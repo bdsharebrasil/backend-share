@@ -1,0 +1,91 @@
+export const BRAZILIAN_AIRPORTS: Record<string, { lat: number; lng: number; name: string }> = {
+  // SUDESTE (Principais e Regionais)
+  'SBGR': { lat: -23.4356, lng: -46.4731, name: 'Guarulhos - SP' },
+  'SBSP': { lat: -23.6273, lng: -46.6564, name: 'Congonhas - SP' },
+  'SBMT': { lat: -23.5069, lng: -46.6378, name: 'Campo de Marte - SP' },
+  'SBKP': { lat: -23.0069, lng: -47.1344, name: 'Viracopos - Campinas' },
+  'SBRJ': { lat: -22.9105, lng: -43.1631, name: 'Santos Dumont - RJ' },
+  'SBGL': { lat: -22.8100, lng: -43.2506, name: 'Galeão - RJ' },
+  'SBCB': { lat: -22.9239, lng: -42.0792, name: 'Cabo Frio - RJ' },
+  'SBCF': { lat: -19.6244, lng: -43.9719, name: 'Confins - MG' },
+  'SBBH': { lat: -19.8519, lng: -43.9506, name: 'Pampulha - MG' },
+  'SBVT': { lat: -20.2581, lng: -40.2864, name: 'Vitória - ES' },
+  'SBRP': { lat: -21.1364, lng: -47.7767, name: 'Ribeirão Preto - SP' },
+  'SBSJ': { lat: -23.2289, lng: -45.8711, name: 'São José dos Campos - SP' },
+  'SBAU': { lat: -21.3353, lng: -49.0667, name: 'Araçatuba - SP' },
+  'SBPP': { lat: -22.1758, lng: -51.4167, name: 'Pres. Prudente - SP' },
+  'SBUR': { lat: -19.7644, lng: -47.9658, name: 'Uberaba - MG' },
+  'SBUA': { lat: -18.8839, lng: -48.2253, name: 'Uberlândia - MG' },
+  'SBIP': { lat: -18.6733, lng: -42.4558, name: 'Ipatinga - MG' },
+  'SBJZ': { lat: -21.7911, lng: -43.3853, name: 'Juiz de Fora - MG' },
+  'SBML': { lat: -23.4444, lng: -51.8667, name: 'Marília - SP' },
+  'SBDN': { lat: -22.1153, lng: -51.1006, name: 'Pres. Epitácio - SP' },
+  
+  // SUL
+  'SBPA': { lat: -29.9939, lng: -51.1711, name: 'Porto Alegre - RS' },
+  'SBCW': { lat: -25.5317, lng: -49.1758, name: 'Curitiba - PR' },
+  'SBFL': { lat: -27.6703, lng: -48.5525, name: 'Florianópolis - SC' },
+  'SBNF': { lat: -26.8786, lng: -48.6511, name: 'Navegantes - SC' },
+  'SBJV': { lat: -26.2231, lng: -48.7978, name: 'Joinville - SC' },
+  'SBLO': { lat: -23.3303, lng: -51.1303, name: 'Londrina - PR' },
+  'SBMG': { lat: -23.4764, lng: -51.9167, name: 'Maringá - PR' },
+  'SBCX': { lat: -29.1953, lng: -51.1889, name: 'Caxias do Sul - RS' },
+  'SBPF': { lat: -28.2431, lng: -52.3958, name: 'Passo Fundo - RS' },
+  'SBPG': { lat: -25.1842, lng: -50.1439, name: 'Ponta Grossa - PR' },
+  'SBFI': { lat: -25.5978, lng: -54.4853, name: 'Foz do Iguaçu - PR' },
+  'SBCO': { lat: -29.9453, lng: -51.1458, name: 'Canoas - RS' },
+  
+  // CENTRO-OESTE
+  'SBBR': { lat: -15.8697, lng: -47.9172, name: 'Brasília - DF' },
+  'SBGO': { lat: -16.6325, lng: -49.2211, name: 'Goiânia - GO' },
+  'SBCG': { lat: -20.4694, lng: -54.6703, name: 'Campo Grande - MS' },
+  'SBCY': { lat: -15.6528, lng: -56.1167, name: 'Cuiabá - MT' },
+  'SBCN': { lat: -17.7247, lng: -48.2839, name: 'Caldas Novas - GO' },
+  'SBRV': { lat: -17.8350, lng: -50.9531, name: 'Rio Verde - GO' },
+  'SBSH': { lat: -16.4478, lng: -54.5833, name: 'Rondonópolis - MT' },
+  'SBSI': { lat: -11.8544, lng: -55.5039, name: 'Sinop - MT' },
+  
+  // NORDESTE
+  'SBFZ': { lat: -3.7761, lng: -38.5325, name: 'Fortaleza - CE' },
+  'SBRF': { lat: -8.1264, lng: -34.9228, name: 'Recife - PE' },
+  'SBSV': { lat: -12.9111, lng: -38.3308, name: 'Salvador - BA' },
+  'SBMO': { lat: -9.5108, lng: -35.7917, name: 'Maceió - AL' },
+  'SBPS': { lat: -16.4378, lng: -39.0778, name: 'Porto Seguro - BA' },
+  'SBTE': { lat: -5.0606, lng: -42.8242, name: 'Teresina - PI' },
+  'SBJA': { lat: -2.5853, lng: -44.2361, name: 'São Luís - MA' },
+  'SBJP': { lat: -7.1483, lng: -34.9506, name: 'João Pessoa - PB' },
+  'SBAJ': { lat: -10.9853, lng: -37.0733, name: 'Aracaju - SE' },
+  'SBPL': { lat: -9.4125, lng: -40.5642, name: 'Petrolina - PE' },
+  'SBVC': { lat: -14.8964, lng: -40.8986, name: 'Vitória da Conquista - BA' },
+  'SBIL': { lat: -14.8158, lng: -39.0331, name: 'Ilhéus - BA' },
+  'SBKG': { lat: -7.2692, lng: -39.2703, name: 'Juazeiro do Norte - CE' },
+  
+  // NORTE
+  'SBMN': { lat: -3.0358, lng: -60.0506, name: 'Manaus - AM' },
+  'SBBE': { lat: -1.3847, lng: -48.4789, name: 'Belém - PA' },
+  'SBRO': { lat: -8.7094, lng: -63.9022, name: 'Porto Velho - RO' },
+  'SBRB': { lat: -9.8683, lng: -67.8981, name: 'Rio Branco - AC' },
+  'SBBV': { lat: 2.8461, lng: -60.6922, name: 'Boa Vista - RR' },
+  'SBPJ': { lat: -10.2900, lng: -48.3578, name: 'Palmas - TO' },
+  'SBMQ': { lat: 0.0506, lng: -51.0722, name: 'Macapá - AP' },
+  'SBSN': { lat: -2.4233, lng: -54.7858, name: 'Santarém - PA' },
+  'SBMY': { lat: -1.3853, lng: -48.4783, name: 'Manicoré - AM' },
+  'SBTF': { lat: -0.4206, lng: -65.0358, name: 'Tefé - AM' },
+  'SBMA': { lat: -5.3708, lng: -49.1383, name: 'Marabá - PA' },
+  'SBCZ': { lat: -7.5986, lng: -72.6689, name: 'Cruzeiro do Sul - AC' },
+};
+
+export const DEFAULT_MAP_CENTER: [number, number] = [-15.7801, -47.9292]; // Brasília
+export const OPENAIP_IFR_LOW_URL = 'https://tiles.openaip.net/ifrl/{z}/{x}/{y}.png';
+export const OPENAIP_IFR_HIGH_URL = 'https://tiles.openaip.net/ifrh/{z}/{x}/{y}.png';
+
+export const ENROUTE_WAYPOINTS: Record<string, { lat: number; lng: number }> = {
+  'BUVUD': { lat: -23.2, lng: -46.2 },
+  'ESUSA': { lat: -22.5, lng: -44.0 },
+  'PIGOS': { lat: -22.9, lng: -43.8 },
+  'OSVOD': { lat: -15.5, lng: -48.5 },
+  'NAXOP': { lat: -23.0, lng: -46.8 },
+  'VUMPI': { lat: -23.5, lng: -46.1 },
+  'KAVOR': { lat: -22.1, lng: -43.5 },
+  'ISUDO': { lat: -20.5, lng: -44.2 }
+};
