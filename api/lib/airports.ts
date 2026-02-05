@@ -36,7 +36,7 @@ export async function getAirportCoordinates(icao: string): Promise<AirportInfo |
 
     if (data && data.coordenadas) {
       // Parse coordinates in format "lat,lng"
-      const [lat, lng] = data.coordenadas.split(',').map(coord => parseFloat(coord.trim()));
+      const [lat, lng] = data.coordenadas.split(',').map((coord: string) => parseFloat(coord.trim()));
       
       if (!isNaN(lat) && !isNaN(lng)) {
         return {
@@ -107,7 +107,7 @@ export async function searchAirports(query: string): Promise<AirportInfo[]> {
       if (data && !error) {
         for (const airport of data) {
           if (!seen.has(airport.designativo) && airport.coordenadas) {
-            const [lat, lng] = airport.coordenadas.split(',').map(coord => parseFloat(coord.trim()));
+            const [lat, lng] = airport.coordenadas.split(',').map((coord: string) => parseFloat(coord.trim()));
             
             if (!isNaN(lat) && !isNaN(lng)) {
               results.push({

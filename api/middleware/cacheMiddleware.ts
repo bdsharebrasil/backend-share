@@ -40,8 +40,8 @@ export function clearCache(pattern?: string): void {
     return;
   }
 
-  const keys = Array.from((globalCache as any).cache.keys());
-  keys.forEach((key: string) => {
+  const keys = Array.from((globalCache as any).cache.keys()) as string[];
+  keys.forEach((key) => {
     if (key.includes(pattern)) {
       globalCache.delete(key);
     }
