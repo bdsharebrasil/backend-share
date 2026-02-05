@@ -28,8 +28,10 @@ export class LRUCache<T = any> {
     });
 
     if (this.cache.size > this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
+      const firstKey = this.cache.keys().next().value as string | undefined;
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey);
+      }
     }
   }
 
