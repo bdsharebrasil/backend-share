@@ -26,7 +26,7 @@ export async function query<T>(
 
   if (filter) {
     const operator = filter.operator || 'eq';
-    query = query[operator](filter.column, filter.value) as any;
+    query = (query as any)[operator](filter.column, filter.value) as any;
   }
 
   const { data, error } = await query;
