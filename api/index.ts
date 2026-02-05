@@ -10,6 +10,10 @@ import { globalCache } from './lib/cache';
 
 const app: Application = express();
 
+// No Vercel, a função já é exposta sob o path `/api`, então removemos o prefixo interno.
+// Quando em ambiente local (dev), mantemos o prefixo `/api` para compatibilidade com docs.
+const base = process.env.VERCEL ? '' : '/api';
+
 // Middleware
 const corsOrigins = [
   'http://localhost:5173',
@@ -71,7 +75,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // Health check
-app.get('/health', (req: Request, res: Response) => {
+app.get(`${base}/health`, (req: Request, res: Response) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -81,7 +85,7 @@ app.get('/health', (req: Request, res: Response) => {
 });
 
 // Debug endpoint
-app.get('/debug/cors', (req: Request, res: Response) => {
+app.get(`${base}/debug/cors`, (req: Request, res: Response) => {
   const origin = req.get('origin');
   res.json({
     requestOrigin: origin,
@@ -92,7 +96,7 @@ app.get('/debug/cors', (req: Request, res: Response) => {
 });
 
 // Cache stats endpoint
-app.get('/api/cache/stats', (req: Request, res: Response) => {
+app.get(`${base}/cache/stats`, (req: Request, res: Response) => {
   res.json({
     size: globalCache.size(),
     maxSize: 500,
@@ -101,7 +105,7 @@ app.get('/api/cache/stats', (req: Request, res: Response) => {
 });
 
 // Clear cache endpoint (admin only - should be protected in production)
-app.post('/api/cache/clear', (req: Request, res: Response) => {
+app.post(`${base}/cache/clear`, (req: Request, res: Response) => {
   const { pattern } = req.body;
   
   if (pattern) {
@@ -114,7 +118,7 @@ app.post('/api/cache/clear', (req: Request, res: Response) => {
 });
 
 // API Routes (consolidated)
-app.use('/api', apiRouter);
+app.use(base, apiRouter);
 
 // 404 handler
 app.use((req: Request, res: Response) => {
