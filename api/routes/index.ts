@@ -1,14 +1,14 @@
 import { Router, Request, Response } from 'express';
-import { supabase, queryWithJoin } from './lib/supabase';
-import { cacheMiddleware } from './middleware/cacheMiddleware';
+import { supabase, queryWithJoin } from '../lib/supabase';
+import { cacheMiddleware } from '../middleware/cacheMiddleware';
 import {
   calculateDistanceNM,
   calculateNightTime,
   getSolarTimes,
   parseDMSCoordinate,
-} from './lib/flight-calculations';
-import { getAirportCoordinates, searchAirports } from './lib/airports';
-import financialRouter from './routes/financial';
+} from '../lib/flight-calculations';
+import { getAirportCoordinates, searchAirports } from '../lib/airports';
+import financialRouter from './financial';
 
 const router: Router = Router();
 
@@ -2004,6 +2004,7 @@ router.get('/airports/search', async (req: Request, res: Response) => {
 });
 
 // ============= FINANCIAL SYNC ROUTES =============
+
 router.use('/financial', financialRouter);
 
 export default router;
