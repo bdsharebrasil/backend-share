@@ -8,6 +8,7 @@ type Bindings = {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
   CACHE_KV: KVNamespace;
+
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
