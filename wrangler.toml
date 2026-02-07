@@ -1,0 +1,28 @@
+name = "api-workers"
+main = "src/worker.ts" 
+compatibility_date = "2024-01-01"
+
+# ============= VARIÁVEIS PÚBLICAS =============
+# Apenas variáveis que PODEM ser públicas
+[vars]
+ENVIRONMENT = "production"
+API_VERSION = "v1"
+
+
+
+# ============= KV NAMESPACE =============
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "83a861dc2e27486e86eb23909fbb9861"
+
+
+
+# ============= BUILD =============
+[build]
+command = "npm run build"
+
+
+
+# ============= OBSERVABILITY =============
+[observability]
+enabled = true
