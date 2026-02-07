@@ -15,11 +15,16 @@ const app: Application = express();
 const base = process.env.VERCEL ? '' : '/api';
 
 // Middleware
+const frontendUrls = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean)
+  : [];
+
 const corsOrigins = [
   'http://localhost:5173',
   'http://localhost:8080',
   'http://localhost:3000',
-  process.env.FRONTEND_URL || '',
+  // URLs definidas via FRONTEND_URL (pode ser múltiplas, separadas por vírgula)
+  ...frontendUrls,
   // Em produção no Vercel, permite requests da mesma origem
   process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : ''
 ].filter(Boolean);
