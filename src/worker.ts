@@ -403,4 +403,256 @@ app.get('/aircraft/:id', async (c) => {
   }
 });
 
+// ============= WEATHER ROUTES (METAR/TAF) =============
+
+// Helper to fetch METAR from AISWEB API
+const fetchAISWebMETAR = async (icao: string): Promise<any> => {
+  try {
+    const response = await fetch(`https://api.aisweb.aer.mil.br/api/metar/${icao.toUpperCase()}`);
+    
+    if (!response.ok) {
+      console.error(`[AISWEB] Erro ${response.status} para ${icao}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error(`[AISWEB] Erro ao buscar METAR para ${icao}:`, error);
+    return null;
+  }
+};
+
+// Helper to fetch TAF from AISWEB API
+const fetchAISWebTAF = async (icao: string): Promise<any> => {
+  try {
+    const response = await fetch(`https://api.aisweb.aer.mil.br/api/taf/${icao.toUpperCase()}`);
+    
+    if (!response.ok) {
+      console.error(`[AISWEB] Erro ${response.status} para ${icao}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error(`[AISWEB] Erro ao buscar TAF para ${icao}:`, error);
+    return null;
+  }
+};
+
+// Parse temperatura do METAR (23/18 ou M05/M10)
+function parseTemperature(metar: string): { temp: number | null; dewp: number | null } {
+  const match = metar.match(/(M?)(\d{2})\/(M?)(\d{2})/);
+  if (match) {
+    const temp = parseInt(match[2]) * (match[1] === 'M' ? -1 : 1);
+    const dewp = parseInt(match[4]) * (match[3] === 'M' ? -1 : 1);
+    return { temp, dewp };
+  }
+  return { temp: null, dewp: null };
+}
+
+// Parse vento do METAR (09015G25KT ou VRB05KT)
+function parseWind(metar: string): { wdir: number | null; wspd: number | null; wgst: number | null } {
+  const vrbMatch = metar.match(/VRB(\d{2})KT/);
+  if (vrbMatch) {
+    return { wdir: null, wspd: parseInt(vrbMatch[1]), wgst: null };
+  }
+  
+  const match = metar.match(/(\d{3})(\d{2})(?:G(\d{2}))?KT/);
+  if (match) {
+    return {
+      wdir: parseInt(match[1]),
+      wspd: parseInt(match[2]),
+      wgst: match[3] ? parseInt(match[3]) : null
+    };
+  }
+  return { wdir: null, wspd: null, wgst: null };
+}
+
+// Parse visibilidade do METAR (10SM ou 9999 ou CAVOK)
+function parseVisibility(metar: string): string | number | null {
+  const smMatch = metar.match(/(\d+)SM/);
+  if (smMatch) return parseInt(smMatch[1]);
+  
+  const mMatch = metar.match(/\s(\d{4})\s/);
+  if (mMatch) return parseInt(mMatch[1]) / 1609.34;
+  
+  if (metar.includes('CAVOK')) return 9999;
+  
+  return null;
+}
+
+// Parse altímetro do METAR (A2992 ou Q1013)
+function parseAltimeter(metar: string): number | null {
+  const aMatch = metar.match(/A(\d{4})/);
+  if (aMatch) return parseInt(aMatch.substring(0, 2)) + parseInt(aMatch.substring(2)) / 100;
+  
+  const qMatch = metar.match(/Q(\d{4})/);
+  if (qMatch) return parseInt(qMatch[1]) * 0.02953;
+  
+  return null;
+}
+
+// Determinar categoria de voo (VFR, MVFR, IFR, LIFR)
+function getFlightCategory(metar: string): 'VFR' | 'MVFR' | 'IFR' | 'LIFR' {
+  if (metar.includes('CAVOK')) return 'VFR';
+  
+  const visibility = parseVisibility(metar);
+  const ceilingMatch = metar.match(/([A-Z]{2,3})(\d{3})/);
+  
+  let ceiling = 99999;
+  if (ceilingMatch && (ceilingMatch[1] === 'FEW' || ceilingMatch[1] === 'SCT' || ceilingMatch[1] === 'BKN' || ceilingMatch[1] === 'OVC')) {
+    ceiling = parseInt(ceilingMatch[2]) * 100;
+  }
+  
+  const visValue = typeof visibility === 'number' ? visibility : 10;
+  
+  if (visValue < 1 || ceiling < 500) return 'LIFR';
+  if (visValue < 3 || ceiling < 1000) return 'IFR';
+  if (visValue < 5 || ceiling < 3000) return 'MVFR';
+  return 'VFR';
+}
+
+// GET METAR (cached - 5 min)
+app.get('/api/weather/metar/:icao', async (c) => {
+  try {
+    const icao = c.req.param('icao');
+    
+    const result = await getCached(c, `metar:${icao.toUpperCase()}`, 300, async () => {
+      // Tentar buscar dados reais da API AISWEB
+      const aiswebData = await fetchAISWebMETAR(icao);
+      
+      if (!aiswebData || !aiswebData.rawOb) {
+        return { 
+          error: 'Sem dados METAR disponível',
+          icao: icao.toUpperCase(),
+          timestamp: new Date().toISOString()
+        };
+      }
+      
+      const metar = aiswebData.rawOb;
+      const { temp, dewp } = parseTemperature(metar);
+      const { wdir, wspd, wgst } = parseWind(metar);
+      const visib = parseVisibility(metar);
+      const altim = parseAltimeter(metar);
+      const flightCategory = getFlightCategory(metar);
+      
+      return {
+        icao: icao.toUpperCase(),
+        rawOb: metar,
+        temp,
+        dewp,
+        wdir,
+        wspd,
+        wgst,
+        visib,
+        altim,
+        flightCategory,
+        reportTime: aiswebData.reportTime || new Date().toISOString(),
+        updatedTime: new Date().toISOString(),
+        source: 'AISWEB',
+        timestamp: new Date().toISOString()
+      };
+    });
+    
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({ 
+      error: 'Failed to fetch METAR', 
+      message: error.message,
+      icao: c.req.param('icao'),
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+});
+
+// GET TAF (cached - 10 min)
+app.get('/api/weather/taf/:icao', async (c) => {
+  try {
+    const icao = c.req.param('icao');
+    
+    const result = await getCached(c, `taf:${icao.toUpperCase()}`, 600, async () => {
+      // Tentar buscar dados reais da API AISWEB
+      const aiswebData = await fetchAISWebTAF(icao);
+      
+      if (!aiswebData || !aiswebData.rawTAF) {
+        return { 
+          error: 'Sem dados TAF disponível',
+          icao: icao.toUpperCase(),
+          timestamp: new Date().toISOString()
+        };
+      }
+      
+      return {
+        icao: icao.toUpperCase(),
+        rawTAF: aiswebData.rawTAF,
+        validTimeFrom: aiswebData.validTimeFrom || new Date().toISOString(),
+        validTimeTo: aiswebData.validTimeTo || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        source: 'AISWEB',
+        timestamp: new Date().toISOString()
+      };
+    });
+    
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({ 
+      error: 'Failed to fetch TAF', 
+      message: error.message,
+      icao: c.req.param('icao'),
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+});
+
+// GET múltiplos METARs
+app.get('/api/weather/metar', async (c) => {
+  try {
+    const icaos = c.req.query('icaos')?.split(',') || [];
+    
+    if (icaos.length === 0) {
+      return c.json({ error: 'Nenhum ICAO fornecido', timestamp: new Date().toISOString() }, 400);
+    }
+    
+    const results: Record<string, any> = {};
+    
+    for (const icao of icaos) {
+      try {
+        const metarData = await fetchAISWebMETAR(icao);
+        
+        if (metarData?.rawOb) {
+          const metar = metarData.rawOb;
+          const { temp, dewp } = parseTemperature(metar);
+          const { wdir, wspd, wgst } = parseWind(metar);
+          
+          results[icao.toUpperCase()] = {
+            rawOb: metar,
+            temp,
+            dewp,
+            wdir,
+            wspd,
+            wgst,
+            visib: parseVisibility(metar),
+            altim: parseAltimeter(metar),
+            flightCategory: getFlightCategory(metar),
+            source: 'AISWEB'
+          };
+        } else {
+          results[icao.toUpperCase()] = { error: 'Sem dados disponível' };
+        }
+      } catch (error: any) {
+        results[icao.toUpperCase()] = { error: error.message };
+      }
+    }
+    
+    return c.json({ data: results, timestamp: new Date().toISOString() });
+  } catch (error: any) {
+    return c.json({ 
+      error: 'Failed to fetch METARs', 
+      message: error.message,
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+});
+
 export default app;
