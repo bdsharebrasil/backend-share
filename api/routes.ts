@@ -757,6 +757,36 @@ router.post('/flight-documents', async (req: Request, res: Response) => {
   }
 });
 
+// GET flight documents by flight_id (optional) or all
+router.get('/flight-documents', async (req: Request, res: Response) => {
+  try {
+    const { flight_id } = req.query;
+
+    let query = supabase.from('flight_documents').select('*');
+
+    if (flight_id && typeof flight_id === 'string') {
+      query = query.eq('flight_id', flight_id);
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[Flight Documents GET] Supabase error:', error);
+      return res.status(500).json({ error: 'Failed to fetch flight documents' });
+    }
+
+    res.json({
+      data: data || [],
+      count: data?.length || 0,
+      timestamp: new Date().toISOString(),
+      cached: res.get('X-Cache') === 'HIT'
+    });
+  } catch (error) {
+    console.error('[Flight Documents GET] Exception:', error);
+    res.status(500).json({ error: 'Failed to fetch flight documents' });
+  }
+});
+
 // ============= FLIGHT CALCULATIONS ROUTES =============
 
 /**
@@ -1027,6 +1057,220 @@ router.get(
         error: 'Failed to fetch METAR data',
         details: process.env.NODE_ENV === 'development' ? errorMsg : undefined,
       });
+    }
+  }
+);
+
+// GET METAR by ICAO as path param - normalized response
+router.get(
+  '/weather/metar/:icao',
+  cacheMiddleware({
+    ttl: 10 * 60 * 1000,
+    key: (req) => `metar:${(req.params.icao as string)?.toUpperCase() || 'unknown'}`
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const icaoParam = req.params.icao;
+
+      if (!icaoParam || typeof icaoParam !== 'string') {
+        return res.status(400).json({ error: 'Missing or invalid icao parameter' });
+      }
+
+      const icao = icaoParam.toUpperCase();
+
+      const response = await fetch(
+        `https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`,
+        {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'ShareBrasil-Aviation-App/1.0',
+          },
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `METAR API returned ${response.status}`, icao });
+      }
+
+      const text = await response.text();
+      if (!text || text.trim().length === 0) {
+        return res.status(503).json({ error: 'METAR service returned empty response', icao });
+      }
+
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch (parseError) {
+        return res.status(502).json({ error: 'METAR service returned invalid JSON', icao });
+      }
+
+      if (!Array.isArray(json) || json.length === 0) {
+        return res.status(404).json({ error: 'METAR not found', icao });
+      }
+
+      const item = json[0];
+      const raw = item.raw_text || item.rawText || item.raw || item.raw_ob || '';
+      const flightCategory = item.flight_category || item.flightCategory || 'UNKNOWN';
+
+      res.json({
+        data: {
+          rawText: raw,
+          flightCategory,
+          original: item
+        },
+        icao,
+        timestamp: new Date().toISOString(),
+        cached: res.get('X-Cache') === 'HIT'
+      });
+    } catch (error) {
+      console.error('[METAR by ICAO] Exception:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: 'Failed to fetch METAR data', details: process.env.NODE_ENV === 'development' ? errorMsg : undefined });
+    }
+  }
+);
+
+// GET TAF by ICAO as path param - normalized response
+router.get(
+  '/weather/taf/:icao',
+  cacheMiddleware({
+    ttl: 10 * 60 * 1000,
+    key: (req) => `taf:${(req.params.icao as string)?.toUpperCase() || 'unknown'}`
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const icaoParam = req.params.icao;
+
+      if (!icaoParam || typeof icaoParam !== 'string') {
+        return res.status(400).json({ error: 'Missing or invalid icao parameter' });
+      }
+
+      const icao = icaoParam.toUpperCase();
+
+      const response = await fetch(
+        `https://aviationweather.gov/api/data/taf?ids=${icao}&format=json`,
+        {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'ShareBrasil-Aviation-App/1.0',
+          },
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `TAF API returned ${response.status}`, icao });
+      }
+
+      const text = await response.text();
+      if (!text || text.trim().length === 0) {
+        return res.status(503).json({ error: 'TAF service returned empty response', icao });
+      }
+
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch (parseError) {
+        return res.status(502).json({ error: 'TAF service returned invalid JSON', icao });
+      }
+
+      if (!Array.isArray(json) || json.length === 0) {
+        return res.status(404).json({ error: 'TAF not found', icao });
+      }
+
+      const item = json[0];
+      const raw = item.raw_text || item.rawText || item.raw || '';
+      const validFrom = item.valid_time_from || item.validTimeFrom || null;
+      const validTo = item.valid_time_to || item.validTimeTo || null;
+
+      res.json({
+        data: {
+          rawText: raw,
+          validTimeFrom: validFrom,
+          validTimeTo: validTo,
+          original: item
+        },
+        icao,
+        timestamp: new Date().toISOString(),
+        cached: res.get('X-Cache') === 'HIT'
+      });
+    } catch (error) {
+      console.error('[TAF by ICAO] Exception:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: 'Failed to fetch TAF data', details: process.env.NODE_ENV === 'development' ? errorMsg : undefined });
+    }
+  }
+);
+
+// GET TAF by query param ?icao= - compatibilidade com frontend
+router.get(
+  '/weather/taf',
+  cacheMiddleware({
+    ttl: 10 * 60 * 1000,
+    key: (req) => `taf:${(req.query.icao as string)?.toUpperCase() || 'unknown'}`
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const icaoParam = req.query.icao;
+
+      if (!icaoParam || typeof icaoParam !== 'string') {
+        return res.status(400).json({ error: 'Missing or invalid icao parameter' });
+      }
+
+      // Delegate to the path-param implementation by calling internal fetch
+      const icao = icaoParam.toUpperCase();
+      const response = await fetch(
+        `https://aviationweather.gov/api/data/taf?ids=${icao}&format=json`,
+        {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'ShareBrasil-Aviation-App/1.0',
+          },
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `TAF API returned ${response.status}`, icao });
+      }
+
+      const text = await response.text();
+      if (!text || text.trim().length === 0) {
+        return res.status(503).json({ error: 'TAF service returned empty response', icao });
+      }
+
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch (parseError) {
+        return res.status(502).json({ error: 'TAF service returned invalid JSON', icao });
+      }
+
+      if (!Array.isArray(json) || json.length === 0) {
+        return res.status(404).json({ error: 'TAF not found', icao });
+      }
+
+      const item = json[0];
+      const raw = item.raw_text || item.rawText || item.raw || '';
+      const validFrom = item.valid_time_from || item.validTimeFrom || null;
+      const validTo = item.valid_time_to || item.validTimeTo || null;
+
+      res.json({
+        data: {
+          rawText: raw,
+          validTimeFrom: validFrom,
+          validTimeTo: validTo,
+          original: item
+        },
+        icao,
+        timestamp: new Date().toISOString(),
+        cached: res.get('X-Cache') === 'HIT'
+      });
+    } catch (error) {
+      console.error('[TAF query] Exception:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: 'Failed to fetch TAF data', details: process.env.NODE_ENV === 'development' ? errorMsg : undefined });
     }
   }
 );

@@ -127,7 +127,8 @@ VITE_SUPABASE_URL=           # URL do Supabase
 VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY=  # Chave pública
 NODE_ENV=                    # development|production
 PORT=                        # 3001 por padrão
-FRONTEND_URL=                # URL do frontend para CORS
+FRONTEND_URL=                # URL do frontend para CORS. Ex: https://gestao.share-brasil.com
+                               # Pode informar múltiplas URLs separadas por vírgula: https://a.com,https://b.com
 ```
 
 ## 📝 Estrutura de Pastas
