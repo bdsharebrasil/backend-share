@@ -1,33 +1,23 @@
 {
-  "name": "portal-share-backend",
+  "name": "api-workers",
   "version": "1.0.0",
-  "type": "module",
-  "description": "Backend API do Portal Share",
-  "main": "dist/api/index.js",
+  "description": "Aviation Management API on Cloudflare Workers",
+  "main": "src/worker.ts",
   "scripts": {
-    "dev": "tsx watch dev-server/server.ts",
-    "dev:backend": "tsx watch dev-server/server.ts",
-    "build": "tsc --project tsconfig.api.json",
-    "start": "node dist/api/index.js",
-    "type-check": "tsc --noEmit",
-    "lint": "eslint ."
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "esbuild src/worker.ts --bundle --outfile=dist/worker.js --format=esm",
+    "tail": "wrangler tail"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.93.3",
-    "axios": "^1.13.2",
-    "cors": "^2.8.5",
-    "date-fns": "^3.6.0",
-    "dotenv": "^17.2.3",
-    "express": "^4.18.2",
-    "suncalc": "^1.9.0",
-    "zod": "^3.23.8"
+    "@supabase/supabase-js": "^2.39.0",
+    "hono": "^4.0.0"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
-    "@types/node": "^22.5.5",
-    "tsx": "^4.7.0",
-    "typescript": "^5.5.3"
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.3.3",
+    "wrangler": "^4.63.0"
   },
   "engines": {
     "node": ">=18.0.0"
