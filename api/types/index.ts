@@ -36,6 +36,25 @@ export interface Aircraft {
   updated_at?: string;
 }
 
+// Airport/Coordinates types
+export interface AirportCoordinates {
+  latitude: number;
+  longitude: number;
+  airport_code?: string;
+  airport_name?: string;
+  city?: string;
+  country?: string;
+}
+
+export interface AirportSearchResult {
+  code: string;
+  name: string;
+  city: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+}
+
 // Flight types
 export interface FlightSchedule {
   id: string;
@@ -85,6 +104,51 @@ export interface FlightPlan {
   updated_at: string;
 }
 
+// Calculation types
+export interface DistanceCalculation {
+  origin: string;
+  destination: string;
+  distance_nm: number;
+  distance_km: number;
+  origin_coordinates: AirportCoordinates;
+  destination_coordinates: AirportCoordinates;
+}
+
+export interface NightTimeCalculation {
+  night_time_hours: number;
+  departure_time: string;
+  flight_duration_hours: number;
+  origin: string;
+  destination: string;
+}
+
+export interface SolarTimes {
+  sunrise: string;
+  sunset: string;
+  solar_noon: string;
+  civil_twilight_begin: string;
+  civil_twilight_end: string;
+  nautical_twilight_begin: string;
+  nautical_twilight_end: string;
+  astronomical_twilight_begin: string;
+  astronomical_twilight_end: string;
+}
+
+export interface SolarTimesResponse {
+  airport: string;
+  date: string;
+  sunrise: string;
+  sunset: string;
+  solar_noon: string;
+  civil_twilight_begin: string;
+  civil_twilight_end: string;
+  nautical_twilight_begin: string;
+  nautical_twilight_end: string;
+  astronomical_twilight_begin: string;
+  astronomical_twilight_end: string;
+  coordinates: AirportCoordinates;
+}
+
 // API Response types
 export interface ApiResponse<T> {
   data: T;
@@ -96,6 +160,7 @@ export interface ApiResponse<T> {
 export interface ApiError {
   error: string;
   message?: string;
+  details?: string;
 }
 
 // Aggregated types for complex queries
@@ -114,7 +179,7 @@ export interface ClientDetail extends Client {
 }
 
 export interface AircraftDetail extends Aircraft {
-  maintenance?: MaintenanceLog[];
+  maintenance_records?: MaintenanceLog[];
   totalFlightHours?: number;
   flightCount?: number;
 }
@@ -132,15 +197,73 @@ export interface WeatherData {
 export interface MaintenanceLog {
   id: string;
   aircraft_id: string;
-  date: string;
+  maintenance_date: string;
+  type: string;
   description: string;
-  duration_hours: number;
+  cost?: number;
+  duration_hours?: number;
   status: 'scheduled' | 'in_progress' | 'completed';
   created_at: string;
+}
+
+export interface CrewMember {
+  id: string;
+  full_name: string;
+  license: string;
+  flight_hours?: number;
+  status: 'active' | 'inactive';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CrewLicense {
+  id: string;
+  crew_id: string;
+  license_type: string;
+  license_number: string;
+  issue_date: string;
+  expiry_date: string;
+  created_at: string;
+}
+
+export interface CrewDetail extends CrewMember {
+  crew_licenses?: CrewLicense[];
+}
+
+export interface DashboardStatistics {
+  totalFlights: number;
+  activeFlights: number;
+  totalAircraft: number;
+  totalClients: number;
+  activeCrew: number;
+}
+
+export interface FlightStatistics {
+  total: number;
+  byStatus: Record<string, number>;
+  byAircraft: Record<string, number>;
 }
 
 export interface CacheStats {
   size: number;
   maxSize: number;
   timestamp: string;
+}
+
+// Request body types
+export interface CalculateDistanceRequest {
+  origin: string;
+  destination: string;
+}
+
+export interface CalculateNightTimeRequest {
+  origin: string;
+  destination: string;
+  departure_time: string;
+  flight_duration: number;
+}
+
+export interface SolarTimesRequest {
+  airport: string;
+  date?: string;
 }
