@@ -654,5 +654,441 @@ app.get('/api/weather/metar', async (c) => {
     }, 500);
   }
 });
+// ============= AIRPORTS ROUTES =============
+
+// GET airport by ICAO code (cached - 1 day)
+app.get('/api/airports/:icao', async (c) => {
+  try {
+    const icao = c.req.param('icao').toUpperCase().trim();
+    
+    const result = await getCached(c, `airport:${icao}`, 86400, async () => {
+      const supabase = getSupabase(c);
+      
+      const { data, error } = await supabase
+        .from('aerodromes')
+        .select('designativo, name, coordenadas')
+        .eq('designativo', icao)
+        .single();
+      
+      if (error || !data) {
+        console.warn(`Airport ${icao} not found`);
+        return {
+          error: 'Airport not found',
+          icao,
+          timestamp: new Date().toISOString()
+        };
+      }
+      
+      // Parse coordinates
+      const coords = parseCoordinates(data.coordenadas);
+      
+      if (!coords) {
+        return {
+          error: 'Invalid coordinates',
+          icao,
+          timestamp: new Date().toISOString()
+        };
+      }
+      
+      return {
+        icao: data.designativo,
+        name: data.name,
+        lat: coords.lat,
+        lng: coords.lng,
+        timestamp: new Date().toISOString()
+      };
+    });
+    
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({ 
+      error: 'Failed to fetch airport', 
+      message: error.message,
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+});
+
+// GET airports search (NOT cached - real-time search)
+app.get('/api/airports/search', async (c) => {
+  try {
+    const q = c.req.query('q')?.toUpperCase() || '';
+    
+    if (!q || q.length < 2) {
+      return c.json({ 
+        error: 'Query must be at least 2 characters',
+        results: [],
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    const supabase = getSupabase(c);
+    
+    // Search by designativo (ICAO) or name
+    const { data, error } = await supabase
+      .from('aerodromes')
+      .select('designativo, name, coordenadas')
+      .or(`designativo.ilike.%${q}%,name.ilike.%${q}%`)
+      .limit(20);
+    
+    if (error) throw error;
+    
+    const results = (data || [])
+      .map((aero: any) => {
+        const coords = parseCoordinates(aero.coordenadas);
+        if (!coords) return null;
+        
+        return {
+          icao: aero.designativo,
+          name: aero.name,
+          lat: coords.lat,
+          lng: coords.lng
+        };
+      })
+      .filter(Boolean);
+    
+    return c.json({ 
+      results,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error: any) {
+    return c.json({ 
+      error: 'Failed to search airports', 
+      message: error.message,
+      results: [],
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+});
+
+// ============= FLIGHT CALCULATIONS ROUTES =============
+
+// Helper: Parse coordinates from DMS or decimal format
+function parseCoordinates(coordStr: string | null): { lat: number; lng: number } | null {
+  if (!coordStr) return null;
+
+  // Try DMS format: N23°32'20" W46°28'10"
+  const dmsMatch = coordStr.match(
+    /([NS])(\d+)°(\d+)'(\d+)"?\s*([EW])(\d+)°(\d+)'(\d+)"?/i
+  );
+  if (dmsMatch) {
+    const lat = (
+      parseInt(dmsMatch[2]) +
+      parseInt(dmsMatch[3]) / 60 +
+      parseInt(dmsMatch[4]) / 3600
+    ) * (dmsMatch[1].toUpperCase() === 'S' ? -1 : 1);
+
+    const lng = (
+      parseInt(dmsMatch[6]) +
+      parseInt(dmsMatch[7]) / 60 +
+      parseInt(dmsMatch[8]) / 3600
+    ) * (dmsMatch[5].toUpperCase() === 'W' ? -1 : 1);
+
+    return { lat, lng };
+  }
+
+  // Try decimal format: -23.5389, -46.4697 or -23.5389,-46.4697
+  const decimalMatch = coordStr.match(/([-\d.]+)[,\s]+([-\d.]+)/);
+  if (decimalMatch) {
+    return {
+      lat: parseFloat(decimalMatch[1]),
+      lng: parseFloat(decimalMatch[2]),
+    };
+  }
+
+  return null;
+}
+
+// Helper: Calculate distance between two points (Haversine formula)
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): { nm: number; km: number } {
+  const R = 3440.065; // Earth radius in nautical miles
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) *
+    Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const nm = R * c;
+  
+  return {
+    nm: Math.round(nm * 10) / 10,
+    km: Math.round(nm * 1.852 * 10) / 10
+  };
+}
+
+// Helper: Calculate solar times (sunrise, sunset, dawn, dusk)
+function calculateSolarTimes(lat: number, lng: number, date: Date): any {
+  // Approximation for solar times in Brazil (simplified)
+  // In production, use proper library like suncalc
+  
+  const dayOfYear = Math.floor((date.getTime() - new Date(date.getFullYear(), 0, 0).getTime()) / 86400000);
+  
+  // Approximate sunrise/sunset calculation
+  // Using a simplified formula for Brazil
+  const B = (360 / 365) * (dayOfYear - 81);
+  const B_rad = (B * Math.PI) / 180;
+  
+  const eot = 9.87 * Math.sin(2 * B_rad) - 7.53 * Math.cos(B_rad) - 1.5 * Math.sin(B_rad);
+  
+  // Standard time correction
+  const timeZoneOffset = -3 * 60; // UTC-3 for Brazil
+  const lng_offset = (-lng / 15) * 60;
+  const timeCorrection = timeZoneOffset + lng_offset + eot;
+  
+  // Solar declination
+  const decl_rad = (23.45 * Math.sin(B_rad) * Math.PI) / 180;
+  const lat_rad = (lat * Math.PI) / 180;
+  
+  // Sunrise/Sunset calculation
+  const cos_h = -Math.tan(lat_rad) * Math.tan(decl_rad);
+  const h_rad = Math.acos(Math.max(-1, Math.min(1, cos_h)));
+  const h_deg = (h_rad * 180) / Math.PI;
+  
+  const sunrise_minutes = 720 - (4 * h_deg) - timeCorrection;
+  const sunset_minutes = 720 + (4 * h_deg) - timeCorrection;
+  const dawn_minutes = sunrise_minutes - 30;
+  const dusk_minutes = sunset_minutes + 30;
+  
+  const formatTime = (minutes: number) => {
+    const hours = Math.floor(minutes / 60);
+    const mins = Math.floor(minutes % 60);
+    return {
+      time: `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`,
+      minutes: Math.round(minutes)
+    };
+  };
+  
+  return {
+    sunrise: formatTime(sunrise_minutes),
+    sunset: formatTime(sunset_minutes),
+    dawn: formatTime(dawn_minutes),
+    dusk: formatTime(dusk_minutes)
+  };
+}
+
+// Helper: Calculate night time for a flight
+function calculateNightTime(
+  depLat: number, depLng: number,
+  arrLat: number, arrLng: number,
+  departureTime: string,
+  arrivalTime: string,
+  flightDate: string
+): number {
+  // Simplified calculation: count 30 minutes before sunset to 30 minutes after sunrise
+  try {
+    const [depHour, depMin] = departureTime.split(':').map(Number);
+    const [arrHour, arrMin] = arrivalTime.split(':').map(Number);
+    
+    const depDate = new Date(flightDate);
+    const depDateTime = new Date(depDate.getFullYear(), depDate.getMonth(), depDate.getDate(), depHour, depMin);
+    
+    const arrDate = new Date(flightDate);
+    const arrDateTime = new Date(arrDate.getFullYear(), arrDate.getMonth(), arrDate.getDate(), arrHour, arrMin);
+    
+    // If arrival is before departure, assume next day
+    if (arrDateTime < depDateTime) {
+      arrDateTime.setDate(arrDateTime.getDate() + 1);
+    }
+    
+    // Calculate average position (middle of route)
+    const avgLat = (depLat + arrLat) / 2;
+    const avgLng = (depLng + arrLng) / 2;
+    
+    // Get solar times for both departure and arrival
+    const depSolar = calculateSolarTimes(depLat, depLng, depDate);
+    const arrSolar = calculateSolarTimes(arrLat, arrLng, arrDate);
+    
+    // Parse times
+    const parseTimeStr = (timeStr: string) => {
+      const [h, m] = timeStr.split(':').map(Number);
+      return h * 60 + m;
+    };
+    
+    const duskDep = parseTimeStr(depSolar.dusk.time);
+    const dawnArr = parseTimeStr(arrSolar.dawn.time);
+    
+    const depTimeMinutes = depHour * 60 + depMin;
+    const arrTimeMinutes = arrHour * 60 + arrMin;
+    
+    let nightMinutes = 0;
+    
+    // If departure is after dusk
+    if (depTimeMinutes > duskDep) {
+      if (arrTimeMinutes < dawnArr) {
+        // Entire flight is night
+        nightMinutes = arrTimeMinutes - depTimeMinutes;
+      } else {
+        // Flight started in night, ended in day
+        nightMinutes = dawnArr - depTimeMinutes;
+      }
+    } else {
+      // Departure is during day
+      if (arrTimeMinutes > duskDep) {
+        // Flight ended in night
+        nightMinutes = arrTimeMinutes - duskDep;
+      }
+    }
+    
+    // Ensure positive value
+    return Math.max(0, nightMinutes);
+  } catch (error) {
+    console.error('Error calculating night time:', error);
+    return 0;
+  }
+}
+
+// POST Flight Calculations
+app.post('/api/flight-calculations', async (c) => {
+  try {
+    const payload = await c.req.json();
+    const { departureIcao, arrivalIcao, arrivalManual, flightDate, landingTime } = payload;
+    
+    // Validations
+    if (!departureIcao || !flightDate || !landingTime) {
+      return c.json({
+        error: 'Missing required fields: departureIcao, flightDate, landingTime',
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    if (!arrivalIcao && !arrivalManual) {
+      return c.json({
+        error: 'Missing arrival: provide either arrivalIcao or arrivalManual',
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    const supabase = getSupabase(c);
+    
+    // Get departure airport
+    const { data: depData, error: depError } = await supabase
+      .from('aerodromes')
+      .select('designativo, name, coordenadas')
+      .eq('designativo', departureIcao.toUpperCase())
+      .single();
+    
+    if (depError || !depData) {
+      return c.json({
+        error: `Departure airport ${departureIcao} not found`,
+        timestamp: new Date().toISOString()
+      }, 404);
+    }
+    
+    const depCoords = parseCoordinates(depData.coordenadas);
+    if (!depCoords) {
+      return c.json({
+        error: 'Invalid departure coordinates',
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    let arrCoords: any;
+    let arrivalName: string;
+    let arrivalIcaoCode: string;
+    
+    if (arrivalManual) {
+      // Use manual coordinates
+      arrCoords = { lat: arrivalManual.lat, lng: arrivalManual.lng };
+      arrivalName = arrivalManual.nome;
+      arrivalIcaoCode = 'MANUAL';
+    } else {
+      // Get arrival airport from database
+      const { data: arrData, error: arrError } = await supabase
+        .from('aerodromes')
+        .select('designativo, name, coordenadas')
+        .eq('designativo', arrivalIcao.toUpperCase())
+        .single();
+      
+      if (arrError || !arrData) {
+        return c.json({
+          error: `Arrival airport ${arrivalIcao} not found`,
+          timestamp: new Date().toISOString()
+        }, 404);
+      }
+      
+      arrCoords = parseCoordinates(arrData.coordenadas);
+      if (!arrCoords) {
+        return c.json({
+          error: 'Invalid arrival coordinates',
+          timestamp: new Date().toISOString()
+        }, 400);
+      }
+      
+      arrivalName = arrData.name;
+      arrivalIcaoCode = arrData.designativo;
+    }
+    
+    // Calculate distance
+    const distance = calculateDistance(depCoords.lat, depCoords.lng, arrCoords.lat, arrCoords.lng);
+    
+    // Calculate solar times
+    const depDate = new Date(flightDate);
+    const solarTimes = calculateSolarTimes(
+      (depCoords.lat + arrCoords.lat) / 2,
+      (depCoords.lng + arrCoords.lng) / 2,
+      depDate
+    );
+    
+    // Estimate departure time (assuming 1 hour before landing, or 2 hours for longer flights)
+    const flightTimeMinutes = (distance.nm / 250) * 60; // assuming 250 knots cruise
+    const [arrHour, arrMin] = landingTime.split(':').map(Number);
+    const arrMinutes = arrHour * 60 + arrMin;
+    const depMinutes = arrMinutes - Math.round(flightTimeMinutes);
+    const depHour = Math.floor(depMinutes / 60);
+    const depMin = depMinutes % 60;
+    const departureTime = `${String(depHour).padStart(2, '0')}:${String(depMin).padStart(2, '0')}`;
+    
+    // Calculate night time
+    const nightMinutes = calculateNightTime(
+      depCoords.lat, depCoords.lng,
+      arrCoords.lat, arrCoords.lng,
+      departureTime,
+      landingTime,
+      flightDate
+    );
+    
+    // Check if landing is at night
+    const [landHour, landMin] = landingTime.split(':').map(Number);
+    const landMinutes = landHour * 60 + landMin;
+    const duskMinutes = parseInt(solarTimes.dusk.time.split(':')[0]) * 60 + 
+                        parseInt(solarTimes.dusk.time.split(':')[1]);
+    const dawnMinutes = parseInt(solarTimes.dawn.time.split(':')[0]) * 60 + 
+                        parseInt(solarTimes.dawn.time.split(':')[1]);
+    const isNightLanding = landMinutes >= duskMinutes || landMinutes < dawnMinutes;
+    
+    const response = {
+      data: {
+        distance,
+        nightTime: {
+          hours: Math.floor(nightMinutes / 60),
+          minutes: nightMinutes % 60,
+          decimal: Math.round((nightMinutes / 60) * 100) / 100
+        },
+        solarTimes,
+        flight: {
+          departure: { icao: departureIcao.toUpperCase(), name: depData.name },
+          arrival: { icao: arrivalIcaoCode, name: arrivalName },
+          date: flightDate,
+          landingTime,
+          isNightFlightAtLanding: isNightLanding
+        }
+      },
+      timestamp: new Date().toISOString()
+    };
+    
+    return c.json(response);
+  } catch (error: any) {
+    console.error('Flight calculation error:', error);
+    return c.json({
+      error: 'Failed to calculate flight metrics',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    }, 500);
+  }
+});
+
 
 export default app;
