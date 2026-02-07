@@ -452,81 +452,129 @@ function parseTemperature(metar: string): { temp: number | null; dewp: number | 
   return { temp: null, dewp: null };
 }
 
-// Parse vento do METAR (09015G25KT ou VRB05KT)
+// Parse vento do METAR (09015G25KT ou VRB05KT) - CORRIGIDO
 function parseWind(metar: string): { wdir: number | null; wspd: number | null; wgst: number | null } {
+  // Variable wind
   const vrbMatch = metar.match(/VRB(\d{2})KT/);
   if (vrbMatch) {
     return { wdir: null, wspd: parseInt(vrbMatch[1]), wgst: null };
   }
   
+  // Normal wind with optional gusts
   const match = metar.match(/(\d{3})(\d{2})(?:G(\d{2}))?KT/);
   if (match) {
-    return {
-      wdir: parseInt(match[1]),
-      wspd: parseInt(match[2]),
-      wgst: match[3] ? parseInt(match[3]) : null
-    };
+    const wdir = parseInt(match[1]);
+    const wspd = parseInt(match[2]);
+    const wgst = match[3] ? parseInt(match[3]) : null;
+    
+    // Validate wind direction (0-360)
+    if (wdir < 0 || wdir > 360) {
+      return { wdir: null, wspd, wgst };
+    }
+    
+    return { wdir, wspd, wgst };
   }
+  
   return { wdir: null, wspd: null, wgst: null };
 }
 
 // Parse visibilidade do METAR (10SM ou 9999 ou CAVOK)
-function parseVisibility(metar: string): string | number | null {
-  const smMatch = metar.match(/(\d+)SM/);
-  if (smMatch) return parseInt(smMatch[1]);
-  
-  const mMatch = metar.match(/\s(\d{4})\s/);
-  if (mMatch) return parseInt(mMatch[1]) / 1609.34;
-  
+function parseVisibility(metar: string): number | null {
+  // CAVOK = visibility 10km or more
   if (metar.includes('CAVOK')) return 9999;
   
+  // Statute miles (US format)
+  const smMatch = metar.match(/(\d+)SM/);
+  if (smMatch) return parseInt(smMatch[1]) * 1609; // Convert to meters
+  
+  // Meters (ICAO format)
+  const mMatch = metar.match(/\s(\d{4})\s/);
+  if (mMatch) return parseInt(mMatch[1]);
+  
   return null;
 }
 
-// Parse altímetro do METAR (A2992 ou Q1013)
+// Parse altímetro do METAR (A2992 ou Q1013) - CORRIGIDO
 function parseAltimeter(metar: string): number | null {
+  // US format (inHg * 100)
   const aMatch = metar.match(/A(\d{4})/);
-  if (aMatch) return parseInt(aMatch.substring(0, 2)) + parseInt(aMatch.substring(2)) / 100;
+  if (aMatch) {
+    const value = aMatch[1];
+    return parseInt(value.substring(0, 2)) + parseInt(value.substring(2)) / 100;
+  }
   
+  // ICAO format (hPa)
   const qMatch = metar.match(/Q(\d{4})/);
-  if (qMatch) return parseInt(qMatch[1]) * 0.02953;
+  if (qMatch) {
+    return parseInt(qMatch[1]) * 0.02953; // Convert hPa to inHg
+  }
   
   return null;
 }
 
-// Determinar categoria de voo (VFR, MVFR, IFR, LIFR)
+// Determinar categoria de voo (VFR, MVFR, IFR, LIFR) - CORRIGIDO
 function getFlightCategory(metar: string): 'VFR' | 'MVFR' | 'IFR' | 'LIFR' {
   if (metar.includes('CAVOK')) return 'VFR';
   
   const visibility = parseVisibility(metar);
-  const ceilingMatch = metar.match(/([A-Z]{2,3})(\d{3})/);
   
+  // Find ceiling (only BKN or OVC count as ceiling, not FEW or SCT)
+  const cloudMatches = metar.match(/\b(FEW|SCT|BKN|OVC)(\d{3})/g);
   let ceiling = 99999;
-  if (ceilingMatch && (ceilingMatch[1] === 'FEW' || ceilingMatch[1] === 'SCT' || ceilingMatch[1] === 'BKN' || ceilingMatch[1] === 'OVC')) {
-    ceiling = parseInt(ceilingMatch[2]) * 100;
+  
+  if (cloudMatches) {
+    for (const match of cloudMatches) {
+      const type = match.substring(0, 3);
+      const height = parseInt(match.substring(3)) * 100;
+      
+      // Only BKN (5-7 oktas) and OVC (8 oktas) count as ceiling
+      if ((type === 'BKN' || type === 'OVC') && height < ceiling) {
+        ceiling = height;
+      }
+    }
   }
   
-  const visValue = typeof visibility === 'number' ? visibility : 10;
+  const visMeters = visibility || 10000;
   
-  if (visValue < 1 || ceiling < 500) return 'LIFR';
-  if (visValue < 3 || ceiling < 1000) return 'IFR';
-  if (visValue < 5 || ceiling < 3000) return 'MVFR';
+  // LIFR: visibility < 1SM (1609m) or ceiling < 500ft
+  if (visMeters < 1609 || ceiling < 500) return 'LIFR';
+  
+  // IFR: visibility < 3SM (4828m) or ceiling < 1000ft
+  if (visMeters < 4828 || ceiling < 1000) return 'IFR';
+  
+  // MVFR: visibility 3-5SM (4828-8046m) or ceiling 1000-3000ft
+  if (visMeters < 8046 || ceiling < 3000) return 'MVFR';
+  
   return 'VFR';
 }
 
-// GET METAR (cached - 5 min)
+// Validate ICAO code - NOVO
+function isValidICAO(icao: string): boolean {
+  return /^[A-Z]{4}$/i.test(icao);
+}
+
+// GET METAR (cached - 5 min) - CORRIGIDO
 app.get('/api/weather/metar/:icao', async (c) => {
   try {
-    const icao = c.req.param('icao');
+    const icao = c.req.param('icao').toUpperCase();
     
-    const result = await getCached(c, `metar:${icao.toUpperCase()}`, 300, async () => {
+    // Validate ICAO
+    if (!isValidICAO(icao)) {
+      return c.json({ 
+        error: 'ICAO inválido (deve ter 4 letras)',
+        icao,
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    const result = await getCached(c, `metar:${icao}`, 300, async () => {
       // Tentar buscar dados reais da API AISWEB
       const aiswebData = await fetchAISWebMETAR(icao);
       
       if (!aiswebData || !aiswebData.rawOb) {
         return { 
           error: 'Sem dados METAR disponível',
-          icao: icao.toUpperCase(),
+          icao,
           timestamp: new Date().toISOString()
         };
       }
@@ -539,7 +587,7 @@ app.get('/api/weather/metar/:icao', async (c) => {
       const flightCategory = getFlightCategory(metar);
       
       return {
-        icao: icao.toUpperCase(),
+        icao,
         rawOb: metar,
         temp,
         dewp,
@@ -570,22 +618,31 @@ app.get('/api/weather/metar/:icao', async (c) => {
 // GET TAF (cached - 10 min)
 app.get('/api/weather/taf/:icao', async (c) => {
   try {
-    const icao = c.req.param('icao');
+    const icao = c.req.param('icao').toUpperCase();
     
-    const result = await getCached(c, `taf:${icao.toUpperCase()}`, 600, async () => {
+    // Validate ICAO
+    if (!isValidICAO(icao)) {
+      return c.json({ 
+        error: 'ICAO inválido (deve ter 4 letras)',
+        icao,
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    const result = await getCached(c, `taf:${icao}`, 600, async () => {
       // Tentar buscar dados reais da API AISWEB
       const aiswebData = await fetchAISWebTAF(icao);
       
       if (!aiswebData || !aiswebData.rawTAF) {
         return { 
           error: 'Sem dados TAF disponível',
-          icao: icao.toUpperCase(),
+          icao,
           timestamp: new Date().toISOString()
         };
       }
       
       return {
-        icao: icao.toUpperCase(),
+        icao,
         rawTAF: aiswebData.rawTAF,
         validTimeFrom: aiswebData.validTimeFrom || new Date().toISOString(),
         validTimeTo: aiswebData.validTimeTo || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
@@ -605,13 +662,22 @@ app.get('/api/weather/taf/:icao', async (c) => {
   }
 });
 
-// GET múltiplos METARs
+// GET múltiplos METARs - MELHORADO
 app.get('/api/weather/metar', async (c) => {
   try {
-    const icaos = c.req.query('icaos')?.split(',') || [];
+    const icaos = c.req.query('icaos')?.split(',').map(i => i.trim().toUpperCase()) || [];
     
     if (icaos.length === 0) {
       return c.json({ error: 'Nenhum ICAO fornecido', timestamp: new Date().toISOString() }, 400);
+    }
+    
+    // Validate all ICAOs
+    const invalidIcaos = icaos.filter(icao => !isValidICAO(icao));
+    if (invalidIcaos.length > 0) {
+      return c.json({ 
+        error: `ICAOs inválidos: ${invalidIcaos.join(', ')}`,
+        timestamp: new Date().toISOString()
+      }, 400);
     }
     
     const results: Record<string, any> = {};
@@ -625,7 +691,7 @@ app.get('/api/weather/metar', async (c) => {
           const { temp, dewp } = parseTemperature(metar);
           const { wdir, wspd, wgst } = parseWind(metar);
           
-          results[icao.toUpperCase()] = {
+          results[icao] = {
             rawOb: metar,
             temp,
             dewp,
@@ -635,13 +701,14 @@ app.get('/api/weather/metar', async (c) => {
             visib: parseVisibility(metar),
             altim: parseAltimeter(metar),
             flightCategory: getFlightCategory(metar),
+            reportTime: metarData.reportTime || new Date().toISOString(),
             source: 'AISWEB'
           };
         } else {
-          results[icao.toUpperCase()] = { error: 'Sem dados disponível' };
+          results[icao] = { error: 'Sem dados disponível' };
         }
       } catch (error: any) {
-        results[icao.toUpperCase()] = { error: error.message };
+        results[icao] = { error: error.message };
       }
     }
     
@@ -654,12 +721,61 @@ app.get('/api/weather/metar', async (c) => {
     }, 500);
   }
 });
+
 // ============= AIRPORTS ROUTES =============
+
+// Helper: Parse coordinates from DMS or decimal format - MELHORADO
+function parseCoordinates(coordStr: string | null): { lat: number; lng: number } | null {
+  if (!coordStr) return null;
+
+  // Try DMS format with symbols: N23°32'20" W46°28'10"
+  const dmsMatch = coordStr.match(
+    /([NS])\s*(\d+)°?\s*(\d+)'?\s*(\d+)"?\s*([EW])\s*(\d+)°?\s*(\d+)'?\s*(\d+)"?/i
+  );
+  if (dmsMatch) {
+    const lat = (
+      parseInt(dmsMatch[2]) +
+      parseInt(dmsMatch[3]) / 60 +
+      parseInt(dmsMatch[4]) / 3600
+    ) * (dmsMatch[1].toUpperCase() === 'S' ? -1 : 1);
+
+    const lng = (
+      parseInt(dmsMatch[6]) +
+      parseInt(dmsMatch[7]) / 60 +
+      parseInt(dmsMatch[8]) / 3600
+    ) * (dmsMatch[5].toUpperCase() === 'W' ? -1 : 1);
+
+    return { lat, lng };
+  }
+
+  // Try decimal format: -23.5389, -46.4697 or -23.5389,-46.4697
+  const decimalMatch = coordStr.match(/([-\d.]+)[,\s]+([-\d.]+)/);
+  if (decimalMatch) {
+    const lat = parseFloat(decimalMatch[1]);
+    const lng = parseFloat(decimalMatch[2]);
+    
+    // Validate ranges
+    if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+      return { lat, lng };
+    }
+  }
+
+  return null;
+}
 
 // GET airport by ICAO code (cached - 1 day)
 app.get('/api/airports/:icao', async (c) => {
   try {
     const icao = c.req.param('icao').toUpperCase().trim();
+    
+    // Validate ICAO
+    if (!isValidICAO(icao)) {
+      return c.json({ 
+        error: 'ICAO inválido (deve ter 4 letras)',
+        icao,
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
     
     const result = await getCached(c, `airport:${icao}`, 86400, async () => {
       const supabase = getSupabase(c);
@@ -712,7 +828,7 @@ app.get('/api/airports/:icao', async (c) => {
 // GET airports search (NOT cached - real-time search)
 app.get('/api/airports/search', async (c) => {
   try {
-    const q = c.req.query('q')?.toUpperCase() || '';
+    const q = c.req.query('q')?.trim().toUpperCase() || '';
     
     if (!q || q.length < 2) {
       return c.json({ 
@@ -749,6 +865,7 @@ app.get('/api/airports/search', async (c) => {
     
     return c.json({ 
       results,
+      count: results.length,
       timestamp: new Date().toISOString()
     });
   } catch (error: any) {
@@ -762,42 +879,6 @@ app.get('/api/airports/search', async (c) => {
 });
 
 // ============= FLIGHT CALCULATIONS ROUTES =============
-
-// Helper: Parse coordinates from DMS or decimal format
-function parseCoordinates(coordStr: string | null): { lat: number; lng: number } | null {
-  if (!coordStr) return null;
-
-  // Try DMS format: N23°32'20" W46°28'10"
-  const dmsMatch = coordStr.match(
-    /([NS])(\d+)°(\d+)'(\d+)"?\s*([EW])(\d+)°(\d+)'(\d+)"?/i
-  );
-  if (dmsMatch) {
-    const lat = (
-      parseInt(dmsMatch[2]) +
-      parseInt(dmsMatch[3]) / 60 +
-      parseInt(dmsMatch[4]) / 3600
-    ) * (dmsMatch[1].toUpperCase() === 'S' ? -1 : 1);
-
-    const lng = (
-      parseInt(dmsMatch[6]) +
-      parseInt(dmsMatch[7]) / 60 +
-      parseInt(dmsMatch[8]) / 3600
-    ) * (dmsMatch[5].toUpperCase() === 'W' ? -1 : 1);
-
-    return { lat, lng };
-  }
-
-  // Try decimal format: -23.5389, -46.4697 or -23.5389,-46.4697
-  const decimalMatch = coordStr.match(/([-\d.]+)[,\s]+([-\d.]+)/);
-  if (decimalMatch) {
-    return {
-      lat: parseFloat(decimalMatch[1]),
-      lng: parseFloat(decimalMatch[2]),
-    };
-  }
-
-  return null;
-}
 
 // Helper: Calculate distance between two points (Haversine formula)
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): { nm: number; km: number } {
@@ -819,57 +900,94 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   };
 }
 
-// Helper: Calculate solar times (sunrise, sunset, dawn, dusk)
+// Helper: Calculate solar times (sunrise, sunset, dawn, dusk) - MELHORADO
 function calculateSolarTimes(lat: number, lng: number, date: Date): any {
-  // Approximation for solar times in Brazil (simplified)
-  // In production, use proper library like suncalc
+  // Simplified solar calculation for Brazil
+  // For production, consider using a library like suncalc for better accuracy
   
-  const dayOfYear = Math.floor((date.getTime() - new Date(date.getFullYear(), 0, 0).getTime()) / 86400000);
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
   
-  // Approximate sunrise/sunset calculation
-  // Using a simplified formula for Brazil
-  const B = (360 / 365) * (dayOfYear - 81);
-  const B_rad = (B * Math.PI) / 180;
+  // Julian day calculation
+  const a = Math.floor((14 - month) / 12);
+  const y = year + 4800 - a;
+  const m = month + 12 * a - 3;
+  const jdn = day + Math.floor((153 * m + 2) / 5) + 365 * y + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400) - 32045;
+  const jd = jdn + 0.5;
   
-  const eot = 9.87 * Math.sin(2 * B_rad) - 7.53 * Math.cos(B_rad) - 1.5 * Math.sin(B_rad);
+  // Number of days since J2000.0
+  const n = jd - 2451545.0;
   
-  // Standard time correction
-  const timeZoneOffset = -3 * 60; // UTC-3 for Brazil
-  const lng_offset = (-lng / 15) * 60;
-  const timeCorrection = timeZoneOffset + lng_offset + eot;
+  // Mean solar noon
+  const J_star = n - lng / 360;
   
-  // Solar declination
-  const decl_rad = (23.45 * Math.sin(B_rad) * Math.PI) / 180;
-  const lat_rad = (lat * Math.PI) / 180;
+  // Solar mean anomaly
+  const M = (357.5291 + 0.98560028 * J_star) % 360;
+  const M_rad = M * Math.PI / 180;
   
-  // Sunrise/Sunset calculation
-  const cos_h = -Math.tan(lat_rad) * Math.tan(decl_rad);
-  const h_rad = Math.acos(Math.max(-1, Math.min(1, cos_h)));
-  const h_deg = (h_rad * 180) / Math.PI;
+  // Equation of center
+  const C = 1.9148 * Math.sin(M_rad) + 0.02 * Math.sin(2 * M_rad) + 0.0003 * Math.sin(3 * M_rad);
   
-  const sunrise_minutes = 720 - (4 * h_deg) - timeCorrection;
-  const sunset_minutes = 720 + (4 * h_deg) - timeCorrection;
-  const dawn_minutes = sunrise_minutes - 30;
-  const dusk_minutes = sunset_minutes + 30;
+  // Ecliptic longitude
+  const lambda = (M + C + 180 + 102.9372) % 360;
+  const lambda_rad = lambda * Math.PI / 180;
   
-  const formatTime = (minutes: number) => {
-    const hours = Math.floor(minutes / 60);
-    const mins = Math.floor(minutes % 60);
+  // Solar transit
+  const J_transit = 2451545.0 + J_star + 0.0053 * Math.sin(M_rad) - 0.0069 * Math.sin(2 * lambda_rad);
+  
+  // Declination of the sun
+  const sin_delta = Math.sin(lambda_rad) * Math.sin(23.44 * Math.PI / 180);
+  const delta_rad = Math.asin(sin_delta);
+  
+  // Hour angle
+  const lat_rad = lat * Math.PI / 180;
+  const cos_omega = (Math.sin(-0.833 * Math.PI / 180) - Math.sin(lat_rad) * Math.sin(delta_rad)) / 
+                    (Math.cos(lat_rad) * Math.cos(delta_rad));
+  
+  // Check if sun rises/sets
+  if (cos_omega > 1 || cos_omega < -1) {
+    // Polar day or polar night
     return {
-      time: `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`,
-      minutes: Math.round(minutes)
+      sunrise: { time: '06:00', minutes: 360 },
+      sunset: { time: '18:00', minutes: 1080 },
+      dawn: { time: '05:30', minutes: 330 },
+      dusk: { time: '18:30', minutes: 1110 }
+    };
+  }
+  
+  const omega = Math.acos(cos_omega) * 180 / Math.PI;
+  
+  // Sunrise and sunset Julian days
+  const J_rise = J_transit - omega / 360;
+  const J_set = J_transit + omega / 360;
+  
+  // Convert to local time (UTC-3 for Brazil)
+  const timeZoneOffset = -3;
+  
+  const jdToTime = (jd: number) => {
+    const hours = ((jd + 0.5) % 1) * 24 + timeZoneOffset;
+    const adjustedHours = (hours + 24) % 24;
+    const h = Math.floor(adjustedHours);
+    const m = Math.floor((adjustedHours - h) * 60);
+    return {
+      time: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
+      minutes: h * 60 + m
     };
   };
   
+  const sunrise = jdToTime(J_rise);
+  const sunset = jdToTime(J_set);
+  
   return {
-    sunrise: formatTime(sunrise_minutes),
-    sunset: formatTime(sunset_minutes),
-    dawn: formatTime(dawn_minutes),
-    dusk: formatTime(dusk_minutes)
+    sunrise,
+    sunset,
+    dawn: { time: sunrise.time, minutes: sunrise.minutes - 30 },
+    dusk: { time: sunset.time, minutes: sunset.minutes + 30 }
   };
 }
 
-// Helper: Calculate night time for a flight
+// Helper: Calculate night time for a flight - MELHORADO
 function calculateNightTime(
   depLat: number, depLng: number,
   arrLat: number, arrLng: number,
@@ -877,74 +995,73 @@ function calculateNightTime(
   arrivalTime: string,
   flightDate: string
 ): number {
-  // Simplified calculation: count 30 minutes before sunset to 30 minutes after sunrise
   try {
     const [depHour, depMin] = departureTime.split(':').map(Number);
     const [arrHour, arrMin] = arrivalTime.split(':').map(Number);
     
-    const depDate = new Date(flightDate);
-    const depDateTime = new Date(depDate.getFullYear(), depDate.getMonth(), depDate.getDate(), depHour, depMin);
-    
-    const arrDate = new Date(flightDate);
-    const arrDateTime = new Date(arrDate.getFullYear(), arrDate.getMonth(), arrDate.getDate(), arrHour, arrMin);
-    
-    // If arrival is before departure, assume next day
-    if (arrDateTime < depDateTime) {
-      arrDateTime.setDate(arrDateTime.getDate() + 1);
+    if (isNaN(depHour) || isNaN(depMin) || isNaN(arrHour) || isNaN(arrMin)) {
+      return 0;
     }
     
-    // Calculate average position (middle of route)
+    const depDate = new Date(flightDate);
+    const arrDate = new Date(flightDate);
+    
+    // Calculate minutes from midnight
+    let depMinutes = depHour * 60 + depMin;
+    let arrMinutes = arrHour * 60 + arrMin;
+    
+    // If arrival is before departure, assume next day
+    if (arrMinutes < depMinutes) {
+      arrMinutes += 24 * 60;
+    }
+    
+    // Calculate average position for solar times
     const avgLat = (depLat + arrLat) / 2;
     const avgLng = (depLng + arrLng) / 2;
     
-    // Get solar times for both departure and arrival
-    const depSolar = calculateSolarTimes(depLat, depLng, depDate);
-    const arrSolar = calculateSolarTimes(arrLat, arrLng, arrDate);
+    const solar = calculateSolarTimes(avgLat, avgLng, depDate);
     
-    // Parse times
-    const parseTimeStr = (timeStr: string) => {
-      const [h, m] = timeStr.split(':').map(Number);
-      return h * 60 + m;
-    };
-    
-    const duskDep = parseTimeStr(depSolar.dusk.time);
-    const dawnArr = parseTimeStr(arrSolar.dawn.time);
-    
-    const depTimeMinutes = depHour * 60 + depMin;
-    const arrTimeMinutes = arrHour * 60 + arrMin;
+    // Night is from dusk to dawn (civil twilight)
+    const duskMinutes = solar.dusk.minutes;
+    const dawnMinutes = solar.dawn.minutes;
+    const nextDawnMinutes = dawnMinutes + 24 * 60; // Dawn next day
     
     let nightMinutes = 0;
     
-    // If departure is after dusk
-    if (depTimeMinutes > duskDep) {
-      if (arrTimeMinutes < dawnArr) {
-        // Entire flight is night
-        nightMinutes = arrTimeMinutes - depTimeMinutes;
-      } else {
-        // Flight started in night, ended in day
-        nightMinutes = dawnArr - depTimeMinutes;
-      }
-    } else {
-      // Departure is during day
-      if (arrTimeMinutes > duskDep) {
-        // Flight ended in night
-        nightMinutes = arrTimeMinutes - duskDep;
-      }
+    // Case 1: Flight entirely during day
+    if (depMinutes >= dawnMinutes && arrMinutes <= duskMinutes) {
+      nightMinutes = 0;
+    }
+    // Case 2: Flight entirely during night
+    else if ((depMinutes >= duskMinutes || depMinutes < dawnMinutes) && 
+             (arrMinutes >= duskMinutes || arrMinutes < nextDawnMinutes)) {
+      nightMinutes = arrMinutes - depMinutes;
+    }
+    // Case 3: Departure in day, arrival in night
+    else if (depMinutes < duskMinutes && arrMinutes > duskMinutes) {
+      nightMinutes = arrMinutes - duskMinutes;
+    }
+    // Case 4: Departure in night, arrival in day
+    else if (depMinutes < dawnMinutes && arrMinutes > dawnMinutes) {
+      nightMinutes = dawnMinutes - depMinutes;
+    }
+    // Case 5: Flight crosses both dusk and dawn
+    else if (depMinutes < duskMinutes && arrMinutes > nextDawnMinutes) {
+      nightMinutes = (nextDawnMinutes - duskMinutes);
     }
     
-    // Ensure positive value
-    return Math.max(0, nightMinutes);
+    return Math.max(0, Math.round(nightMinutes));
   } catch (error) {
     console.error('Error calculating night time:', error);
     return 0;
   }
 }
 
-// POST Flight Calculations
+// POST Flight Calculations - MELHORADO
 app.post('/api/flight-calculations', async (c) => {
   try {
     const payload = await c.req.json();
-    const { departureIcao, arrivalIcao, arrivalManual, flightDate, landingTime } = payload;
+    const { departureIcao, arrivalIcao, arrivalManual, flightDate, landingTime, departureTime } = payload;
     
     // Validations
     if (!departureIcao || !flightDate || !landingTime) {
@@ -957,6 +1074,21 @@ app.post('/api/flight-calculations', async (c) => {
     if (!arrivalIcao && !arrivalManual) {
       return c.json({
         error: 'Missing arrival: provide either arrivalIcao or arrivalManual',
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    // Validate ICAO codes
+    if (!isValidICAO(departureIcao)) {
+      return c.json({
+        error: `Invalid departure ICAO: ${departureIcao}`,
+        timestamp: new Date().toISOString()
+      }, 400);
+    }
+    
+    if (arrivalIcao && !isValidICAO(arrivalIcao)) {
+      return c.json({
+        error: `Invalid arrival ICAO: ${arrivalIcao}`,
         timestamp: new Date().toISOString()
       }, 400);
     }
@@ -991,6 +1123,13 @@ app.post('/api/flight-calculations', async (c) => {
     
     if (arrivalManual) {
       // Use manual coordinates
+      if (!arrivalManual.lat || !arrivalManual.lng || !arrivalManual.nome) {
+        return c.json({
+          error: 'Manual arrival requires lat, lng, and nome',
+          timestamp: new Date().toISOString()
+        }, 400);
+      }
+      
       arrCoords = { lat: arrivalManual.lat, lng: arrivalManual.lng };
       arrivalName = arrivalManual.nome;
       arrivalIcaoCode = 'MANUAL';
@@ -1032,20 +1171,23 @@ app.post('/api/flight-calculations', async (c) => {
       depDate
     );
     
-    // Estimate departure time (assuming 1 hour before landing, or 2 hours for longer flights)
-    const flightTimeMinutes = (distance.nm / 250) * 60; // assuming 250 knots cruise
-    const [arrHour, arrMin] = landingTime.split(':').map(Number);
-    const arrMinutes = arrHour * 60 + arrMin;
-    const depMinutes = arrMinutes - Math.round(flightTimeMinutes);
-    const depHour = Math.floor(depMinutes / 60);
-    const depMin = depMinutes % 60;
-    const departureTime = `${String(depHour).padStart(2, '0')}:${String(depMin).padStart(2, '0')}`;
+    // Estimate departure time if not provided
+    let estimatedDepartureTime = departureTime;
+    if (!estimatedDepartureTime) {
+      const flightTimeMinutes = (distance.nm / 250) * 60; // assuming 250 knots cruise
+      const [arrHour, arrMin] = landingTime.split(':').map(Number);
+      const arrMinutes = arrHour * 60 + arrMin;
+      const depMinutes = arrMinutes - Math.round(flightTimeMinutes);
+      const depHour = Math.floor((depMinutes + 24 * 60) % (24 * 60) / 60);
+      const depMin = Math.floor((depMinutes + 24 * 60) % 60);
+      estimatedDepartureTime = `${String(depHour).padStart(2, '0')}:${String(depMin).padStart(2, '0')}`;
+    }
     
     // Calculate night time
     const nightMinutes = calculateNightTime(
       depCoords.lat, depCoords.lng,
       arrCoords.lat, arrCoords.lng,
-      departureTime,
+      estimatedDepartureTime,
       landingTime,
       flightDate
     );
@@ -1053,10 +1195,8 @@ app.post('/api/flight-calculations', async (c) => {
     // Check if landing is at night
     const [landHour, landMin] = landingTime.split(':').map(Number);
     const landMinutes = landHour * 60 + landMin;
-    const duskMinutes = parseInt(solarTimes.dusk.time.split(':')[0]) * 60 + 
-                        parseInt(solarTimes.dusk.time.split(':')[1]);
-    const dawnMinutes = parseInt(solarTimes.dawn.time.split(':')[0]) * 60 + 
-                        parseInt(solarTimes.dawn.time.split(':')[1]);
+    const duskMinutes = solarTimes.dusk.minutes;
+    const dawnMinutes = solarTimes.dawn.minutes;
     const isNightLanding = landMinutes >= duskMinutes || landMinutes < dawnMinutes;
     
     const response = {
@@ -1067,11 +1207,27 @@ app.post('/api/flight-calculations', async (c) => {
           minutes: nightMinutes % 60,
           decimal: Math.round((nightMinutes / 60) * 100) / 100
         },
-        solarTimes,
+        solarTimes: {
+          sunrise: solarTimes.sunrise.time,
+          sunset: solarTimes.sunset.time,
+          dawn: solarTimes.dawn.time,
+          dusk: solarTimes.dusk.time
+        },
         flight: {
-          departure: { icao: departureIcao.toUpperCase(), name: depData.name },
-          arrival: { icao: arrivalIcaoCode, name: arrivalName },
+          departure: { 
+            icao: departureIcao.toUpperCase(), 
+            name: depData.name,
+            lat: depCoords.lat,
+            lng: depCoords.lng
+          },
+          arrival: { 
+            icao: arrivalIcaoCode, 
+            name: arrivalName,
+            lat: arrCoords.lat,
+            lng: arrCoords.lng
+          },
           date: flightDate,
+          departureTime: estimatedDepartureTime,
           landingTime,
           isNightFlightAtLanding: isNightLanding
         }
@@ -1089,6 +1245,5 @@ app.post('/api/flight-calculations', async (c) => {
     }, 500);
   }
 });
-
 
 export default app;
