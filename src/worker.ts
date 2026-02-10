@@ -29,21 +29,24 @@ const fetchAisweb = async (c: Context<{ Bindings: Bindings }>, area: string, add
     headers: { 'User-Agent': 'Mozilla/5.0 ShareBrasil' }
   });
 
-  if (!res.ok) throw new Error(`Erro AISWEB: ${res.status}`);
-
   const text = await res.text();
 
-  // Tenta JSON primeiro, se falhar, vai para XML
+  // 1. Tenta JSON direto
   try {
     return JSON.parse(text);
   } catch {
+    // 2. Se falhar, vai para o XML
     const jsonObj = parser.parse(text);
-    // A AISWEB costuma colocar tudo dentro de uma tag raiz <aisweb> ou <met>
-    return jsonObj.aisweb || jsonObj;
+    
+    // 3. LOG DE DEPURAÇÃO (Importante):
+    // Se você rodar 'wrangler tail', verá o que a AISWEB respondeu de verdade.
+    console.log("Resposta bruta da AISWEB:", text);
+
+    // 4. Remove a "casca" do XML (pega o que está dentro da tag raiz, seja ela qual for)
+    const rootKey = Object.keys(jsonObj)[0];
+    return rootKey ? jsonObj[rootKey] : jsonObj;
   }
 };
-
-
 
 // ============= ROTAS =============
 
