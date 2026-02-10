@@ -18,7 +18,13 @@ const parser = new XMLParser({
 
 app.use('*', cors());
 
-const AISWEB_BASE_URL = 'http://aisweb.decea.gov.br/api/';
+// Domínios a tentar em ordem — o primeiro que responder com dados válidos vence
+const AISWEB_CANDIDATES = [
+  'https://aisweb.decea.gov.br/api/',       // HTTPS novo (mais provável)
+  'http://aisweb.decea.gov.br/api/',         // HTTP documentado
+  'https://www.aisweb.aer.mil.br/api/',      // HTTPS legado
+  'http://www.aisweb.aer.mil.br/api/',       // HTTP legado (curl da doc)
+];
 
 const AREA_NODE_MAP: Record<string, string> = {
   met:       'met',
@@ -31,6 +37,50 @@ const AREA_NODE_MAP: Record<string, string> = {
   rotaer:    'rotaer',
 };
 
+// Monta query string manualmente — URLSearchParams converte undefined→"undefined"
+const buildUrl = (
+  base: string,
+  apiKey: string,
+  apiPass: string,
+  area: string,
+  extra: Record<string, string | undefined>
+) => {
+  const parts: string[] = [
+    `apiKey=${encodeURIComponent(apiKey)}`,
+    `apiPass=${encodeURIComponent(apiPass)}`,
+    `area=${encodeURIComponent(area)}`,
+  ];
+  Object.entries(extra).forEach(([k, v]) => {
+    if (v !== undefined && v !== '') parts.push(`${k}=${encodeURIComponent(v)}`);
+  });
+  return `${base}?${parts.join('&')}`;
+};
+
+// Faz uma única chamada HTTP com timeout e follow redirect
+const tryFetch = async (url: string): Promise<{ ok: boolean; status: number; text: string }> => {
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',           // segue redirects 301/302
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept':     'text/xml, application/xml, */*',
+      },
+    });
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, text };
+  } catch (err: any) {
+    return { ok: false, status: 0, text: err.message };
+  }
+};
+
+// Resposta é válida se não contém erro e tem algum conteúdo XML
+const isValidResponse = (text: string) =>
+  text.length > 10 &&
+  !text.includes('Erro nos parametros') &&
+  !text.includes('404') &&
+  (text.includes('<') || text.includes('{'));
+
 const fetchAisweb = async (
   c: Context<{ Bindings: Bindings }>,
   area: string,
@@ -39,81 +89,73 @@ const fetchAisweb = async (
   const apiKey  = c.env.AISWEB_API_KEY;
   const apiPass = c.env.AISWEB_API_PASS;
 
-  // DEBUG: loga estado real dos env vars no wrangler tail
-  // URLSearchParams converte `undefined` para a STRING "undefined" — causando o erro!
-  console.log(`[ENV] apiKey  → tipo:${typeof apiKey}  tamanho:${apiKey?.length ?? 'N/A'}`);
-  console.log(`[ENV] apiPass → tipo:${typeof apiPass} tamanho:${apiPass?.length ?? 'N/A'}`);
-
   if (!apiKey || !apiPass) {
-    throw new Error(
-      `Credenciais AISWEB ausentes. apiKey=${!!apiKey} apiPass=${!!apiPass}`
-    );
+    throw new Error(`Credenciais ausentes. apiKey=${!!apiKey} apiPass=${!!apiPass}`);
   }
 
-  // Constrói a query string manualmente (evita o bug do URLSearchParams com undefined)
-  const queryParts: string[] = [
-    `apiKey=${encodeURIComponent(apiKey)}`,
-    `apiPass=${encodeURIComponent(apiPass)}`,
-    `area=${encodeURIComponent(area)}`,
-  ];
+  let lastError = '';
 
-  Object.entries(additionalParams).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') {
-      queryParts.push(`${key}=${encodeURIComponent(value)}`);
+  // Tenta cada domínio até um responder com dados válidos
+  for (const base of AISWEB_CANDIDATES) {
+    const url  = buildUrl(base, apiKey, apiPass, area, additionalParams);
+    const safe = `${base}?apiKey=***&apiPass=***&area=${area}`;
+
+    console.log(`[AISWEB] Tentando: ${safe}`);
+
+    const { ok, status, text } = await tryFetch(url);
+
+    console.log(`[AISWEB] Status ${status}, tamanho ${text.length}, preview: ${text.substring(0, 120)}`);
+
+    if (!ok || !isValidResponse(text)) {
+      lastError = `${base} → HTTP ${status}: ${text.substring(0, 80)}`;
+      continue; // tenta o próximo
     }
-  });
 
-  const url = `${AISWEB_BASE_URL}?${queryParts.join('&')}`;
+    // Sucesso — faz o parse
+    try { return JSON.parse(text); } catch { /* segue XML */ }
 
-  // Log seguro (sem credenciais reais)
-  const safeParams = Object.entries(additionalParams)
-    .filter(([, v]) => v)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('&');
-  console.log(`[AISWEB] GET area=${area} ${safeParams}`);
+    const parsed = parser.parse(text);
+    if (!parsed || typeof parsed !== 'object') throw new Error('Falha ao parsear XML');
 
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 ShareBrasil',
-      'Accept':     'text/xml, application/xml, */*',
-    },
-  });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    const aisweb  = parsed['aisweb'] ?? parsed;
+    const nodeKey = AREA_NODE_MAP[area];
+    return (nodeKey && aisweb[nodeKey] !== undefined) ? aisweb[nodeKey] : aisweb;
   }
 
-  const text = await res.text();
-  console.log(`[AISWEB] Resposta (${area}): ${text.substring(0, 300)}`);
-
-  if (!text || text.trim() === '') {
-    throw new Error('AISWEB retornou resposta vazia');
-  }
-
-  if (text.includes('Erro nos parametros')) {
-    throw new Error(`AISWEB rejeitou: ${text.replace(/<[^>]+>/g, '').trim()}`);
-  }
-
-  // Tenta JSON
-  try { return JSON.parse(text); } catch { /* segue para XML */ }
-
-  // Parse XML → desce para o nó correto
-  const parsed = parser.parse(text);
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error('Falha ao parsear XML da AISWEB');
-  }
-
-  const aisweb  = parsed['aisweb'] ?? parsed;
-  const nodeKey = AREA_NODE_MAP[area];
-
-  return (nodeKey && aisweb[nodeKey] !== undefined) ? aisweb[nodeKey] : aisweb;
+  throw new Error(`Todos os domínios falharam. Último erro: ${lastError}`);
 };
 
 // ============= ROTAS =============
 
 app.get('/', (c) => c.text('ShareBrasil API - Central DECEA Ativa 🚀'));
 
-// DIAGNÓSTICO — remova após confirmar funcionamento
+// DIAGNÓSTICO: testa todos os domínios e retorna resultado detalhado
+app.get('/debug/probe', async (c) => {
+  const apiKey  = c.env.AISWEB_API_KEY;
+  const apiPass = c.env.AISWEB_API_PASS;
+
+  if (!apiKey || !apiPass) return c.json({ error: 'Credenciais ausentes' }, 500);
+
+  const results: Record<string, any> = {};
+
+  for (const base of AISWEB_CANDIDATES) {
+    const url = buildUrl(base, apiKey, apiPass, 'met', { icaoCode: 'SBGR' });
+    const { ok, status, text } = await tryFetch(url);
+    results[base] = {
+      status,
+      ok,
+      tamanho:    text.length,
+      preview:    text.substring(0, 200).replace(/\s+/g, ' ').trim(),
+      erro_api:   text.includes('Erro nos parametros'),
+      tem_dados:  isValidResponse(text),
+      tem_metar:  text.toLowerCase().includes('metar'),
+    };
+  }
+
+  return c.json(results);
+});
+
+// DIAGNÓSTICO: env vars
 app.get('/debug/env', (c) => {
   const key  = c.env.AISWEB_API_KEY;
   const pass = c.env.AISWEB_API_PASS;
@@ -172,10 +214,7 @@ app.get('/api/solar/:icao', async (c) => {
     const params: Record<string, string | undefined> = {
       icaoCode: c.req.param('icao').toUpperCase(),
     };
-    if (dt_i) {
-      params.dt_i = dt_i;
-      params.dt_f = dt_f ?? dt_i;
-    }
+    if (dt_i) { params.dt_i = dt_i; params.dt_f = dt_f ?? dt_i; }
     const data = await fetchAisweb(c, 'sol', params);
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
