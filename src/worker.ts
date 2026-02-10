@@ -197,6 +197,18 @@ app.get('/api/pub', async (c) => {
 });
 
 // ─── DIAGNÓSTICO (remova após confirmar funcionamento) ───────────────────────
+// Mostra exatamente qual URL está sendo construída (com credenciais — só debug!)
+app.get('/debug/rawurl', (c) => {
+  const apiKey  = c.env.AISWEB_API_KEY;
+  const apiPass = c.env.AISWEB_API_PASS;
+  const url = `${AISWEB_BASE_URL}?apiKey=${apiKey}&apiPass=${apiPass}&area=met&icaoCode=SBGR`;
+  return c.json({
+    url_exata: url,
+    apiKey_bytes:  [...(apiKey  ?? '')].map(ch => ({ char: ch, code: ch.charCodeAt(0) })),
+    apiPass_bytes: [...(apiPass ?? '')].map(ch => ({ char: ch, code: ch.charCodeAt(0) })),
+  });
+});
+
 app.get('/debug/probe', async (c) => {
   const apiKey  = c.env.AISWEB_API_KEY;
   const apiPass = c.env.AISWEB_API_PASS;
@@ -208,13 +220,13 @@ app.get('/debug/probe', async (c) => {
     const res  = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
     const text = await res.text();
     return c.json({
-      dominio_usado: AISWEB_BASE_URL,
-      status:        res.status,
-      ok:            res.ok,
-      tamanho:       text.length,
-      preview:       text.substring(0, 400).replace(/\s+/g, ' ').trim(),
-      erro_api:      text.includes('Erro nos parametros'),
-      tem_metar:     text.toLowerCase().includes('metar'),
+      dominio_usado:  AISWEB_BASE_URL,
+      status:         res.status,
+      ok:             res.ok,
+      tamanho:        text.length,
+      resposta_completa: text,   // XML completo para diagnóstico
+      erro_api:       text.includes('Erro nos parametros'),
+      tem_metar:      text.toLowerCase().includes('metar'),
     });
   } catch (err: any) {
     return c.json({ erro: err.message });
@@ -235,3 +247,4 @@ app.get('/debug/env', (c) => {
 });
 
 export default { fetch: app.fetch };
+// TEMPORÁRIO — remova após debug
