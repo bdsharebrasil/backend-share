@@ -13,32 +13,43 @@ app.use('*', cors());
 
 // ============= HELPER DE COMUNICAÇÃO =============
 const fetchAisweb = async (c: Context<{ Bindings: Bindings }>, area: string, additionalParams: Record<string, string | undefined>) => {
-  const baseUrl = `https://api.aisweb.aer.mil.br/api/`;
+  // Mudamos para o domínio principal da documentação que você passou
+  const baseUrl = `https://aisweb.decea.mil.br/api/`;
   
-  // Cria os parâmetros da URL
   const params = new URLSearchParams({
     apiKey: c.env.AISWEB_API_KEY,
     apiPass: c.env.AISWEB_API_PASS,
     area: area,
-    display: 'json'
   });
 
-  // Adiciona parâmetros opcionais enviados na query string ou rota
   Object.entries(additionalParams).forEach(([key, value]) => {
     if (value) params.append(key, value);
   });
 
-  const res = await fetch(`${baseUrl}?${params.toString()}`);
+  const finalUrl = `${baseUrl}?${params.toString()}`;
+
+  const res = await fetch(finalUrl, {
+    method: 'GET',
+    headers: {
+      // O "pulo do gato": fingir que é um navegador para evitar o erro 530
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/plain, */*',
+    },
+  });
   
-  if (!res.ok) throw new Error(`AISWEB Indisponível: ${res.status}`);
+  // Se o erro 530 persistir, a AISWEB pode estar offline ou bloqueando o IP do Cloudflare
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => "Sem detalhes");
+    throw new Error(`AISWEB Indisponível (Status ${res.status}). Detalhes: ${errorBody.substring(0, 100)}`);
+  }
 
   const text = await res.text();
   
-  // Tenta converter para JSON. Se falhar, é porque a AISWEB mandou XML ou erro de texto.
   try {
     return JSON.parse(text);
   } catch (e) {
-    throw new Error(`A AISWEB não retornou um JSON válido. Verifique se o formato JSON está ativo na sua conta DECEA.`);
+    // Se não for JSON, pode ser que ela tenha retornado XML (padrão deles)
+    throw new Error(`A AISWEB retornou XML em vez de JSON. Verifique se o parâmetro display=json é suportado nesta área.`);
   }
 };
 
