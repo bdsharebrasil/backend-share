@@ -20,6 +20,7 @@ const fetchAisweb = async (c: Context<{ Bindings: Bindings }>, area: string, add
     apiKey: c.env.AISWEB_API_KEY,
     apiPass: c.env.AISWEB_API_PASS,
     area: area,
+    display: 'json'
   });
 
   // Adiciona parâmetros opcionais enviados na query string ou rota
