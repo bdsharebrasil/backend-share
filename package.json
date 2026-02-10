@@ -1,12 +1,10 @@
 {
   "name": "api-workers",
   "version": "1.0.0",
-  "description": "Aviation Management API on Cloudflare Workers",
-  "main": "src/worker.ts",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
     "build": "esbuild src/worker.ts --bundle --outfile=dist/worker.js --format=esm",
+    "deploy": "npm run build && wrangler deploy",
     "tail": "wrangler tail"
   },
   "dependencies": {
@@ -15,11 +13,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
-    "esbuild": "^0.27.3",
+    "esbuild": "^0.20.0",
     "typescript": "^5.3.3",
-    "wrangler": "^4.63.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "wrangler": "^3.0.0"
   }
 }

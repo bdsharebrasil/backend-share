@@ -189,9 +189,11 @@ var getPath = (request) => {
     const charCode = url.charCodeAt(i);
     if (charCode === 37) {
       const queryIndex = url.indexOf("?", i);
-      const path = url.slice(start, queryIndex === -1 ? void 0 : queryIndex);
+      const hashIndex = url.indexOf("#", i);
+      const end = queryIndex === -1 ? hashIndex === -1 ? void 0 : hashIndex : hashIndex === -1 ? queryIndex : Math.min(queryIndex, hashIndex);
+      const path = url.slice(start, end);
       return tryDecodeURI(path.includes("%25") ? path.replace(/%25/g, "%2525") : path);
-    } else if (charCode === 63) {
+    } else if (charCode === 63 || charCode === 35) {
       break;
     }
   }
@@ -1418,7 +1420,7 @@ var Hono = class _Hono {
 var emptyParam = [];
 function match(method, path) {
   const matchers = this.buildAllMatchers();
-  const match2 = ((method2, path2) => {
+  const match2 = (method2, path2) => {
     const matcher = matchers[method2] || matchers[METHOD_NAME_ALL];
     const staticMatch = matcher[2][path2];
     if (staticMatch) {
@@ -1430,7 +1432,7 @@ function match(method, path) {
     }
     const index = match3.indexOf("", 1);
     return [matcher[1][index], match3];
-  });
+  };
   this.match = match2;
   return match2(method, path);
 }
@@ -2116,8 +2118,9 @@ var cors = (options) => {
 // node_modules/tslib/tslib.es6.mjs
 function __rest(s, e) {
   var t = {};
-  for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
-    t[p] = s[p];
+  for (var p in s)
+    if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+      t[p] = s[p];
   if (s != null && typeof Object.getOwnPropertySymbols === "function")
     for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
       if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
@@ -2392,8 +2395,10 @@ var PostgrestBuilder = class {
     this.signal = builder.signal;
     this.isMaybeSingle = (_builder$isMaybeSingl = builder.isMaybeSingle) !== null && _builder$isMaybeSingl !== void 0 ? _builder$isMaybeSingl : false;
     this.urlLengthLimit = (_builder$urlLengthLim = builder.urlLengthLimit) !== null && _builder$urlLengthLim !== void 0 ? _builder$urlLengthLim : 8e3;
-    if (builder.fetch) this.fetch = builder.fetch;
-    else this.fetch = fetch;
+    if (builder.fetch)
+      this.fetch = builder.fetch;
+    else
+      this.fetch = fetch;
   }
   /**
   * If there's an error with the query, throwOnError will reject the promise by
@@ -2416,9 +2421,12 @@ var PostgrestBuilder = class {
   then(onfulfilled, onrejected) {
     var _this = this;
     if (this.schema === void 0) {
-    } else if (["GET", "HEAD"].includes(this.method)) this.headers.set("Accept-Profile", this.schema);
-    else this.headers.set("Content-Profile", this.schema);
-    if (this.method !== "GET" && this.method !== "HEAD") this.headers.set("Content-Type", "application/json");
+    } else if (["GET", "HEAD"].includes(this.method))
+      this.headers.set("Accept-Profile", this.schema);
+    else
+      this.headers.set("Content-Profile", this.schema);
+    if (this.method !== "GET" && this.method !== "HEAD")
+      this.headers.set("Content-Type", "application/json");
     const _fetch = this.fetch;
     let res = _fetch(this.url.toString(), {
       method: this.method,
@@ -2437,26 +2445,33 @@ var PostgrestBuilder = class {
           var _this$headers$get;
           const body = await res$1.text();
           if (body === "") {
-          } else if (_this.headers.get("Accept") === "text/csv") data = body;
-          else if (_this.headers.get("Accept") && ((_this$headers$get = _this.headers.get("Accept")) === null || _this$headers$get === void 0 ? void 0 : _this$headers$get.includes("application/vnd.pgrst.plan+text"))) data = body;
-          else data = JSON.parse(body);
+          } else if (_this.headers.get("Accept") === "text/csv")
+            data = body;
+          else if (_this.headers.get("Accept") && ((_this$headers$get = _this.headers.get("Accept")) === null || _this$headers$get === void 0 ? void 0 : _this$headers$get.includes("application/vnd.pgrst.plan+text")))
+            data = body;
+          else
+            data = JSON.parse(body);
         }
         const countHeader = (_this$headers$get2 = _this.headers.get("Prefer")) === null || _this$headers$get2 === void 0 ? void 0 : _this$headers$get2.match(/count=(exact|planned|estimated)/);
         const contentRange = (_res$headers$get = res$1.headers.get("content-range")) === null || _res$headers$get === void 0 ? void 0 : _res$headers$get.split("/");
-        if (countHeader && contentRange && contentRange.length > 1) count = parseInt(contentRange[1]);
-        if (_this.isMaybeSingle && _this.method === "GET" && Array.isArray(data)) if (data.length > 1) {
-          error = {
-            code: "PGRST116",
-            details: `Results contain ${data.length} rows, application/vnd.pgrst.object+json requires 1 row`,
-            hint: null,
-            message: "JSON object requested, multiple (or no) rows returned"
-          };
-          data = null;
-          count = null;
-          status = 406;
-          statusText = "Not Acceptable";
-        } else if (data.length === 1) data = data[0];
-        else data = null;
+        if (countHeader && contentRange && contentRange.length > 1)
+          count = parseInt(contentRange[1]);
+        if (_this.isMaybeSingle && _this.method === "GET" && Array.isArray(data))
+          if (data.length > 1) {
+            error = {
+              code: "PGRST116",
+              details: `Results contain ${data.length} rows, application/vnd.pgrst.object+json requires 1 row`,
+              hint: null,
+              message: "JSON object requested, multiple (or no) rows returned"
+            };
+            data = null;
+            count = null;
+            status = 406;
+            statusText = "Not Acceptable";
+          } else if (data.length === 1)
+            data = data[0];
+          else
+            data = null;
       } else {
         var _error$details;
         const body = await res$1.text();
@@ -2472,14 +2487,16 @@ var PostgrestBuilder = class {
           if (res$1.status === 404 && body === "") {
             status = 204;
             statusText = "No Content";
-          } else error = { message: body };
+          } else
+            error = { message: body };
         }
         if (error && _this.isMaybeSingle && (error === null || error === void 0 || (_error$details = error.details) === null || _error$details === void 0 ? void 0 : _error$details.includes("0 rows"))) {
           error = null;
           status = 200;
           statusText = "OK";
         }
-        if (error && _this.shouldThrowOnError) throw new PostgrestError(error);
+        if (error && _this.shouldThrowOnError)
+          throw new PostgrestError(error);
       }
       return {
         error,
@@ -2489,50 +2506,55 @@ var PostgrestBuilder = class {
         statusText
       };
     });
-    if (!this.shouldThrowOnError) res = res.catch((fetchError) => {
-      var _fetchError$name2;
-      let errorDetails = "";
-      let hint = "";
-      let code = "";
-      const cause = fetchError === null || fetchError === void 0 ? void 0 : fetchError.cause;
-      if (cause) {
-        var _cause$message, _cause$code, _fetchError$name, _cause$name;
-        const causeMessage = (_cause$message = cause === null || cause === void 0 ? void 0 : cause.message) !== null && _cause$message !== void 0 ? _cause$message : "";
-        const causeCode = (_cause$code = cause === null || cause === void 0 ? void 0 : cause.code) !== null && _cause$code !== void 0 ? _cause$code : "";
-        errorDetails = `${(_fetchError$name = fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) !== null && _fetchError$name !== void 0 ? _fetchError$name : "FetchError"}: ${fetchError === null || fetchError === void 0 ? void 0 : fetchError.message}`;
-        errorDetails += `
+    if (!this.shouldThrowOnError)
+      res = res.catch((fetchError) => {
+        var _fetchError$name2;
+        let errorDetails = "";
+        let hint = "";
+        let code = "";
+        const cause = fetchError === null || fetchError === void 0 ? void 0 : fetchError.cause;
+        if (cause) {
+          var _cause$message, _cause$code, _fetchError$name, _cause$name;
+          const causeMessage = (_cause$message = cause === null || cause === void 0 ? void 0 : cause.message) !== null && _cause$message !== void 0 ? _cause$message : "";
+          const causeCode = (_cause$code = cause === null || cause === void 0 ? void 0 : cause.code) !== null && _cause$code !== void 0 ? _cause$code : "";
+          errorDetails = `${(_fetchError$name = fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) !== null && _fetchError$name !== void 0 ? _fetchError$name : "FetchError"}: ${fetchError === null || fetchError === void 0 ? void 0 : fetchError.message}`;
+          errorDetails += `
 
 Caused by: ${(_cause$name = cause === null || cause === void 0 ? void 0 : cause.name) !== null && _cause$name !== void 0 ? _cause$name : "Error"}: ${causeMessage}`;
-        if (causeCode) errorDetails += ` (${causeCode})`;
-        if (cause === null || cause === void 0 ? void 0 : cause.stack) errorDetails += `
+          if (causeCode)
+            errorDetails += ` (${causeCode})`;
+          if (cause === null || cause === void 0 ? void 0 : cause.stack)
+            errorDetails += `
 ${cause.stack}`;
-      } else {
-        var _fetchError$stack;
-        errorDetails = (_fetchError$stack = fetchError === null || fetchError === void 0 ? void 0 : fetchError.stack) !== null && _fetchError$stack !== void 0 ? _fetchError$stack : "";
-      }
-      const urlLength = this.url.toString().length;
-      if ((fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) === "AbortError" || (fetchError === null || fetchError === void 0 ? void 0 : fetchError.code) === "ABORT_ERR") {
-        code = "";
-        hint = "Request was aborted (timeout or manual cancellation)";
-        if (urlLength > this.urlLengthLimit) hint += `. Note: Your request URL is ${urlLength} characters, which may exceed server limits. If selecting many fields, consider using views. If filtering with large arrays (e.g., .in('id', [many IDs])), consider using an RPC function to pass values server-side.`;
-      } else if ((cause === null || cause === void 0 ? void 0 : cause.name) === "HeadersOverflowError" || (cause === null || cause === void 0 ? void 0 : cause.code) === "UND_ERR_HEADERS_OVERFLOW") {
-        code = "";
-        hint = "HTTP headers exceeded server limits (typically 16KB)";
-        if (urlLength > this.urlLengthLimit) hint += `. Your request URL is ${urlLength} characters. If selecting many fields, consider using views. If filtering with large arrays (e.g., .in('id', [200+ IDs])), consider using an RPC function instead.`;
-      }
-      return {
-        error: {
-          message: `${(_fetchError$name2 = fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) !== null && _fetchError$name2 !== void 0 ? _fetchError$name2 : "FetchError"}: ${fetchError === null || fetchError === void 0 ? void 0 : fetchError.message}`,
-          details: errorDetails,
-          hint,
-          code
-        },
-        data: null,
-        count: null,
-        status: 0,
-        statusText: ""
-      };
-    });
+        } else {
+          var _fetchError$stack;
+          errorDetails = (_fetchError$stack = fetchError === null || fetchError === void 0 ? void 0 : fetchError.stack) !== null && _fetchError$stack !== void 0 ? _fetchError$stack : "";
+        }
+        const urlLength = this.url.toString().length;
+        if ((fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) === "AbortError" || (fetchError === null || fetchError === void 0 ? void 0 : fetchError.code) === "ABORT_ERR") {
+          code = "";
+          hint = "Request was aborted (timeout or manual cancellation)";
+          if (urlLength > this.urlLengthLimit)
+            hint += `. Note: Your request URL is ${urlLength} characters, which may exceed server limits. If selecting many fields, consider using views. If filtering with large arrays (e.g., .in('id', [many IDs])), consider using an RPC function to pass values server-side.`;
+        } else if ((cause === null || cause === void 0 ? void 0 : cause.name) === "HeadersOverflowError" || (cause === null || cause === void 0 ? void 0 : cause.code) === "UND_ERR_HEADERS_OVERFLOW") {
+          code = "";
+          hint = "HTTP headers exceeded server limits (typically 16KB)";
+          if (urlLength > this.urlLengthLimit)
+            hint += `. Your request URL is ${urlLength} characters. If selecting many fields, consider using views. If filtering with large arrays (e.g., .in('id', [200+ IDs])), consider using an RPC function instead.`;
+        }
+        return {
+          error: {
+            message: `${(_fetchError$name2 = fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) !== null && _fetchError$name2 !== void 0 ? _fetchError$name2 : "FetchError"}: ${fetchError === null || fetchError === void 0 ? void 0 : fetchError.message}`,
+            details: errorDetails,
+            hint,
+            code
+          },
+          data: null,
+          count: null,
+          status: 0,
+          statusText: ""
+        };
+      });
     return res.then(onfulfilled, onrejected);
   }
   /**
@@ -2583,8 +2605,10 @@ var PostgrestTransformBuilder = class extends PostgrestBuilder {
   select(columns) {
     let quoted = false;
     const cleanedColumns = (columns !== null && columns !== void 0 ? columns : "*").split("").map((c) => {
-      if (/\s/.test(c) && !quoted) return "";
-      if (c === '"') quoted = !quoted;
+      if (/\s/.test(c) && !quoted)
+        return "";
+      if (c === '"')
+        quoted = !quoted;
       return c;
     }).join("");
     this.url.searchParams.set("select", cleanedColumns);
@@ -2678,8 +2702,10 @@ var PostgrestTransformBuilder = class extends PostgrestBuilder {
   * this returns an error.
   */
   maybeSingle() {
-    if (this.method === "GET") this.headers.set("Accept", "application/json");
-    else this.headers.set("Accept", "application/vnd.pgrst.object+json");
+    if (this.method === "GET")
+      this.headers.set("Accept", "application/json");
+    else
+      this.headers.set("Accept", "application/vnd.pgrst.object+json");
     this.isMaybeSingle = true;
     return this;
   }
@@ -2733,8 +2759,10 @@ var PostgrestTransformBuilder = class extends PostgrestBuilder {
     ].filter(Boolean).join("|");
     const forMediatype = (_this$headers$get = this.headers.get("Accept")) !== null && _this$headers$get !== void 0 ? _this$headers$get : "application/json";
     this.headers.set("Accept", `application/vnd.pgrst.plan+${format}; for="${forMediatype}"; options=${options};`);
-    if (format === "json") return this;
-    else return this;
+    if (format === "json")
+      return this;
+    else
+      return this;
   }
   /**
   * Rollback the query.
@@ -2950,8 +2978,10 @@ var PostgrestFilterBuilder = class extends PostgrestTransformBuilder {
   */
   in(column, values) {
     const cleanedValues = Array.from(new Set(values)).map((s) => {
-      if (typeof s === "string" && PostgrestReservedCharsRegexp.test(s)) return `"${s}"`;
-      else return `${s}`;
+      if (typeof s === "string" && PostgrestReservedCharsRegexp.test(s))
+        return `"${s}"`;
+      else
+        return `${s}`;
     }).join(",");
     this.url.searchParams.append(column, `in.(${cleanedValues})`);
     return this;
@@ -2964,8 +2994,10 @@ var PostgrestFilterBuilder = class extends PostgrestTransformBuilder {
   */
   notIn(column, values) {
     const cleanedValues = Array.from(new Set(values)).map((s) => {
-      if (typeof s === "string" && PostgrestReservedCharsRegexp.test(s)) return `"${s}"`;
-      else return `${s}`;
+      if (typeof s === "string" && PostgrestReservedCharsRegexp.test(s))
+        return `"${s}"`;
+      else
+        return `${s}`;
     }).join(",");
     this.url.searchParams.append(column, `not.in.(${cleanedValues})`);
     return this;
@@ -2978,9 +3010,12 @@ var PostgrestFilterBuilder = class extends PostgrestTransformBuilder {
   * @param value - The jsonb, array, or range value to filter with
   */
   contains(column, value) {
-    if (typeof value === "string") this.url.searchParams.append(column, `cs.${value}`);
-    else if (Array.isArray(value)) this.url.searchParams.append(column, `cs.{${value.join(",")}}`);
-    else this.url.searchParams.append(column, `cs.${JSON.stringify(value)}`);
+    if (typeof value === "string")
+      this.url.searchParams.append(column, `cs.${value}`);
+    else if (Array.isArray(value))
+      this.url.searchParams.append(column, `cs.{${value.join(",")}}`);
+    else
+      this.url.searchParams.append(column, `cs.${JSON.stringify(value)}`);
     return this;
   }
   /**
@@ -2991,9 +3026,12 @@ var PostgrestFilterBuilder = class extends PostgrestTransformBuilder {
   * @param value - The jsonb, array, or range value to filter with
   */
   containedBy(column, value) {
-    if (typeof value === "string") this.url.searchParams.append(column, `cd.${value}`);
-    else if (Array.isArray(value)) this.url.searchParams.append(column, `cd.{${value.join(",")}}`);
-    else this.url.searchParams.append(column, `cd.${JSON.stringify(value)}`);
+    if (typeof value === "string")
+      this.url.searchParams.append(column, `cd.${value}`);
+    else if (Array.isArray(value))
+      this.url.searchParams.append(column, `cd.{${value.join(",")}}`);
+    else
+      this.url.searchParams.append(column, `cd.${JSON.stringify(value)}`);
     return this;
   }
   /**
@@ -3062,8 +3100,10 @@ var PostgrestFilterBuilder = class extends PostgrestTransformBuilder {
   * @param value - The array or range value to filter with
   */
   overlaps(column, value) {
-    if (typeof value === "string") this.url.searchParams.append(column, `ov.${value}`);
-    else this.url.searchParams.append(column, `ov.{${value.join(",")}}`);
+    if (typeof value === "string")
+      this.url.searchParams.append(column, `ov.${value}`);
+    else
+      this.url.searchParams.append(column, `ov.{${value.join(",")}}`);
     return this;
   }
   /**
@@ -3078,9 +3118,12 @@ var PostgrestFilterBuilder = class extends PostgrestTransformBuilder {
   */
   textSearch(column, query, { config, type } = {}) {
     let typePart = "";
-    if (type === "plain") typePart = "pl";
-    else if (type === "phrase") typePart = "ph";
-    else if (type === "websearch") typePart = "w";
+    if (type === "plain")
+      typePart = "pl";
+    else if (type === "phrase")
+      typePart = "ph";
+    else if (type === "websearch")
+      typePart = "w";
     const configPart = config === void 0 ? "" : `(${config})`;
     this.url.searchParams.append(column, `${typePart}fts${configPart}.${query}`);
     return this;
@@ -3213,13 +3256,16 @@ var PostgrestQueryBuilder = class {
     const method = head2 ? "HEAD" : "GET";
     let quoted = false;
     const cleanedColumns = (columns !== null && columns !== void 0 ? columns : "*").split("").map((c) => {
-      if (/\s/.test(c) && !quoted) return "";
-      if (c === '"') quoted = !quoted;
+      if (/\s/.test(c) && !quoted)
+        return "";
+      if (c === '"')
+        quoted = !quoted;
       return c;
     }).join("");
     const { url, headers } = this.cloneRequestState();
     url.searchParams.set("select", cleanedColumns);
-    if (count) headers.append("Prefer", `count=${count}`);
+    if (count)
+      headers.append("Prefer", `count=${count}`);
     return new PostgrestFilterBuilder({
       method,
       url,
@@ -3259,8 +3305,10 @@ var PostgrestQueryBuilder = class {
     var _this$fetch;
     const method = "POST";
     const { url, headers } = this.cloneRequestState();
-    if (count) headers.append("Prefer", `count=${count}`);
-    if (!defaultToNull) headers.append("Prefer", `missing=default`);
+    if (count)
+      headers.append("Prefer", `count=${count}`);
+    if (!defaultToNull)
+      headers.append("Prefer", `missing=default`);
     if (Array.isArray(values)) {
       const columns = values.reduce((acc, x) => acc.concat(Object.keys(x)), []);
       if (columns.length > 0) {
@@ -3368,9 +3416,12 @@ var PostgrestQueryBuilder = class {
     const method = "POST";
     const { url, headers } = this.cloneRequestState();
     headers.append("Prefer", `resolution=${ignoreDuplicates ? "ignore" : "merge"}-duplicates`);
-    if (onConflict !== void 0) url.searchParams.set("on_conflict", onConflict);
-    if (count) headers.append("Prefer", `count=${count}`);
-    if (!defaultToNull) headers.append("Prefer", "missing=default");
+    if (onConflict !== void 0)
+      url.searchParams.set("on_conflict", onConflict);
+    if (count)
+      headers.append("Prefer", `count=${count}`);
+    if (!defaultToNull)
+      headers.append("Prefer", "missing=default");
     if (Array.isArray(values)) {
       const columns = values.reduce((acc, x) => acc.concat(Object.keys(x)), []);
       if (columns.length > 0) {
@@ -3413,7 +3464,8 @@ var PostgrestQueryBuilder = class {
     var _this$fetch3;
     const method = "PATCH";
     const { url, headers } = this.cloneRequestState();
-    if (count) headers.append("Prefer", `count=${count}`);
+    if (count)
+      headers.append("Prefer", `count=${count}`);
     return new PostgrestFilterBuilder({
       method,
       url,
@@ -3447,7 +3499,8 @@ var PostgrestQueryBuilder = class {
     var _this$fetch4;
     const method = "DELETE";
     const { url, headers } = this.cloneRequestState();
-    if (count) headers.append("Prefer", `count=${count}`);
+    if (count)
+      headers.append("Prefer", `count=${count}`);
     return new PostgrestFilterBuilder({
       method,
       url,
@@ -3467,11 +3520,13 @@ function _typeof(o) {
   }, _typeof(o);
 }
 function toPrimitive(t, r) {
-  if ("object" != _typeof(t) || !t) return t;
+  if ("object" != _typeof(t) || !t)
+    return t;
   var e = t[Symbol.toPrimitive];
   if (void 0 !== e) {
     var i = e.call(t, r || "default");
-    if ("object" != _typeof(i)) return i;
+    if ("object" != _typeof(i))
+      return i;
     throw new TypeError("@@toPrimitive must return a primitive value.");
   }
   return ("string" === r ? String : Number)(t);
@@ -3537,28 +3592,30 @@ var PostgrestClient = class PostgrestClient2 {
     this.schemaName = schema;
     this.urlLengthLimit = urlLengthLimit;
     const originalFetch = fetch$1 !== null && fetch$1 !== void 0 ? fetch$1 : globalThis.fetch;
-    if (timeout !== void 0 && timeout > 0) this.fetch = (input, init) => {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-      const existingSignal = init === null || init === void 0 ? void 0 : init.signal;
-      if (existingSignal) {
-        if (existingSignal.aborted) {
-          clearTimeout(timeoutId);
-          return originalFetch(input, init);
+    if (timeout !== void 0 && timeout > 0)
+      this.fetch = (input, init) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        const existingSignal = init === null || init === void 0 ? void 0 : init.signal;
+        if (existingSignal) {
+          if (existingSignal.aborted) {
+            clearTimeout(timeoutId);
+            return originalFetch(input, init);
+          }
+          const abortHandler = () => {
+            clearTimeout(timeoutId);
+            controller.abort();
+          };
+          existingSignal.addEventListener("abort", abortHandler, { once: true });
+          return originalFetch(input, _objectSpread2(_objectSpread2({}, init), {}, { signal: controller.signal })).finally(() => {
+            clearTimeout(timeoutId);
+            existingSignal.removeEventListener("abort", abortHandler);
+          });
         }
-        const abortHandler = () => {
-          clearTimeout(timeoutId);
-          controller.abort();
-        };
-        existingSignal.addEventListener("abort", abortHandler, { once: true });
-        return originalFetch(input, _objectSpread2(_objectSpread2({}, init), {}, { signal: controller.signal })).finally(() => {
-          clearTimeout(timeoutId);
-          existingSignal.removeEventListener("abort", abortHandler);
-        });
-      }
-      return originalFetch(input, _objectSpread2(_objectSpread2({}, init), {}, { signal: controller.signal })).finally(() => clearTimeout(timeoutId));
-    };
-    else this.fetch = originalFetch;
+        return originalFetch(input, _objectSpread2(_objectSpread2({}, init), {}, { signal: controller.signal })).finally(() => clearTimeout(timeoutId));
+      };
+    else
+      this.fetch = originalFetch;
   }
   /**
   * Perform a query on a table or a view.
@@ -3566,7 +3623,8 @@ var PostgrestClient = class PostgrestClient2 {
   * @param relation - The table or view name to query
   */
   from(relation) {
-    if (!relation || typeof relation !== "string" || relation.trim() === "") throw new Error("Invalid relation name: relation must be a non-empty string.");
+    if (!relation || typeof relation !== "string" || relation.trim() === "")
+      throw new Error("Invalid relation name: relation must be a non-empty string.");
     return new PostgrestQueryBuilder(new URL(`${this.url}/${relation}`), {
       headers: new Headers(this.headers),
       schema: this.schemaName,
@@ -3641,8 +3699,10 @@ var PostgrestClient = class PostgrestClient2 {
       body = args;
     }
     const headers = new Headers(this.headers);
-    if (_hasObjectArg) headers.set("Prefer", count ? `count=${count},return=minimal` : "return=minimal");
-    else if (count) headers.set("Prefer", `count=${count}`);
+    if (_hasObjectArg)
+      headers.set("Prefer", count ? `count=${count},return=minimal` : "return=minimal");
+    else if (count)
+      headers.set("Prefer", `count=${count}`);
     return new PostgrestFilterBuilder({
       method,
       url,
@@ -4052,24 +4112,17 @@ var convertCell = (type, value) => {
       return toJson(value);
     case PostgresTypes.timestamp:
       return toTimestampString(value);
-    // Format to be consistent with PostgREST
     case PostgresTypes.abstime:
-    // To allow users to cast it based on Timezone
     case PostgresTypes.date:
-    // To allow users to cast it based on Timezone
     case PostgresTypes.daterange:
     case PostgresTypes.int4range:
     case PostgresTypes.int8range:
     case PostgresTypes.money:
     case PostgresTypes.reltime:
-    // To allow users to cast it based on Timezone
     case PostgresTypes.text:
     case PostgresTypes.time:
-    // To allow users to cast it based on Timezone
     case PostgresTypes.timestamptz:
-    // To allow users to cast it based on Timezone
     case PostgresTypes.timetz:
-    // To allow users to cast it based on Timezone
     case PostgresTypes.tsrange:
     case PostgresTypes.tstzrange:
       return noop(value);
@@ -5806,17 +5859,17 @@ Option 2: Install and provide the "ws" package:
       this.logLevel = options.logLevel || options.log_level;
       this.params = Object.assign(Object.assign({}, this.params), { log_level: this.logLevel });
     }
-    this.reconnectAfterMs = (_h = options === null || options === void 0 ? void 0 : options.reconnectAfterMs) !== null && _h !== void 0 ? _h : ((tries) => {
+    this.reconnectAfterMs = (_h = options === null || options === void 0 ? void 0 : options.reconnectAfterMs) !== null && _h !== void 0 ? _h : (tries) => {
       return RECONNECT_INTERVALS[tries - 1] || DEFAULT_RECONNECT_FALLBACK;
-    });
+    };
     switch (this.vsn) {
       case VSN_1_0_0:
-        this.encode = (_j = options === null || options === void 0 ? void 0 : options.encode) !== null && _j !== void 0 ? _j : ((payload, callback) => {
+        this.encode = (_j = options === null || options === void 0 ? void 0 : options.encode) !== null && _j !== void 0 ? _j : (payload, callback) => {
           return callback(JSON.stringify(payload));
-        });
-        this.decode = (_k = options === null || options === void 0 ? void 0 : options.decode) !== null && _k !== void 0 ? _k : ((payload, callback) => {
+        };
+        this.decode = (_k = options === null || options === void 0 ? void 0 : options.decode) !== null && _k !== void 0 ? _k : (payload, callback) => {
           return callback(JSON.parse(payload));
-        });
+        };
         break;
       case VSN_2_0_0:
         this.encode = (_l = options === null || options === void 0 ? void 0 : options.encode) !== null && _l !== void 0 ? _l : this.serializer.encode.bind(this.serializer);
@@ -6405,17 +6458,21 @@ var StorageUnknownError = class extends StorageError {
   }
 };
 var resolveFetch2 = (customFetch) => {
-  if (customFetch) return (...args) => customFetch(...args);
+  if (customFetch)
+    return (...args) => customFetch(...args);
   return (...args) => fetch(...args);
 };
 var isPlainObject = (value) => {
-  if (typeof value !== "object" || value === null) return false;
+  if (typeof value !== "object" || value === null)
+    return false;
   const prototype = Object.getPrototypeOf(value);
   return (prototype === null || prototype === Object.prototype || Object.getPrototypeOf(prototype) === null) && !(Symbol.toStringTag in value) && !(Symbol.iterator in value);
 };
 var recursiveToCamel = (item) => {
-  if (Array.isArray(item)) return item.map((el) => recursiveToCamel(el));
-  else if (typeof item === "function" || item !== Object(item)) return item;
+  if (Array.isArray(item))
+    return item.map((el) => recursiveToCamel(el));
+  else if (typeof item === "function" || item !== Object(item))
+    return item;
   const result = {};
   Object.entries(item).forEach(([key, value]) => {
     const newKey = key.replace(/([-_][a-z])/gi, (c) => c.toUpperCase().replace(/[-_]/g, ""));
@@ -6424,10 +6481,14 @@ var recursiveToCamel = (item) => {
   return result;
 };
 var isValidBucketName = (bucketName) => {
-  if (!bucketName || typeof bucketName !== "string") return false;
-  if (bucketName.length === 0 || bucketName.length > 100) return false;
-  if (bucketName.trim() !== bucketName) return false;
-  if (bucketName.includes("/") || bucketName.includes("\\")) return false;
+  if (!bucketName || typeof bucketName !== "string")
+    return false;
+  if (bucketName.length === 0 || bucketName.length > 100)
+    return false;
+  if (bucketName.trim() !== bucketName)
+    return false;
+  if (bucketName.includes("/") || bucketName.includes("\\"))
+    return false;
   return /^[\w!.\*'() &$@=;:+,?-]+$/.test(bucketName);
 };
 function _typeof2(o) {
@@ -6439,11 +6500,13 @@ function _typeof2(o) {
   }, _typeof2(o);
 }
 function toPrimitive2(t, r) {
-  if ("object" != _typeof2(t) || !t) return t;
+  if ("object" != _typeof2(t) || !t)
+    return t;
   var e = t[Symbol.toPrimitive];
   if (void 0 !== e) {
     var i = e.call(t, r || "default");
-    if ("object" != _typeof2(i)) return i;
+    if ("object" != _typeof2(i))
+      return i;
     throw new TypeError("@@toPrimitive must return a primitive value.");
   }
   return ("string" === r ? String : Number)(t);
@@ -6489,46 +6552,55 @@ var handleError = async (error, reject, options, namespace) => {
   if (error && typeof error === "object" && "status" in error && "ok" in error && typeof error.status === "number" && !(options === null || options === void 0 ? void 0 : options.noResolveJson)) {
     const responseError = error;
     const status = responseError.status || 500;
-    if (typeof responseError.json === "function") responseError.json().then((err) => {
-      const statusCode = (err === null || err === void 0 ? void 0 : err.statusCode) || (err === null || err === void 0 ? void 0 : err.code) || status + "";
-      reject(new StorageApiError(_getErrorMessage(err), status, statusCode, namespace));
-    }).catch(() => {
-      if (namespace === "vectors") {
-        const statusCode = status + "";
-        reject(new StorageApiError(responseError.statusText || `HTTP ${status} error`, status, statusCode, namespace));
-      } else {
-        const statusCode = status + "";
-        reject(new StorageApiError(responseError.statusText || `HTTP ${status} error`, status, statusCode, namespace));
-      }
-    });
+    if (typeof responseError.json === "function")
+      responseError.json().then((err) => {
+        const statusCode = (err === null || err === void 0 ? void 0 : err.statusCode) || (err === null || err === void 0 ? void 0 : err.code) || status + "";
+        reject(new StorageApiError(_getErrorMessage(err), status, statusCode, namespace));
+      }).catch(() => {
+        if (namespace === "vectors") {
+          const statusCode = status + "";
+          reject(new StorageApiError(responseError.statusText || `HTTP ${status} error`, status, statusCode, namespace));
+        } else {
+          const statusCode = status + "";
+          reject(new StorageApiError(responseError.statusText || `HTTP ${status} error`, status, statusCode, namespace));
+        }
+      });
     else {
       const statusCode = status + "";
       reject(new StorageApiError(responseError.statusText || `HTTP ${status} error`, status, statusCode, namespace));
     }
-  } else reject(new StorageUnknownError(_getErrorMessage(error), error, namespace));
+  } else
+    reject(new StorageUnknownError(_getErrorMessage(error), error, namespace));
 };
 var _getRequestParams = (method, options, parameters, body) => {
   const params = {
     method,
     headers: (options === null || options === void 0 ? void 0 : options.headers) || {}
   };
-  if (method === "GET" || method === "HEAD" || !body) return _objectSpread22(_objectSpread22({}, params), parameters);
+  if (method === "GET" || method === "HEAD" || !body)
+    return _objectSpread22(_objectSpread22({}, params), parameters);
   if (isPlainObject(body)) {
     params.headers = _objectSpread22({ "Content-Type": "application/json" }, options === null || options === void 0 ? void 0 : options.headers);
     params.body = JSON.stringify(body);
-  } else params.body = body;
-  if (options === null || options === void 0 ? void 0 : options.duplex) params.duplex = options.duplex;
+  } else
+    params.body = body;
+  if (options === null || options === void 0 ? void 0 : options.duplex)
+    params.duplex = options.duplex;
   return _objectSpread22(_objectSpread22({}, params), parameters);
 };
 async function _handleRequest(fetcher, method, url, options, parameters, body, namespace) {
   return new Promise((resolve, reject) => {
     fetcher(url, _getRequestParams(method, options, parameters, body)).then((result) => {
-      if (!result.ok) throw result;
-      if (options === null || options === void 0 ? void 0 : options.noResolveJson) return result;
+      if (!result.ok)
+        throw result;
+      if (options === null || options === void 0 ? void 0 : options.noResolveJson)
+        return result;
       if (namespace === "vectors") {
         const contentType = result.headers.get("content-type");
-        if (result.headers.get("content-length") === "0" || result.status === 204) return {};
-        if (!contentType || !contentType.includes("application/json")) return {};
+        if (result.headers.get("content-length") === "0" || result.status === 204)
+          return {};
+        if (!contentType || !contentType.includes("application/json"))
+          return {};
       }
       return result.json();
     }).then((data) => resolve(data)).catch((error) => handleError(error, reject, options, namespace));
@@ -6614,11 +6686,13 @@ var BaseApiClient = class {
         error: null
       };
     } catch (error) {
-      if (_this.shouldThrowOnError) throw error;
-      if (isStorageError(error)) return {
-        data: null,
-        error
-      };
+      if (_this.shouldThrowOnError)
+        throw error;
+      if (isStorageError(error))
+        return {
+          data: null,
+          error
+        };
       throw error;
     }
   }
@@ -6639,11 +6713,13 @@ var StreamDownloadBuilder = class {
         error: null
       };
     } catch (error) {
-      if (_this.shouldThrowOnError) throw error;
-      if (isStorageError(error)) return {
-        data: null,
-        error
-      };
+      if (_this.shouldThrowOnError)
+        throw error;
+      if (isStorageError(error))
+        return {
+          data: null,
+          error
+        };
       throw error;
     }
   }
@@ -6670,7 +6746,8 @@ var BlobDownloadBuilder = class {
     return this.getPromise().finally(onfinally);
   }
   getPromise() {
-    if (!this.promise) this.promise = this.execute();
+    if (!this.promise)
+      this.promise = this.execute();
     return this.promise;
   }
   async execute() {
@@ -6681,11 +6758,13 @@ var BlobDownloadBuilder = class {
         error: null
       };
     } catch (error) {
-      if (_this.shouldThrowOnError) throw error;
-      if (isStorageError(error)) return {
-        data: null,
-        error
-      };
+      if (_this.shouldThrowOnError)
+        throw error;
+      if (isStorageError(error))
+        return {
+          data: null,
+          error
+        };
       throw error;
     }
   }
@@ -6725,20 +6804,26 @@ var StorageFileApi = class extends BaseApiClient {
       if (typeof Blob !== "undefined" && fileBody instanceof Blob) {
         body = new FormData();
         body.append("cacheControl", options.cacheControl);
-        if (metadata) body.append("metadata", _this.encodeMetadata(metadata));
+        if (metadata)
+          body.append("metadata", _this.encodeMetadata(metadata));
         body.append("", fileBody);
       } else if (typeof FormData !== "undefined" && fileBody instanceof FormData) {
         body = fileBody;
-        if (!body.has("cacheControl")) body.append("cacheControl", options.cacheControl);
-        if (metadata && !body.has("metadata")) body.append("metadata", _this.encodeMetadata(metadata));
+        if (!body.has("cacheControl"))
+          body.append("cacheControl", options.cacheControl);
+        if (metadata && !body.has("metadata"))
+          body.append("metadata", _this.encodeMetadata(metadata));
       } else {
         body = fileBody;
         headers["cache-control"] = `max-age=${options.cacheControl}`;
         headers["content-type"] = options.contentType;
-        if (metadata) headers["x-metadata"] = _this.toBase64(_this.encodeMetadata(metadata));
-        if ((typeof ReadableStream !== "undefined" && body instanceof ReadableStream || body && typeof body === "object" && "pipe" in body && typeof body.pipe === "function") && !options.duplex) options.duplex = "half";
+        if (metadata)
+          headers["x-metadata"] = _this.toBase64(_this.encodeMetadata(metadata));
+        if ((typeof ReadableStream !== "undefined" && body instanceof ReadableStream || body && typeof body === "object" && "pipe" in body && typeof body.pipe === "function") && !options.duplex)
+          options.duplex = "half";
       }
-      if (fileOptions === null || fileOptions === void 0 ? void 0 : fileOptions.headers) headers = _objectSpread22(_objectSpread22({}, headers), fileOptions.headers);
+      if (fileOptions === null || fileOptions === void 0 ? void 0 : fileOptions.headers)
+        headers = _objectSpread22(_objectSpread22({}, headers), fileOptions.headers);
       const cleanPath = _this._removeEmptyFolders(path);
       const _path = _this._getFinalPath(cleanPath);
       const data = await (method == "PUT" ? put : post)(_this.fetch, `${_this.url}/object/${_path}`, body, _objectSpread22({ headers }, (options === null || options === void 0 ? void 0 : options.duplex) ? { duplex: options.duplex } : {}));
@@ -6890,11 +6975,13 @@ var StorageFileApi = class extends BaseApiClient {
     return _this4.handleOperation(async () => {
       let _path = _this4._getFinalPath(path);
       const headers = _objectSpread22({}, _this4.headers);
-      if (options === null || options === void 0 ? void 0 : options.upsert) headers["x-upsert"] = "true";
+      if (options === null || options === void 0 ? void 0 : options.upsert)
+        headers["x-upsert"] = "true";
       const data = await post(_this4.fetch, `${_this4.url}/object/upload/sign/${_path}`, {}, { headers });
       const url = new URL(_this4.url + data.url);
       const token = url.searchParams.get("token");
-      if (!token) throw new StorageError("No token returned by API");
+      if (!token)
+        throw new StorageError("No token returned by API");
       return {
         signedUrl: url.toString(),
         path,
@@ -7250,13 +7337,15 @@ var StorageFileApi = class extends BaseApiClient {
         error: null
       };
     } catch (error) {
-      if (_this11.shouldThrowOnError) throw error;
+      if (_this11.shouldThrowOnError)
+        throw error;
       if (isStorageError(error) && error instanceof StorageUnknownError) {
         const originalError = error.originalError;
-        if ([400, 404].includes(originalError === null || originalError === void 0 ? void 0 : originalError.status)) return {
-          data: false,
-          error
-        };
+        if ([400, 404].includes(originalError === null || originalError === void 0 ? void 0 : originalError.status))
+          return {
+            data: false,
+            error
+          };
       }
       throw error;
     }
@@ -7315,12 +7404,15 @@ var StorageFileApi = class extends BaseApiClient {
     const _path = this._getFinalPath(path);
     const _queryString = [];
     const downloadQueryParam = (options === null || options === void 0 ? void 0 : options.download) ? `download=${options.download === true ? "" : options.download}` : "";
-    if (downloadQueryParam !== "") _queryString.push(downloadQueryParam);
+    if (downloadQueryParam !== "")
+      _queryString.push(downloadQueryParam);
     const renderPath = typeof (options === null || options === void 0 ? void 0 : options.transform) !== "undefined" ? "render/image" : "object";
     const transformationQuery = this.transformOptsToQueryString((options === null || options === void 0 ? void 0 : options.transform) || {});
-    if (transformationQuery !== "") _queryString.push(transformationQuery);
+    if (transformationQuery !== "")
+      _queryString.push(transformationQuery);
     let queryString = _queryString.join("&");
-    if (queryString !== "") queryString = `?${queryString}`;
+    if (queryString !== "")
+      queryString = `?${queryString}`;
     return { data: { publicUrl: encodeURI(`${this.url}/${renderPath}/public/${_path}${queryString}`) } };
   }
   /**
@@ -7445,7 +7537,8 @@ var StorageFileApi = class extends BaseApiClient {
     return JSON.stringify(metadata);
   }
   toBase64(data) {
-    if (typeof Buffer !== "undefined") return Buffer.from(data).toString("base64");
+    if (typeof Buffer !== "undefined")
+      return Buffer.from(data).toString("base64");
     return btoa(data);
   }
   _getFinalPath(path) {
@@ -7456,11 +7549,16 @@ var StorageFileApi = class extends BaseApiClient {
   }
   transformOptsToQueryString(transform) {
     const params = [];
-    if (transform.width) params.push(`width=${transform.width}`);
-    if (transform.height) params.push(`height=${transform.height}`);
-    if (transform.resize) params.push(`resize=${transform.resize}`);
-    if (transform.format) params.push(`format=${transform.format}`);
-    if (transform.quality) params.push(`quality=${transform.quality}`);
+    if (transform.width)
+      params.push(`width=${transform.width}`);
+    if (transform.height)
+      params.push(`height=${transform.height}`);
+    if (transform.resize)
+      params.push(`resize=${transform.resize}`);
+    if (transform.format)
+      params.push(`format=${transform.format}`);
+    if (transform.quality)
+      params.push(`quality=${transform.quality}`);
     return params.join("&");
   }
 };
@@ -7470,7 +7568,8 @@ var StorageBucketApi = class extends BaseApiClient {
   constructor(url, headers = {}, fetch$1, opts) {
     const baseUrl = new URL(url);
     if (opts === null || opts === void 0 ? void 0 : opts.useNewHostname) {
-      if (/supabase\.(co|in|red)$/.test(baseUrl.hostname) && !baseUrl.hostname.includes("storage.supabase.")) baseUrl.hostname = baseUrl.hostname.replace("supabase.", "storage.supabase.");
+      if (/supabase\.(co|in|red)$/.test(baseUrl.hostname) && !baseUrl.hostname.includes("storage.supabase."))
+        baseUrl.hostname = baseUrl.hostname.replace("supabase.", "storage.supabase.");
     }
     const finalUrl = baseUrl.href.replace(/\/$/, "");
     const finalHeaders = _objectSpread22(_objectSpread22({}, DEFAULT_HEADERS), headers);
@@ -7715,11 +7814,16 @@ var StorageBucketApi = class extends BaseApiClient {
   listBucketOptionsToQueryString(options) {
     const params = {};
     if (options) {
-      if ("limit" in options) params.limit = String(options.limit);
-      if ("offset" in options) params.offset = String(options.offset);
-      if (options.search) params.search = options.search;
-      if (options.sortColumn) params.sortColumn = options.sortColumn;
-      if (options.sortOrder) params.sortOrder = options.sortOrder;
+      if ("limit" in options)
+        params.limit = String(options.limit);
+      if ("offset" in options)
+        params.offset = String(options.offset);
+      if (options.search)
+        params.search = options.search;
+      if (options.sortColumn)
+        params.sortColumn = options.sortColumn;
+      if (options.sortOrder)
+        params.sortOrder = options.sortOrder;
     }
     return Object.keys(params).length > 0 ? "?" + new URLSearchParams(params).toString() : "";
   }
@@ -7837,11 +7941,16 @@ var StorageAnalyticsClient = class extends BaseApiClient {
     var _this2 = this;
     return _this2.handleOperation(async () => {
       const queryParams = new URLSearchParams();
-      if ((options === null || options === void 0 ? void 0 : options.limit) !== void 0) queryParams.set("limit", options.limit.toString());
-      if ((options === null || options === void 0 ? void 0 : options.offset) !== void 0) queryParams.set("offset", options.offset.toString());
-      if (options === null || options === void 0 ? void 0 : options.sortColumn) queryParams.set("sortColumn", options.sortColumn);
-      if (options === null || options === void 0 ? void 0 : options.sortOrder) queryParams.set("sortOrder", options.sortOrder);
-      if (options === null || options === void 0 ? void 0 : options.search) queryParams.set("search", options.search);
+      if ((options === null || options === void 0 ? void 0 : options.limit) !== void 0)
+        queryParams.set("limit", options.limit.toString());
+      if ((options === null || options === void 0 ? void 0 : options.offset) !== void 0)
+        queryParams.set("offset", options.offset.toString());
+      if (options === null || options === void 0 ? void 0 : options.sortColumn)
+        queryParams.set("sortColumn", options.sortColumn);
+      if (options === null || options === void 0 ? void 0 : options.sortOrder)
+        queryParams.set("sortOrder", options.sortOrder);
+      if (options === null || options === void 0 ? void 0 : options.search)
+        queryParams.set("search", options.search);
       const queryString = queryParams.toString();
       const url = queryString ? `${_this2.url}/bucket?${queryString}` : `${_this2.url}/bucket`;
       return await get(_this2.fetch, url, { headers: _this2.headers });
@@ -8009,7 +8118,8 @@ var StorageAnalyticsClient = class extends BaseApiClient {
   */
   from(bucketName) {
     var _this4 = this;
-    if (!isValidBucketName(bucketName)) throw new StorageError("Invalid bucket name: File, folder, and bucket names must follow AWS object key naming guidelines and should avoid the use of any other characters.");
+    if (!isValidBucketName(bucketName))
+      throw new StorageError("Invalid bucket name: File, folder, and bucket names must follow AWS object key naming guidelines and should avoid the use of any other characters.");
     const catalog = new IcebergRestCatalog({
       baseUrl: this.url,
       catalogName: bucketName,
@@ -8022,7 +8132,8 @@ var StorageAnalyticsClient = class extends BaseApiClient {
     const shouldThrowOnError = this.shouldThrowOnError;
     return new Proxy(catalog, { get(target, prop) {
       const value = target[prop];
-      if (typeof value !== "function") return value;
+      if (typeof value !== "function")
+        return value;
       return async (...args) => {
         try {
           return {
@@ -8030,7 +8141,8 @@ var StorageAnalyticsClient = class extends BaseApiClient {
             error: null
           };
         } catch (error) {
-          if (shouldThrowOnError) throw error;
+          if (shouldThrowOnError)
+            throw error;
           return {
             data: null,
             error
@@ -8092,7 +8204,8 @@ var VectorDataApi = class extends BaseApiClient {
   /** Inserts or updates vectors in batch (1-500 per request) */
   async putVectors(options) {
     var _this = this;
-    if (options.vectors.length < 1 || options.vectors.length > 500) throw new Error("Vector batch size must be between 1 and 500 items");
+    if (options.vectors.length < 1 || options.vectors.length > 500)
+      throw new Error("Vector batch size must be between 1 and 500 items");
     return _this.handleOperation(async () => {
       return await vectorsApi.post(_this.fetch, `${_this.url}/PutVectors`, options, { headers: _this.headers }) || {};
     });
@@ -8108,9 +8221,11 @@ var VectorDataApi = class extends BaseApiClient {
   async listVectors(options) {
     var _this3 = this;
     if (options.segmentCount !== void 0) {
-      if (options.segmentCount < 1 || options.segmentCount > 16) throw new Error("segmentCount must be between 1 and 16");
+      if (options.segmentCount < 1 || options.segmentCount > 16)
+        throw new Error("segmentCount must be between 1 and 16");
       if (options.segmentIndex !== void 0) {
-        if (options.segmentIndex < 0 || options.segmentIndex >= options.segmentCount) throw new Error(`segmentIndex must be between 0 and ${options.segmentCount - 1}`);
+        if (options.segmentIndex < 0 || options.segmentIndex >= options.segmentCount)
+          throw new Error(`segmentIndex must be between 0 and ${options.segmentCount - 1}`);
       }
     }
     return _this3.handleOperation(async () => {
@@ -8127,7 +8242,8 @@ var VectorDataApi = class extends BaseApiClient {
   /** Deletes vectors by their keys in batch (1-500 per request) */
   async deleteVectors(options) {
     var _this5 = this;
-    if (options.keys.length < 1 || options.keys.length > 500) throw new Error("Keys batch size must be between 1 and 500 items");
+    if (options.keys.length < 1 || options.keys.length > 500)
+      throw new Error("Keys batch size must be between 1 and 500 items");
     return _this5.handleOperation(async () => {
       return await vectorsApi.post(_this5.fetch, `${_this5.url}/DeleteVectors`, options, { headers: _this5.headers }) || {};
     });
@@ -9010,7 +9126,7 @@ function expiresAt(expiresIn) {
   return timeNow + expiresIn;
 }
 function generateCallbackId() {
-  return /* @__PURE__ */ Symbol("auth-callback");
+  return Symbol("auth-callback");
 }
 var isBrowser = () => typeof window !== "undefined" && typeof document !== "undefined";
 var localStorageWriteTests = {
@@ -13264,10 +13380,14 @@ var AuthClient_default = AuthClient;
 // node_modules/@supabase/supabase-js/dist/index.mjs
 var version4 = "2.95.3";
 var JS_ENV = "";
-if (typeof Deno !== "undefined") JS_ENV = "deno";
-else if (typeof document !== "undefined") JS_ENV = "web";
-else if (typeof navigator !== "undefined" && navigator.product === "ReactNative") JS_ENV = "react-native";
-else JS_ENV = "node";
+if (typeof Deno !== "undefined")
+  JS_ENV = "deno";
+else if (typeof document !== "undefined")
+  JS_ENV = "web";
+else if (typeof navigator !== "undefined" && navigator.product === "ReactNative")
+  JS_ENV = "react-native";
+else
+  JS_ENV = "node";
 var DEFAULT_HEADERS3 = { "X-Client-Info": `supabase-js-${JS_ENV}/${version4}` };
 var DEFAULT_GLOBAL_OPTIONS = { headers: DEFAULT_HEADERS3 };
 var DEFAULT_DB_OPTIONS = { schema: "public" };
@@ -13287,11 +13407,13 @@ function _typeof3(o) {
   }, _typeof3(o);
 }
 function toPrimitive3(t, r) {
-  if ("object" != _typeof3(t) || !t) return t;
+  if ("object" != _typeof3(t) || !t)
+    return t;
   var e = t[Symbol.toPrimitive];
   if (void 0 !== e) {
     var i = e.call(t, r || "default");
-    if ("object" != _typeof3(i)) return i;
+    if ("object" != _typeof3(i))
+      return i;
     throw new TypeError("@@toPrimitive must return a primitive value.");
   }
   return ("string" === r ? String : Number)(t);
@@ -13330,7 +13452,8 @@ function _objectSpread23(e) {
   return e;
 }
 var resolveFetch4 = (customFetch) => {
-  if (customFetch) return (...args) => customFetch(...args);
+  if (customFetch)
+    return (...args) => customFetch(...args);
   return (...args) => fetch(...args);
 };
 var resolveHeadersConstructor = () => {
@@ -13343,8 +13466,10 @@ var fetchWithAuth = (supabaseKey, getAccessToken, customFetch) => {
     var _await$getAccessToken;
     const accessToken = (_await$getAccessToken = await getAccessToken()) !== null && _await$getAccessToken !== void 0 ? _await$getAccessToken : supabaseKey;
     let headers = new HeadersConstructor(init === null || init === void 0 ? void 0 : init.headers);
-    if (!headers.has("apikey")) headers.set("apikey", supabaseKey);
-    if (!headers.has("Authorization")) headers.set("Authorization", `Bearer ${accessToken}`);
+    if (!headers.has("apikey"))
+      headers.set("apikey", supabaseKey);
+    if (!headers.has("Authorization"))
+      headers.set("Authorization", `Bearer ${accessToken}`);
     return fetch$1(input, _objectSpread23(_objectSpread23({}, init), {}, { headers }));
   };
 };
@@ -13363,14 +13488,18 @@ function applySettingDefaults(options, defaults) {
     global: _objectSpread23(_objectSpread23(_objectSpread23({}, DEFAULT_GLOBAL_OPTIONS$1), globalOptions), {}, { headers: _objectSpread23(_objectSpread23({}, (_DEFAULT_GLOBAL_OPTIO = DEFAULT_GLOBAL_OPTIONS$1 === null || DEFAULT_GLOBAL_OPTIONS$1 === void 0 ? void 0 : DEFAULT_GLOBAL_OPTIONS$1.headers) !== null && _DEFAULT_GLOBAL_OPTIO !== void 0 ? _DEFAULT_GLOBAL_OPTIO : {}), (_globalOptions$header = globalOptions === null || globalOptions === void 0 ? void 0 : globalOptions.headers) !== null && _globalOptions$header !== void 0 ? _globalOptions$header : {}) }),
     accessToken: async () => ""
   };
-  if (options.accessToken) result.accessToken = options.accessToken;
-  else delete result.accessToken;
+  if (options.accessToken)
+    result.accessToken = options.accessToken;
+  else
+    delete result.accessToken;
   return result;
 }
 function validateSupabaseUrl(supabaseUrl) {
   const trimmedUrl = supabaseUrl === null || supabaseUrl === void 0 ? void 0 : supabaseUrl.trim();
-  if (!trimmedUrl) throw new Error("supabaseUrl is required.");
-  if (!trimmedUrl.match(/^https?:\/\//i)) throw new Error("Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL.");
+  if (!trimmedUrl)
+    throw new Error("supabaseUrl is required.");
+  if (!trimmedUrl.match(/^https?:\/\//i))
+    throw new Error("Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL.");
   try {
     return new URL(ensureTrailingSlash(trimmedUrl));
   } catch (_unused) {
@@ -13408,7 +13537,8 @@ var SupabaseClient = class {
     this.supabaseUrl = supabaseUrl;
     this.supabaseKey = supabaseKey;
     const baseUrl = validateSupabaseUrl(supabaseUrl);
-    if (!supabaseKey) throw new Error("supabaseKey is required.");
+    if (!supabaseKey)
+      throw new Error("supabaseKey is required.");
     this.realtimeUrl = new URL("realtime/v1", baseUrl);
     this.realtimeUrl.protocol = this.realtimeUrl.protocol.replace("http", "ws");
     this.authUrl = new URL("auth/v1", baseUrl);
@@ -13438,7 +13568,8 @@ var SupabaseClient = class {
       headers: this.headers,
       accessToken: this._getAccessToken.bind(this)
     }, settings.realtime));
-    if (this.accessToken) Promise.resolve(this.accessToken()).then((token) => this.realtime.setAuth(token)).catch((e) => console.warn("Failed to set initial Realtime auth token:", e));
+    if (this.accessToken)
+      Promise.resolve(this.accessToken()).then((token) => this.realtime.setAuth(token)).catch((e) => console.warn("Failed to set initial Realtime auth token:", e));
     this.rest = new PostgrestClient(new URL("rest/v1", baseUrl).href, {
       headers: this.headers,
       schema: settings.db.schema,
@@ -13447,7 +13578,8 @@ var SupabaseClient = class {
       urlLengthLimit: settings.db.urlLengthLimit
     });
     this.storage = new StorageClient(this.storageUrl.href, this.headers, this.fetch, options === null || options === void 0 ? void 0 : options.storage);
-    if (!settings.accessToken) this._listenForAuthEvents();
+    if (!settings.accessToken)
+      this._listenForAuthEvents();
   }
   /**
   * Supabase Functions allows you to deploy and invoke edge functions.
@@ -13540,7 +13672,8 @@ var SupabaseClient = class {
   async _getAccessToken() {
     var _this = this;
     var _data$session$access_, _data$session;
-    if (_this.accessToken) return await _this.accessToken();
+    if (_this.accessToken)
+      return await _this.accessToken();
     const { data } = await _this.auth.getSession();
     return (_data$session$access_ = (_data$session = data.session) === null || _data$session === void 0 ? void 0 : _data$session.access_token) !== null && _data$session$access_ !== void 0 ? _data$session$access_ : _this.supabaseKey;
   }
@@ -13580,7 +13713,8 @@ var SupabaseClient = class {
       this.realtime.setAuth(token);
     } else if (event === "SIGNED_OUT") {
       this.realtime.setAuth();
-      if (source == "STORAGE") this.auth.signOut();
+      if (source == "STORAGE")
+        this.auth.signOut();
       this.changedAccessToken = void 0;
     }
   }
@@ -13589,16 +13723,21 @@ var createClient = (supabaseUrl, supabaseKey, options) => {
   return new SupabaseClient(supabaseUrl, supabaseKey, options);
 };
 function shouldShowDeprecationWarning() {
-  if (typeof window !== "undefined") return false;
+  if (typeof window !== "undefined")
+    return false;
   const _process = globalThis["process"];
-  if (!_process) return false;
+  if (!_process)
+    return false;
   const processVersion = _process["version"];
-  if (processVersion === void 0 || processVersion === null) return false;
+  if (processVersion === void 0 || processVersion === null)
+    return false;
   const versionMatch = processVersion.match(/^v(\d+)\./);
-  if (!versionMatch) return false;
+  if (!versionMatch)
+    return false;
   return parseInt(versionMatch[1], 10) <= 18;
 }
-if (shouldShowDeprecationWarning()) console.warn("\u26A0\uFE0F  Node.js 18 and below are deprecated and will no longer be supported in future versions of @supabase/supabase-js. Please upgrade to Node.js 20 or later. For more information, visit: https://github.com/orgs/supabase/discussions/37217");
+if (shouldShowDeprecationWarning())
+  console.warn("\u26A0\uFE0F  Node.js 18 and below are deprecated and will no longer be supported in future versions of @supabase/supabase-js. Please upgrade to Node.js 20 or later. For more information, visit: https://github.com/orgs/supabase/discussions/37217");
 
 // src/worker.ts
 var app = new Hono2();
@@ -13621,7 +13760,8 @@ var getCached = async (c, key, ttl, fetchFn) => {
   return { ...storage, cached: false };
 };
 function parseCoordinates(coordStr) {
-  if (!coordStr) return null;
+  if (!coordStr)
+    return null;
   const dmsMatch = coordStr.match(/([NS])\s*(\d+)°?\s*(\d+)'?\s*(\d+)"?\s*([EW])\s*(\d+)°?\s*(\d+)'?\s*(\d+)"?/i);
   if (dmsMatch) {
     const lat = (parseInt(dmsMatch[2]) + parseInt(dmsMatch[3]) / 60 + parseInt(dmsMatch[4]) / 3600) * (dmsMatch[1].toUpperCase() === "S" ? -1 : 1);
@@ -13649,13 +13789,17 @@ var weatherParsers = {
     return match2 ? { wdir: parseInt(match2[1]), wspd: parseInt(match2[2]), wgst: match2[3] ? parseInt(match2[3]) : null } : { wdir: null, wspd: null, wgst: null };
   },
   category: (raw2) => {
-    if (raw2.includes("CAVOK")) return "VFR";
+    if (raw2.includes("CAVOK"))
+      return "VFR";
     const ceilingMatch = raw2.match(/(BKN|OVC)(\d{3})/);
     if (ceilingMatch) {
       const h = parseInt(ceilingMatch[2]) * 100;
-      if (h < 500) return "LIFR";
-      if (h < 1e3) return "IFR";
-      if (h < 3e3) return "MVFR";
+      if (h < 500)
+        return "LIFR";
+      if (h < 1e3)
+        return "IFR";
+      if (h < 3e3)
+        return "MVFR";
     }
     return "VFR";
   }
@@ -13687,14 +13831,16 @@ function calculateSolarTimes(lat, lng, date) {
 app.get("/health", (c) => c.json({ status: "ok", timestamp: (/* @__PURE__ */ new Date()).toISOString() }));
 app.get("/api/weather/:icao", async (c) => {
   const icao = c.req.param("icao").toUpperCase();
-  if (!isValidICAO(icao)) return c.json({ error: "ICAO Inv\xE1lido" }, 400);
+  if (!isValidICAO(icao))
+    return c.json({ error: "ICAO Inv\xE1lido" }, 400);
   try {
     const result = await getCached(c, `weather:${icao}`, 300, async () => {
       const url = `https://api.aisweb.aer.mil.br/api/?apiKey=${c.env.AISWEB_API_KEY}&apiPass=${c.env.AISWEB_API_PASS}&area=metar&icao=${icao}`;
       const res = await fetch(url);
       const data = await res.json();
       const raw2 = data?.metar || data?.rawOb;
-      if (!raw2) throw new Error("METAR n\xE3o dispon\xEDvel para este ICAO");
+      if (!raw2)
+        throw new Error("METAR n\xE3o dispon\xEDvel para este ICAO");
       return {
         icao,
         raw: raw2,
@@ -13713,7 +13859,8 @@ app.get("/api/airports/:icao", async (c) => {
   try {
     const result = await getCached(c, `airport:${icao}`, 86400, async () => {
       const { data, error } = await getSupabase(c).from("aerodromes").select("*").eq("designativo", icao).single();
-      if (error || !data) throw new Error("Aer\xF3dromo n\xE3o encontrado no banco");
+      if (error || !data)
+        throw new Error("Aer\xF3dromo n\xE3o encontrado no banco");
       const coords = parseCoordinates(data.coordenadas);
       return { icao: data.designativo, name: data.name, coords };
     });
@@ -13726,12 +13873,14 @@ app.post("/api/flight-calculations", async (c) => {
   const { departureIcao, arrivalIcao, flightDate } = await c.req.json();
   const supabase = getSupabase(c);
   const { data: airps } = await supabase.from("aerodromes").select("*").in("designativo", [departureIcao.toUpperCase(), arrivalIcao.toUpperCase()]);
-  if (!airps || airps.length < 2) return c.json({ error: "Aer\xF3dromos de origem ou destino n\xE3o encontrados" }, 404);
+  if (!airps || airps.length < 2)
+    return c.json({ error: "Aer\xF3dromos de origem ou destino n\xE3o encontrados" }, 404);
   const dep = airps.find((a) => a.designativo === departureIcao.toUpperCase());
   const arr = airps.find((a) => a.designativo === arrivalIcao.toUpperCase());
   const cDep = parseCoordinates(dep.coordenadas);
   const cArr = parseCoordinates(arr.coordenadas);
-  if (!cDep || !cArr) return c.json({ error: "Falha ao processar coordenadas dos aer\xF3dromos" }, 400);
+  if (!cDep || !cArr)
+    return c.json({ error: "Falha ao processar coordenadas dos aer\xF3dromos" }, 400);
   const dist = calculateDistance(cDep.lat, cDep.lng, cArr.lat, cArr.lng);
   const solar = calculateSolarTimes((cDep.lat + cArr.lat) / 2, (cDep.lng + cArr.lng) / 2, new Date(flightDate));
   return c.json({
