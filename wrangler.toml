@@ -1,24 +1,25 @@
 name = "api-workers"
-main = "src/worker.ts" 
+main = "dist/worker.js"
 compatibility_date = "2024-01-01"
-
-
-
-
 
 # ============= KV NAMESPACE =============
 [[kv_namespaces]]
 binding = "CACHE_KV"
 id = "83a861dc2e27486e86eb23909fbb9861"
 
-
-
-# ============= BUILD =============
-[build]
-command = "npm run build"
-
-
+# ============= VARIÁVEIS DE AMBIENTE (Secrets - configure via CLI ou Dashboard) =============
+# Use: wrangler secret put AISWEB_API_KEY
+# Use: wrangler secret put AISWEB_API_PASS
+# Use: wrangler secret put VITE_SUPABASE_URL
+# Use: wrangler secret put VITE_SUPABASE_ANON_KEY
 
 # ============= OBSERVABILITY =============
 [observability]
 enabled = true
+
+# ============= BUILD CONFIG =============
+[build]
+command = "npm run build"
+
+# ============= COMPATIBILIDADE NODE =============
+node_compat = true
