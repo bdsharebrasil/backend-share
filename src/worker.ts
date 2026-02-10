@@ -2,7 +2,6 @@ import { Hono, Context } from 'hono';
 import { cors } from 'hono/cors';
 import { createClient } from '@supabase/supabase-js';
 
-// ============= DEFINIÇÃO DE TIPOS (Baseado no seu print) =============
 type Bindings = {
   AISWEB_API_KEY: string;
   AISWEB_API_PASS: string;
