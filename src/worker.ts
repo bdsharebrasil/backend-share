@@ -206,4 +206,7 @@ app.get('/api/flights/active', async (c) => {
   return c.json({ data, cached: false });
 });
 
-export default app;
+// ============= EXPORT PARA CLOUDFLARE WORKERS =============
+export default {
+  fetch: app.fetch,
+};
