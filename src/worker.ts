@@ -18,21 +18,21 @@ const parser = new XMLParser({
 
 app.use('*', cors());
 
-// ✅ URL CORRETA conforme documentação oficial v00.00.02
+// URL oficial AISWEB v00.00.02
 const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/';
 
 const AREA_NODE_MAP: Record<string, string> = {
-  met:          'met',
-  cartas:       'cartas',
-  notam:        'notam',
-  infotemp:     'infotemp',
-  sol:          'sol',
-  routesp:      'routesp',
-  waypoints:    'waypoints',
-  rotaer:       'rotaer',
-  pub:          'pub',
-  suplementos:  'suplementos',
-  geiloc:       'geiloc',
+  met:         'met',
+  cartas:      'cartas',
+  notam:       'notam',
+  infotemp:    'infotemp',
+  sol:         'sol',
+  routesp:     'routesp',
+  waypoints:   'waypoints',
+  rotaer:      'rotaer',
+  pub:         'pub',
+  suplementos: 'suplementos',
+  geiloc:      'geiloc',
 };
 
 const fetchAisweb = async (
@@ -40,14 +40,14 @@ const fetchAisweb = async (
   area: string,
   additionalParams: Record<string, string | undefined>
 ) => {
-  const apiKey  = c.env.AISWEB_API_KEY;
-  const apiPass = c.env.AISWEB_API_PASS;
+  // .trim() garante que newlines ou espaços acidentais nas credenciais não quebrem a chamada
+  const apiKey  = c.env.AISWEB_API_KEY?.trim();
+  const apiPass = c.env.AISWEB_API_PASS?.trim();
 
   if (!apiKey || !apiPass) {
-    throw new Error(`Credenciais ausentes. apiKey=${!!apiKey} apiPass=${!!apiPass}`);
+    throw new Error(`Credenciais AISWEB ausentes`);
   }
 
-  // Monta query string sem encodeURIComponent nas chaves (API espera valores literais)
   const parts: string[] = [
     `apiKey=${apiKey}`,
     `apiPass=${apiPass}`,
@@ -59,10 +59,7 @@ const fetchAisweb = async (
 
   const url = `${AISWEB_BASE_URL}?${parts.join('&')}`;
 
-  const safeUrl = `${AISWEB_BASE_URL}?apiKey=***&apiPass=***&area=${area}&${
-    Object.entries(additionalParams).filter(([,v])=>v).map(([k,v])=>`${k}=${v}`).join('&')
-  }`;
-  console.log(`[AISWEB] GET ${safeUrl}`);
+  console.log(`[AISWEB] area=${area} params=${JSON.stringify(additionalParams)}`);
 
   const res = await fetch(url, {
     redirect: 'follow',
@@ -73,13 +70,10 @@ const fetchAisweb = async (
   });
 
   const text = await res.text();
-  console.log(`[AISWEB] Status: ${res.status} | Preview: ${text.substring(0, 300)}`);
 
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  if (!text || text.trim() === '') throw new Error('Resposta vazia');
-  if (text.includes('Erro nos parametros')) {
-    throw new Error(`Parâmetros rejeitados: ${text.replace(/<[^>]+>/g, '').trim()}`);
-  }
+  if (!res.ok)                            throw new Error(`HTTP ${res.status}`);
+  if (!text || text.trim() === '')        throw new Error('Resposta vazia');
+  if (text.includes('Erro nos parametros')) throw new Error('Parâmetros rejeitados pela AISWEB');
 
   try { return JSON.parse(text); } catch { /* segue XML */ }
 
@@ -98,7 +92,9 @@ app.get('/', (c) => c.text('ShareBrasil API - Central DECEA Ativa 🚀'));
 // 1. Meteorologia (METAR/TAF)
 app.get('/api/weather/:icao', async (c) => {
   try {
-    const data = await fetchAisweb(c, 'met', { icaoCode: c.req.param('icao').toUpperCase() });
+    const data = await fetchAisweb(c, 'met', {
+      icaoCode: c.req.param('icao').toUpperCase(),
+    });
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
@@ -119,15 +115,19 @@ app.get('/api/charts/:icao', async (c) => {
 // 3. NOTAM
 app.get('/api/notam/:icao', async (c) => {
   try {
-    const data = await fetchAisweb(c, 'notam', { icaoCode: c.req.param('icao').toUpperCase() });
+    const data = await fetchAisweb(c, 'notam', {
+      icaoCode: c.req.param('icao').toUpperCase(),
+    });
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 4. InfoTemp / ROTAER
+// 4. InfoTemp
 app.get('/api/infotemp/:icao', async (c) => {
   try {
-    const data = await fetchAisweb(c, 'infotemp', { icaoCode: c.req.param('icao').toUpperCase() });
+    const data = await fetchAisweb(c, 'infotemp', {
+      icaoCode: c.req.param('icao').toUpperCase(),
+    });
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
@@ -135,7 +135,9 @@ app.get('/api/infotemp/:icao', async (c) => {
 // 5. ROTAER (aeródromos)
 app.get('/api/rotaer/:icao', async (c) => {
   try {
-    const data = await fetchAisweb(c, 'rotaer', { icaoCode: c.req.param('icao').toUpperCase() });
+    const data = await fetchAisweb(c, 'rotaer', {
+      icaoCode: c.req.param('icao').toUpperCase(),
+    });
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
@@ -176,7 +178,7 @@ app.get('/api/waypoints', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 9. GEILOC (aeródromos, TMAs e FIRs simplificados)
+// 9. GEILOC
 app.get('/api/geiloc', async (c) => {
   try {
     const data = await fetchAisweb(c, 'geiloc', {
@@ -196,55 +198,4 @@ app.get('/api/pub', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// ─── DIAGNÓSTICO (remova após confirmar funcionamento) ───────────────────────
-// Mostra exatamente qual URL está sendo construída (com credenciais — só debug!)
-app.get('/debug/rawurl', (c) => {
-  const apiKey  = c.env.AISWEB_API_KEY;
-  const apiPass = c.env.AISWEB_API_PASS;
-  const url = `${AISWEB_BASE_URL}?apiKey=${apiKey}&apiPass=${apiPass}&area=met&icaoCode=SBGR`;
-  return c.json({
-    url_exata: url,
-    apiKey_bytes:  [...(apiKey  ?? '')].map(ch => ({ char: ch, code: ch.charCodeAt(0) })),
-    apiPass_bytes: [...(apiPass ?? '')].map(ch => ({ char: ch, code: ch.charCodeAt(0) })),
-  });
-});
-
-app.get('/debug/probe', async (c) => {
-  const apiKey  = c.env.AISWEB_API_KEY;
-  const apiPass = c.env.AISWEB_API_PASS;
-  if (!apiKey || !apiPass) return c.json({ error: 'Credenciais ausentes' }, 500);
-
-  const url = `${AISWEB_BASE_URL}?apiKey=${apiKey}&apiPass=${apiPass}&area=met&icaoCode=SBGR`;
-
-  try {
-    const res  = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
-    const text = await res.text();
-    return c.json({
-      dominio_usado:  AISWEB_BASE_URL,
-      status:         res.status,
-      ok:             res.ok,
-      tamanho:        text.length,
-      resposta_completa: text,   // XML completo para diagnóstico
-      erro_api:       text.includes('Erro nos parametros'),
-      tem_metar:      text.toLowerCase().includes('metar'),
-    });
-  } catch (err: any) {
-    return c.json({ erro: err.message });
-  }
-});
-
-app.get('/debug/env', (c) => {
-  const key  = c.env.AISWEB_API_KEY;
-  const pass = c.env.AISWEB_API_PASS;
-  return c.json({
-    apiKey_ok:      !!key  && key.trim()  !== '',
-    apiPass_ok:     !!pass && pass.trim() !== '',
-    apiKey_length:  key?.length  ?? 0,
-    apiPass_length: pass?.length ?? 0,
-    apiKey_prefix:  key  ? key.substring(0, 4)  + '***' : 'AUSENTE',
-    apiPass_prefix: pass ? pass.substring(0, 4) + '***' : 'AUSENTE',
-  });
-});
-
 export default { fetch: app.fetch };
-// TEMPORÁRIO — remova após debug
