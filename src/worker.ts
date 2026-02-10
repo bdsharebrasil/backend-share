@@ -5,8 +5,8 @@ import { createClient } from '@supabase/supabase-js';
 
 // Types
 type Bindings = {
-  SUPABASE_URL: string;
-  SUPABASE_ANON_KEY: string;
+  VITE_SUPABASE_URL: string;
+  VITE_SUPABASE_ANON_KEY: string;
   CACHE_KV: KVNamespace;
 };
 
