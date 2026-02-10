@@ -1,10 +1,10 @@
 {
   "name": "api-workers",
   "version": "1.0.0",
+  "main": "src/worker.ts",
   "scripts": {
     "dev": "wrangler dev",
-    "build": "esbuild src/worker.ts --bundle --outfile=dist/worker.js --format=esm",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "wrangler deploy",
     "tail": "wrangler tail"
   },
   "dependencies": {
@@ -13,7 +13,6 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
-    "esbuild": "^0.20.0",
     "typescript": "^5.3.3",
     "wrangler": "^3.0.0"
   }
