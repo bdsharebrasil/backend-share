@@ -4,11 +4,11 @@
   "main": "src/worker.ts",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
+    "fast-xml-parser": "^5.3.5",
     "hono": "^4.0.0",
     "node": "^25.6.0"
   },

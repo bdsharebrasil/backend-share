@@ -1,5 +1,6 @@
 import { Hono, Context } from 'hono';
 import { cors } from 'hono/cors';
+import { XMLParser } from 'fast-xml-parser'; 
 
 type Bindings = {
   AISWEB_API_KEY: string;
@@ -8,14 +9,12 @@ type Bindings = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
 app.use('*', cors());
 
-// ============= HELPER DE COMUNICAÇÃO =============
 const fetchAisweb = async (c: Context<{ Bindings: Bindings }>, area: string, additionalParams: Record<string, string | undefined>) => {
-  // Mudamos para o domínio principal da documentação que você passou
   const baseUrl = `https://aisweb.decea.mil.br/api/`;
-  
   const params = new URLSearchParams({
     apiKey: c.env.AISWEB_API_KEY,
     apiPass: c.env.AISWEB_API_PASS,
@@ -26,32 +25,25 @@ const fetchAisweb = async (c: Context<{ Bindings: Bindings }>, area: string, add
     if (value) params.append(key, value);
   });
 
-  const finalUrl = `${baseUrl}?${params.toString()}`;
-
-  const res = await fetch(finalUrl, {
-    method: 'GET',
-    headers: {
-      // O "pulo do gato": fingir que é um navegador para evitar o erro 530
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'application/json, text/plain, */*',
-    },
+  const res = await fetch(`${baseUrl}?${params.toString()}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 ShareBrasil' }
   });
-  
-  // Se o erro 530 persistir, a AISWEB pode estar offline ou bloqueando o IP do Cloudflare
-  if (!res.ok) {
-    const errorBody = await res.text().catch(() => "Sem detalhes");
-    throw new Error(`AISWEB Indisponível (Status ${res.status}). Detalhes: ${errorBody.substring(0, 100)}`);
-  }
+
+  if (!res.ok) throw new Error(`Erro AISWEB: ${res.status}`);
 
   const text = await res.text();
-  
+
+  // Tenta JSON primeiro, se falhar, vai para XML
   try {
     return JSON.parse(text);
-  } catch (e) {
-    // Se não for JSON, pode ser que ela tenha retornado XML (padrão deles)
-    throw new Error(`A AISWEB retornou XML em vez de JSON. Verifique se o parâmetro display=json é suportado nesta área.`);
+  } catch {
+    const jsonObj = parser.parse(text);
+    // A AISWEB costuma colocar tudo dentro de uma tag raiz <aisweb> ou <met>
+    return jsonObj.aisweb || jsonObj;
   }
 };
+
+
 
 // ============= ROTAS =============
 
