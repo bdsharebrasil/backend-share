@@ -2,7 +2,7 @@ import { Hono, Context } from 'hono';
 import { cors } from 'hono/cors';
 import { createClient } from '@supabase/supabase-js';
 
-// ============= DEFINIÇÃO DE TIPOS =============
+// ============= DEFINIÇÃO DE TIPOS (Baseado no seu print) =============
 type Bindings = {
   AISWEB_API_KEY: string;
   AISWEB_API_PASS: string;
@@ -48,12 +48,14 @@ const getCached = async <T>(
 
 function parseCoordinates(coordStr: string | null): { lat: number; lng: number } | null {
   if (!coordStr) return null;
+  // Tenta formato DMS: S23°32'20" W46°28'10"
   const dmsMatch = coordStr.match(/([NS])\s*(\d+)°?\s*(\d+)'?\s*(\d+)"?\s*([EW])\s*(\d+)°?\s*(\d+)'?\s*(\d+)"?/i);
   if (dmsMatch) {
     const lat = (parseInt(dmsMatch[2]) + parseInt(dmsMatch[3]) / 60 + parseInt(dmsMatch[4]) / 3600) * (dmsMatch[1].toUpperCase() === 'S' ? -1 : 1);
     const lng = (parseInt(dmsMatch[6]) + parseInt(dmsMatch[7]) / 60 + parseInt(dmsMatch[8]) / 3600) * (dmsMatch[5].toUpperCase() === 'W' ? -1 : 1);
     return { lat, lng };
   }
+  // Tenta formato decimal: -23.5389, -46.4697
   const decimalMatch = coordStr.match(/([-\d.]+)[,\s]+([-\d.]+)/);
   if (decimalMatch) {
     const lat = parseFloat(decimalMatch[1]);
@@ -91,7 +93,7 @@ const weatherParsers = {
 // ============= CÁLCULOS NÁUTICOS E SOLARES =============
 
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 3440.065; // NM
+  const R = 3440.065; // Raio da Terra em Milhas Náuticas
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
@@ -100,23 +102,31 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
 }
 
 function calculateSolarTimes(lat: number, lng: number, date: Date) {
-  // Simplificado para o fuso do Brasil (UTC-3)
-  const sunriseMinutes = 360 - (lng * 4); // Aproximação básica
-  const sunsetMinutes = 1080 - (lng * 4);
-  const format = (min: number) => `${String(Math.floor((min/60)%24)).padStart(2,'0')}:${String(Math.floor(min%60)).padStart(2,'0')}`;
+  // Cálculo simplificado baseado na longitude para UTC-3 (Brasil)
+  // 1 grau = 4 minutos de diferença
+  const baseSunrise = 360; // 06:00 AM base
+  const baseSunset = 1080; // 06:00 PM base
+  const longitudeCorrection = (lng + 45) * 4; // Ajuste baseado no meridiano central de Brasília (45W)
+  
+  const format = (min: number) => {
+    const h = Math.floor((min / 60) % 24);
+    const m = Math.floor(min % 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+
   return {
-    sunrise: { time: format(sunriseMinutes), minutes: sunriseMinutes },
-    sunset: { time: format(sunsetMinutes), minutes: sunsetMinutes },
-    dawn: { time: format(sunriseMinutes - 30), minutes: sunriseMinutes - 30 },
-    dusk: { time: format(sunsetMinutes + 30), minutes: sunsetMinutes + 30 }
+    sunrise: format(baseSunrise - longitudeCorrection),
+    sunset: format(baseSunset - longitudeCorrection),
+    dawn: format(baseSunrise - longitudeCorrection - 30),
+    dusk: format(baseSunset - longitudeCorrection + 30)
   };
 }
 
-// ============= ROTAS =============
+// ============= ROTAS DA API =============
 
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// METAR AISWEB
+// 1. Meteorologia (METAR)
 app.get('/api/weather/:icao', async (c) => {
   const icao = c.req.param('icao').toUpperCase();
   if (!isValidICAO(icao)) return c.json({ error: 'ICAO Inválido' }, 400);
@@ -127,45 +137,62 @@ app.get('/api/weather/:icao', async (c) => {
       const res = await fetch(url);
       const data: any = await res.json();
       const raw = data?.metar || data?.rawOb;
-      if (!raw) throw new Error('Dados não encontrados');
-      return { icao, raw, ...weatherParsers.temperature(raw), ...weatherParsers.wind(raw), category: weatherParsers.category(raw) };
+      if (!raw) throw new Error('METAR não disponível para este ICAO');
+      return { 
+        icao, 
+        raw, 
+        ...weatherParsers.temperature(raw), 
+        ...weatherParsers.wind(raw), 
+        category: weatherParsers.category(raw) 
+      };
     });
     return c.json(result);
   } catch (err: any) { return c.json({ error: err.message }, 500); }
 });
 
-// AERÓDROMOS
+// 2. Aeródromos (Supabase + Coordenadas)
 app.get('/api/airports/:icao', async (c) => {
   const icao = c.req.param('icao').toUpperCase();
-  const result = await getCached(c, `airport:${icao}`, 86400, async () => {
-    const { data, error } = await getSupabase(c).from('aerodromes').select('*').eq('designativo', icao).single();
-    if (error || !data) throw new Error('Aeródromo não encontrado');
-    const coords = parseCoordinates(data.coordenadas);
-    return { icao: data.designativo, name: data.name, ...coords };
-  });
-  return c.json(result);
+  try {
+    const result = await getCached(c, `airport:${icao}`, 86400, async () => {
+      const { data, error } = await getSupabase(c).from('aerodromes').select('*').eq('designativo', icao).single();
+      if (error || !data) throw new Error('Aeródromo não encontrado no banco');
+      const coords = parseCoordinates(data.coordenadas);
+      return { icao: data.designativo, name: data.name, coords };
+    });
+    return c.json(result);
+  } catch (err: any) { return c.json({ error: err.message }, 500); }
 });
 
-// CÁLCULO DE VOO COMPLETO
+// 3. Cálculos de Voo (Distância e Noite)
 app.post('/api/flight-calculations', async (c) => {
-  const { departureIcao, arrivalIcao, flightDate, landingTime, departureTime } = await c.req.json();
+  const { departureIcao, arrivalIcao, flightDate } = await c.req.json();
   const supabase = getSupabase(c);
 
   const { data: airps } = await supabase.from('aerodromes').select('*').in('designativo', [departureIcao.toUpperCase(), arrivalIcao.toUpperCase()]);
-  if (!airps || airps.length < 2) return c.json({ error: 'Aeródromos não encontrados' }, 404);
+  if (!airps || airps.length < 2) return c.json({ error: 'Aeródromos de origem ou destino não encontrados' }, 404);
 
   const dep = airps.find(a => a.designativo === departureIcao.toUpperCase());
   const arr = airps.find(a => a.designativo === arrivalIcao.toUpperCase());
-  const cDep = parseCoordinates(dep.coordenadas)!;
-  const cArr = parseCoordinates(arr.coordenadas)!;
+  
+  const cDep = parseCoordinates(dep.coordenadas);
+  const cArr = parseCoordinates(arr.coordenadas);
+
+  if (!cDep || !cArr) return c.json({ error: 'Falha ao processar coordenadas dos aeródromos' }, 400);
 
   const dist = calculateDistance(cDep.lat, cDep.lng, cArr.lat, cArr.lng);
   const solar = calculateSolarTimes((cDep.lat + cArr.lat)/2, (cDep.lng + cArr.lng)/2, new Date(flightDate));
 
-  return c.json({ data: { distance: dist, solarTimes: solar, flight: { departureIcao, arrivalIcao, date: flightDate } } });
+  return c.json({ 
+    data: { 
+      distance: dist, 
+      solarTimes: solar,
+      airports: { departure: dep.name, arrival: arr.name }
+    } 
+  });
 });
 
-// USUÁRIOS
+// 4. Usuários e Voos Ativos
 app.get('/api/users', async (c) => {
   const res = await getCached(c, 'users:all', 600, async () => {
     const { data } = await getSupabase(c).from('users').select('*');
@@ -174,7 +201,6 @@ app.get('/api/users', async (c) => {
   return c.json(res);
 });
 
-// VOOS ATIVOS
 app.get('/api/flights/active', async (c) => {
   const { data, error } = await getSupabase(c).from('flight_schedules').select('*, aircraft:aircraft_id(registration)').eq('status', 'em_voo');
   return c.json({ data, cached: false });
