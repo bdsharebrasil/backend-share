@@ -33,10 +33,17 @@ const getCached = async <T>(
   ttl: number,
   fetchFn: () => Promise<T>
 ): Promise<{ data: T; cached: boolean; timestamp: string }> => {
+  // Verifica se o KV está configurado
+  if (!c.env.CACHE_KV) {
+    const data = await fetchFn();
+    return { data, timestamp: new Date().toISOString(), cached: false };
+  }
+
   const cached = await c.env.CACHE_KV.get(key, 'json');
   if (cached) {
     return { ...(cached as any), cached: true };
   }
+
   const data = await fetchFn();
   const storage = { data, timestamp: new Date().toISOString() };
   await c.env.CACHE_KV.put(key, JSON.stringify(storage), { expirationTtl: ttl });
@@ -122,6 +129,8 @@ function calculateSolarTimes(lat: number, lng: number, date: Date) {
 }
 
 // ============= ROTAS DA API =============
+// ROTA RAIZ (Para evitar o 404 ao abrir o link)
+app.get('/', (c) => c.text('API Workers Online! 🚀 Use /health para verificar o status.'));
 
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
