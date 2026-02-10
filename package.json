@@ -9,11 +9,12 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
-    "hono": "^4.0.0"
+    "hono": "^4.0.0",
+    "node": "^25.6.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
     "typescript": "^5.3.3",
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.63.0"
   }
 }
