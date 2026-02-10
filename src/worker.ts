@@ -18,68 +18,22 @@ const parser = new XMLParser({
 
 app.use('*', cors());
 
-// Domínios a tentar em ordem — o primeiro que responder com dados válidos vence
-const AISWEB_CANDIDATES = [
-  'https://aisweb.decea.gov.br/api/',       // HTTPS novo (mais provável)
-  'http://aisweb.decea.gov.br/api/',         // HTTP documentado
-  'https://www.aisweb.aer.mil.br/api/',      // HTTPS legado
-  'http://www.aisweb.aer.mil.br/api/',       // HTTP legado (curl da doc)
-];
+// ✅ URL CORRETA conforme documentação oficial v00.00.02
+const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/';
 
 const AREA_NODE_MAP: Record<string, string> = {
-  met:       'met',
-  cartas:    'cartas',
-  notam:     'notam',
-  infotemp:  'infotemp',
-  sol:       'sol',
-  routesp:   'routesp',
-  waypoints: 'waypoints',
-  rotaer:    'rotaer',
+  met:          'met',
+  cartas:       'cartas',
+  notam:        'notam',
+  infotemp:     'infotemp',
+  sol:          'sol',
+  routesp:      'routesp',
+  waypoints:    'waypoints',
+  rotaer:       'rotaer',
+  pub:          'pub',
+  suplementos:  'suplementos',
+  geiloc:       'geiloc',
 };
-
-// Monta query string manualmente — URLSearchParams converte undefined→"undefined"
-const buildUrl = (
-  base: string,
-  apiKey: string,
-  apiPass: string,
-  area: string,
-  extra: Record<string, string | undefined>
-) => {
-  const parts: string[] = [
-    `apiKey=${encodeURIComponent(apiKey)}`,
-    `apiPass=${encodeURIComponent(apiPass)}`,
-    `area=${encodeURIComponent(area)}`,
-  ];
-  Object.entries(extra).forEach(([k, v]) => {
-    if (v !== undefined && v !== '') parts.push(`${k}=${encodeURIComponent(v)}`);
-  });
-  return `${base}?${parts.join('&')}`;
-};
-
-// Faz uma única chamada HTTP com timeout e follow redirect
-const tryFetch = async (url: string): Promise<{ ok: boolean; status: number; text: string }> => {
-  try {
-    const res = await fetch(url, {
-      redirect: 'follow',           // segue redirects 301/302
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept':     'text/xml, application/xml, */*',
-      },
-    });
-    const text = await res.text();
-    return { ok: res.ok, status: res.status, text };
-  } catch (err: any) {
-    return { ok: false, status: 0, text: err.message };
-  }
-};
-
-// Resposta é válida se não contém erro e tem algum conteúdo XML
-const isValidResponse = (text: string) =>
-  text.length > 10 &&
-  !text.includes('Erro nos parametros') &&
-  !text.includes('404') &&
-  (text.includes('<') || text.includes('{'));
 
 const fetchAisweb = async (
   c: Context<{ Bindings: Bindings }>,
@@ -93,81 +47,53 @@ const fetchAisweb = async (
     throw new Error(`Credenciais ausentes. apiKey=${!!apiKey} apiPass=${!!apiPass}`);
   }
 
-  let lastError = '';
+  // Monta query string sem encodeURIComponent nas chaves (API espera valores literais)
+  const parts: string[] = [
+    `apiKey=${apiKey}`,
+    `apiPass=${apiPass}`,
+    `area=${area}`,
+  ];
+  Object.entries(additionalParams).forEach(([k, v]) => {
+    if (v !== undefined && v !== '') parts.push(`${k}=${v}`);
+  });
 
-  // Tenta cada domínio até um responder com dados válidos
-  for (const base of AISWEB_CANDIDATES) {
-    const url  = buildUrl(base, apiKey, apiPass, area, additionalParams);
-    const safe = `${base}?apiKey=***&apiPass=***&area=${area}`;
+  const url = `${AISWEB_BASE_URL}?${parts.join('&')}`;
 
-    console.log(`[AISWEB] Tentando: ${safe}`);
+  const safeUrl = `${AISWEB_BASE_URL}?apiKey=***&apiPass=***&area=${area}&${
+    Object.entries(additionalParams).filter(([,v])=>v).map(([k,v])=>`${k}=${v}`).join('&')
+  }`;
+  console.log(`[AISWEB] GET ${safeUrl}`);
 
-    const { ok, status, text } = await tryFetch(url);
+  const res = await fetch(url, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'Accept':     'text/xml, application/xml, */*',
+    },
+  });
 
-    console.log(`[AISWEB] Status ${status}, tamanho ${text.length}, preview: ${text.substring(0, 120)}`);
+  const text = await res.text();
+  console.log(`[AISWEB] Status: ${res.status} | Preview: ${text.substring(0, 300)}`);
 
-    if (!ok || !isValidResponse(text)) {
-      lastError = `${base} → HTTP ${status}: ${text.substring(0, 80)}`;
-      continue; // tenta o próximo
-    }
-
-    // Sucesso — faz o parse
-    try { return JSON.parse(text); } catch { /* segue XML */ }
-
-    const parsed = parser.parse(text);
-    if (!parsed || typeof parsed !== 'object') throw new Error('Falha ao parsear XML');
-
-    const aisweb  = parsed['aisweb'] ?? parsed;
-    const nodeKey = AREA_NODE_MAP[area];
-    return (nodeKey && aisweb[nodeKey] !== undefined) ? aisweb[nodeKey] : aisweb;
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  if (!text || text.trim() === '') throw new Error('Resposta vazia');
+  if (text.includes('Erro nos parametros')) {
+    throw new Error(`Parâmetros rejeitados: ${text.replace(/<[^>]+>/g, '').trim()}`);
   }
 
-  throw new Error(`Todos os domínios falharam. Último erro: ${lastError}`);
+  try { return JSON.parse(text); } catch { /* segue XML */ }
+
+  const parsed = parser.parse(text);
+  if (!parsed || typeof parsed !== 'object') throw new Error('Falha ao parsear XML');
+
+  const aisweb  = parsed['aisweb'] ?? parsed;
+  const nodeKey = AREA_NODE_MAP[area];
+  return (nodeKey && aisweb[nodeKey] !== undefined) ? aisweb[nodeKey] : aisweb;
 };
 
 // ============= ROTAS =============
 
 app.get('/', (c) => c.text('ShareBrasil API - Central DECEA Ativa 🚀'));
-
-// DIAGNÓSTICO: testa todos os domínios e retorna resultado detalhado
-app.get('/debug/probe', async (c) => {
-  const apiKey  = c.env.AISWEB_API_KEY;
-  const apiPass = c.env.AISWEB_API_PASS;
-
-  if (!apiKey || !apiPass) return c.json({ error: 'Credenciais ausentes' }, 500);
-
-  const results: Record<string, any> = {};
-
-  for (const base of AISWEB_CANDIDATES) {
-    const url = buildUrl(base, apiKey, apiPass, 'met', { icaoCode: 'SBGR' });
-    const { ok, status, text } = await tryFetch(url);
-    results[base] = {
-      status,
-      ok,
-      tamanho:    text.length,
-      preview:    text.substring(0, 200).replace(/\s+/g, ' ').trim(),
-      erro_api:   text.includes('Erro nos parametros'),
-      tem_dados:  isValidResponse(text),
-      tem_metar:  text.toLowerCase().includes('metar'),
-    };
-  }
-
-  return c.json(results);
-});
-
-// DIAGNÓSTICO: env vars
-app.get('/debug/env', (c) => {
-  const key  = c.env.AISWEB_API_KEY;
-  const pass = c.env.AISWEB_API_PASS;
-  return c.json({
-    apiKey_ok:      !!key  && key.trim()  !== '',
-    apiPass_ok:     !!pass && pass.trim() !== '',
-    apiKey_length:  key?.length  ?? 0,
-    apiPass_length: pass?.length ?? 0,
-    apiKey_prefix:  key  ? key.substring(0, 4)  + '***' : 'AUSENTE',
-    apiPass_prefix: pass ? pass.substring(0, 4) + '***' : 'AUSENTE',
-  });
-});
 
 // 1. Meteorologia (METAR/TAF)
 app.get('/api/weather/:icao', async (c) => {
@@ -198,7 +124,7 @@ app.get('/api/notam/:icao', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 4. InfoTemp
+// 4. InfoTemp / ROTAER
 app.get('/api/infotemp/:icao', async (c) => {
   try {
     const data = await fetchAisweb(c, 'infotemp', { icaoCode: c.req.param('icao').toUpperCase() });
@@ -206,7 +132,15 @@ app.get('/api/infotemp/:icao', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 5. Nascer/Pôr do Sol
+// 5. ROTAER (aeródromos)
+app.get('/api/rotaer/:icao', async (c) => {
+  try {
+    const data = await fetchAisweb(c, 'rotaer', { icaoCode: c.req.param('icao').toUpperCase() });
+    return c.json(data);
+  } catch (err: any) { return c.json({ error: err.message }, 502); }
+});
+
+// 6. Nascer/Pôr do Sol
 app.get('/api/solar/:icao', async (c) => {
   try {
     const dt_i = c.req.query('date');
@@ -220,7 +154,7 @@ app.get('/api/solar/:icao', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 6. Rotas Preferenciais
+// 7. Rotas Preferenciais
 app.get('/api/routes', async (c) => {
   try {
     const adep = c.req.query('adep');
@@ -234,7 +168,7 @@ app.get('/api/routes', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 7. Waypoints
+// 8. Waypoints
 app.get('/api/waypoints', async (c) => {
   try {
     const data = await fetchAisweb(c, 'waypoints', {});
@@ -242,12 +176,62 @@ app.get('/api/waypoints', async (c) => {
   } catch (err: any) { return c.json({ error: err.message }, 502); }
 });
 
-// 8. ROTAER
-app.get('/api/rotaer/:icao', async (c) => {
+// 9. GEILOC (aeródromos, TMAs e FIRs simplificados)
+app.get('/api/geiloc', async (c) => {
   try {
-    const data = await fetchAisweb(c, 'rotaer', { icaoCode: c.req.param('icao').toUpperCase() });
+    const data = await fetchAisweb(c, 'geiloc', {
+      icaoCode: c.req.query('icao')?.toUpperCase(),
+    });
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
+});
+
+// 10. Publicações AIP
+app.get('/api/pub', async (c) => {
+  try {
+    const data = await fetchAisweb(c, 'pub', {
+      tipo: c.req.query('tipo'),
+    });
+    return c.json(data);
+  } catch (err: any) { return c.json({ error: err.message }, 502); }
+});
+
+// ─── DIAGNÓSTICO (remova após confirmar funcionamento) ───────────────────────
+app.get('/debug/probe', async (c) => {
+  const apiKey  = c.env.AISWEB_API_KEY;
+  const apiPass = c.env.AISWEB_API_PASS;
+  if (!apiKey || !apiPass) return c.json({ error: 'Credenciais ausentes' }, 500);
+
+  const url = `${AISWEB_BASE_URL}?apiKey=${apiKey}&apiPass=${apiPass}&area=met&icaoCode=SBGR`;
+
+  try {
+    const res  = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
+    const text = await res.text();
+    return c.json({
+      dominio_usado: AISWEB_BASE_URL,
+      status:        res.status,
+      ok:            res.ok,
+      tamanho:       text.length,
+      preview:       text.substring(0, 400).replace(/\s+/g, ' ').trim(),
+      erro_api:      text.includes('Erro nos parametros'),
+      tem_metar:     text.toLowerCase().includes('metar'),
+    });
+  } catch (err: any) {
+    return c.json({ erro: err.message });
+  }
+});
+
+app.get('/debug/env', (c) => {
+  const key  = c.env.AISWEB_API_KEY;
+  const pass = c.env.AISWEB_API_PASS;
+  return c.json({
+    apiKey_ok:      !!key  && key.trim()  !== '',
+    apiPass_ok:     !!pass && pass.trim() !== '',
+    apiKey_length:  key?.length  ?? 0,
+    apiPass_length: pass?.length ?? 0,
+    apiKey_prefix:  key  ? key.substring(0, 4)  + '***' : 'AUSENTE',
+    apiPass_prefix: pass ? pass.substring(0, 4) + '***' : 'AUSENTE',
+  });
 });
 
 export default { fetch: app.fetch };
