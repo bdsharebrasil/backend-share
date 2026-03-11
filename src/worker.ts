@@ -241,27 +241,33 @@ app.get('/api/nearest',async(c)=>{
 
 })
 
-app.get('/api/flightplan',async(c)=>{
+app.get('/api/flightplan', async (c) => {
 
   const adep = c.req.query('adep')?.toUpperCase()
   const ades = c.req.query('ades')?.toUpperCase()
 
   const speed = parseInt(c.req.query('speed') ?? '120')
-
   const burn = parseFloat(c.req.query('fuel_burn') ?? '32')
   const reserveMin = parseInt(c.req.query('reserve') ?? '45')
 
-  if(!adep || !ades){
-    return c.json({error:"adep e ades obrigatórios"},400)
+  if (!adep || !ades) {
+    return c.json({ error: 'adep e ades obrigatórios' }, 400)
   }
 
-  try{
+  try {
 
+    // origem
     const dep = await fetchAisweb(c,'rotaer',{icaoCode:adep})
+
+    // destino
     const des = await fetchAisweb(c,'rotaer',{icaoCode:ades})
 
     const depItem = dep?.item?.[0]
     const desItem = des?.item?.[0]
+
+    if(!depItem || !desItem){
+      return c.json({error:"Aeródromo não encontrado"},404)
+    }
 
     const lat1 = parseCoord(depItem.latitude ?? depItem.lat)
     const lon1 = parseCoord(depItem.longitude ?? depItem.lon)
@@ -270,25 +276,92 @@ app.get('/api/flightplan',async(c)=>{
     const lon2 = parseCoord(desItem.longitude ?? desItem.lon)
 
     if(lat1==null||lon1==null||lat2==null||lon2==null){
-      return c.json({error:"coordenadas inválidas"},500)
+      return c.json({error:"Coordenadas inválidas"},500)
     }
 
+    // distância
     const distanceKm = haversineKm(lat1,lon1,lat2,lon2)
-
     const distanceNm = distanceKm * 0.539957
 
+    // tempo
     const flightHours = distanceNm / speed
-
     const reserveHours = reserveMin / 60
 
+    const hours = Math.floor(flightHours)
+    const minutes = Math.round((flightHours-hours)*60)
+
+    // combustível
     const tripFuel = flightHours * burn
     const reserveFuel = reserveHours * burn
     const taxiFuel = burn * 0.1
 
-    const totalFuel =
-      tripFuel + reserveFuel + taxiFuel
+    const totalFuel = tripFuel + reserveFuel + taxiFuel
 
-    const route = `${adep} DCT ${ades}`
+    // rota preferencial
+    let routePref=null
+
+    try{
+      routePref = await fetchAisweb(c,'routesp',{adep,ades})
+    }catch{}
+
+    const route =
+      routePref?.item?.[0]?.rota ??
+      `${adep} DCT ${ades}`
+
+    // alternados automáticos
+    const rawAirports = await fetchAisweb(c,'rotaer',{})
+
+    const airports = normalizeAirportList(
+      rawAirports,
+      lat2,
+      lon2
+    )
+
+    const alternates = airports
+      .filter(a => a.icao !== ades)
+      .filter(a => a.distKm < 150)
+      .slice(0,3)
+
+    // NOTAM origem
+    const notamDep = await fetchAisweb(c,'notam',{icaoCode:adep})
+
+    // NOTAM destino
+    const notamDes = await fetchAisweb(c,'notam',{icaoCode:ades})
+
+    const depItems = Array.isArray(notamDep?.item)
+      ? notamDep.item
+      : [notamDep?.item]
+
+    const desItems = Array.isArray(notamDes?.item)
+      ? notamDes.item
+      : [notamDes?.item]
+
+    const notamAlerts = [...depItems,...desItems]
+      .map(n => n?.texto ?? n?.notam)
+      .filter(Boolean)
+      .slice(0,5)
+
+    // IA briefing
+    const ai = await c.env.AI.run(
+      '@cf/meta/llama-3-8b-instruct',
+      {
+        messages:[
+          {
+            role:"system",
+            content:"Você é um despachante de voo."
+          },
+          {
+            role:"user",
+            content:`
+Plano de voo
+Origem ${adep}
+Destino ${ades}
+Distância ${Math.round(distanceNm)} NM
+`
+          }
+        ]
+      }
+    )
 
     return c.json({
 
@@ -297,6 +370,7 @@ app.get('/api/flightplan',async(c)=>{
         ades,
         route,
         distance_nm:Math.round(distanceNm),
+        estimated_time:`${hours}h${minutes}m`,
         cruise_speed:speed
       },
 
@@ -306,15 +380,23 @@ app.get('/api/flightplan',async(c)=>{
         reserve_liters:Math.round(reserveFuel),
         taxi_liters:Math.round(taxiFuel),
         total_required:Math.round(totalFuel)
-      }
+      },
+
+      alternates:alternates.map(a=>({
+        icao:a.icao,
+        name:a.name,
+        distance_km:a.distKm
+      })),
+
+      notam_alerts:notamAlerts,
+
+      briefing:ai.response
 
     })
 
-  }catch(err:any){
+  } catch(err:any){
 
-    return c.json({
-      error:err.message
-    },500)
+    return c.json({error:err.message},500)
 
   }
 
