@@ -100,8 +100,8 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 /**
  * Tenta extrair lat/lon de um item de aeródromo retornado pela AisWeb.
  * A AisWeb devolve coordenadas em vários formatos:
- *   - Decimal: "-23.4356" / "-46.4731"
- *   - GMS compacto: "234100S" / "0464400W"  (DDMMSS + hemisfério)
+ * - Decimal: "-23.4356" / "-46.4731"
+ * - GMS compacto: "234100S" / "0464400W"  (DDMMSS + hemisfério)
  */
 function parseCoord(raw: string | number | undefined): number | null {
   if (raw === undefined || raw === null) return null;
@@ -189,7 +189,7 @@ function normalizeAirportList(data: any, userLat: number, userLon: number): Airp
 
 app.get('/', (c) => c.text('ShareBrasil API - Central DECEA Ativa 🚀'));
 
-// 1. Meteorologia (METAR/TAF)
+// 1. Meteorologia (METAR/TAF) - Resposta Raw da AisWeb
 app.get('/api/weather/:icao', async (c) => {
   try {
     const data = await fetchAisweb(c, 'met', {
@@ -197,6 +197,50 @@ app.get('/api/weather/:icao', async (c) => {
     });
     return c.json(data);
   } catch (err: any) { return c.json({ error: err.message }, 502); }
+});
+
+// 1b. Meteorologia com Tradução IA (Llama 3)
+app.get('/api/weather-human/:icao', async (c) => {
+  try {
+    const icao = c.req.param('icao').toUpperCase();
+    
+    // Busca os dados originais usando sua função
+    const data = await fetchAisweb(c, 'met', {
+      icaoCode: icao,
+    });
+    
+    // Tenta extrair a string do METAR (lida com o fato de 'item' poder ser array ou objeto)
+    const items = Array.isArray(data?.item) ? data.item : [data?.item];
+    const metarString = items[0]?.metar ?? null;
+
+    if (!metarString) {
+      return c.json({ error: 'Nenhum METAR encontrado para este ICAO na AisWeb' }, 404);
+    }
+
+    // Chama a IA do Cloudflare
+    const iaResponse = await c.env.AI.run('@cf/meta/llama-3-8b-instruct', {
+      messages: [
+        { 
+          role: 'system', 
+          content: 'Você é um copiloto especialista em aviação. Traduza a string do METAR para português claro, resumido e em linguagem natural para um piloto. Seja direto, não use jargões complexos e não invente dados.' 
+        },
+        { 
+          role: 'user', 
+          content: `Traduza este METAR: ${metarString}` 
+        }
+      ]
+    });
+
+    // Retorna o pacote completo para o frontend
+    return c.json({
+      icao: icao,
+      metar_raw: metarString,
+      traducao_ia: iaResponse.response
+    });
+
+  } catch (err: any) { 
+    return c.json({ error: err.message }, 502); 
+  }
 });
 
 // 2. Cartas
