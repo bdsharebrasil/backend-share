@@ -188,7 +188,19 @@ function normalizeAirportList(data: any, userLat: number, userLon: number): Airp
 // ============= ROTAS =============
 
 app.get('/', (c) => c.text('ShareBrasil API - Central DECEA Ativa 🚀'));
+if (url.pathname === "/ai-test") {
 
+  const result = await env.AI.run(
+    "@cf/meta/llama-3-8b-instruct",
+    {
+      messages: [
+        { role: "user", content: "Explique o que é um METAR em 1 frase." }
+      ]
+    }
+  )
+
+  return Response.json(result)
+}
 // 1. Meteorologia (METAR/TAF) - Resposta Raw da AisWeb
 app.get('/api/weather/:icao', async (c) => {
   try {
