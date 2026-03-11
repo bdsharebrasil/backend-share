@@ -6,6 +6,7 @@ type Bindings = {
   AISWEB_API_KEY: string;
   AISWEB_API_PASS: string;
   CACHE_KV: KVNamespace;
+  AI: any;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
