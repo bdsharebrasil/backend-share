@@ -205,21 +205,101 @@ app.get('/',(c)=>
   c.text("ShareBrasil API 🚀")
 )
 
+// ==================== WEATHER (METAR) ====================
 app.get('/api/weather/:icao',async(c)=>{
 
   const icao = c.req.param('icao').toUpperCase()
 
-  const data = await cachedFetch(
-    c,
-    `metar-${icao}`,
-    30,
-    ()=>fetchAisweb(c,'met',{icaoCode:icao})
-  )
+  try {
+    const data = await cachedFetch(
+      c,
+      `metar-${icao}`,
+      300, // 5 minutos
+      ()=>fetchAisweb(c,'met',{icaoCode:icao})
+    )
 
-  return c.json(data)
+    return c.json(data)
+  } catch(err:any) {
+    return c.json({error:err.message},500)
+  }
 
 })
 
+// ==================== NOTAM ====================
+app.get('/api/notam/:icao',async(c)=>{
+
+  const icao = c.req.param('icao').toUpperCase()
+
+  try {
+    const data = await cachedFetch(
+      c,
+      `notam-${icao}`,
+      600, // 10 minutos
+      ()=>fetchAisweb(c,'notam',{icaoCode:icao})
+    )
+
+    return c.json(data)
+  } catch(err:any) {
+    return c.json({error:err.message},500)
+  }
+
+})
+
+// ==================== CARTAS (CHARTS) ====================
+app.get('/api/charts/:icao',async(c)=>{
+
+  const icao = c.req.param('icao').toUpperCase()
+  const especie = c.req.query('especie') // Ex: "APP", "STR", "IAC"
+  const tipo = c.req.query('tipo') // Ex: "PDF", "PNG"
+
+  try {
+    const params: Record<string,string|undefined> = {icaoCode:icao}
+    if(especie) params.especie = especie
+    if(tipo) params.tipo = tipo
+
+    const data = await cachedFetch(
+      c,
+      `charts-${icao}-${especie||''}-${tipo||''}`,
+      3600, // 1 hora (cartas mudam menos frequentemente)
+      ()=>fetchAisweb(c,'cartas',params)
+    )
+
+    return c.json(data)
+  } catch(err:any) {
+    return c.json({error:err.message},500)
+  }
+
+})
+
+// ==================== ROTAER (ROUTES) ====================
+app.get('/api/rotaer',async(c)=>{
+  const adep = c.req.query('adep')?.toUpperCase()
+  const ades = c.req.query('ades')?.toUpperCase()
+
+  try {
+    const params: Record<string,string|undefined> = {}
+    if(adep) params.adep = adep
+    if(ades) params.ades = ades
+
+    const cacheKey = adep && ades
+      ? `rotaer-${adep}-${ades}`
+      : 'rotaer-all'
+
+    const data = await cachedFetch(
+      c,
+      cacheKey,
+      1800, // 30 minutos
+      ()=>fetchAisweb(c,'rotaer',params)
+    )
+
+    return c.json(data)
+  } catch(err:any) {
+    return c.json({error:err.message},500)
+  }
+
+})
+
+// ==================== NEAREST AIRPORT ====================
 app.get('/api/nearest',async(c)=>{
 
   const lat = parseFloat(c.req.query('lat')||'')
@@ -229,18 +309,60 @@ app.get('/api/nearest',async(c)=>{
     return c.json({error:"lat/lon inválidos"},400)
   }
 
-  const raw = await fetchAisweb(c,'rotaer',{})
+  try {
+    const raw = await cachedFetch(
+      c,
+      'rotaer-all',
+      1800,
+      ()=>fetchAisweb(c,'rotaer',{})
+    )
 
-  const airports = normalizeAirportList(raw,lat,lon)
+    const airports = normalizeAirportList(raw,lat,lon)
 
-  airports.sort((a,b)=>a.distKm-b.distKm)
+    airports.sort((a,b)=>a.distKm-b.distKm)
 
-  return c.json({
-    nearest:airports[0]
-  })
+    return c.json({
+      nearest:airports[0],
+      alternates: airports.slice(0,5)
+    })
+  } catch(err:any) {
+    return c.json({error:err.message},500)
+  }
 
 })
 
+// ==================== GEILOC NEARBY ====================
+app.get('/api/geiloc/nearby',async(c)=>{
+
+  const lat = parseFloat(c.req.query('lat')||'')
+  const lon = parseFloat(c.req.query('lon')||'')
+
+  if(isNaN(lat)||isNaN(lon)){
+    return c.json({error:"lat/lon inválidos"},400)
+  }
+
+  try {
+    const raw = await cachedFetch(
+      c,
+      `geiloc-${Math.round(lat*10)}-${Math.round(lon*10)}`, // Arredondar para cache melhor
+      1800,
+      ()=>fetchAisweb(c,'rotaer',{})
+    )
+
+    const airports = normalizeAirportList(raw,lat,lon)
+
+    airports.sort((a,b)=>a.distKm-b.distKm)
+
+    return c.json({
+      alternates: airports.filter(a=>a.distKm<200).slice(0,10)
+    })
+  } catch(err:any) {
+    return c.json({error:err.message},500)
+  }
+
+})
+
+// ==================== FLIGHT PLAN ====================
 app.get('/api/flightplan', async (c) => {
 
   const adep = c.req.query('adep')?.toUpperCase()
@@ -309,7 +431,12 @@ app.get('/api/flightplan', async (c) => {
       `${adep} DCT ${ades}`
 
     // alternados automáticos
-    const rawAirports = await fetchAisweb(c,'rotaer',{})
+    const rawAirports = await cachedFetch(
+      c,
+      `geiloc-${Math.round(lat2*10)}-${Math.round(lon2*10)}`,
+      1800,
+      ()=>fetchAisweb(c,'rotaer',{})
+    )
 
     const airports = normalizeAirportList(
       rawAirports,
@@ -341,27 +468,34 @@ app.get('/api/flightplan', async (c) => {
       .filter(Boolean)
       .slice(0,5)
 
-    // IA briefing
-    const ai = await c.env.AI.run(
-      '@cf/meta/llama-3-8b-instruct',
-      {
-        messages:[
-          {
-            role:"system",
-            content:"Você é um despachante de voo."
-          },
-          {
-            role:"user",
-            content:`
+    // IA briefing (opcional, comentado se AI não está disponível)
+    let briefing = "Briefing indisponível"
+    try {
+      const ai = await c.env.AI.run(
+        '@cf/meta/llama-3-8b-instruct',
+        {
+          messages:[
+            {
+              role:"system",
+              content:"Você é um despachante de voo."
+            },
+            {
+              role:"user",
+              content:`
 Plano de voo
 Origem ${adep}
 Destino ${ades}
 Distância ${Math.round(distanceNm)} NM
+Tempo estimado: ${hours}h${minutes}m
 `
-          }
-        ]
-      }
-    )
+            }
+          ]
+        }
+      )
+      briefing = ai.response
+    } catch(aiErr) {
+      console.warn("AI briefing indisponível:", aiErr)
+    }
 
     return c.json({
 
@@ -390,7 +524,7 @@ Distância ${Math.round(distanceNm)} NM
 
       notam_alerts:notamAlerts,
 
-      briefing:ai.response
+      briefing
 
     })
 
