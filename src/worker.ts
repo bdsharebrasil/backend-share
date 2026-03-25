@@ -116,7 +116,7 @@ async function cachedFetch(
     if (!locked) {
       c.executionCtx.waitUntil(
         (async () => {
-          await kv.put(lockKey, '1', { expirationTtl: 15 })
+          await kv.put(lockKey, '1', { expirationTtl: 60 })
           try {
             const data = await fetcher()
             await save(data)
@@ -145,7 +145,7 @@ async function cachedFetch(
   }
 
   // Faz a busca na AISWEB com proteção de Lock
-  await kv.put(lockKey, '1', { expirationTtl: 15 })
+  await kv.put(lockKey, '1', { expirationTtl: 60 })
   try {
     const data = await fetcher()
     await save(data)
