@@ -8,7 +8,6 @@ type Bindings = {
   AISWEB_API_KEY: string
   AISWEB_API_PASS: string
   CACHE_KV: KVNamespace
-  AI: any
 }
 
 // ─── App & Logger ─────────────────────────────────────────────────────────────
@@ -16,7 +15,7 @@ type Bindings = {
 const app = new Hono<{ Bindings: Bindings }>()
 app.use('*', cors())
 
-const isDev = false // Mantenha false em produção para não poluir os logs
+const isDev = false
 const log = {
   debug: (...a: any[]) => isDev && console.log('[DEBUG]', ...a),
   warn:  (...a: any[]) => console.warn('[WARN]',  ...a),
@@ -47,20 +46,16 @@ const AREA_NODE_MAP: Record<string, string> = {
   geiloc:      'geiloc',
 }
 
-// ─── Fetch com Timeout + Edge Cache (Segurança) ──────────────────────────────
+// ─── Fetch com Timeout + Edge Cache ──────────────────────────────────────────
 
 async function fetchWithTimeout(url: string, timeout = 10_000): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeout)
-
   try {
     return await fetch(url, {
       signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        Accept: 'text/xml,application/xml,*/*',
-      },
-      // @ts-ignore — Cloudflare Workers specific edge cache
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/xml,application/xml,*/*' },
+      // @ts-ignore — Cloudflare Workers specific
       cf: { cacheTtl: 300, cacheEverything: true },
     })
   } catch (err: any) {
@@ -71,7 +66,7 @@ async function fetchWithTimeout(url: string, timeout = 10_000): Promise<Response
   }
 }
 
-// ─── Cache SWR + Lock (Velocidade Suprema) ───────────────────────────────────
+// ─── Cache SWR + Lock ─────────────────────────────────────────────────────────
 
 async function cachedFetch(
   c: Context<{ Bindings: Bindings }>,
@@ -79,27 +74,24 @@ async function cachedFetch(
   ttlSeconds: number,
   fetcher: () => Promise<any>
 ): Promise<any> {
-  const kv = c.env.CACHE_KV
+  const kv  = c.env.CACHE_KV
   const raw = await kv.get(key, { type: 'json' }) as any
   const now = Date.now()
 
-  const isNewFormat = raw !== null && typeof raw === 'object' && 'fetchedAt' in raw && 'data' in raw
-  const fetchedAt   = isNewFormat ? (raw.fetchedAt as number) : 0
-  const cachedData  = isNewFormat ? raw.data : raw
-  const ageSeconds  = (now - fetchedAt) / 1000
-
+  const isNewFormat   = raw !== null && typeof raw === 'object' && 'fetchedAt' in raw && 'data' in raw
+  const fetchedAt     = isNewFormat ? (raw.fetchedAt as number) : 0
+  const cachedData    = isNewFormat ? raw.data : raw
+  const ageSeconds    = (now - fetchedAt) / 1000
   const hasCachedData = cachedData !== null && cachedData !== undefined
   const isFresh       = hasCachedData && ageSeconds < ttlSeconds
   const isStale       = hasCachedData && ageSeconds >= ttlSeconds
 
   const save = async (data: any) => {
     const payload = JSON.stringify({ data, fetchedAt: Date.now() })
-    // TTL no KV é 4x maior para garantir que o dado stale exista para a próxima requisição
     await kv.put(key, payload, { expirationTtl: ttlSeconds * 4 })
     return data
   }
 
-  // 1. Cache Fresco: Retorna imediatamente
   if (isFresh) {
     log.debug(`[kv] FRESH key="${key}" age=${Math.round(ageSeconds)}s`)
     return cachedData
@@ -107,19 +99,15 @@ async function cachedFetch(
 
   const lockKey = `${key}:lock`
 
-  // 2. Cache Antigo (Stale): Retorna o antigo agora e atualiza em background
   if (isStale) {
-    log.debug(`[kv] STALE key="${key}" age=${Math.round(ageSeconds)}s — background refresh`)
-    
-    // Evita múltiplos refreshes em background simultâneos
+    log.debug(`[kv] STALE key="${key}" — background refresh`)
     const locked = await kv.get(lockKey)
     if (!locked) {
       c.executionCtx.waitUntil(
         (async () => {
           await kv.put(lockKey, '1', { expirationTtl: 60 })
           try {
-            const data = await fetcher()
-            await save(data)
+            await save(await fetcher())
             log.debug(`[kv] Refresh OK key="${key}"`)
           } catch (err: any) {
             log.error(`[kv] Refresh FAIL key="${key}":`, err.message)
@@ -132,19 +120,15 @@ async function cachedFetch(
     return cachedData
   }
 
-  // 3. Sem Cache (Cold Start): Pega o lock para evitar thundering herd
   log.debug(`[kv] MISS key="${key}" — buscando na DECEA`)
   const locked = await kv.get(lockKey)
-
   if (locked) {
-    // Se outro worker já está buscando, aguarda um pouco e tenta ler o cache de novo
     await new Promise(r => setTimeout(r, 800))
     const retry = await kv.get(key, { type: 'json' }) as any
-    if (retry && retry.data) return retry.data
-    if (retry) return retry
+    if (retry?.data) return retry.data
+    if (retry)       return retry
   }
 
-  // Faz a busca na AISWEB com proteção de Lock
   await kv.put(lockKey, '1', { expirationTtl: 60 })
   try {
     const data = await fetcher()
@@ -163,18 +147,13 @@ async function fetchAisweb(
   params: Record<string, string | undefined>
 ): Promise<any> {
   const { AISWEB_API_KEY: apiKey, AISWEB_API_PASS: apiPass } = c.env
-
-  if (!apiKey?.trim() || !apiPass?.trim()) {
-    throw new Error('Credenciais AISWEB ausentes')
-  }
+  if (!apiKey?.trim() || !apiPass?.trim()) throw new Error('Credenciais AISWEB ausentes')
 
   const query = new URLSearchParams({ apiKey, apiPass, area })
   Object.entries(params).forEach(([k, v]) => v && query.append(k, v))
 
   const url = `${AISWEB_BASE_URL}?${query.toString()}`
-  log.debug(`fetchAisweb area=${area}`, params)
-
-  const res = await fetchWithTimeout(url, 12_000) // 12s timeout max
+  const res  = await fetchWithTimeout(url, 12_000)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
   const text = await res.text()
@@ -187,22 +166,18 @@ async function fetchAisweb(
   const node   = AREA_NODE_MAP[area]
 
   if (!node) return root
-
   if (!root[node]) {
     log.warn(`Node "${node}" ausente para area="${area}". Chaves: [${Object.keys(root).join(', ')}]`)
     return {}
   }
-
   return root[node]
 }
 
-// ─── Geo Helpers & Normalizadores ─────────────────────────────────────────────
+// ─── Geo Helpers ──────────────────────────────────────────────────────────────
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371
-  const toRad = (d: number) => (d * Math.PI) / 180
-  const dLat = toRad(lat2 - lat1)
-  const dLon = toRad(lon2 - lon1)
+  const R = 6371, toRad = (d: number) => (d * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1)
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
@@ -212,73 +187,47 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 function parseCoord(raw: any): number | null {
   if (raw == null) return null
   if (typeof raw === 'number') return raw
-
   const s = String(raw).trim()
   if (/^-?\d+(\.\d+)?$/.test(s)) return parseFloat(s)
-
   const gms = s.match(/^(\d{2,3})(\d{2})(\d{2})([NSEW])$/i)
   if (gms) {
     const dec = parseInt(gms[1]) + parseInt(gms[2]) / 60 + parseInt(gms[3]) / 3600
     return ['S', 'W'].includes(gms[4].toUpperCase()) ? -dec : dec
   }
-
   const n = parseFloat(s)
   return isNaN(n) ? null : n
 }
 
 function normalizeMet(data: any, icao: string): Record<string, any> {
   if (!data || typeof data !== 'object') return { loc: icao, metar: '', taf: '' }
-
   const metarStr =
-    (typeof data.rawOb === 'string'              ? data.rawOb              : null) ??
-    (typeof data.metar === 'string'              ? data.metar              : null) ??
-    (typeof data.metar?.metar === 'string'       ? data.metar.metar        : null) ??
-    (typeof data.metar?.raw === 'string'         ? data.metar.raw          : null) ??
+    (typeof data.rawOb === 'string'        ? data.rawOb        : null) ??
+    (typeof data.metar === 'string'        ? data.metar        : null) ??
+    (typeof data.metar?.metar === 'string' ? data.metar.metar  : null) ??
+    (typeof data.metar?.raw === 'string'   ? data.metar.raw    : null) ??
     ''
-
   const tafStr =
-    (typeof data.taf === 'string'                ? data.taf                : null) ??
-    (typeof data.taf?.taf === 'string'           ? data.taf.taf            : null) ??
-    (typeof data.taf?.raw === 'string'           ? data.taf.raw            : null) ??
+    (typeof data.taf === 'string'          ? data.taf          : null) ??
+    (typeof data.taf?.taf === 'string'     ? data.taf.taf      : null) ??
+    (typeof data.taf?.raw === 'string'     ? data.taf.raw      : null) ??
     ''
-
-  return {
-    loc:   data.metar?.loc ?? data.loc ?? icao,
-    metar: metarStr,
-    taf:   tafStr,
-  }
+  return { loc: data.metar?.loc ?? data.loc ?? icao, metar: metarStr, taf: tafStr }
 }
 
-interface Airport {
-  icao:   string
-  name:   string
-  lat:    number
-  lon:    number
-  distKm: number
-}
+interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
 
 function normalizeAirportList(data: any, userLat: number, userLon: number): Airport[] {
   const src   = data?.item ?? data
   const items = Array.isArray(src) ? src : [src]
   const list: Airport[] = []
-
   for (const item of items) {
     const icao = item?.icaoCode ?? item?.icao ?? item?.CodICAO
     if (!icao) continue
-
     const lat = parseCoord(item?.latitude ?? item?.lat)
     const lon = parseCoord(item?.longitude ?? item?.lon)
     if (lat == null || lon == null) continue
-
-    list.push({
-      icao,
-      name:   item?.nome ?? icao,
-      lat,
-      lon,
-      distKm: Math.round(haversineKm(userLat, userLon, lat, lon)),
-    })
+    list.push({ icao, name: item?.nome ?? icao, lat, lon, distKm: Math.round(haversineKm(userLat, userLon, lat, lon)) })
   }
-
   return list
 }
 
@@ -308,13 +257,11 @@ app.get('/api/notam/:icao', async (c) => {
 })
 
 app.get('/api/charts/:icao', async (c) => {
-  const icao    = c.req.param('icao').toUpperCase()
-  const especie = c.req.query('especie')
-  const tipo    = c.req.query('tipo')
+  const icao = c.req.param('icao').toUpperCase()
+  const especie = c.req.query('especie'), tipo = c.req.query('tipo')
   try {
     const data = await cachedFetch(c, `charts-${icao}-${especie ?? ''}-${tipo ?? ''}`, 3600,
-      () => fetchAisweb(c, 'cartas', { icaoCode: icao, especie, tipo })
-    )
+      () => fetchAisweb(c, 'cartas', { icaoCode: icao, especie, tipo }))
     return c.json(data)
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -325,8 +272,8 @@ app.get('/api/rotaer', async (c) => {
   const adep = c.req.query('adep')?.toUpperCase()
   const ades = c.req.query('ades')?.toUpperCase()
   try {
-    const cacheKey = `rotaer-${adep ?? ''}-${ades ?? ''}`
-    const data = await cachedFetch(c, cacheKey, 1800, () => fetchAisweb(c, 'rotaer', { adep, ades }))
+    const data = await cachedFetch(c, `rotaer-${adep ?? ''}-${ades ?? ''}`, 1800,
+      () => fetchAisweb(c, 'rotaer', { adep, ades }))
     return c.json(data)
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -337,18 +284,16 @@ app.get('/api/routes', async (c) => {
   const adep = c.req.query('adep')?.toUpperCase()
   const ades = c.req.query('ades')?.toUpperCase()
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
-
   try {
-    const data = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
+    const data  = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
     const raw   = data?.item
     const items = Array.isArray(raw) ? raw : (raw ? [raw] : [])
-
     return c.json({
       adep, ades,
       routes: items.map((r: any) => ({
-        route:   r?.rota   ?? r?.route  ?? '',
-        level:   r?.nivel  ?? r?.level  ?? '',
-        remarks: r?.rmk    ?? r?.remarks ?? '',
+        route:   r?.rota    ?? r?.route   ?? '',
+        level:   r?.nivel   ?? r?.level   ?? '',
+        remarks: r?.rmk     ?? r?.remarks ?? '',
       })),
     })
   } catch (e: any) {
@@ -359,13 +304,12 @@ app.get('/api/routes', async (c) => {
 app.get('/api/solar/:icao', async (c) => {
   const icao = c.req.param('icao').toUpperCase()
   const date = c.req.query('date')
-
   try {
     const today    = new Date().toISOString().slice(0, 10).replace(/-/g, '')
     const cacheKey = `solar-${icao}-${date ?? today}`
-    const data = await cachedFetch(c, cacheKey, 86400, () => fetchAisweb(c, 'sol', { icaoCode: icao, ...(date ? { date } : {}) }))
+    const data     = await cachedFetch(c, cacheKey, 86400,
+      () => fetchAisweb(c, 'sol', { icaoCode: icao, ...(date ? { date } : {}) }))
     const days = Array.isArray(data) ? data : (data?.sol ?? [data])
-
     return c.json({
       icao,
       solar: days.map((d: any) => ({
@@ -385,14 +329,10 @@ app.post('/api/flight-calculations', async (c) => {
   try {
     const body = await c.req.json()
     const { distance_nm, speed_kts = 120, fuel_burn = 32, reserve_min = 45, wind_kts = 0, taxi_min = 10 } = body
-
     if (!distance_nm || isNaN(Number(distance_nm))) return c.json({ error: 'distance_nm é obrigatório' }, 400)
 
-    const dist     = Number(distance_nm)
-    const gs       = Math.max(Number(speed_kts) - Number(wind_kts), 1)
-    const flightH  = dist / gs
-    const reserveH = Number(reserve_min) / 60
-    const taxiH    = Number(taxi_min) / 60
+    const dist = Number(distance_nm), gs = Math.max(Number(speed_kts) - Number(wind_kts), 1)
+    const flightH = dist / gs, reserveH = Number(reserve_min) / 60, taxiH = Number(taxi_min) / 60
 
     const tripFuel    = flightH  * Number(fuel_burn)
     const reserveFuel = reserveH * Number(fuel_burn)
@@ -400,8 +340,7 @@ app.post('/api/flight-calculations', async (c) => {
     const totalFuel   = tripFuel + reserveFuel + taxiFuel
 
     const totalMin = Math.round(flightH * 60)
-    const hours    = Math.floor(totalMin / 60)
-    const minutes  = totalMin % 60
+    const hours    = Math.floor(totalMin / 60), minutes = totalMin % 60
 
     return c.json({
       inputs:  { distance_nm: dist, speed_kts, fuel_burn, reserve_min, wind_kts, taxi_min },
@@ -423,9 +362,8 @@ app.post('/api/flight-calculations', async (c) => {
 app.get('/api/nearest', async (c) => {
   const lat = parseFloat(c.req.query('lat') ?? ''), lon = parseFloat(c.req.query('lon') ?? '')
   if (isNaN(lat) || isNaN(lon)) return c.json({ error: 'lat/lon inválidos' }, 400)
-
   try {
-    const raw = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
+    const raw      = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
     const airports = normalizeAirportList(raw, lat, lon).sort((a, b) => a.distKm - b.distKm)
     return c.json({ nearest: airports[0] ?? null, alternates: airports.slice(0, 5) })
   } catch (e: any) {
@@ -436,9 +374,8 @@ app.get('/api/nearest', async (c) => {
 app.get('/api/geiloc/nearby', async (c) => {
   const lat = parseFloat(c.req.query('lat') ?? ''), lon = parseFloat(c.req.query('lon') ?? '')
   if (isNaN(lat) || isNaN(lon)) return c.json({ error: 'lat/lon inválidos' }, 400)
-
   try {
-    const raw = await cachedFetch(c, `geiloc-${Math.round(lat * 10)}-${Math.round(lon * 10)}`, 1800, () => fetchAisweb(c, 'rotaer', {}))
+    const raw      = await cachedFetch(c, `geiloc-${Math.round(lat * 10)}-${Math.round(lon * 10)}`, 1800, () => fetchAisweb(c, 'rotaer', {}))
     const airports = normalizeAirportList(raw, lat, lon).sort((a, b) => a.distKm - b.distKm)
     return c.json({ alternates: airports.filter(a => a.distKm < 200).slice(0, 10) })
   } catch (e: any) {
@@ -446,12 +383,15 @@ app.get('/api/geiloc/nearby', async (c) => {
   }
 })
 
+// ─── /api/flightplan ─────────────────────────────────────────────────────────
+// Retorna dados estruturados. Briefing é gerado no frontend via generateFlightBriefing().
+
 app.get('/api/flightplan', async (c) => {
   const adep       = c.req.query('adep')?.toUpperCase()
   const ades       = c.req.query('ades')?.toUpperCase()
-  const speed      = parseInt(c.req.query('speed')      ?? '120')
+  const speed      = parseInt(c.req.query('speed')       ?? '120')
   const burn       = parseFloat(c.req.query('fuel_burn') ?? '32')
-  const reserveMin = parseInt(c.req.query('reserve')    ?? '45')
+  const reserveMin = parseInt(c.req.query('reserve')     ?? '45')
 
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
 
@@ -464,10 +404,12 @@ app.get('/api/flightplan', async (c) => {
     const depItem = dep?.item?.[0], desItem = des?.item?.[0]
     if (!depItem || !desItem) return c.json({ error: 'Aeródromo não encontrado' }, 404)
 
-    const lat1 = parseCoord(depItem.latitude ?? depItem.lat), lon1 = parseCoord(depItem.longitude ?? depItem.lon)
-    const lat2 = parseCoord(desItem.latitude ?? desItem.lat), lon2 = parseCoord(desItem.longitude ?? desItem.lon)
-
-    if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return c.json({ error: 'Coordenadas inválidas' }, 500)
+    const lat1 = parseCoord(depItem.latitude ?? depItem.lat)
+    const lon1 = parseCoord(depItem.longitude ?? depItem.lon)
+    const lat2 = parseCoord(desItem.latitude ?? desItem.lat)
+    const lon2 = parseCoord(desItem.longitude ?? desItem.lon)
+    if (lat1 == null || lon1 == null || lat2 == null || lon2 == null)
+      return c.json({ error: 'Coordenadas inválidas' }, 500)
 
     const distanceNm  = haversineKm(lat1, lon1, lat2, lon2) * 0.539957
     const flightHours = distanceNm / speed
@@ -477,8 +419,8 @@ app.get('/api/flightplan', async (c) => {
     const minutes = Math.round((flightHours - hours) * 60)
 
     const tripFuel    = flightHours * burn
-    const reserveFuel = reserveH * burn
-    const taxiFuel    = burn * (10 / 60)
+    const reserveFuel = reserveH    * burn
+    const taxiFuel    = burn        * (10 / 60)
     const totalFuel   = tripFuel + reserveFuel + taxiFuel
 
     let routeStr = `${adep} DCT ${ades}`
@@ -504,25 +446,42 @@ app.get('/api/flightplan', async (c) => {
       .filter(Boolean)
       .slice(0, 5)
 
-    let briefing = 'Briefing indisponível'
-    try {
-      const ai = await c.env.AI.run('@cf/meta/llama-3-8b-instruct', {
-        messages: [
-          { role: 'system', content: 'Você é um despachante de voo brasileiro. Seja objetivo e use terminologia aeronáutica.' },
-          { role: 'user', content: `Plano de voo\nOrigem: ${adep} | Destino: ${ades}\nDistância: ${Math.round(distanceNm)} NM\nTempo estimado: ${hours}h${String(minutes).padStart(2, '0')}m\nCombustível total: ${Math.round(totalFuel)} L\nNOTAMs ativos: ${notamAlerts.length}` },
-        ],
-      })
-      briefing = ai.response
-    } catch (aiErr) {
-      log.warn('[flightplan] AI briefing indisponível:', aiErr)
-    }
-
     return c.json({
-      flightplan: { adep, ades, route: routeStr, distance_nm: Math.round(distanceNm), estimated_time: `${hours}h${String(minutes).padStart(2, '0')}m`, cruise_speed: speed },
-      fuel: { burn_lh: burn, trip_liters: Math.round(tripFuel), reserve_liters: Math.round(reserveFuel), taxi_liters: Math.round(taxiFuel), total_required: Math.round(totalFuel) },
-      alternates: alternates.map(a => ({ icao: a.icao, name: a.name, distance_km: a.distKm })),
+      flightplan: {
+        adep,
+        ades,
+        route:          routeStr,
+        distance_nm:    Math.round(distanceNm),
+        estimated_time: `${hours}h${String(minutes).padStart(2, '0')}m`,
+        flight_minutes: Math.round(flightHours * 60),
+        cruise_speed:   speed,
+      },
+      fuel: {
+        burn_lh:        burn,
+        trip_liters:    Math.round(tripFuel),
+        reserve_liters: Math.round(reserveFuel),
+        taxi_liters:    Math.round(taxiFuel),
+        total_required: Math.round(totalFuel),
+        reserve_min:    reserveMin,
+      },
+      departure: {
+        icao: adep,
+        name: depItem?.nome ?? adep,
+        lat:  lat1,
+        lon:  lon1,
+      },
+      destination: {
+        icao: ades,
+        name: desItem?.nome ?? ades,
+        lat:  lat2,
+        lon:  lon2,
+      },
+      alternates: alternates.map(a => ({
+        icao:        a.icao,
+        name:        a.name,
+        distance_km: a.distKm,
+      })),
       notam_alerts: notamAlerts,
-      briefing,
     })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -531,14 +490,13 @@ app.get('/api/flightplan', async (c) => {
 
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
-// ─── Exports (fetch + cron prefetch) ─────────────────────────────────────────
+// ─── Exports ──────────────────────────────────────────────────────────────────
 
-const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBKP', 'SBCF', 'SBBR']
-const WORKER_URL     = 'https://api-workers.sharebrasil.workers.dev' // Substitua se necessário
+const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
+const WORKER_URL     = 'https://api-workers.sharebrasil.workers.dev'
 
 export default {
   fetch: app.fetch,
-
   async scheduled(_event: any, _env: Bindings, ctx: ExecutionContext) {
     const tasks = PREFETCH_ICAOS.flatMap(icao => [
       fetch(`${WORKER_URL}/api/weather/${icao}`),
