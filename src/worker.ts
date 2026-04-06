@@ -56,8 +56,11 @@ async function fetchWithTimeout(url: string, timeout = 10_000): Promise<Response
   try {
     return await fetch(url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/xml,application/xml,*/*' },
-      // @ts-ignore — Cloudflare Workers specific
+headers: {
+  'User-Agent': 'ShareBrasil/1.0 (aplicativo aviacao civil; contato@sharebrasil.com.br)',
+  'Accept': 'text/xml,application/xml,*/*',
+  'Accept-Language': 'pt-BR,pt;q=0.9',
+},      // @ts-ignore — Cloudflare Workers specific
       cf: { cacheTtl: 300, cacheEverything: true },
     })
   } catch (err: any) {
