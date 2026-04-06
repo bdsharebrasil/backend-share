@@ -10,6 +10,8 @@ type Bindings = {
   CACHE_KV: KVNamespace
 }
 
+interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
+
 // ─── App & Logger ─────────────────────────────────────────────────────────────
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -159,6 +161,12 @@ async function fetchAisweb(
   const text = await res.text()
   if (!text) throw new Error('Resposta vazia da AISWEB')
 
+  // ─── Detecta HTML de erro (bloqueio, auth, página de manutenção) ──────────
+  const trimmed = text.trimStart()
+  if (trimmed.startsWith('<html') || trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<!doctype')) {
+    throw new Error(`AISWEB retornou HTML em vez de XML (bloqueio ou erro de auth): ${text.slice(0, 200)}`)
+  }
+
   try { return JSON.parse(text) } catch {}
 
   const parsed = parser.parse(text)
@@ -200,21 +208,32 @@ function parseCoord(raw: any): number | null {
 
 function normalizeMet(data: any, icao: string): Record<string, any> {
   if (!data || typeof data !== 'object') return { loc: icao, metar: '', taf: '' }
+
   const metarStr =
     (typeof data.rawOb === 'string'        ? data.rawOb        : null) ??
     (typeof data.metar === 'string'        ? data.metar        : null) ??
     (typeof data.metar?.metar === 'string' ? data.metar.metar  : null) ??
     (typeof data.metar?.raw === 'string'   ? data.metar.raw    : null) ??
     ''
+
   const tafStr =
     (typeof data.taf === 'string'          ? data.taf          : null) ??
     (typeof data.taf?.taf === 'string'     ? data.taf.taf      : null) ??
     (typeof data.taf?.raw === 'string'     ? data.taf.raw      : null) ??
     ''
-  return { loc: data.metar?.loc ?? data.loc ?? icao, metar: metarStr, taf: tafStr }
-}
 
-interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
+  log.debug(`[MET RAW] ${icao}:`, JSON.stringify(data).slice(0, 500))
+
+  if (!metarStr && !tafStr) {
+    throw new Error(`METAR/TAF vazio para ${icao}`)
+  }
+
+  return {
+    loc:   data.metar?.loc ?? data.loc ?? icao,
+    metar: metarStr,
+    taf:   tafStr,
+  }
+}
 
 function normalizeAirportList(data: any, userLat: number, userLon: number): Airport[] {
   const src   = data?.item ?? data
@@ -229,6 +248,32 @@ function normalizeAirportList(data: any, userLat: number, userLon: number): Airp
     list.push({ icao, name: item?.nome ?? icao, lat, lon, distKm: Math.round(haversineKm(userLat, userLon, lat, lon)) })
   }
   return list
+}
+
+// ─── Nearby helper: tenta geiloc (4s), fallback para rotaer-all ──────────────
+
+async function fetchNearby(
+  c: Context<{ Bindings: Bindings }>,
+  lat: number,
+  lon: number
+): Promise<Airport[]> {
+  const cacheKey = `geiloc-${Math.round(lat * 10)}-${Math.round(lon * 10)}`
+
+  try {
+    const data = await cachedFetch(c, cacheKey, 1800, () =>
+      Promise.race([
+        fetchAisweb(c, 'geiloc', { lat: String(lat), lon: String(lon) }),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('geiloc timeout interno')), 4_000)),
+      ])
+    )
+    const list = normalizeAirportList(data, lat, lon)
+    if (list.length > 0) return list
+    throw new Error('geiloc retornou lista vazia')
+  } catch (err: any) {
+    log.warn(`[nearby] geiloc falhou (${err.message}), usando rotaer como fallback`)
+    const data = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
+    return normalizeAirportList(data, lat, lon)
+  }
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -363,8 +408,7 @@ app.get('/api/nearest', async (c) => {
   const lat = parseFloat(c.req.query('lat') ?? ''), lon = parseFloat(c.req.query('lon') ?? '')
   if (isNaN(lat) || isNaN(lon)) return c.json({ error: 'lat/lon inválidos' }, 400)
   try {
-    const raw      = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
-    const airports = normalizeAirportList(raw, lat, lon).sort((a, b) => a.distKm - b.distKm)
+    const airports = (await fetchNearby(c, lat, lon)).sort((a, b) => a.distKm - b.distKm)
     return c.json({ nearest: airports[0] ?? null, alternates: airports.slice(0, 5) })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -375,16 +419,17 @@ app.get('/api/geiloc/nearby', async (c) => {
   const lat = parseFloat(c.req.query('lat') ?? ''), lon = parseFloat(c.req.query('lon') ?? '')
   if (isNaN(lat) || isNaN(lon)) return c.json({ error: 'lat/lon inválidos' }, 400)
   try {
-    const raw      = await cachedFetch(c, `geiloc-${Math.round(lat * 10)}-${Math.round(lon * 10)}`, 1800, () => fetchAisweb(c, 'rotaer', {}))
-    const airports = normalizeAirportList(raw, lat, lon).sort((a, b) => a.distKm - b.distKm)
-    return c.json({ alternates: airports.filter(a => a.distKm < 200).slice(0, 10) })
+    const airports = (await fetchNearby(c, lat, lon))
+      .sort((a, b) => a.distKm - b.distKm)
+      .filter(a => a.distKm < 200)
+      .slice(0, 10)
+    return c.json({ alternates: airports })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
 })
 
 // ─── /api/flightplan ─────────────────────────────────────────────────────────
-// Retorna dados estruturados. Briefing é gerado no frontend via generateFlightBriefing().
 
 app.get('/api/flightplan', async (c) => {
   const adep       = c.req.query('adep')?.toUpperCase()
@@ -429,13 +474,13 @@ app.get('/api/flightplan', async (c) => {
       routeStr = routePref?.item?.[0]?.rota ?? routeStr
     } catch {}
 
-    const [rawAirports, notamDep, notamDes] = await Promise.all([
-      cachedFetch(c, `geiloc-${Math.round(lat2 * 10)}-${Math.round(lon2 * 10)}`, 1800, () => fetchAisweb(c, 'rotaer', {})),
+    const [alternates, notamDep, notamDes] = await Promise.all([
+      fetchNearby(c, lat2, lon2),
       fetchAisweb(c, 'notam', { icaoCode: adep }),
       fetchAisweb(c, 'notam', { icaoCode: ades }),
     ])
 
-    const alternates = normalizeAirportList(rawAirports, lat2, lon2)
+    const nearbyAlts = alternates
       .filter(a => a.icao !== ades && a.distKm < 150)
       .sort((a, b) => a.distKm - b.distKm)
       .slice(0, 3)
@@ -476,7 +521,7 @@ app.get('/api/flightplan', async (c) => {
         lat:  lat2,
         lon:  lon2,
       },
-      alternates: alternates.map(a => ({
+      alternates: nearbyAlts.map(a => ({
         icao:        a.icao,
         name:        a.name,
         distance_km: a.distKm,
@@ -498,10 +543,15 @@ const WORKER_URL     = 'https://api-workers.sharebrasil.workers.dev'
 export default {
   fetch: app.fetch,
   async scheduled(_event: any, _env: Bindings, ctx: ExecutionContext) {
-    const tasks = PREFETCH_ICAOS.flatMap(icao => [
-      fetch(`${WORKER_URL}/api/weather/${icao}`),
-      fetch(`${WORKER_URL}/api/notam/${icao}`),
-    ])
+    const tasks = [
+      // Aquece weather e notam dos principais aeródromos
+      ...PREFETCH_ICAOS.flatMap(icao => [
+        fetch(`${WORKER_URL}/api/weather/${icao}`),
+        fetch(`${WORKER_URL}/api/notam/${icao}`),
+      ]),
+      // Aquece o rotaer-all para /nearest e /geiloc/nearby responderem do cache
+      fetch(`${WORKER_URL}/api/nearest?lat=-23.5&lon=-46.6`),
+    ]
     ctx.waitUntil(Promise.allSettled(tasks))
   },
 }
