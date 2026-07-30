@@ -1,3 +1,4 @@
+node_compat = true
 name = "api-workers"
 main = "src/worker.ts"
 compatibility_date = "2024-01-01"
@@ -14,5 +15,24 @@ id = "83a861dc2e27486e86eb23909fbb9861"
 [observability]
 enabled = true
 
-# ============= COMPATIBILIDADE NODE =============
-node_compat = true
+# ── Novo: R2 para armazenar PDFs, boletos, NFs, comprovantes ────────────────
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "nf-boletos-clients"
+
+# ── Novo: D1 para templates de email, log de envios e short links ──────────
+[[d1_databases]]
+binding = "DB"
+database_name = "share-brasil-aux"
+database_id = "b7048c06-cc46-4832-bac5-641a24ce245c"
+
+# ── Secrets (não colocar aqui — usar `wrangler secret put`) ─────────────────
+# AISWEB_API_KEY
+# AISWEB_API_PASS
+# RESEND_API_KEY
+# INTERNAL_TOKEN
+# EMAIL_FROM  (ex: "Financeiro Share Brasil <financeiro@seudominio.com>")
+
+# ── Cron para pré-aquecer cache (já existente) ──────────────────────────────
+[triggers]
+crons = ["*/15 * * * *"]
