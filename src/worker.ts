@@ -8,6 +8,11 @@ type Bindings = {
   AISWEB_API_KEY: string
   AISWEB_API_PASS: string
   CACHE_KV: KVNamespace
+  FILES: R2Bucket
+  DB: D1Database
+  RESEND_API_KEY: string
+  INTERNAL_TOKEN: string
+  EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -56,11 +61,12 @@ async function fetchWithTimeout(url: string, timeout = 10_000): Promise<Response
   try {
     return await fetch(url, {
       signal: controller.signal,
-headers: {
-  'User-Agent': 'ShareBrasil/1.0 (aplicativo aviacao civil; contato@sharebrasil.com.br)',
-  'Accept': 'text/xml,application/xml,*/*',
-  'Accept-Language': 'pt-BR,pt;q=0.9',
-},      // @ts-ignore — Cloudflare Workers specific
+      headers: {
+        'User-Agent': 'ShareBrasil/1.0 (aplicativo aviacao civil; contato@sharebrasil.com.br)',
+        'Accept': 'text/xml,application/xml,*/*',
+        'Accept-Language': 'pt-BR,pt;q=0.9',
+      },
+      // @ts-ignore — Cloudflare Workers specific
       cf: { cacheTtl: 300, cacheEverything: true },
     })
   } catch (err: any) {
@@ -279,7 +285,41 @@ async function fetchNearby(
   }
 }
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
+// ─── Helpers: arquivos, short links e auth ────────────────────────────────────
+
+function uuid(): string {
+  return crypto.randomUUID()
+}
+
+function shortCode(): string {
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+}
+
+/** Protege rotas sensíveis (upload, envio de email). Chamado no início de cada handler. */
+function checkInternalAuth(c: Context<{ Bindings: Bindings }>): boolean {
+  return c.req.header('x-internal-token') === c.env.INTERNAL_TOKEN
+}
+
+/**
+ * Extrai o user_id (sub) do JWT do Supabase enviado pelo front, SEM validar assinatura.
+ * Serve só para rastreabilidade (quem disparou o envio) — a autorização real
+ * é feita pelo x-internal-token. Se quiser validar a assinatura de verdade,
+ * dá pra usar a JWKS do Supabase (GET /auth/v1/.well-known/jwks.json) com jose.
+ */
+function extractSupabaseUserId(c: Context<{ Bindings: Bindings }>): string | null {
+  const authHeader = c.req.header('authorization')
+  if (!authHeader?.startsWith('Bearer ')) return null
+  try {
+    const token = authHeader.slice(7)
+    const payloadB64 = token.split('.')[1]
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')))
+    return payload?.sub ?? null
+  } catch {
+    return null
+  }
+}
+
+// ─── Routes: AISWEB (existentes) ──────────────────────────────────────────────
 
 app.get('/', (c) => c.text('ShareBrasil API 🚀'))
 
@@ -531,6 +571,196 @@ app.get('/api/flightplan', async (c) => {
       })),
       notam_alerts: notamAlerts,
     })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── Routes: Upload de arquivos (R2 + short link) ────────────────────────────
+
+app.post('/api/upload', async (c) => {
+  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+
+  try {
+    const formData = await c.req.formData()
+    const file = formData.get('file') as File | null
+    const folder = (formData.get('folder') as string) || 'geral'
+
+    if (!file) return c.json({ error: 'Arquivo ausente' }, 400)
+
+    const MAX_SIZE = 25 * 1024 * 1024 // 25MB
+    if (file.size > MAX_SIZE) return c.json({ error: 'Arquivo excede 25MB' }, 413)
+
+    const ext = (file.name.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '')
+    const key = `${folder}/${Date.now()}-${uuid().slice(0, 8)}.${ext}`
+
+    await c.env.FILES.put(key, await file.arrayBuffer(), {
+      httpMetadata: { contentType: file.type || 'application/octet-stream' },
+    })
+
+    const code = shortCode()
+    await c.env.DB.prepare('INSERT INTO short_links (code, r2_key) VALUES (?, ?)')
+      .bind(code, key)
+      .run()
+
+    const url = new URL(c.req.url)
+    const publicUrl = `${url.protocol}//${url.host}/r/${code}`
+
+    return c.json({ url: publicUrl, key, code })
+  } catch (e: any) {
+    log.error('[upload]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── Route: Servir arquivo via short link (público, sem auth) ───────────────
+
+app.get('/r/:code', async (c) => {
+  const code = c.req.param('code')
+  try {
+    const row = await c.env.DB.prepare('SELECT r2_key FROM short_links WHERE code = ?')
+      .bind(code)
+      .first<{ r2_key: string }>()
+
+    if (!row) return c.notFound()
+
+    const object = await c.env.FILES.get(row.r2_key)
+    if (!object) return c.notFound()
+
+    const headers = new Headers()
+    object.writeHttpMetadata(headers)
+    headers.set('etag', object.httpEtag)
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+
+    return new Response(object.body, { headers })
+  } catch (e: any) {
+    log.error('[serve-file]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── Routes: Templates de email (D1) ─────────────────────────────────────────
+
+app.get('/api/templates', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      'SELECT id, tipo, assunto, corpo_html, created_at FROM email_templates ORDER BY tipo'
+    ).all()
+    return c.json(results)
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+app.get('/api/template/:tipo', async (c) => {
+  const tipo = c.req.param('tipo')
+  try {
+    const row = await c.env.DB.prepare(
+      'SELECT id, tipo, assunto, corpo_html FROM email_templates WHERE tipo = ? LIMIT 1'
+    ).bind(tipo).first()
+    return c.json(row || null)
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+app.post('/api/templates', async (c) => {
+  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  try {
+    const { tipo, assunto, corpo_html } = await c.req.json()
+    if (!tipo || !assunto || !corpo_html) return c.json({ error: 'Campos obrigatórios faltando' }, 400)
+
+    const id = uuid()
+    await c.env.DB.prepare(
+      'INSERT INTO email_templates (id, tipo, assunto, corpo_html) VALUES (?, ?, ?, ?)'
+    ).bind(id, tipo, assunto, corpo_html).run()
+
+    return c.json({ id, tipo, assunto, corpo_html })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+app.put('/api/templates/:id', async (c) => {
+  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  try {
+    const id = c.req.param('id')
+    const { assunto, corpo_html } = await c.req.json()
+    await c.env.DB.prepare(
+      'UPDATE email_templates SET assunto = ?, corpo_html = ? WHERE id = ?'
+    ).bind(assunto, corpo_html, id).run()
+    return c.json({ ok: true })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
+
+app.post('/api/send-email', async (c) => {
+  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+
+  try {
+    const { to, cc, subject, html, tipo, reference_type, reference_id } = await c.req.json()
+    if (!to || !subject || !html) return c.json({ error: 'Campos obrigatórios faltando (to, subject, html)' }, 400)
+
+    const enviadoPor = extractSupabaseUserId(c)
+
+    const resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${c.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: c.env.EMAIL_FROM,
+        to: [to],
+        cc: cc || undefined,
+        subject,
+        html,
+      }),
+    })
+
+    const data = await resp.json()
+    const status = resp.ok ? 'enviado' : 'erro'
+
+    await c.env.DB.prepare(
+      `INSERT INTO email_envios
+         (id, tipo, reference_type, reference_id, destinatario, assunto, status, erro_mensagem, enviado_por)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      uuid(),
+      tipo || null,
+      reference_type || null,
+      reference_id || null,
+      to,
+      subject,
+      status,
+      resp.ok ? null : JSON.stringify(data),
+      enviadoPor,
+    ).run()
+
+    if (!resp.ok) {
+      log.error('[send-email] Resend error:', JSON.stringify(data))
+      return c.json({ error: 'Falha ao enviar email', details: data }, 500)
+    }
+
+    return c.json(data)
+  } catch (e: any) {
+    log.error('[send-email]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+app.get('/api/email-envios', async (c) => {
+  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  const referenceId = c.req.query('reference_id')
+  try {
+    const query = referenceId
+      ? c.env.DB.prepare('SELECT * FROM email_envios WHERE reference_id = ? ORDER BY created_at DESC').bind(referenceId)
+      : c.env.DB.prepare('SELECT * FROM email_envios ORDER BY created_at DESC LIMIT 100')
+    const { results } = await query.all()
+    return c.json(results)
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
