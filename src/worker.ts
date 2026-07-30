@@ -319,6 +319,22 @@ function extractSupabaseUserId(c: Context<{ Bindings: Bindings }>): string | nul
   }
 }
 
+/**
+ * Converte um ArrayBuffer (conteúdo lido do R2) para base64, em chunks para
+ * não estourar o limite de argumentos do String.fromCharCode em arquivos grandes.
+ */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = ''
+  const bytes = new Uint8Array(buffer)
+  const chunkSize = 0x8000 // evita estourar o limite de argumentos do String.fromCharCode
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+  }
+  return btoa(binary)
+}
+
+const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de provedores de email)
+
 // ─── Routes: AISWEB (existentes) ──────────────────────────────────────────────
 
 app.get('/', (c) => c.text('ShareBrasil API 🚀'))
@@ -696,15 +712,48 @@ app.put('/api/templates/:id', async (c) => {
 })
 
 // ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
+// Suporta anexos: attachments?: { filename: string; r2_key: string }[]
+// Fluxo esperado do frontend:
+//   1. Upload do arquivo via POST /api/upload  → retorna { key, url, code }
+//   2. Envio do email via POST /api/send-email → passa attachments: [{ filename, r2_key: key }]
 
 app.post('/api/send-email', async (c) => {
   if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
 
   try {
-    const { to, cc, subject, html, tipo, reference_type, reference_id } = await c.req.json()
+    const { to, cc, subject, html, tipo, reference_type, reference_id, attachments } = await c.req.json()
     if (!to || !subject || !html) return c.json({ error: 'Campos obrigatórios faltando (to, subject, html)' }, 400)
 
     const enviadoPor = extractSupabaseUserId(c)
+
+    // ─── Monta anexos a partir do R2 ─────────────────────────────────────
+    let resolvedAttachments: { filename: string; content: string }[] | undefined
+
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      let totalSize = 0
+      resolvedAttachments = []
+
+      for (const att of attachments) {
+        if (!att?.r2_key || !att?.filename) continue
+
+        const object = await c.env.FILES.get(att.r2_key)
+        if (!object) {
+          log.warn(`[send-email] anexo não encontrado no R2: ${att.r2_key}`)
+          continue
+        }
+
+        const buffer = await object.arrayBuffer()
+        totalSize += buffer.byteLength
+        if (totalSize > MAX_ATTACHMENT_TOTAL_SIZE) {
+          return c.json({ error: 'Anexos excedem o limite total de 25MB' }, 413)
+        }
+
+        resolvedAttachments.push({
+          filename: att.filename,
+          content: arrayBufferToBase64(buffer),
+        })
+      }
+    }
 
     const resp = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -718,6 +767,7 @@ app.post('/api/send-email', async (c) => {
         cc: cc || undefined,
         subject,
         html,
+        attachments: resolvedAttachments?.length ? resolvedAttachments : undefined,
       }),
     })
 
