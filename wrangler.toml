@@ -30,7 +30,7 @@ database_id = "b7048c06-cc46-4832-bac5-641a24ce245c"
 # AISWEB_API_PASS
 # RESEND_API_KEY
 # INTERNAL_TOKEN
-# EMAIL_FROM  (ex: "Financeiro Share Brasil <financeiro@seudominio.com>")
+# EMAIL_FROM  
 
 # ── Cron para pré-aquecer cache (já existente) ──────────────────────────────
 [triggers]
