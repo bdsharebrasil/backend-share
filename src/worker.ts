@@ -13,6 +13,12 @@ type Bindings = {
   RESEND_API_KEY: string
   INTERNAL_TOKEN: string
   EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
+  SUPABASE_URL: string
+  SUPABASE_ANON_KEY: string
+  WINSOCK_VALUATION_URL: string
+  WINSOCK_API_KEY: string
+  WINSOCK_AUTH_HEADER?: string
+  WINSOCK_AUTH_PREFIX?: string
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -38,6 +44,87 @@ const parser = new XMLParser({
 })
 
 const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/'
+const WINSOCK_VALUATION_CACHE_TTL = 86_400
+
+async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
+  const authorization = c.req.header('authorization')
+  const { SUPABASE_URL, SUPABASE_ANON_KEY } = c.env
+
+  if (!authorization?.startsWith('Bearer ') || !SUPABASE_URL || !SUPABASE_ANON_KEY) return false
+
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: authorization,
+    },
+  })
+
+  return response.ok
+}
+
+function valuationCacheKey(aircraft: Record<string, unknown>): string {
+  const identity = [
+    aircraft.id,
+    aircraft.registration,
+    aircraft.serial_number,
+    aircraft.model,
+    aircraft.year,
+    aircraft.cell_hours_current,
+    aircraft.horimeter_end,
+  ].map(value => String(value ?? '')).join('|')
+
+  return `windsock-valuation:${identity}`
+}
+
+function normalizeWindsockValuation(data: Record<string, any>): Record<string, any> {
+  const valuation = data.valuation ?? data.data ?? data
+  const estimatedMarketValue = valuation.estimated_market_value ?? valuation.estimatedMarketValue ?? valuation.market_value
+
+  if (typeof estimatedMarketValue !== 'number') {
+    throw new Error('Resposta da Windsock sem estimated_market_value')
+  }
+
+  return {
+    ...valuation,
+    estimated_market_value: estimatedMarketValue,
+    confidence_score: valuation.confidence_score ?? valuation.confidenceScore ?? null,
+    updated_at: valuation.updated_at ?? valuation.updatedAt ?? new Date().toISOString(),
+  }
+}
+
+async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircraft: Record<string, unknown>): Promise<Record<string, any>> {
+  const { WINSOCK_VALUATION_URL, WINSOCK_API_KEY, WINSOCK_AUTH_HEADER = 'Authorization', WINSOCK_AUTH_PREFIX = 'Bearer ' } = c.env
+
+  if (!WINSOCK_VALUATION_URL || !WINSOCK_API_KEY) throw new Error('Integração Windsock não configurada')
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15_000)
+
+  try {
+    const response = await fetch(WINSOCK_VALUATION_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        [WINSOCK_AUTH_HEADER]: `${WINSOCK_AUTH_PREFIX}${WINSOCK_API_KEY}`,
+      },
+      body: JSON.stringify(aircraft),
+    })
+
+    if (!response.ok) {
+      log.error(`[windsock] HTTP ${response.status}:`, (await response.text()).slice(0, 500))
+      throw new Error('Falha ao consultar a avaliação da Windsock')
+    }
+
+    return normalizeWindsockValuation(await response.json())
+  } catch (error: any) {
+    if (error.name === 'AbortError') throw new Error('Tempo limite ao consultar a Windsock')
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 
 const AREA_NODE_MAP: Record<string, string> = {
   met:         'met',
@@ -325,7 +412,7 @@ function shortCode(): string {
 
 /** Protege rotas sensíveis (upload, envio de email). Chamado no início de cada handler. */
 function checkInternalAuth(c: Context<{ Bindings: Bindings }>): boolean {
-  return c.req.header('x-internal-token') === c.env.INTERNAL_TOKEN
+  return Boolean(c.env.INTERNAL_TOKEN) && c.req.header('x-internal-token') === c.env.INTERNAL_TOKEN
 }
 
 /**
@@ -366,6 +453,32 @@ const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de prov
 // ─── Routes: AISWEB (existentes) ──────────────────────────────────────────────
 
 app.get('/', (c) => c.text('ShareBrasil API 🚀'))
+
+app.post('/api/aircraft-valuation', async (c) => {
+  try {
+    if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'Não autorizado' }, 401)
+
+    const aircraft = await c.req.json<Record<string, unknown>>()
+    if (!aircraft || typeof aircraft !== 'object' || Array.isArray(aircraft)) {
+      return c.json({ error: 'Dados da aeronave inválidos' }, 400)
+    }
+
+    const hasIdentity = ['id', 'registration', 'serial_number'].some(key => typeof aircraft[key] === 'string' && aircraft[key].trim())
+    if (!hasIdentity) return c.json({ error: 'Informe id, registration ou serial_number da aeronave' }, 400)
+
+    const valuation = await cachedFetch(
+      c,
+      valuationCacheKey(aircraft),
+      WINSOCK_VALUATION_CACHE_TTL,
+      () => fetchWindsockValuation(c, aircraft)
+    )
+
+    return c.json(valuation)
+  } catch (error: any) {
+    log.error('[windsock]', error.message)
+    return c.json({ error: error.message === 'Integração Windsock não configurada' ? error.message : 'Não foi possível obter a avaliação da aeronave' }, 502)
+  }
+})
 
 app.get('/api/weather/:icao', async (c) => {
   const icao = c.req.param('icao').toUpperCase()
