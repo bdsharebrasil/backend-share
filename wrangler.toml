@@ -26,7 +26,7 @@ database_name = "share-brasil-aux"
 database_id = "b7048c06-cc46-4832-bac5-641a24ce245c"
 
 # ── Secrets
-EMAIL_FROM = Financeiro Share Brasil <financeiro@share-brasil.com>
+EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 # ── Secrets (não colocar aqui — usar `wrangler secret put`) ─────────────────
 # AISWEB_API_KEY
 # AISWEB_API_PASS
