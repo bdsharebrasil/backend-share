@@ -32,6 +32,12 @@ EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 # AISWEB_API_PASS
 # RESEND_API_KEY
 # INTERNAL_TOKEN
+# SUPABASE_URL
+# SUPABASE_ANON_KEY
+# WINSOCK_VALUATION_URL
+# WINSOCK_API_KEY
+# WINSOCK_AUTH_HEADER (opcional; padrão: Authorization)
+# WINSOCK_AUTH_PREFIX (opcional; padrão: Bearer )
 
 # ── Cron para pré-aquecer cache (já existente) ──────────────────────────────
 [triggers]
