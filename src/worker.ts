@@ -244,19 +244,47 @@ function normalizeMet(data: any, icao: string): Record<string, any> {
   }
 }
 
+function rotaerItems(data: any): any[] {
+  const items = data?.item ?? data
+  return Array.isArray(items) ? items : (items ? [items] : [])
+}
+
+function rotaerIcao(item: any): string {
+  return String(item?.AeroCode ?? item?.IcaoCode ?? item?.icaoCode ?? item?.icao ?? item?.CodICAO ?? '').toUpperCase()
+}
+
+function normalizeCharts(data: any): Record<string, any> {
+  const item = Array.isArray(data?.item) ? data.item : (data?.item ? [data.item] : [])
+  return {
+    ...data,
+    item,
+    charts: item.map((chart: any) => ({
+      title: chart?.nome ?? chart?.title ?? '',
+      tipo: chart?.tipo_descr ?? chart?.tipo ?? '',
+      descricao: chart?.especie ?? chart?.descricao ?? '',
+      url: typeof chart?.link === 'string' ? chart.link.replaceAll('&amp;', '&') : (chart?.url ?? ''),
+    })),
+  }
+}
+
 function normalizeAirportList(data: any, userLat: number, userLon: number): Airport[] {
-  const src   = data?.item ?? data
-  const items = Array.isArray(src) ? src : [src]
   const list: Airport[] = []
-  for (const item of items) {
-    const icao = item?.icaoCode ?? item?.icao ?? item?.CodICAO
+  for (const item of rotaerItems(data)) {
+    const icao = rotaerIcao(item)
     if (!icao) continue
     const lat = parseCoord(item?.latitude ?? item?.lat)
-    const lon = parseCoord(item?.longitude ?? item?.lon)
+    const lon = parseCoord(item?.longitude ?? item?.lng ?? item?.lon)
     if (lat == null || lon == null) continue
-    list.push({ icao, name: item?.nome ?? icao, lat, lon, distKm: Math.round(haversineKm(userLat, userLon, lat, lon)) })
+    list.push({ icao, name: item?.nome ?? item?.name ?? icao, lat, lon, distKm: Math.round(haversineKm(userLat, userLon, lat, lon)) })
   }
   return list
+}
+
+async function fetchRotaerByIcao(c: Context<{ Bindings: Bindings }>, icao: string): Promise<any> {
+  const data = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
+  const airport = rotaerItems(data).find(item => rotaerIcao(item) === icao)
+  if (!airport) throw new Error(`Aeródromo ${icao} não encontrado no ROTAER`)
+  return airport
 }
 
 // ─── Nearby helper: tenta geiloc (4s), fallback para rotaer-all ──────────────
@@ -366,23 +394,38 @@ app.get('/api/charts/:icao', async (c) => {
   try {
     const data = await cachedFetch(c, `charts-${icao}-${especie ?? ''}-${tipo ?? ''}`, 3600,
       () => fetchAisweb(c, 'cartas', { icaoCode: icao, especie, tipo }))
-    return c.json(data)
+    return c.json(normalizeCharts(data))
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
 })
 
-app.get('/api/rotaer', async (c) => {
-  const adep = c.req.query('adep')?.toUpperCase()
-  const ades = c.req.query('ades')?.toUpperCase()
+async function getRotaer(c: Context<{ Bindings: Bindings }>, icaoParam?: string) {
+  const icaoCode = (icaoParam ?? c.req.query('icaoCode') ?? c.req.query('icao'))?.trim().toUpperCase()
+  const adep = c.req.query('adep')?.trim().toUpperCase()
+  const ades = c.req.query('ades')?.trim().toUpperCase()
+
+  if (!icaoCode && !adep && !ades) {
+    return c.json({ error: 'Informe icaoCode, icao, adep ou ades' }, 400)
+  }
+
   try {
+    if (icaoCode) {
+      const airport = await fetchRotaerByIcao(c, icaoCode)
+      return c.json({ item: [airport] })
+    }
+
     const data = await cachedFetch(c, `rotaer-${adep ?? ''}-${ades ?? ''}`, 1800,
       () => fetchAisweb(c, 'rotaer', { adep, ades }))
     return c.json(data)
   } catch (e: any) {
+    log.error(`[rotaer] ${icaoCode ?? `${adep ?? ''}-${ades ?? ''}`}:`, e.message)
     return c.json({ error: e.message }, 500)
   }
-})
+}
+
+app.get('/api/rotaer', (c) => getRotaer(c))
+app.get('/api/rotaer/:icao', (c) => getRotaer(c, c.req.param('icao')))
 
 app.get('/api/routes', async (c) => {
   const adep = c.req.query('adep')?.toUpperCase()
@@ -500,18 +543,15 @@ app.get('/api/flightplan', async (c) => {
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
 
   try {
-    const [dep, des] = await Promise.all([
-      fetchAisweb(c, 'rotaer', { icaoCode: adep }),
-      fetchAisweb(c, 'rotaer', { icaoCode: ades }),
+    const [depItem, desItem] = await Promise.all([
+      fetchRotaerByIcao(c, adep),
+      fetchRotaerByIcao(c, ades),
     ])
 
-    const depItem = dep?.item?.[0], desItem = des?.item?.[0]
-    if (!depItem || !desItem) return c.json({ error: 'Aeródromo não encontrado' }, 404)
-
     const lat1 = parseCoord(depItem.latitude ?? depItem.lat)
-    const lon1 = parseCoord(depItem.longitude ?? depItem.lon)
+    const lon1 = parseCoord(depItem.longitude ?? depItem.lng ?? depItem.lon)
     const lat2 = parseCoord(desItem.latitude ?? desItem.lat)
-    const lon2 = parseCoord(desItem.longitude ?? desItem.lon)
+    const lon2 = parseCoord(desItem.longitude ?? desItem.lng ?? desItem.lon)
     if (lat1 == null || lon1 == null || lat2 == null || lon2 == null)
       return c.json({ error: 'Coordenadas inválidas' }, 500)
 
