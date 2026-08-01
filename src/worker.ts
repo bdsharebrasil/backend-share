@@ -15,10 +15,10 @@ type Bindings = {
   EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
   SUPABASE_URL: string
   SUPABASE_ANON_KEY: string
-  WINSOCK_VALUATION_URL: string
+  WINSOCK_VALUATION_URL: string   // https://windsock.ai/api/v3/valuations
   WINSOCK_API_KEY: string
-  WINSOCK_AUTH_HEADER?: string
-  WINSOCK_AUTH_PREFIX?: string
+  WINSOCK_AUTH_HEADER?: string    // default: 'X-API-Key'
+  WINSOCK_AUTH_PREFIX?: string    // default: '' (sem prefixo)
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -31,7 +31,7 @@ app.use('*', cors())
 const isDev = false
 const log = {
   debug: (...a: any[]) => isDev && console.log('[DEBUG]', ...a),
-  warn:  (...a: any[]) => console.warn('[WARN]',  ...a),
+  warn: (...a: any[]) => console.warn('[WARN]', ...a),
   error: (...a: any[]) => console.error('[ERROR]', ...a),
 }
 
@@ -45,6 +45,7 @@ const parser = new XMLParser({
 
 const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/'
 const WINSOCK_VALUATION_CACHE_TTL = 86_400
+const WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i
 
 async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
   const authorization = c.req.header('authorization')
@@ -76,26 +77,107 @@ function valuationCacheKey(aircraft: Record<string, unknown>): string {
   return `windsock-valuation:${identity}`
 }
 
-function normalizeWindsockValuation(data: Record<string, any>): Record<string, any> {
-  const valuation = data.valuation ?? data.data ?? data
-  const estimatedMarketValue = valuation.estimated_market_value ?? valuation.estimatedMarketValue ?? valuation.market_value
+// ─── Windsock: rate limit (KV, best-effort) ───────────────────────────────────
 
-  if (typeof estimatedMarketValue !== 'number') {
-    throw new Error('Resposta da Windsock sem estimated_market_value')
+async function checkWindsockRateLimit(
+  c: Context<{ Bindings: Bindings }>,
+  bucket: string,
+  perMinute: number
+): Promise<boolean> {
+  const minuteWindow = Math.floor(Date.now() / 60_000)
+  const key = `windsock-rl:${bucket}:${minuteWindow}`
+  const kv = c.env.CACHE_KV
+  const current = parseInt((await kv.get(key)) ?? '0', 10)
+  if (current >= perMinute) return false
+  await kv.put(key, String(current + 1), { expirationTtl: 70 })
+  return true
+}
+
+// ─── Windsock: resolver make_model_id a partir de texto livre ────────────────
+
+async function resolveMakeModelId(
+  c: Context<{ Bindings: Bindings }>,
+  modelText: string
+): Promise<number | null> {
+  const trimmed = modelText.trim()
+  if (!trimmed) return null
+
+  const cacheKey = `windsock-makemodel:${trimmed.toLowerCase()}`
+
+  return cachedFetch(c, cacheKey, 30 * 86_400, async () => {
+    const allowed = await checkWindsockRateLimit(c, 'reference', 60)
+    if (!allowed) throw new Error('Limite de requisições de referência à Windsock atingido')
+
+    const url = `https://windsock.ai/api/v3/references/make-models?q=${encodeURIComponent(trimmed)}&limit=1`
+    const res = await fetch(url, { headers: { 'X-API-Key': c.env.WINSOCK_API_KEY } })
+    if (!res.ok) throw new Error(`make-models HTTP ${res.status}`)
+    const json = await res.json<any>()
+    const row = json?.data?.[0]
+    return row?.id ?? null
+  })
+}
+
+// ─── Windsock: montar request e normalizar resposta ───────────────────────────
+
+function buildWindsockRequestBody(aircraft: Record<string, unknown>, makeModelId: number | null) {
+  const registration = typeof aircraft.registration === 'string' ? aircraft.registration.trim() : ''
+  const isFaaTail = WINSOCK_N_NUMBER.test(registration)
+
+  const aircraft_info: Record<string, unknown> = {}
+  if (typeof aircraft.year === 'number') aircraft_info.year = aircraft.year
+  const aftt = aircraft.horimeter_end ?? aircraft.cell_hours_current
+  if (typeof aftt === 'number') aircraft_info.aftt = aftt
+
+  const body: Record<string, unknown> = { aircraft_info }
+
+  if (isFaaTail) {
+    body.registration = registration // aeronave americana de fato — usa o N-number direto
+  } else {
+    if (!makeModelId) {
+      throw new Error('Não foi possível resolver o make/model da aeronave na Windsock (matrícula brasileira precisa de make_model_id)')
+    }
+    body.make_model_id = makeModelId
+  }
+
+  return body
+}
+
+function normalizeWindsockValuation(data: Record<string, any>): Record<string, any> {
+  const valuation = data?.data?.valuation ?? data?.valuation ?? data
+  const predicted = valuation?.prediction_data?.predicted_price
+
+  if (typeof predicted !== 'number') {
+    throw new Error('Resposta da Windsock sem prediction_data.predicted_price')
   }
 
   return {
-    ...valuation,
-    estimated_market_value: estimatedMarketValue,
-    confidence_score: valuation.confidence_score ?? valuation.confidenceScore ?? null,
-    updated_at: valuation.updated_at ?? valuation.updatedAt ?? new Date().toISOString(),
+    estimated_market_value: predicted,
+    confidence: valuation?.prediction_data?.confidence ?? null,
+    uncertainty: valuation?.prediction_data?.uncertainty ?? null,
+    as_of: data?.data?.as_of ?? null,
+    valuation_mode: data?.data?.valuation_mode ?? null,
+    updated_at: new Date().toISOString(),
   }
 }
 
 async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircraft: Record<string, unknown>): Promise<Record<string, any>> {
-  const { WINSOCK_VALUATION_URL, WINSOCK_API_KEY, WINSOCK_AUTH_HEADER = 'Authorization', WINSOCK_AUTH_PREFIX = 'Bearer ' } = c.env
+  const {
+    WINSOCK_VALUATION_URL,
+    WINSOCK_API_KEY,
+    WINSOCK_AUTH_HEADER = 'X-API-Key',
+    WINSOCK_AUTH_PREFIX = '',
+  } = c.env
 
   if (!WINSOCK_VALUATION_URL || !WINSOCK_API_KEY) throw new Error('Integração Windsock não configurada')
+
+  const allowed = await checkWindsockRateLimit(c, 'compute_heavy', 6) // /valuations é compute_heavy: 6/min no free tier
+  if (!allowed) throw new Error('Limite de requisições à Windsock atingido (6/min no plano Free) — tente novamente em instantes')
+
+  const registration = typeof aircraft.registration === 'string' ? aircraft.registration.trim() : ''
+  const isFaaTail = WINSOCK_N_NUMBER.test(registration)
+  const makeModelId = isFaaTail ? null : await resolveMakeModelId(c, String(aircraft.model ?? ''))
+
+  const body = buildWindsockRequestBody(aircraft, makeModelId)
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15_000)
@@ -108,8 +190,13 @@ async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircra
         'Content-Type': 'application/json',
         [WINSOCK_AUTH_HEADER]: `${WINSOCK_AUTH_PREFIX}${WINSOCK_API_KEY}`,
       },
-      body: JSON.stringify(aircraft),
+      body: JSON.stringify(body),
     })
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('retry-after')
+      throw new Error(`Rate limit da Windsock excedido${retryAfter ? ` (retry-after: ${retryAfter}s)` : ''}`)
+    }
 
     if (!response.ok) {
       log.error(`[windsock] HTTP ${response.status}:`, (await response.text()).slice(0, 500))
@@ -127,17 +214,17 @@ async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircra
 
 
 const AREA_NODE_MAP: Record<string, string> = {
-  met:         'met',
-  cartas:      'cartas',
-  notam:       'notam',
-  infotemp:    'infotemp',
-  sol:         'sol',
-  routesp:     'routesp',
-  waypoints:   'waypoints',
-  rotaer:      'rotaer',
-  pub:         'pub',
+  met: 'met',
+  cartas: 'cartas',
+  notam: 'notam',
+  infotemp: 'infotemp',
+  sol: 'sol',
+  routesp: 'routesp',
+  waypoints: 'waypoints',
+  rotaer: 'rotaer',
+  pub: 'pub',
   suplementos: 'suplementos',
-  geiloc:      'geiloc',
+  geiloc: 'geiloc',
 }
 
 // ─── Fetch com Timeout + Edge Cache ──────────────────────────────────────────
@@ -172,17 +259,17 @@ async function cachedFetch(
   ttlSeconds: number,
   fetcher: () => Promise<any>
 ): Promise<any> {
-  const kv  = c.env.CACHE_KV
+  const kv = c.env.CACHE_KV
   const raw = await kv.get(key, { type: 'json' }) as any
   const now = Date.now()
 
-  const isNewFormat   = raw !== null && typeof raw === 'object' && 'fetchedAt' in raw && 'data' in raw
-  const fetchedAt     = isNewFormat ? (raw.fetchedAt as number) : 0
-  const cachedData    = isNewFormat ? raw.data : raw
-  const ageSeconds    = (now - fetchedAt) / 1000
+  const isNewFormat = raw !== null && typeof raw === 'object' && 'fetchedAt' in raw && 'data' in raw
+  const fetchedAt = isNewFormat ? (raw.fetchedAt as number) : 0
+  const cachedData = isNewFormat ? raw.data : raw
+  const ageSeconds = (now - fetchedAt) / 1000
   const hasCachedData = cachedData !== null && cachedData !== undefined
-  const isFresh       = hasCachedData && ageSeconds < ttlSeconds
-  const isStale       = hasCachedData && ageSeconds >= ttlSeconds
+  const isFresh = hasCachedData && ageSeconds < ttlSeconds
+  const isStale = hasCachedData && ageSeconds >= ttlSeconds
 
   const save = async (data: any) => {
     const payload = JSON.stringify({ data, fetchedAt: Date.now() })
@@ -224,7 +311,7 @@ async function cachedFetch(
     await new Promise(r => setTimeout(r, 800))
     const retry = await kv.get(key, { type: 'json' }) as any
     if (retry?.data) return retry.data
-    if (retry)       return retry
+    if (retry) return retry
   }
 
   await kv.put(lockKey, '1', { expirationTtl: 60 })
@@ -251,7 +338,7 @@ async function fetchAisweb(
   Object.entries(params).forEach(([k, v]) => v && query.append(k, v))
 
   const url = `${AISWEB_BASE_URL}?${query.toString()}`
-  const res  = await fetchWithTimeout(url, 12_000)
+  const res = await fetchWithTimeout(url, 12_000)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
   const text = await res.text()
@@ -263,11 +350,11 @@ async function fetchAisweb(
     throw new Error(`AISWEB retornou HTML em vez de XML (bloqueio ou erro de auth): ${text.slice(0, 200)}`)
   }
 
-  try { return JSON.parse(text) } catch {}
+  try { return JSON.parse(text) } catch { }
 
   const parsed = parser.parse(text)
-  const root   = parsed['aisweb'] ?? parsed
-  const node   = AREA_NODE_MAP[area]
+  const root = parsed['aisweb'] ?? parsed
+  const node = AREA_NODE_MAP[area]
 
   if (!node) return root
   if (!root[node]) {
@@ -306,16 +393,16 @@ function normalizeMet(data: any, icao: string): Record<string, any> {
   if (!data || typeof data !== 'object') return { loc: icao, metar: '', taf: '' }
 
   const metarStr =
-    (typeof data.rawOb === 'string'        ? data.rawOb        : null) ??
-    (typeof data.metar === 'string'        ? data.metar        : null) ??
-    (typeof data.metar?.metar === 'string' ? data.metar.metar  : null) ??
-    (typeof data.metar?.raw === 'string'   ? data.metar.raw    : null) ??
+    (typeof data.rawOb === 'string' ? data.rawOb : null) ??
+    (typeof data.metar === 'string' ? data.metar : null) ??
+    (typeof data.metar?.metar === 'string' ? data.metar.metar : null) ??
+    (typeof data.metar?.raw === 'string' ? data.metar.raw : null) ??
     ''
 
   const tafStr =
-    (typeof data.taf === 'string'          ? data.taf          : null) ??
-    (typeof data.taf?.taf === 'string'     ? data.taf.taf      : null) ??
-    (typeof data.taf?.raw === 'string'     ? data.taf.raw      : null) ??
+    (typeof data.taf === 'string' ? data.taf : null) ??
+    (typeof data.taf?.taf === 'string' ? data.taf.taf : null) ??
+    (typeof data.taf?.raw === 'string' ? data.taf.raw : null) ??
     ''
 
   log.debug(`[MET RAW] ${icao}:`, JSON.stringify(data).slice(0, 500))
@@ -325,9 +412,9 @@ function normalizeMet(data: any, icao: string): Record<string, any> {
   }
 
   return {
-    loc:   data.metar?.loc ?? data.loc ?? icao,
+    loc: data.metar?.loc ?? data.loc ?? icao,
     metar: metarStr,
-    taf:   tafStr,
+    taf: tafStr,
   }
 }
 
@@ -545,15 +632,15 @@ app.get('/api/routes', async (c) => {
   const ades = c.req.query('ades')?.toUpperCase()
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
   try {
-    const data  = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
-    const raw   = data?.item
+    const data = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
+    const raw = data?.item
     const items = Array.isArray(raw) ? raw : (raw ? [raw] : [])
     return c.json({
       adep, ades,
       routes: items.map((r: any) => ({
-        route:   r?.rota    ?? r?.route   ?? '',
-        level:   r?.nivel   ?? r?.level   ?? '',
-        remarks: r?.rmk     ?? r?.remarks ?? '',
+        route: r?.rota ?? r?.route ?? '',
+        level: r?.nivel ?? r?.level ?? '',
+        remarks: r?.rmk ?? r?.remarks ?? '',
       })),
     })
   } catch (e: any) {
@@ -565,19 +652,19 @@ app.get('/api/solar/:icao', async (c) => {
   const icao = c.req.param('icao').toUpperCase()
   const date = c.req.query('date')
   try {
-    const today    = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
     const cacheKey = `solar-${icao}-${date ?? today}`
-    const data     = await cachedFetch(c, cacheKey, 86400,
+    const data = await cachedFetch(c, cacheKey, 86400,
       () => fetchAisweb(c, 'sol', { icaoCode: icao, ...(date ? { date } : {}) }))
     const days = Array.isArray(data) ? data : (data?.sol ?? [data])
     return c.json({
       icao,
       solar: days.map((d: any) => ({
-        date:                 d?.date   ?? d?.data   ?? '',
-        sunrise:              d?.nascer ?? d?.sunrise ?? '',
-        sunset:               d?.poente ?? d?.sunset  ?? '',
+        date: d?.date ?? d?.data ?? '',
+        sunrise: d?.nascer ?? d?.sunrise ?? '',
+        sunset: d?.poente ?? d?.sunset ?? '',
         civil_twilight_begin: d?.crepusculo_manha ?? '',
-        civil_twilight_end:   d?.crepusculo_tarde ?? '',
+        civil_twilight_end: d?.crepusculo_tarde ?? '',
       })),
     })
   } catch (e: any) {
@@ -594,24 +681,24 @@ app.post('/api/flight-calculations', async (c) => {
     const dist = Number(distance_nm), gs = Math.max(Number(speed_kts) - Number(wind_kts), 1)
     const flightH = dist / gs, reserveH = Number(reserve_min) / 60, taxiH = Number(taxi_min) / 60
 
-    const tripFuel    = flightH  * Number(fuel_burn)
+    const tripFuel = flightH * Number(fuel_burn)
     const reserveFuel = reserveH * Number(fuel_burn)
-    const taxiFuel    = taxiH    * Number(fuel_burn)
-    const totalFuel   = tripFuel + reserveFuel + taxiFuel
+    const taxiFuel = taxiH * Number(fuel_burn)
+    const totalFuel = tripFuel + reserveFuel + taxiFuel
 
     const totalMin = Math.round(flightH * 60)
-    const hours    = Math.floor(totalMin / 60), minutes = totalMin % 60
+    const hours = Math.floor(totalMin / 60), minutes = totalMin % 60
 
     return c.json({
-      inputs:  { distance_nm: dist, speed_kts, fuel_burn, reserve_min, wind_kts, taxi_min },
+      inputs: { distance_nm: dist, speed_kts, fuel_burn, reserve_min, wind_kts, taxi_min },
       results: {
-        ground_speed_kts:    Math.round(gs),
-        flight_time:         `${hours}h${String(minutes).padStart(2, '0')}m`,
-        flight_minutes:      totalMin,
-        trip_fuel_liters:    Math.round(tripFuel),
+        ground_speed_kts: Math.round(gs),
+        flight_time: `${hours}h${String(minutes).padStart(2, '0')}m`,
+        flight_minutes: totalMin,
+        trip_fuel_liters: Math.round(tripFuel),
         reserve_fuel_liters: Math.round(reserveFuel),
-        taxi_fuel_liters:    Math.round(taxiFuel),
-        total_fuel_liters:   Math.round(totalFuel),
+        taxi_fuel_liters: Math.round(taxiFuel),
+        total_fuel_liters: Math.round(totalFuel),
       },
     })
   } catch (e: any) {
@@ -647,11 +734,11 @@ app.get('/api/geiloc/nearby', async (c) => {
 // ─── /api/flightplan ─────────────────────────────────────────────────────────
 
 app.get('/api/flightplan', async (c) => {
-  const adep       = c.req.query('adep')?.toUpperCase()
-  const ades       = c.req.query('ades')?.toUpperCase()
-  const speed      = parseInt(c.req.query('speed')       ?? '120')
-  const burn       = parseFloat(c.req.query('fuel_burn') ?? '32')
-  const reserveMin = parseInt(c.req.query('reserve')     ?? '45')
+  const adep = c.req.query('adep')?.toUpperCase()
+  const ades = c.req.query('ades')?.toUpperCase()
+  const speed = parseInt(c.req.query('speed') ?? '120')
+  const burn = parseFloat(c.req.query('fuel_burn') ?? '32')
+  const reserveMin = parseInt(c.req.query('reserve') ?? '45')
 
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
 
@@ -668,23 +755,23 @@ app.get('/api/flightplan', async (c) => {
     if (lat1 == null || lon1 == null || lat2 == null || lon2 == null)
       return c.json({ error: 'Coordenadas inválidas' }, 500)
 
-    const distanceNm  = haversineKm(lat1, lon1, lat2, lon2) * 0.539957
+    const distanceNm = haversineKm(lat1, lon1, lat2, lon2) * 0.539957
     const flightHours = distanceNm / speed
-    const reserveH    = reserveMin / 60
+    const reserveH = reserveMin / 60
 
-    const hours   = Math.floor(flightHours)
+    const hours = Math.floor(flightHours)
     const minutes = Math.round((flightHours - hours) * 60)
 
-    const tripFuel    = flightHours * burn
-    const reserveFuel = reserveH    * burn
-    const taxiFuel    = burn        * (10 / 60)
-    const totalFuel   = tripFuel + reserveFuel + taxiFuel
+    const tripFuel = flightHours * burn
+    const reserveFuel = reserveH * burn
+    const taxiFuel = burn * (10 / 60)
+    const totalFuel = tripFuel + reserveFuel + taxiFuel
 
     let routeStr = `${adep} DCT ${ades}`
     try {
       const routePref = await fetchAisweb(c, 'routesp', { adep, ades })
       routeStr = routePref?.item?.[0]?.rota ?? routeStr
-    } catch {}
+    } catch { }
 
     const [alternates, notamDep, notamDes] = await Promise.all([
       fetchNearby(c, lat2, lon2),
@@ -707,35 +794,35 @@ app.get('/api/flightplan', async (c) => {
       flightplan: {
         adep,
         ades,
-        route:          routeStr,
-        distance_nm:    Math.round(distanceNm),
+        route: routeStr,
+        distance_nm: Math.round(distanceNm),
         estimated_time: `${hours}h${String(minutes).padStart(2, '0')}m`,
         flight_minutes: Math.round(flightHours * 60),
-        cruise_speed:   speed,
+        cruise_speed: speed,
       },
       fuel: {
-        burn_lh:        burn,
-        trip_liters:    Math.round(tripFuel),
+        burn_lh: burn,
+        trip_liters: Math.round(tripFuel),
         reserve_liters: Math.round(reserveFuel),
-        taxi_liters:    Math.round(taxiFuel),
+        taxi_liters: Math.round(taxiFuel),
         total_required: Math.round(totalFuel),
-        reserve_min:    reserveMin,
+        reserve_min: reserveMin,
       },
       departure: {
         icao: adep,
         name: depItem?.nome ?? adep,
-        lat:  lat1,
-        lon:  lon1,
+        lat: lat1,
+        lon: lon1,
       },
       destination: {
         icao: ades,
         name: desItem?.nome ?? ades,
-        lat:  lat2,
-        lon:  lon2,
+        lat: lat2,
+        lon: lon2,
       },
       alternates: nearbyAlts.map(a => ({
-        icao:        a.icao,
-        name:        a.name,
+        icao: a.icao,
+        name: a.name,
         distance_km: a.distKm,
       })),
       notam_alerts: notamAlerts,
@@ -974,7 +1061,7 @@ app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
-const WORKER_URL     = 'https://api-workers.sharebrasil.workers.dev'
+const WORKER_URL = 'https://api-workers.sharebrasil.workers.dev'
 
 export default {
   fetch: app.fetch,

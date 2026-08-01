@@ -3718,6 +3718,7 @@ var parser = new XMLParser({
 });
 var AISWEB_BASE_URL = "https://api.decea.mil.br/aisweb/";
 var WINSOCK_VALUATION_CACHE_TTL = 86400;
+var WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i;
 async function requireAuthenticatedUser(c) {
   const authorization = c.req.header("authorization");
   const { SUPABASE_URL, SUPABASE_ANON_KEY } = c.env;
@@ -3744,23 +3745,81 @@ function valuationCacheKey(aircraft) {
   return `windsock-valuation:${identity}`;
 }
 __name(valuationCacheKey, "valuationCacheKey");
+async function checkWindsockRateLimit(c, bucket, perMinute) {
+  const minuteWindow = Math.floor(Date.now() / 6e4);
+  const key = `windsock-rl:${bucket}:${minuteWindow}`;
+  const kv = c.env.CACHE_KV;
+  const current = parseInt(await kv.get(key) ?? "0", 10);
+  if (current >= perMinute) return false;
+  await kv.put(key, String(current + 1), { expirationTtl: 70 });
+  return true;
+}
+__name(checkWindsockRateLimit, "checkWindsockRateLimit");
+async function resolveMakeModelId(c, modelText) {
+  const trimmed = modelText.trim();
+  if (!trimmed) return null;
+  const cacheKey = `windsock-makemodel:${trimmed.toLowerCase()}`;
+  return cachedFetch(c, cacheKey, 30 * 86400, async () => {
+    const allowed = await checkWindsockRateLimit(c, "reference", 60);
+    if (!allowed) throw new Error("Limite de requisi\xE7\xF5es de refer\xEAncia \xE0 Windsock atingido");
+    const url = `https://windsock.ai/api/v3/references/make-models?q=${encodeURIComponent(trimmed)}&limit=1`;
+    const res = await fetch(url, { headers: { "X-API-Key": c.env.WINSOCK_API_KEY } });
+    if (!res.ok) throw new Error(`make-models HTTP ${res.status}`);
+    const json = await res.json();
+    const row = json?.data?.[0];
+    return row?.id ?? null;
+  });
+}
+__name(resolveMakeModelId, "resolveMakeModelId");
+function buildWindsockRequestBody(aircraft, makeModelId) {
+  const registration = typeof aircraft.registration === "string" ? aircraft.registration.trim() : "";
+  const isFaaTail = WINSOCK_N_NUMBER.test(registration);
+  const aircraft_info = {};
+  if (typeof aircraft.year === "number") aircraft_info.year = aircraft.year;
+  const aftt = aircraft.horimeter_end ?? aircraft.cell_hours_current;
+  if (typeof aftt === "number") aircraft_info.aftt = aftt;
+  const body = { aircraft_info };
+  if (isFaaTail) {
+    body.registration = registration;
+  } else {
+    if (!makeModelId) {
+      throw new Error("N\xE3o foi poss\xEDvel resolver o make/model da aeronave na Windsock (matr\xEDcula brasileira precisa de make_model_id)");
+    }
+    body.make_model_id = makeModelId;
+  }
+  return body;
+}
+__name(buildWindsockRequestBody, "buildWindsockRequestBody");
 function normalizeWindsockValuation(data) {
-  const valuation = data.valuation ?? data.data ?? data;
-  const estimatedMarketValue = valuation.estimated_market_value ?? valuation.estimatedMarketValue ?? valuation.market_value;
-  if (typeof estimatedMarketValue !== "number") {
-    throw new Error("Resposta da Windsock sem estimated_market_value");
+  const valuation = data?.data?.valuation ?? data?.valuation ?? data;
+  const predicted = valuation?.prediction_data?.predicted_price;
+  if (typeof predicted !== "number") {
+    throw new Error("Resposta da Windsock sem prediction_data.predicted_price");
   }
   return {
-    ...valuation,
-    estimated_market_value: estimatedMarketValue,
-    confidence_score: valuation.confidence_score ?? valuation.confidenceScore ?? null,
-    updated_at: valuation.updated_at ?? valuation.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString()
+    estimated_market_value: predicted,
+    confidence: valuation?.prediction_data?.confidence ?? null,
+    uncertainty: valuation?.prediction_data?.uncertainty ?? null,
+    as_of: data?.data?.as_of ?? null,
+    valuation_mode: data?.data?.valuation_mode ?? null,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
 __name(normalizeWindsockValuation, "normalizeWindsockValuation");
 async function fetchWindsockValuation(c, aircraft) {
-  const { WINSOCK_VALUATION_URL, WINSOCK_API_KEY, WINSOCK_AUTH_HEADER = "Authorization", WINSOCK_AUTH_PREFIX = "Bearer " } = c.env;
+  const {
+    WINSOCK_VALUATION_URL,
+    WINSOCK_API_KEY,
+    WINSOCK_AUTH_HEADER = "X-API-Key",
+    WINSOCK_AUTH_PREFIX = ""
+  } = c.env;
   if (!WINSOCK_VALUATION_URL || !WINSOCK_API_KEY) throw new Error("Integra\xE7\xE3o Windsock n\xE3o configurada");
+  const allowed = await checkWindsockRateLimit(c, "compute_heavy", 6);
+  if (!allowed) throw new Error("Limite de requisi\xE7\xF5es \xE0 Windsock atingido (6/min no plano Free) \u2014 tente novamente em instantes");
+  const registration = typeof aircraft.registration === "string" ? aircraft.registration.trim() : "";
+  const isFaaTail = WINSOCK_N_NUMBER.test(registration);
+  const makeModelId = isFaaTail ? null : await resolveMakeModelId(c, String(aircraft.model ?? ""));
+  const body = buildWindsockRequestBody(aircraft, makeModelId);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15e3);
   try {
@@ -3771,8 +3830,12 @@ async function fetchWindsockValuation(c, aircraft) {
         "Content-Type": "application/json",
         [WINSOCK_AUTH_HEADER]: `${WINSOCK_AUTH_PREFIX}${WINSOCK_API_KEY}`
       },
-      body: JSON.stringify(aircraft)
+      body: JSON.stringify(body)
     });
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("retry-after");
+      throw new Error(`Rate limit da Windsock excedido${retryAfter ? ` (retry-after: ${retryAfter}s)` : ""}`);
+    }
     if (!response.ok) {
       log.error(`[windsock] HTTP ${response.status}:`, (await response.text()).slice(0, 500));
       throw new Error("Falha ao consultar a avalia\xE7\xE3o da Windsock");
