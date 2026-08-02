@@ -2,8 +2,9 @@ name = "api-workers"
 main = "src/worker.ts"
 compatibility_date = "2024-01-01"
 
-preview_urls = true
-
+# ============= VARS (não sensíveis) =============
+[vars]
+EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 
 # ============= KV NAMESPACE =============
 [[kv_namespaces]]
@@ -14,20 +15,18 @@ id = "83a861dc2e27486e86eb23909fbb9861"
 [observability]
 enabled = true
 
-# ── Novo: R2 para armazenar PDFs, boletos, NFs, comprovantes ────────────────
+# ── R2 para armazenar PDFs, boletos, NFs, comprovantes ──────────────────────
 [[r2_buckets]]
 binding = "FILES"
 bucket_name = "nf-boletos-clients"
 
-# ── Novo: D1 para templates de email, log de envios e short links ──────────
+# ── D1 para templates de email, log de envios, short links e mensageria ────
 [[d1_databases]]
 binding = "DB"
 database_name = "share-brasil-aux"
 database_id = "b7048c06-cc46-4832-bac5-641a24ce245c"
 
-# ── Secrets
-EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
-# ── Secrets (não colocar aqui — usar `wrangler secret put`) ─────────────────
+# ── Secrets (NÃO colocar valores aqui — usar `wrangler secret put <NOME>`) ──
 # AISWEB_API_KEY
 # AISWEB_API_PASS
 # RESEND_API_KEY
@@ -36,9 +35,9 @@ EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 # SUPABASE_ANON_KEY
 # WINSOCK_VALUATION_URL
 # WINSOCK_API_KEY
-# WINSOCK_AUTH_HEADER (opcional; padrão: Authorization)
-# WINSOCK_AUTH_PREFIX (opcional; padrão: Bearer )
+# WINSOCK_AUTH_HEADER (opcional; padrão no código: X-API-Key)
+# WINSOCK_AUTH_PREFIX (opcional; padrão no código: '' — sem prefixo)
 
-# ── Cron para pré-aquecer cache (já existente) ──────────────────────────────
+# ── Cron para pré-aquecer cache (weather/notam/nearest) ─────────────────────
 [triggers]
 crons = ["*/15 * * * *"]
