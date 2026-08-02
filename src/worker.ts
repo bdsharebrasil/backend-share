@@ -1056,6 +1056,181 @@ app.get('/api/email-envios', async (c) => {
   }
 })
 
+// ─── Routes: Mensageria Interna (Inbox / D1) ──────────────────────────────────
+
+// 📩 1. Enviar nova mensagem
+app.post('/api/mensagens', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+
+  const remetenteId = extractSupabaseUserId(c)
+  if (!remetenteId) return c.json({ error: 'Sessão inválida' }, 401)
+
+  try {
+    const body = await c.req.json<{
+      destinatario_id: string
+      assunto?: string
+      conteudo: string
+    }>()
+
+    const { destinatario_id, assunto, conteudo } = body
+
+    if (!destinatario_id || !conteudo?.trim()) {
+      return c.json({ error: 'destinatario_id e conteudo são obrigatórios' }, 400)
+    }
+
+    const id = uuid()
+
+    await c.env.DB.prepare(
+      `INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo) 
+       VALUES (?, ?, ?, ?, ?)`
+    )
+      .bind(id, remetenteId, destinatario_id, assunto?.trim() ?? null, conteudo.trim())
+      .run()
+
+    return c.json({ success: true, id, message: 'Mensagem enviada com sucesso' }, 201)
+  } catch (e: any) {
+    log.error('[mensagens:send]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// 📬 2. Listar Caixa de Entrada (Inbox)
+app.get('/api/mensagens/inbox', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+
+  const usuarioId = extractSupabaseUserId(c)
+  if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
+
+  try {
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, remetente_id, assunto, conteudo, lida, criado_em 
+       FROM mensagens 
+       WHERE destinatario_id = ? 
+       ORDER BY criado_em DESC`
+    )
+      .bind(usuarioId)
+      .all()
+
+    return c.json(results)
+  } catch (e: any) {
+    log.error('[mensagens:inbox]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// 📤 3. Listar Caixa de Saída (Enviados)
+app.get('/api/mensagens/outbox', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+
+  const usuarioId = extractSupabaseUserId(c)
+  if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
+
+  try {
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, destinatario_id, assunto, conteudo, lida, criado_em 
+       FROM mensagens 
+       WHERE remetente_id = ? 
+       ORDER BY criado_em DESC`
+    )
+      .bind(usuarioId)
+      .all()
+
+    return c.json(results)
+  } catch (e: any) {
+    log.error('[mensagens:outbox]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// 🔔 4. Obter contagem de mensagens NÃO LIDAS (para badges de notificação)
+app.get('/api/mensagens/unread-count', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+
+  const usuarioId = extractSupabaseUserId(c)
+  if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
+
+  try {
+    const result = await c.env.DB.prepare(
+      `SELECT COUNT(*) as unread FROM mensagens WHERE destinatario_id = ? AND lida = 0`
+    )
+      .bind(usuarioId)
+      .first<{ unread: number }>()
+
+    return c.json({ unread: result?.unread ?? 0 })
+  } catch (e: any) {
+    log.error('[mensagens:unread-count]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// 🔍 5. Obter uma mensagem específica e marcar como LIDA
+app.get('/api/mensagens/:id', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+
+  const usuarioId = extractSupabaseUserId(c)
+  const id = c.req.param('id')
+
+  try {
+    const msg = await c.env.DB.prepare(
+      `SELECT * FROM mensagens WHERE id = ? AND (destinatario_id = ? OR remetente_id = ?)`
+    )
+      .bind(id, usuarioId, usuarioId)
+      .first<any>()
+
+    if (!msg) return c.json({ error: 'Mensagem não encontrada' }, 404)
+
+    // Se o usuário atual for o destinatário e a mensagem ainda não foi lida, marca como lida
+    if (msg.destinatario_id === usuarioId && msg.lida === 0) {
+      c.executionCtx.waitUntil(
+        c.env.DB.prepare(`UPDATE mensagens SET lida = 1 WHERE id = ?`).bind(id).run()
+      )
+      msg.lida = 1
+    }
+
+    return c.json(msg)
+  } catch (e: any) {
+    log.error('[mensagens:get]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// 🗑️ 6. Deletar mensagem
+app.delete('/api/mensagens/:id', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+
+  const usuarioId = extractSupabaseUserId(c)
+  const id = c.req.param('id')
+
+  try {
+    const res = await c.env.DB.prepare(
+      `DELETE FROM mensagens WHERE id = ? AND (destinatario_id = ? OR remetente_id = ?)`
+    )
+      .bind(id, usuarioId, usuarioId)
+      .run()
+
+    if (res.meta.changes === 0) {
+      return c.json({ error: 'Mensagem não encontrada ou sem permissão' }, 404)
+    }
+
+    return c.json({ success: true, message: 'Mensagem removida' })
+  } catch (e: any) {
+    log.error('[mensagens:delete]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
