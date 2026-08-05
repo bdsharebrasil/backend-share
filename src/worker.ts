@@ -77,6 +77,11 @@ function valuationCacheKey(aircraft: Record<string, unknown>): string {
   return `windsock-valuation:${identity}`
 }
 
+function marketEstimateCacheKey(model: string, year?: number, hours?: number, registration?: string): string {
+  const reg = registration?.trim().toUpperCase() ?? ''
+  return `windsock-market-estimate:${reg || model.trim().toLowerCase()}|${year ?? ''}|${hours ?? ''}`
+}
+
 // ─── Windsock: rate limit (KV, best-effort) ───────────────────────────────────
 
 async function checkWindsockRateLimit(
@@ -160,7 +165,10 @@ function normalizeWindsockValuation(data: Record<string, any>): Record<string, a
   }
 }
 
-async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircraft: Record<string, unknown>): Promise<Record<string, any>> {
+async function callWindsockValuationApi(
+  c: Context<{ Bindings: Bindings }>,
+  body: Record<string, unknown>
+): Promise<Record<string, any>> {
   const {
     WINSOCK_VALUATION_URL,
     WINSOCK_API_KEY,
@@ -170,14 +178,8 @@ async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircra
 
   if (!WINSOCK_VALUATION_URL || !WINSOCK_API_KEY) throw new Error('Integração Windsock não configurada')
 
-  const allowed = await checkWindsockRateLimit(c, 'compute_heavy', 6) // /valuations é compute_heavy: 6/min no free tier
+  const allowed = await checkWindsockRateLimit(c, 'compute_heavy', 6)
   if (!allowed) throw new Error('Limite de requisições à Windsock atingido (6/min no plano Free) — tente novamente em instantes')
-
-  const registration = typeof aircraft.registration === 'string' ? aircraft.registration.trim() : ''
-  const isFaaTail = WINSOCK_N_NUMBER.test(registration)
-  const makeModelId = isFaaTail ? null : await resolveMakeModelId(c, String(aircraft.model ?? ''))
-
-  const body = buildWindsockRequestBody(aircraft, makeModelId)
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15_000)
@@ -210,6 +212,45 @@ async function fetchWindsockValuation(c: Context<{ Bindings: Bindings }>, aircra
   } finally {
     clearTimeout(timer)
   }
+}
+
+async function fetchWindsockValuation(
+  c: Context<{ Bindings: Bindings }>,
+  aircraft: Record<string, unknown>
+): Promise<Record<string, any>> {
+  const registration = typeof aircraft.registration === 'string' ? aircraft.registration.trim() : ''
+  const isFaaTail = WINSOCK_N_NUMBER.test(registration)
+  const makeModelId = isFaaTail ? null : await resolveMakeModelId(c, String(aircraft.model ?? ''))
+
+  return callWindsockValuationApi(c, buildWindsockRequestBody(aircraft, makeModelId))
+}
+
+async function estimateUsMarketValue(
+  c: Context<{ Bindings: Bindings }>,
+  input: { model?: string; year?: number; hours?: number; registration?: string }
+): Promise<Record<string, any>> {
+  const registration = input.registration?.trim() ?? ''
+  const isFaaTail = WINSOCK_N_NUMBER.test(registration)
+  const aircraft_info: Record<string, unknown> = {}
+
+  if (typeof input.year === 'number') aircraft_info.year = input.year
+  if (typeof input.hours === 'number') aircraft_info.aftt = input.hours
+
+  const body: Record<string, unknown> = { aircraft_info }
+
+  if (isFaaTail) {
+    body.registration = registration
+  } else {
+    if (!input.model?.trim()) {
+      throw new Error('Informe "model" (ex: "Cessna 172S", "King Air 350") ou uma matrícula americana (N-number)')
+    }
+
+    const makeModelId = await resolveMakeModelId(c, input.model)
+    if (!makeModelId) throw new Error(`Não foi possível localizar o modelo "${input.model}" na base da Windsock`)
+    body.make_model_id = makeModelId
+  }
+
+  return callWindsockValuationApi(c, body)
 }
 
 
@@ -564,6 +605,29 @@ app.post('/api/aircraft-valuation', async (c) => {
   } catch (error: any) {
     log.error('[windsock]', error.message)
     return c.json({ error: error.message === 'Integração Windsock não configurada' ? error.message : 'Não foi possível obter a avaliação da aeronave' }, 502)
+  }
+})
+
+app.post('/api/us-aircraft-estimate', async (c) => {
+  try {
+    if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'Não autorizado' }, 401)
+
+    const input = await c.req.json<{ model?: string; year?: number; hours?: number; registration?: string }>()
+    if (!input.model?.trim() && !input.registration?.trim()) {
+      return c.json({ error: 'Informe "model" ou "registration"' }, 400)
+    }
+
+    const estimate = await cachedFetch(
+      c,
+      marketEstimateCacheKey(input.model ?? '', input.year, input.hours, input.registration),
+      WINSOCK_VALUATION_CACHE_TTL,
+      () => estimateUsMarketValue(c, input)
+    )
+
+    return c.json({ query: input, ...estimate })
+  } catch (error: any) {
+    log.error('[windsock-market-estimate]', error.message)
+    return c.json({ error: error.message }, 502)
   }
 })
 
