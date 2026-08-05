@@ -147,22 +147,58 @@ function buildWindsockRequestBody(aircraft: Record<string, unknown>, makeModelId
   return body
 }
 
+/**
+ * Normaliza a resposta da Windsock.
+ *
+ * Formato real da API (v3/valuations):
+ * {
+ *   data: {
+ *     as_of / as_of_date: string,
+ *     valuation_mode: string,
+ *     valuation: {
+ *       prediction_data: { predicted_price, uncertainty, tbo_depreciation, ... },
+ *       confidence: number,        // 0-100, IRMÃO de prediction_data (não está dentro dele)
+ *       residual: number,
+ *       explanation: { summary, key_drivers, by_category, base_value, ... }
+ *     }
+ *   }
+ * }
+ *
+ * Bug corrigido: o código antigo lia `valuation.prediction_data.confidence`,
+ * mas `confidence` fica em `valuation.confidence` — por isso sempre voltava null.
+ */
 function normalizeWindsockValuation(data: Record<string, any>): Record<string, any> {
-  const valuation = data?.data?.valuation ?? data?.valuation ?? data
+  const root = data?.data ?? data
+  const valuation = root?.valuation ?? data?.valuation ?? data
   const predicted = valuation?.prediction_data?.predicted_price
 
   if (typeof predicted !== 'number') {
     throw new Error('Resposta da Windsock sem prediction_data.predicted_price')
   }
 
+  const explanation = valuation?.explanation ?? null
+
   return {
     estimated_market_value: predicted,
-    confidence: valuation?.prediction_data?.confidence ?? null,
+    // confidence vem em escala 0-100 na Windsock; normalizamos de forma defensiva
+    // caso algum modo de valuation volte a mandar em fração 0-1.
+    confidence: normalizeConfidencePercent(valuation?.confidence),
     uncertainty: valuation?.prediction_data?.uncertainty ?? null,
-    as_of: data?.data?.as_of ?? null,
-    valuation_mode: data?.data?.valuation_mode ?? null,
+    as_of: root?.as_of ?? root?.as_of_date ?? null,
+    valuation_mode: root?.valuation_mode ?? null,
+    // dados extras da explicação — antes descartados, úteis para a UI
+    explanation_summary: explanation?.summary ?? null,
+    key_drivers: Array.isArray(explanation?.key_drivers) ? explanation.key_drivers : null,
+    base_value: explanation?.base_value ?? null,
+    total_adjustment: explanation?.total_adjustment ?? null,
     updated_at: new Date().toISOString(),
   }
+}
+
+function normalizeConfidencePercent(raw: unknown): number | null {
+  if (typeof raw !== 'number' || Number.isNaN(raw)) return null
+  // se algum dia vier em fração (0-1), converte para percentual; se já vier 0-100, mantém.
+  return raw <= 1 ? raw * 100 : raw
 }
 
 async function callWindsockValuationApi(
