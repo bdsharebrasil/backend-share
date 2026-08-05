@@ -618,7 +618,7 @@ const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de prov
 
 app.get('/', (c) => c.text('ShareBrasil API 🚀'))
 
-app.post('/api/aircraft-valuation', async (c) => {
+app.post('/api/valuation', async (c) => {
   try {
     if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'Não autorizado' }, 401)
 
