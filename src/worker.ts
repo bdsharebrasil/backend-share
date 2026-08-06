@@ -20,6 +20,7 @@ type Bindings = {
   WINSOCK_API_KEY: string
   WINSOCK_AUTH_HEADER?: string    // default: 'X-API-Key'
   WINSOCK_AUTH_PREFIX?: string    // default: '' (sem prefixo)
+  ANTHROPIC_API_KEY: string       // usado no OCR de demonstrativos (Claude Vision/Document)
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -597,9 +598,26 @@ function shortCode(): string {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 8)
 }
 
-/** Protege rotas sensíveis (upload, envio de email). Chamado no início de cada handler. */
+/**
+ * Compara dois tokens em tempo constante para evitar timing attacks.
+ * `crypto.subtle.timingSafeEqual` é uma extensão específica do runtime
+ * Cloudflare Workers (não é Web Crypto padrão) — funciona só nesse ambiente.
+ */
+function timingSafeTokenMatch(a: string, b: string): boolean {
+  const enc = new TextEncoder()
+  const bufA = enc.encode(a)
+  const bufB = enc.encode(b)
+  if (bufA.byteLength !== bufB.byteLength) return false
+  // @ts-ignore — extensão do runtime Cloudflare Workers, não faz parte do lib.dom.d.ts
+  return crypto.subtle.timingSafeEqual(bufA, bufB)
+}
+
+/** Protege rotas sensíveis (upload, envio de email, OCR). Chamado no início de cada handler. */
 function checkInternalAuth(c: Context<{ Bindings: Bindings }>): boolean {
-  return Boolean(c.env.INTERNAL_TOKEN) && c.req.header('x-internal-token') === c.env.INTERNAL_TOKEN
+  const token = c.req.header('x-internal-token')
+  const expected = c.env.INTERNAL_TOKEN
+  if (!expected || !token) return false
+  return timingSafeTokenMatch(token, expected)
 }
 
 /**
@@ -636,6 +654,225 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de provedores de email)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Demonstrativo OCR (Claude Vision / Document) — versão revisada
+// ═══════════════════════════════════════════════════════════════════════════
+// Substitui a antiga Supabase Edge Function "demonstrativo-ocr" do Lovable.
+//
+// Pontos endurecidos em relação à primeira versão:
+// - Suporte real a PDF (bloco `type: 'document'`) além de imagem — a
+//   primeira versão só funcionava com imagem, e PDF é o formato mais comum
+//   de demonstrativo INFRAERO/DECEA.
+// - Modelo atualizado para claude-sonnet-5.
+// - Validação de tamanho (5MB imagem / 32MB PDF) antes de gastar chamada de API.
+// - Retry automático se a resposta truncar por max_tokens.
+// - Sanity check: soma dos itens vs. valor_total extraído, sinalizando
+//   `_meta.precisa_revisao_manual` quando divergem.
+// - Não descarta mais itens com valor 0 (ex: operações isentas).
+
+type TipoDemo = 'INFRAERO' | 'DECEA' | 'POUSO'
+const TIPOS_VALIDOS: TipoDemo[] = ['INFRAERO', 'DECEA', 'POUSO']
+
+const DEMO_TIPO_CONTEXT: Record<TipoDemo, string> = {
+  INFRAERO: 'um demonstrativo de Tarifa INFRAERO (tarifas aeroportuárias cobradas pela INFRAERO)',
+  DECEA: 'um demonstrativo de Tarifa DECEA (tarifas de navegação aérea cobradas pelo DECEA)',
+  POUSO: 'um demonstrativo de Tarifa de Pouso',
+}
+
+const DEMO_OCR_SYSTEM_PROMPT = (tipo: TipoDemo) => `Você é um especialista em leitura de demonstrativos financeiros da aviação civil brasileira.
+O documento enviado é ${DEMO_TIPO_CONTEXT[tipo]}.
+
+Extraia os dados e responda APENAS com um objeto JSON válido, sem markdown, sem texto antes ou depois, no seguinte formato exato:
+
+{
+  "tipo": "${tipo}",
+  "numero_documento": string ou null,
+  "competencia": string ou null (formato MM/YYYY se disponível),
+  "data_faturamento": string ou null (formato DD/MM/YYYY),
+  "aeronave_matricula": string ou null,
+  "cliente_nome": string ou null,
+  "valor_total": number ou null,
+  "itens": [
+    {
+      "data": string (formato DD/MM/YYYY),
+      "hora": string ou omitido,
+      "operacao": string ou omitido (ex: código ICAO do aeródromo),
+      "matricula": string ou omitido,
+      "valor": number
+    }
+  ]
+}
+
+Regras importantes:
+- Extraia TODAS as linhas/operações listadas no documento, uma por item em "itens", mesmo que o documento tenha várias páginas.
+- Valores monetários devem ser números (ponto decimal, sem "R$", sem separador de milhar).
+- Inclua itens com valor 0 (ex: operações isentas) — não os omita.
+- "valor_total" deve ser o total exatamente como impresso no documento. Se não houver um total explícito, use null.
+- Se um campo não existir no documento, use null (campos do topo) ou omita a chave (campos opcionais dos itens).
+- Nunca invente dados que não estejam visíveis no documento.
+- Responda SOMENTE com o JSON, nada mais.`
+
+function extractJsonFromText(text: string): any {
+  const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '')
+  const start = cleaned.indexOf('{')
+  const end = cleaned.lastIndexOf('}')
+  if (start === -1 || end === -1) throw new Error('Resposta da IA não contém JSON válido')
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1))
+  } catch (err: any) {
+    throw new Error(`JSON inválido na resposta da IA (possível truncamento): ${err.message}`)
+  }
+}
+
+// ─── Validação e montagem do bloco de conteúdo (imagem OU PDF) ────────────
+
+const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+const SUPPORTED_DOC_TYPES = new Set(['application/pdf'])
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024   // limite da Anthropic p/ imagem
+const MAX_PDF_BYTES = 32 * 1024 * 1024    // limite da Anthropic p/ PDF
+
+function base64ByteLength(b64: string): number {
+  const clean = b64.replace(/=+$/, '')
+  return Math.floor((clean.length * 3) / 4)
+}
+
+function buildContentBlock(dataBase64: string, mimeType: string): Record<string, any> {
+  if (SUPPORTED_IMAGE_TYPES.has(mimeType)) {
+    const size = base64ByteLength(dataBase64)
+    if (size > MAX_IMAGE_BYTES) {
+      throw new Error(`Imagem excede o limite de 5MB (${(size / 1024 / 1024).toFixed(1)}MB) — comprima ou envie como PDF`)
+    }
+    return { type: 'image', source: { type: 'base64', media_type: mimeType, data: dataBase64 } }
+  }
+
+  if (SUPPORTED_DOC_TYPES.has(mimeType)) {
+    const size = base64ByteLength(dataBase64)
+    if (size > MAX_PDF_BYTES) {
+      throw new Error(`PDF excede o limite de 32MB (${(size / 1024 / 1024).toFixed(1)}MB)`)
+    }
+    return { type: 'document', source: { type: 'base64', media_type: mimeType, data: dataBase64 } }
+  }
+
+  throw new Error(`mimeType não suportado: "${mimeType}" (use image/jpeg, image/png, image/gif, image/webp ou application/pdf)`)
+}
+
+// ─── Chamada à Anthropic, com retry em caso de truncamento ────────────────
+
+const CLAUDE_MODEL = 'claude-sonnet-5'
+
+async function callClaudeExtraction(
+  c: Context<{ Bindings: Bindings }>,
+  dataBase64: string,
+  mimeType: string,
+  tipo: TipoDemo
+): Promise<any> {
+  const { ANTHROPIC_API_KEY } = c.env
+  if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY não configurada')
+
+  const contentBlock = buildContentBlock(dataBase64, mimeType)
+
+  const request = async (maxTokens: number) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 60_000)
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: CLAUDE_MODEL,
+          max_tokens: maxTokens,
+          system: DEMO_OCR_SYSTEM_PROMPT(tipo),
+          messages: [
+            {
+              role: 'user',
+              content: [
+                contentBlock,
+                { type: 'text', text: 'Extraia os dados deste demonstrativo conforme as instruções.' },
+              ],
+            },
+          ],
+        }),
+      })
+
+      if (!response.ok) {
+        const errText = await response.text()
+        log.error('[demonstrativo-ocr] Claude HTTP', response.status, errText.slice(0, 500))
+        throw new Error(`Falha ao consultar IA (HTTP ${response.status})`)
+      }
+
+      return await response.json<any>()
+    } catch (error: any) {
+      if (error.name === 'AbortError') throw new Error('Tempo limite ao consultar a IA')
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  let data = await request(8192)
+
+  // Se cortou por limite de tokens (documento com muitas linhas), refaz uma vez com mais espaço
+  if (data?.stop_reason === 'max_tokens') {
+    log.warn('[demonstrativo-ocr] resposta truncada (max_tokens=8192), refazendo com 16384')
+    data = await request(16384)
+    if (data?.stop_reason === 'max_tokens') {
+      throw new Error('Demonstrativo grande demais para extrair em uma única chamada — considere dividir em páginas menores')
+    }
+  }
+
+  const textBlock = data?.content?.find((b: any) => b.type === 'text')
+  if (!textBlock?.text) throw new Error('Resposta da IA sem conteúdo de texto')
+
+  return extractJsonFromText(textBlock.text)
+}
+
+// ─── Normalização + sanity check (soma dos itens vs. total extraído) ──────
+
+function normalizeDemoResult(raw: any, tipo: TipoDemo): Record<string, any> {
+  const itensRaw = Array.isArray(raw?.itens) ? raw.itens : []
+
+  const itens = itensRaw
+    .map((it: any) => ({
+      data: String(it?.data ?? ''),
+      hora: it?.hora ? String(it.hora) : undefined,
+      operacao: it?.operacao ? String(it.operacao) : undefined,
+      matricula: it?.matricula ? String(it.matricula) : undefined,
+      valor: typeof it?.valor === 'number'
+        ? it.valor
+        : parseFloat(String(it?.valor ?? '').replace(',', '.')),
+    }))
+    // mantém itens com valor 0 (ex: operações isentas); só descarta linha sem data ou com valor inválido
+    .filter((it: any) => it.data && !Number.isNaN(it.valor))
+
+  const somaItens = itens.reduce((s: number, i: any) => s + i.valor, 0)
+  const valorTotalExtraido = typeof raw?.valor_total === 'number' ? raw.valor_total : null
+  const valorTotal = valorTotalExtraido ?? (itens.length ? somaItens : null)
+
+  const divergencia = valorTotalExtraido != null && itens.length
+    ? Math.abs(valorTotalExtraido - somaItens)
+    : 0
+
+  return {
+    tipo,
+    numero_documento: raw?.numero_documento ?? null,
+    competencia: raw?.competencia ?? null,
+    data_faturamento: raw?.data_faturamento ?? null,
+    aeronave_matricula: raw?.aeronave_matricula ?? null,
+    cliente_nome: raw?.cliente_nome ?? null,
+    valor_total: valorTotal,
+    itens,
+    _meta: {
+      soma_itens: itens.length ? Math.round(somaItens * 100) / 100 : null,
+      precisa_revisao_manual: divergencia > 0.05, // mais de 5 centavos de diferença
+    },
+  }
+}
 
 // ─── Routes: AISWEB (existentes) ──────────────────────────────────────────────
 
@@ -1366,6 +1603,36 @@ app.delete('/api/mensagens/:id', async (c) => {
   } catch (e: any) {
     log.error('[mensagens:delete]', e.message)
     return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── Route: Demonstrativo OCR (Claude) ────────────────────────────────────────
+// Aceita usuário Supabase autenticado OU x-internal-token (chamadas servidor-a-servidor).
+// Aceita imagem (jpeg/png/gif/webp) OU PDF em base64 — ver buildContentBlock.
+
+app.post('/api/demonstrativo-ocr', async (c) => {
+  try {
+    const authOk = (await requireAuthenticatedUser(c)) || checkInternalAuth(c)
+    if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
+
+    const allowed = await checkWindsockRateLimit(c, 'demo-ocr', 10)
+    if (!allowed) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+
+    const body = await c.req.json<{ imageBase64?: string; mimeType?: string; tipo?: TipoDemo }>()
+    const { imageBase64, mimeType, tipo } = body
+
+    if (!imageBase64 || !mimeType) return c.json({ error: 'imageBase64 e mimeType são obrigatórios' }, 400)
+    if (!tipo || !TIPOS_VALIDOS.includes(tipo)) {
+      return c.json({ error: 'tipo inválido (use INFRAERO, DECEA ou POUSO)' }, 400)
+    }
+
+    const raw = await callClaudeExtraction(c, imageBase64, mimeType, tipo)
+    const result = normalizeDemoResult(raw, tipo)
+
+    return c.json(result)
+  } catch (error: any) {
+    log.error('[demonstrativo-ocr]', error?.message ?? error)
+    return c.json({ error: error?.message ?? 'Falha ao processar o demonstrativo' }, 502)
   }
 })
 
