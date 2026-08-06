@@ -313,7 +313,6 @@ async function estimateUsMarketValue(
   return callWindsockValuationApi(c, body)
 }
 
-
 const AREA_NODE_MAP: Record<string, string> = {
   met: 'met',
   cartas: 'cartas',
@@ -658,7 +657,8 @@ const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de prov
 // ═══════════════════════════════════════════════════════════════════════════
 // Demonstrativo OCR (Claude Vision / Document) — versão revisada
 // ═══════════════════════════════════════════════════════════════════════════
-// Substitui a antiga Supabase Edge Function "demonstrativo-ocr" do Lovable.
+// Substitui a antiga Supabase Edge Function "demonstrativo-ocr" do Lovable e
+// o worker separado que usava Groq Vision para extração + rateio.
 //
 // Pontos endurecidos em relação à primeira versão:
 // - Suporte real a PDF (bloco `type: 'document'`) além de imagem — a
@@ -670,6 +670,10 @@ const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de prov
 // - Sanity check: soma dos itens vs. valor_total extraído, sinalizando
 //   `_meta.precisa_revisao_manual` quando divergem.
 // - Não descarta mais itens com valor 0 (ex: operações isentas).
+// - NOVO: extração de origem/destino por trecho (quando o documento traz),
+//   usada pela rota /api/demonstrativo-rateio para casar cada operação com o
+//   diário de bordo (Supabase) e apurar o responsável (cliente ou sócio) —
+//   função que antes vivia em um worker Groq separado.
 
 type TipoDemo = 'INFRAERO' | 'DECEA' | 'POUSO'
 const TIPOS_VALIDOS: TipoDemo[] = ['INFRAERO', 'DECEA', 'POUSO']
@@ -697,8 +701,10 @@ Extraia os dados e responda APENAS com um objeto JSON válido, sem markdown, sem
     {
       "data": string (formato DD/MM/YYYY),
       "hora": string ou omitido,
-      "operacao": string ou omitido (ex: código ICAO do aeródromo),
-      "matricula": string ou omitido,
+      "operacao": string ou omitido (ex: código ICAO do aeródromo, quando a linha só cita um local),
+      "origem": string ou omitido (código ICAO de origem do trecho — preencha quando o documento listar origem e destino separados, o que é comum em demonstrativos DECEA),
+      "destino": string ou omitido (código ICAO de destino do trecho),
+      "matricula": string ou omitido (matrícula da aeronave daquela linha, se vier por linha),
       "valor": number
     }
   ]
@@ -706,6 +712,7 @@ Extraia os dados e responda APENAS com um objeto JSON válido, sem markdown, sem
 
 Regras importantes:
 - Extraia TODAS as linhas/operações listadas no documento, uma por item em "itens", mesmo que o documento tenha várias páginas.
+- Se a linha trouxer origem e destino separados, preencha "origem" e "destino" (não preencha "operacao" nesse caso). Se trouxer só um aeródromo, preencha "operacao" e omita origem/destino.
 - Valores monetários devem ser números (ponto decimal, sem "R$", sem separador de milhar).
 - Inclua itens com valor 0 (ex: operações isentas) — não os omita.
 - "valor_total" deve ser o total exatamente como impresso no documento. Se não houver um total explícito, use null.
@@ -834,23 +841,35 @@ async function callClaudeExtraction(
 
 // ─── Normalização + sanity check (soma dos itens vs. total extraído) ──────
 
+interface ItemDemonstrativo {
+  data: string
+  hora?: string
+  operacao?: string
+  origem?: string
+  destino?: string
+  matricula?: string
+  valor: number
+}
+
 function normalizeDemoResult(raw: any, tipo: TipoDemo): Record<string, any> {
   const itensRaw = Array.isArray(raw?.itens) ? raw.itens : []
 
-  const itens = itensRaw
+  const itens: ItemDemonstrativo[] = itensRaw
     .map((it: any) => ({
       data: String(it?.data ?? ''),
       hora: it?.hora ? String(it.hora) : undefined,
       operacao: it?.operacao ? String(it.operacao) : undefined,
-      matricula: it?.matricula ? String(it.matricula) : undefined,
+      origem: it?.origem ? String(it.origem).toUpperCase() : undefined,
+      destino: it?.destino ? String(it.destino).toUpperCase() : undefined,
+      matricula: it?.matricula ? String(it.matricula).toUpperCase() : undefined,
       valor: typeof it?.valor === 'number'
         ? it.valor
         : parseFloat(String(it?.valor ?? '').replace(',', '.')),
     }))
     // mantém itens com valor 0 (ex: operações isentas); só descarta linha sem data ou com valor inválido
-    .filter((it: any) => it.data && !Number.isNaN(it.valor))
+    .filter((it: ItemDemonstrativo) => it.data && !Number.isNaN(it.valor))
 
-  const somaItens = itens.reduce((s: number, i: any) => s + i.valor, 0)
+  const somaItens = itens.reduce((s: number, i: ItemDemonstrativo) => s + i.valor, 0)
   const valorTotalExtraido = typeof raw?.valor_total === 'number' ? raw.valor_total : null
   const valorTotal = valorTotalExtraido ?? (itens.length ? somaItens : null)
 
@@ -872,6 +891,97 @@ function normalizeDemoResult(raw: any, tipo: TipoDemo): Record<string, any> {
       precisa_revisao_manual: divergencia > 0.05, // mais de 5 centavos de diferença
     },
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Rateio por cliente/sócio — casa cada item do demonstrativo com o diário de
+// bordo (Supabase) para descobrir o responsável e somar o total por pessoa.
+// ═══════════════════════════════════════════════════════════════════════════
+// Migrado do worker separado que usava Groq Vision: aqui reaproveitamos a
+// extração via Claude (callClaudeExtraction) e o SUPABASE_URL/SUPABASE_ANON_KEY
+// que o worker já usa para autenticação — não precisa de nenhum secret novo.
+
+interface ItemRateio extends ItemDemonstrativo {
+  responsavel: string
+}
+
+const RATEIO_SEM_MATCH = 'Não Identificado / Traslado'
+
+/** Converte "DD/MM/YYYY" (formato do OCR) para "YYYY-MM-DD" (formato esperado pelo Postgres/PostgREST). */
+function brDateToIso(brDate: string): string | null {
+  const m = brDate.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+  if (!m) return null
+  const [, dd, mm, yyyy] = m
+  return `${yyyy}-${mm}-${dd}`
+}
+
+/**
+ * Busca em `lancamentos_diario_bordo` o trecho que bate com matrícula + data +
+ * aeródromo de partida/chegada, e devolve o nome do cliente ou sócio responsável.
+ * Usa a REST API do Supabase (PostgREST) diretamente, como o worker Groq original.
+ */
+async function buscarResponsavelLancamento(
+  c: Context<{ Bindings: Bindings }>,
+  item: Pick<ItemDemonstrativo, 'data' | 'origem' | 'destino' | 'matricula'>
+): Promise<string> {
+  const { SUPABASE_URL, SUPABASE_ANON_KEY } = c.env
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error('Supabase não configurado (SUPABASE_URL/SUPABASE_ANON_KEY)')
+  if (!item.matricula || !item.origem || !item.destino) return RATEIO_SEM_MATCH
+
+  const dataRegistro = brDateToIso(item.data)
+  if (!dataRegistro) return RATEIO_SEM_MATCH
+
+  const queryParams = new URLSearchParams({
+    select: 'id, clientes_id, clientes(nome), socios_id, socios(nome), aeronave!inner(matricula)',
+    'aeronave.matricula': `eq.${item.matricula}`,
+    data_registro: `eq.${dataRegistro}`,
+    aerodromo_partida: `eq.${item.origem}`,
+    aerodromo_chegada: `eq.${item.destino}`,
+    limit: '1',
+  })
+
+  const url = `${SUPABASE_URL}/rest/v1/lancamentos_diario_bordo?${queryParams.toString()}`
+
+  const res = await fetch(url, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+  })
+
+  if (!res.ok) {
+    log.warn(`[rateio] falha ao consultar lancamentos_diario_bordo (HTTP ${res.status}) para ${item.matricula} ${item.origem}-${item.destino} em ${item.data}`)
+    return RATEIO_SEM_MATCH
+  }
+
+  const rows = await res.json<any[]>()
+  const trecho = rows?.[0]
+  if (!trecho) return RATEIO_SEM_MATCH
+
+  return trecho.clientes?.nome ?? trecho.socios?.nome ?? RATEIO_SEM_MATCH
+}
+
+/**
+ * Monta o relatório de rateio por perna + total por cliente/sócio.
+ * Sequencial de propósito: o volume típico de um demonstrativo mensal (dezenas
+ * de linhas) não justifica paralelizar contra a REST API do Supabase.
+ */
+async function montarRelatorioRateio(
+  c: Context<{ Bindings: Bindings }>,
+  itens: ItemDemonstrativo[]
+): Promise<{ relatorio: ItemRateio[]; totalPorCliente: Record<string, number> }> {
+  const relatorio: ItemRateio[] = []
+  const totalPorCliente: Record<string, number> = {}
+
+  for (const item of itens) {
+    const responsavel = await buscarResponsavelLancamento(c, item)
+    relatorio.push({ ...item, responsavel })
+    totalPorCliente[responsavel] = Math.round(((totalPorCliente[responsavel] ?? 0) + item.valor) * 100) / 100
+  }
+
+  return { relatorio, totalPorCliente }
 }
 
 // ─── Routes: AISWEB (existentes) ──────────────────────────────────────────────
@@ -1609,6 +1719,8 @@ app.delete('/api/mensagens/:id', async (c) => {
 // ─── Route: Demonstrativo OCR (Claude) ────────────────────────────────────────
 // Aceita usuário Supabase autenticado OU x-internal-token (chamadas servidor-a-servidor).
 // Aceita imagem (jpeg/png/gif/webp) OU PDF em base64 — ver buildContentBlock.
+// Devolve só os dados extraídos e normalizados, sem rateio — use
+// /api/demonstrativo-rateio quando também precisar do cruzamento com o diário de bordo.
 
 app.post('/api/demonstrativo-ocr', async (c) => {
   try {
@@ -1633,6 +1745,45 @@ app.post('/api/demonstrativo-ocr', async (c) => {
   } catch (error: any) {
     log.error('[demonstrativo-ocr]', error?.message ?? error)
     return c.json({ error: error?.message ?? 'Falha ao processar o demonstrativo' }, 502)
+  }
+})
+
+// ─── Route: Demonstrativo + Rateio (Claude + Supabase) ────────────────────────
+// Une a extração via Claude com o cruzamento contra `lancamentos_diario_bordo`
+// no Supabase (antes era um worker Groq separado). Pensada para demonstrativos
+// DECEA, que trazem origem/destino por trecho — mas funciona para qualquer tipo;
+// itens sem origem/destino/matrícula simplesmente caem em "Não Identificado / Traslado".
+
+app.post('/api/demonstrativo-rateio', async (c) => {
+  try {
+    const authOk = (await requireAuthenticatedUser(c)) || checkInternalAuth(c)
+    if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
+
+    const allowed = await checkWindsockRateLimit(c, 'demo-ocr', 10)
+    if (!allowed) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+
+    const body = await c.req.json<{ imageBase64?: string; mimeType?: string; tipo?: TipoDemo }>()
+    const { imageBase64, mimeType } = body
+    const tipo: TipoDemo = body.tipo ?? 'DECEA'
+
+    if (!imageBase64 || !mimeType) return c.json({ error: 'imageBase64 e mimeType são obrigatórios' }, 400)
+    if (!TIPOS_VALIDOS.includes(tipo)) {
+      return c.json({ error: 'tipo inválido (use INFRAERO, DECEA ou POUSO)' }, 400)
+    }
+
+    const raw = await callClaudeExtraction(c, imageBase64, mimeType, tipo)
+    const demonstrativo = normalizeDemoResult(raw, tipo)
+
+    const { relatorio, totalPorCliente } = await montarRelatorioRateio(c, demonstrativo.itens)
+
+    return c.json({
+      ...demonstrativo,
+      rateio_por_perna: relatorio,
+      total_a_faturar_por_cliente: totalPorCliente,
+    })
+  } catch (error: any) {
+    log.error('[demonstrativo-rateio]', error?.message ?? error)
+    return c.json({ error: error?.message ?? 'Falha ao processar o rateio do demonstrativo' }, 502)
   }
 })
 
