@@ -15,6 +15,7 @@ type Bindings = {
   EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
   SUPABASE_URL: string
   SUPABASE_ANON_KEY: string
+  VITE_SUPABASE_PUBLISHABLE_KEY?: string // usado só para diagnóstico em log; não substitui SUPABASE_ANON_KEY
   WINSOCK_VALUATION_URL: string   // https://windsock.ai/api/v3/valuations
   WINSOCK_API_KEY: string
   WINSOCK_AUTH_HEADER?: string    // default: 'X-API-Key'
@@ -47,20 +48,42 @@ const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/'
 const WINSOCK_VALUATION_CACHE_TTL = 86_400
 const WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i
 
+/**
+ * Valida o Bearer token do Supabase chamando /auth/v1/user.
+ * Inclui logs de diagnóstico (log.debug só imprime com isDev=true — ver nota no final do arquivo).
+ */
 async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
   const authorization = c.req.header('authorization')
-  const { SUPABASE_URL, SUPABASE_ANON_KEY } = c.env
+  log.debug('[auth] Authorization header present:', Boolean(authorization))
+  const { SUPABASE_URL, SUPABASE_ANON_KEY, VITE_SUPABASE_PUBLISHABLE_KEY } = c.env
 
-  if (!authorization?.startsWith('Bearer ') || !SUPABASE_URL || !SUPABASE_ANON_KEY) return false
+  if (!authorization?.startsWith('Bearer ')) {
+    log.debug('[auth] missing Bearer token')
+    return false
+  }
+  if (!SUPABASE_URL) {
+    log.warn('[auth] SUPABASE_URL não definido')
+    return false
+  }
+  if (!SUPABASE_ANON_KEY) {
+    // Publishable key NÃO serve para validar usuário no endpoint /auth/v1/user
+    log.warn('[auth] SUPABASE_ANON_KEY ausente. VITE_SUPABASE_PUBLISHABLE_KEY presente:', Boolean(VITE_SUPABASE_PUBLISHABLE_KEY))
+    return false
+  }
 
-  const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: authorization,
-    },
-  })
-
-  return response.ok
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: authorization,
+      },
+    })
+    log.debug('[auth] supabase /auth/v1/user status:', res.status)
+    return res.ok
+  } catch (err: any) {
+    log.error('[auth] erro ao validar token no Supabase:', err?.message ?? err)
+    return false
+  }
 }
 
 function valuationCacheKey(aircraft: Record<string, unknown>): string {
@@ -618,9 +641,21 @@ const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024 // 25MB (limite comum de prov
 
 app.get('/', (c) => c.text('ShareBrasil API 🚀'))
 
-app.post('/api/valuation', async (c) => {
+/**
+ * Handler compartilhado de valuation, registrado em /api/valuation (singular)
+ * e /api/valuations (plural) — mesma lógica, duas rotas.
+ *
+ * Aceita tanto um usuário Supabase autenticado quanto o x-internal-token
+ * (checkInternalAuth), para permitir chamadas internas/servidor-a-servidor
+ * sem sessão de usuário.
+ */
+async function valuationHandler(c: Context<{ Bindings: Bindings }>) {
   try {
-    if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'Não autorizado' }, 401)
+    const authOk = (await requireAuthenticatedUser(c)) || checkInternalAuth(c)
+    if (!authOk) {
+      log.debug('[valuation] auth failed; authorization present:', Boolean(c.req.header('authorization')))
+      return c.json({ error: 'Não autorizado' }, 401)
+    }
 
     const aircraft = await c.req.json<Record<string, unknown>>()
     if (!aircraft || typeof aircraft !== 'object' || Array.isArray(aircraft)) {
@@ -639,10 +674,13 @@ app.post('/api/valuation', async (c) => {
 
     return c.json(valuation)
   } catch (error: any) {
-    log.error('[windsock]', error.message)
-    return c.json({ error: error.message === 'Integração Windsock não configurada' ? error.message : 'Não foi possível obter a avaliação da aeronave' }, 502)
+    log.error('[windsock]', error?.message ?? error)
+    return c.json({ error: error?.message === 'Integração Windsock não configurada' ? error.message : 'Não foi possível obter a avaliação da aeronave' }, 502)
   }
-})
+}
+
+app.post('/api/valuation', valuationHandler)
+app.post('/api/valuations', valuationHandler)
 
 app.post('/api/us-aircraft-estimate', async (c) => {
   try {
