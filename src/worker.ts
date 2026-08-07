@@ -21,6 +21,7 @@ type Bindings = {
   WINSOCK_AUTH_HEADER?: string    // default: 'X-API-Key'
   WINSOCK_AUTH_PREFIX?: string    // default: '' (sem prefixo)
   ANTHROPIC_API_KEY: string       // usado no OCR de demonstrativos (Claude Vision/Document)
+  ALLOWED_ORIGINS?: string        // opcional: lista separada por vírgula de origens permitidas no CORS. Se ausente, libera '*'.
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -28,7 +29,14 @@ interface Airport { icao: string; name: string; lat: number; lon: number; distKm
 // ─── App & Logger ─────────────────────────────────────────────────────────────
 
 const app = new Hono<{ Bindings: Bindings }>()
-app.use('*', cors())
+
+app.use('*', async (c, next) => {
+  const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
+  const corsMiddleware = cors({
+    origin: allowed && allowed.length > 0 ? allowed : '*',
+  })
+  return corsMiddleware(c, next)
+})
 
 const isDev = false
 const log = {
@@ -106,20 +114,27 @@ function marketEstimateCacheKey(model: string, year?: number, hours?: number, re
   return `windsock-market-estimate:${reg || model.trim().toLowerCase()}|${year ?? ''}|${hours ?? ''}`
 }
 
-// ─── Windsock: rate limit (KV, best-effort) ───────────────────────────────────
+// ─── Rate limit genérico (KV, best-effort) ────────────────────────────────────
+// Usado tanto para Windsock/Claude (buckets pesados) quanto para as rotas
+// públicas de proxy da AISWEB (bucket por IP, ver clientBucket()).
 
-async function checkWindsockRateLimit(
+async function checkRateLimit(
   c: Context<{ Bindings: Bindings }>,
   bucket: string,
   perMinute: number
 ): Promise<boolean> {
   const minuteWindow = Math.floor(Date.now() / 60_000)
-  const key = `windsock-rl:${bucket}:${minuteWindow}`
+  const key = `rl:${bucket}:${minuteWindow}`
   const kv = c.env.CACHE_KV
   const current = parseInt((await kv.get(key)) ?? '0', 10)
   if (current >= perMinute) return false
   await kv.put(key, String(current + 1), { expirationTtl: 70 })
   return true
+}
+
+/** Identifica o cliente para limitar por IP as rotas públicas (sem auth) que fazem proxy da AISWEB. */
+function clientIp(c: Context<{ Bindings: Bindings }>): string {
+  return c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown'
 }
 
 // ─── Windsock: resolver make_model_id a partir de texto livre ────────────────
@@ -134,7 +149,7 @@ async function resolveMakeModelId(
   const cacheKey = `windsock-makemodel:${trimmed.toLowerCase()}`
 
   return cachedFetch(c, cacheKey, 30 * 86_400, async () => {
-    const allowed = await checkWindsockRateLimit(c, 'reference', 60)
+    const allowed = await checkRateLimit(c, 'windsock:reference', 60)
     if (!allowed) throw new Error('Limite de requisições de referência à Windsock atingido')
 
     const url = `https://windsock.ai/api/v3/references/make-models?q=${encodeURIComponent(trimmed)}&limit=1`
@@ -238,7 +253,7 @@ async function callWindsockValuationApi(
 
   if (!WINSOCK_VALUATION_URL || !WINSOCK_API_KEY) throw new Error('Integração Windsock não configurada')
 
-  const allowed = await checkWindsockRateLimit(c, 'compute_heavy', 6)
+  const allowed = await checkRateLimit(c, 'windsock:compute_heavy', 6)
   if (!allowed) throw new Error('Limite de requisições à Windsock atingido (6/min no plano Free) — tente novamente em instantes')
 
   const controller = new AbortController()
@@ -406,15 +421,36 @@ async function cachedFetch(
   }
 
   log.debug(`[kv] MISS key="${key}" — buscando na DECEA`)
-  const locked = await kv.get(lockKey)
+
+  // Se já existe alguém buscando essa chave, tenta aguardar o resultado em vez
+  // de disparar um segundo fetch concorrente. Faz até 3 tentativas (~2.1s) antes
+  // de desistir de esperar.
+  let locked = await kv.get(lockKey)
   if (locked) {
-    await new Promise(r => setTimeout(r, 800))
-    const retry = await kv.get(key, { type: 'json' }) as any
-    if (retry?.data) return retry.data
-    if (retry) return retry
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise(r => setTimeout(r, 700))
+      const retry = await kv.get(key, { type: 'json' }) as any
+      if (retry && 'data' in retry) return retry.data
+      if (retry) return retry
+      locked = await kv.get(lockKey)
+      if (!locked) break
+    }
   }
 
+  // FIX (race condition): antes, se o lock ainda estivesse ocupado após as
+  // tentativas de espera, `acquiredLock` virava `false` e o código pulava o
+  // `kv.put` do lock — mas chamava `fetcher()` mesmo assim, sem proteção
+  // nenhuma. Isso permitia duas (ou mais) requisições concorrentes disparando
+  // fetch pra mesma chave em cache-miss, cada uma pensando que a outra ainda
+  // estava "esperando".
+  //
+  // Agora o lock é SEMPRE marcado antes de chamar fetcher() — mesmo que
+  // estivéssemos esperando um lock alheio e ele não tenha liberado a tempo
+  // (nesse caso assumimos que o holder anterior pode ter travado/caído e
+  // tomamos a vez, mas sob nosso próprio lock) — e SEMPRE liberado no
+  // finally. Isso fecha a janela em que um fetch ficava "solto" sem lock.
   await kv.put(lockKey, '1', { expirationTtl: 60 })
+
   try {
     const data = await fetcher()
     await save(data)
@@ -462,6 +498,15 @@ async function fetchAisweb(
     return {}
   }
   return root[node]
+}
+
+/**
+ * Aplica rate limit por IP às rotas públicas (sem autenticação) que fazem
+ * proxy da AISWEB. Protege sua cota da API do DECEA contra abuso vindo de
+ * qualquer origem, já que o CORS dessas rotas é aberto por padrão.
+ */
+async function requireAiswebRateLimit(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
+  return checkRateLimit(c, `aisweb-public:${clientIp(c)}`, 60)
 }
 
 // ─── Geo Helpers ──────────────────────────────────────────────────────────────
@@ -599,20 +644,30 @@ function shortCode(): string {
 
 /**
  * Compara dois tokens em tempo constante para evitar timing attacks.
- * `crypto.subtle.timingSafeEqual` é uma extensão específica do runtime
- * Cloudflare Workers (não é Web Crypto padrão) — funciona só nesse ambiente.
+ *
+ * Importante: NÃO retornamos cedo quando os tamanhos diferem — isso vazaria
+ * o tamanho do token via timing (o caso "tamanhos diferentes" seria sempre
+ * mais rápido que o caso "tamanhos iguais mas conteúdo diferente"). Em vez
+ * disso, aplicamos SHA-256 nos dois valores antes de comparar: hash sempre
+ * tem tamanho fixo (32 bytes), então `crypto.subtle.timingSafeEqual` nunca
+ * lança exceção por tamanho e o tempo de execução não varia com o input.
+ *
+ * `crypto.subtle.timingSafeEqual` é uma extensão não padrão do runtime do
+ * Cloudflare Workers (não faz parte da Web Crypto API padrão) — só funciona
+ * nesse ambiente.
  */
-function timingSafeTokenMatch(a: string, b: string): boolean {
+async function timingSafeTokenMatch(a: string, b: string): Promise<boolean> {
   const enc = new TextEncoder()
-  const bufA = enc.encode(a)
-  const bufB = enc.encode(b)
-  if (bufA.byteLength !== bufB.byteLength) return false
+  const [hashA, hashB] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ])
   // @ts-ignore — extensão do runtime Cloudflare Workers, não faz parte do lib.dom.d.ts
-  return crypto.subtle.timingSafeEqual(bufA, bufB)
+  return crypto.subtle.timingSafeEqual(hashA, hashB)
 }
 
 /** Protege rotas sensíveis (upload, envio de email, OCR). Chamado no início de cada handler. */
-function checkInternalAuth(c: Context<{ Bindings: Bindings }>): boolean {
+async function checkInternalAuth(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
   const token = c.req.header('x-internal-token')
   const expected = c.env.INTERNAL_TOKEN
   if (!expected || !token) return false
@@ -624,6 +679,13 @@ function checkInternalAuth(c: Context<{ Bindings: Bindings }>): boolean {
  * Serve só para rastreabilidade (quem disparou o envio) — a autorização real
  * é feita pelo x-internal-token. Se quiser validar a assinatura de verdade,
  * dá pra usar a JWKS do Supabase (GET /auth/v1/.well-known/jwks.json) com jose.
+ *
+ * IMPORTANTE: como a assinatura não é validada aqui, o valor retornado só é
+ * confiável quando a requisição também passou por `requireAuthenticatedUser`
+ * (que valida o token contra o Supabase). Em rotas liberadas só por
+ * `checkInternalAuth` (chamada servidor-a-servidor), um JWT arbitrário pode
+ * ser anexado e o `sub` pode ser forjado — por isso não deve ser usado como
+ * valor de auditoria nesse caminho (ver uso em /api/send-email).
  */
 function extractSupabaseUserId(c: Context<{ Bindings: Bindings }>): string | null {
   const authHeader = c.req.header('authorization')
@@ -900,6 +962,12 @@ function normalizeDemoResult(raw: any, tipo: TipoDemo): Record<string, any> {
 // Migrado do worker separado que usava Groq Vision: aqui reaproveitamos a
 // extração via Claude (callClaudeExtraction) e o SUPABASE_URL/SUPABASE_ANON_KEY
 // que o worker já usa para autenticação — não precisa de nenhum secret novo.
+//
+// IMPORTANTE: essa consulta usa SUPABASE_ANON_KEY (chave pública) para ler
+// `lancamentos_diario_bordo` via PostgREST. Isso só é seguro se a Row Level
+// Security dessa tabela estiver configurada para restringir corretamente o
+// que o papel `anon` pode enxergar — vale confirmar isso no painel do
+// Supabase, já que os dados aqui são financeiros/pessoais.
 
 interface ItemRateio extends ItemDemonstrativo {
   responsavel: string
@@ -998,7 +1066,7 @@ app.get('/', (c) => c.text('ShareBrasil API 🚀'))
  */
 async function valuationHandler(c: Context<{ Bindings: Bindings }>) {
   try {
-    const authOk = (await requireAuthenticatedUser(c)) || checkInternalAuth(c)
+    const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
     if (!authOk) {
       log.debug('[valuation] auth failed; authorization present:', Boolean(c.req.header('authorization')))
       return c.json({ error: 'Não autorizado' }, 401)
@@ -1053,6 +1121,7 @@ app.post('/api/us-aircraft-estimate', async (c) => {
 })
 
 app.get('/api/weather/:icao', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icao = c.req.param('icao').toUpperCase()
   try {
     const data = await cachedFetch(c, `metar-${icao}`, 300, () => fetchAisweb(c, 'met', { icaoCode: icao }))
@@ -1064,6 +1133,7 @@ app.get('/api/weather/:icao', async (c) => {
 })
 
 app.get('/api/notam/:icao', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icao = c.req.param('icao').toUpperCase()
   try {
     const data = await cachedFetch(c, `notam-${icao}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: icao }))
@@ -1074,6 +1144,7 @@ app.get('/api/notam/:icao', async (c) => {
 })
 
 app.get('/api/charts/:icao', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icao = c.req.param('icao').toUpperCase()
   const especie = c.req.query('especie'), tipo = c.req.query('tipo')
   try {
@@ -1086,6 +1157,7 @@ app.get('/api/charts/:icao', async (c) => {
 })
 
 async function getRotaer(c: Context<{ Bindings: Bindings }>, icaoParam?: string) {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icaoCode = (icaoParam ?? c.req.query('icaoCode') ?? c.req.query('icao'))?.trim().toUpperCase()
   const adep = c.req.query('adep')?.trim().toUpperCase()
   const ades = c.req.query('ades')?.trim().toUpperCase()
@@ -1113,6 +1185,7 @@ app.get('/api/rotaer', (c) => getRotaer(c))
 app.get('/api/rotaer/:icao', (c) => getRotaer(c, c.req.param('icao')))
 
 app.get('/api/routes', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const adep = c.req.query('adep')?.toUpperCase()
   const ades = c.req.query('ades')?.toUpperCase()
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
@@ -1134,6 +1207,7 @@ app.get('/api/routes', async (c) => {
 })
 
 app.get('/api/solar/:icao', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icao = c.req.param('icao').toUpperCase()
   const date = c.req.query('date')
   try {
@@ -1192,6 +1266,7 @@ app.post('/api/flight-calculations', async (c) => {
 })
 
 app.get('/api/nearest', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const lat = parseFloat(c.req.query('lat') ?? ''), lon = parseFloat(c.req.query('lon') ?? '')
   if (isNaN(lat) || isNaN(lon)) return c.json({ error: 'lat/lon inválidos' }, 400)
   try {
@@ -1203,6 +1278,7 @@ app.get('/api/nearest', async (c) => {
 })
 
 app.get('/api/geiloc/nearby', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const lat = parseFloat(c.req.query('lat') ?? ''), lon = parseFloat(c.req.query('lon') ?? '')
   if (isNaN(lat) || isNaN(lon)) return c.json({ error: 'lat/lon inválidos' }, 400)
   try {
@@ -1219,6 +1295,7 @@ app.get('/api/geiloc/nearby', async (c) => {
 // ─── /api/flightplan ─────────────────────────────────────────────────────────
 
 app.get('/api/flightplan', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const adep = c.req.query('adep')?.toUpperCase()
   const ades = c.req.query('ades')?.toUpperCase()
   const speed = parseInt(c.req.query('speed') ?? '120')
@@ -1254,14 +1331,15 @@ app.get('/api/flightplan', async (c) => {
 
     let routeStr = `${adep} DCT ${ades}`
     try {
-      const routePref = await fetchAisweb(c, 'routesp', { adep, ades })
+      // Reaproveita o mesmo cache de /api/routes em vez de bater direto na AISWEB.
+      const routePref = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
       routeStr = routePref?.item?.[0]?.rota ?? routeStr
     } catch { }
 
     const [alternates, notamDep, notamDes] = await Promise.all([
       fetchNearby(c, lat2, lon2),
-      fetchAisweb(c, 'notam', { icaoCode: adep }),
-      fetchAisweb(c, 'notam', { icaoCode: ades }),
+      cachedFetch(c, `notam-${adep}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: adep })),
+      cachedFetch(c, `notam-${ades}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: ades })),
     ])
 
     const nearbyAlts = alternates
@@ -1320,7 +1398,7 @@ app.get('/api/flightplan', async (c) => {
 // ─── Routes: Upload de arquivos (R2 + short link) ────────────────────────────
 
 app.post('/api/upload', async (c) => {
-  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
 
   try {
     const formData = await c.req.formData()
@@ -1383,6 +1461,8 @@ app.get('/r/:code', async (c) => {
 // ─── Routes: Templates de email (D1) ─────────────────────────────────────────
 
 app.get('/api/templates', async (c) => {
+  const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
+  if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
   try {
     const { results } = await c.env.DB.prepare(
       'SELECT id, tipo, assunto, corpo_html, created_at FROM email_templates ORDER BY tipo'
@@ -1394,6 +1474,8 @@ app.get('/api/templates', async (c) => {
 })
 
 app.get('/api/template/:tipo', async (c) => {
+  const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
+  if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
   const tipo = c.req.param('tipo')
   try {
     const row = await c.env.DB.prepare(
@@ -1406,7 +1488,7 @@ app.get('/api/template/:tipo', async (c) => {
 })
 
 app.post('/api/templates', async (c) => {
-  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   try {
     const { tipo, assunto, corpo_html } = await c.req.json()
     if (!tipo || !assunto || !corpo_html) return c.json({ error: 'Campos obrigatórios faltando' }, 400)
@@ -1423,7 +1505,7 @@ app.post('/api/templates', async (c) => {
 })
 
 app.put('/api/templates/:id', async (c) => {
-  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   try {
     const id = c.req.param('id')
     const { assunto, corpo_html } = await c.req.json()
@@ -1443,13 +1525,19 @@ app.put('/api/templates/:id', async (c) => {
 //   2. Envio do email via POST /api/send-email → passa attachments: [{ filename, r2_key: key }]
 
 app.post('/api/send-email', async (c) => {
-  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  const viaSupabase = await requireAuthenticatedUser(c)
+  const viaInternal = !viaSupabase && (await checkInternalAuth(c))
+  if (!viaSupabase && !viaInternal) return c.json({ error: 'Unauthorized' }, 401)
 
   try {
     const { to, cc, subject, html, tipo, reference_type, reference_id, attachments } = await c.req.json()
     if (!to || !subject || !html) return c.json({ error: 'Campos obrigatórios faltando (to, subject, html)' }, 400)
 
-    const enviadoPor = extractSupabaseUserId(c)
+    // Só confiamos no sub do JWT quando ele foi validado de verdade contra o
+    // Supabase (viaSupabase) — em chamadas servidor-a-servidor autenticadas
+    // só pelo token interno, o JWT anexado não é verificado e não deve virar
+    // valor de auditoria (ver nota em extractSupabaseUserId).
+    const enviadoPor = viaSupabase ? extractSupabaseUserId(c) : null
 
     // ─── Monta anexos a partir do R2 ─────────────────────────────────────
     let resolvedAttachments: { filename: string; content: string }[] | undefined
@@ -1528,7 +1616,7 @@ app.post('/api/send-email', async (c) => {
 })
 
 app.get('/api/email-envios', async (c) => {
-  if (!checkInternalAuth(c)) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   const referenceId = c.req.query('reference_id')
   try {
     const query = referenceId
@@ -1724,10 +1812,10 @@ app.delete('/api/mensagens/:id', async (c) => {
 
 app.post('/api/demonstrativo-ocr', async (c) => {
   try {
-    const authOk = (await requireAuthenticatedUser(c)) || checkInternalAuth(c)
+    const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
     if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
 
-    const allowed = await checkWindsockRateLimit(c, 'demo-ocr', 10)
+    const allowed = await checkRateLimit(c, 'demo-ocr', 10)
     if (!allowed) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
 
     const body = await c.req.json<{ imageBase64?: string; mimeType?: string; tipo?: TipoDemo }>()
@@ -1756,10 +1844,10 @@ app.post('/api/demonstrativo-ocr', async (c) => {
 
 app.post('/api/demonstrativo-rateio', async (c) => {
   try {
-    const authOk = (await requireAuthenticatedUser(c)) || checkInternalAuth(c)
+    const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
     if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
 
-    const allowed = await checkWindsockRateLimit(c, 'demo-ocr', 10)
+    const allowed = await checkRateLimit(c, 'demo-ocr', 10)
     if (!allowed) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
 
     const body = await c.req.json<{ imageBase64?: string; mimeType?: string; tipo?: TipoDemo }>()
