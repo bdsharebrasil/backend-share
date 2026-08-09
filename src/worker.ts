@@ -15,6 +15,7 @@ type Bindings = {
   EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
   SUPABASE_URL: string
   SUPABASE_ANON_KEY: string
+  SUPABASE_SERVICE_ROLE_KEY: string
   VITE_SUPABASE_PUBLISHABLE_KEY?: string // usado só para diagnóstico em log; não substitui SUPABASE_ANON_KEY
   WINSOCK_VALUATION_URL: string   // https://windsock.ai/api/v3/valuations
   WINSOCK_API_KEY: string
@@ -25,6 +26,31 @@ type Bindings = {
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
+
+interface ReservationRequest {
+  hotelId: string
+  dataCheckin: string
+  dataCheckout: string
+  tipoQuarto?: string
+  quantidadeHospedes: number
+  hospedeNome: string
+  hospedeTelefone: string
+  hospedeEmail?: string
+  observacoes?: string
+  userId?: string
+}
+
+interface HotelReservationHotel {
+  id: string
+  nome: string
+  endereco: string | null
+  cidade: string | null
+  uf: string | null
+  email: string | null
+  email_reservas: string | null
+  telefone: string | null
+  telefone_reservas: string | null
+}
 
 // ─── App & Logger ─────────────────────────────────────────────────────────────
 
@@ -56,6 +82,16 @@ const parser = new XMLParser({
 const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/'
 const WINSOCK_VALUATION_CACHE_TTL = 86_400
 const WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i
+
+function escapeHtml(value: string | number): string {
+  return String(value).replace(/[&<>'"]/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    "'": '&#39;',
+    '"': '&quot;',
+  })[char]!)
+}
 
 /**
  * Valida o Bearer token do Supabase chamando /auth/v1/user.
@@ -1872,6 +1908,132 @@ app.post('/api/demonstrativo-rateio', async (c) => {
   } catch (error: any) {
     log.error('[demonstrativo-rateio]', error?.message ?? error)
     return c.json({ error: error?.message ?? 'Falha ao processar o rateio do demonstrativo' }, 502)
+  }
+})
+
+app.post('/api/hotel-reservation', async (c) => {
+  try {
+    const allowed = await checkRateLimit(c, `hotel-reservation:${clientIp(c)}`, 5)
+    if (!allowed) return c.json({ error: 'Limite de solicitações atingido, tente novamente em instantes' }, 429)
+
+    const body = await c.req.json<ReservationRequest>()
+    const required: Array<keyof ReservationRequest> = [
+      'hotelId',
+      'dataCheckin',
+      'dataCheckout',
+      'quantidadeHospedes',
+      'hospedeNome',
+      'hospedeTelefone',
+    ]
+    const missing = required.filter(key => {
+      const value = body[key]
+      return typeof value === 'string' ? !value.trim() : value == null
+    })
+
+    if (missing.length) {
+      return c.json({ error: `Campos obrigatórios faltando: ${missing.join(', ')}` }, 400)
+    }
+    if (!Number.isInteger(body.quantidadeHospedes) || body.quantidadeHospedes < 1) {
+      return c.json({ error: 'quantidadeHospedes deve ser um número inteiro maior que zero' }, 400)
+    }
+    if (!c.env.SUPABASE_URL || !c.env.SUPABASE_SERVICE_ROLE_KEY || !c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) {
+      log.error('[hotel-reservation] configuração de integração ausente')
+      return c.json({ error: 'Serviço de reservas indisponível' }, 503)
+    }
+
+    const hotelResponse = await fetch(
+      `${c.env.SUPABASE_URL}/rest/v1/hoteis?id=eq.${encodeURIComponent(body.hotelId)}&select=id,nome,endereco,cidade,uf,email,email_reservas,telefone,telefone_reservas`,
+      {
+        headers: {
+          apikey: c.env.SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+      },
+    )
+
+    if (!hotelResponse.ok) {
+      log.error('[hotel-reservation] falha ao buscar hotel:', hotelResponse.status)
+      return c.json({ error: 'Falha ao consultar hotel' }, 502)
+    }
+
+    const hotels = await hotelResponse.json<HotelReservationHotel[]>()
+    const hotel = hotels[0]
+    if (!hotel) return c.json({ error: 'Hotel não encontrado' }, 404)
+
+    const destinatario = hotel.email_reservas || hotel.email
+    if (!destinatario) return c.json({ error: 'Hotel não possui email cadastrado para reservas' }, 422)
+
+    const emailResponse = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${c.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: c.env.EMAIL_FROM,
+        to: [destinatario],
+        reply_to: body.hospedeEmail || undefined,
+        subject: `Solicitação de reserva — ${body.hospedeNome} (${body.dataCheckin} a ${body.dataCheckout})`,
+        html: `
+          <style>.hotel-reservation-note { font-size: 12px; color: #666; }</style>
+          <h2>Nova solicitação de reserva</h2>
+          <p><strong>Hotel:</strong> ${escapeHtml(hotel.nome)}</p>
+          <p><strong>Check-in:</strong> ${escapeHtml(body.dataCheckin)}</p>
+          <p><strong>Check-out:</strong> ${escapeHtml(body.dataCheckout)}</p>
+          ${body.tipoQuarto ? `<p><strong>Tipo de quarto:</strong> ${escapeHtml(body.tipoQuarto)}</p>` : ''}
+          <p><strong>Hóspede:</strong> ${escapeHtml(body.hospedeNome)}</p>
+          <p><strong>Telefone:</strong> ${escapeHtml(body.hospedeTelefone)}</p>
+          ${body.hospedeEmail ? `<p><strong>Email:</strong> ${escapeHtml(body.hospedeEmail)}</p>` : ''}
+          <p><strong>Nº de hóspedes:</strong> ${escapeHtml(body.quantidadeHospedes)}</p>
+          ${body.observacoes ? `<p><strong>Observações:</strong> ${escapeHtml(body.observacoes)}</p>` : ''}
+          <hr>
+          <p class="hotel-reservation-note">Solicitação gerada automaticamente pelo sistema Share Brasil.</p>
+        `,
+      }),
+    })
+
+    if (!emailResponse.ok) {
+      log.error('[hotel-reservation] falha ao enviar email:', emailResponse.status)
+      return c.json({ error: 'Falha ao enviar solicitação por email' }, 500)
+    }
+
+    const reservationResponse = await fetch(`${c.env.SUPABASE_URL}/rest/v1/hotel_reservas`, {
+      method: 'POST',
+      headers: {
+        apikey: c.env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        user_id: body.userId ?? null,
+        hotel_id: hotel.id,
+        nome_hotel: hotel.nome,
+        endereco_hotel: hotel.endereco,
+        cidade: hotel.cidade,
+        data_checkin: body.dataCheckin,
+        data_checkout: body.dataCheckout,
+        tipo_quarto: body.tipoQuarto ?? null,
+        quantidade_hospedes: body.quantidadeHospedes,
+        hospede_nome: body.hospedeNome,
+        hospede_telefone: body.hospedeTelefone,
+        hospede_email: body.hospedeEmail ?? null,
+        observacoes: body.observacoes ?? null,
+        status_reserva: 'solicitada',
+      }),
+    })
+
+    if (!reservationResponse.ok) {
+      const detail = await reservationResponse.text()
+      log.error('[hotel-reservation] falha ao registrar reserva:', detail)
+      return c.json({ success: true, warning: 'Email enviado, mas falha ao salvar registro' })
+    }
+
+    const reservas = await reservationResponse.json<unknown[]>()
+    return c.json({ success: true, reserva: reservas[0] ?? null })
+  } catch (error: any) {
+    log.error('[hotel-reservation]', error?.message ?? error)
+    return c.json({ error: 'Falha ao processar solicitação de reserva' }, 500)
   }
 })
 
