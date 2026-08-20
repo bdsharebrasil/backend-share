@@ -685,11 +685,46 @@ function normalizeAirportList(data: any, userLat: number, userLon: number): Airp
   return list
 }
 
+function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, any> {
+  const source = item?.aerodrome ?? item?.airport ?? item?.rotaer ?? item ?? {}
+  const rawCoordinates = source.coordinates ?? source.coordenadas
+  const lat = rawCoordinates?.lat ?? rawCoordinates?.latitude ?? parseCoord(source.latitude ?? source.lat)
+  const lng = rawCoordinates?.lng ?? rawCoordinates?.lon ?? rawCoordinates?.longitude ?? parseCoord(source.longitude ?? source.lng ?? source.lon)
+  const runways = source.runways ?? source.pistas ?? source.runway ?? []
+  const frequencies = source.frequencies ?? source.frequencias ?? source.frequency ?? []
+  const restrictions = source.restrictions ?? source.restricoes ?? source.observacoes ?? []
+  return {
+    ...source,
+    icao: rotaerIcao(source) || fallbackIcao,
+    name: source.name ?? source.nome ?? source.designacao ?? source.AerodromeName ?? fallbackIcao,
+    city: source.city ?? source.cidade ?? source.municipio,
+    state: source.state ?? source.uf ?? source.estado,
+    elevation: source.elevation ?? source.elevacao ?? source.altitude ?? source.Elev,
+    coordinates: lat != null && lng != null ? { lat: Number(lat), lng: Number(lng) } : null,
+    runways: Array.isArray(runways) ? runways : [runways].filter(Boolean),
+    frequencies: Array.isArray(frequencies) ? frequencies : [frequencies].filter(Boolean),
+    restrictions: Array.isArray(restrictions) ? restrictions : [restrictions].filter(Boolean),
+    contact: source.contact ?? source.contato ?? {
+      phone: source.phone ?? source.telefone ?? source.tel,
+      email: source.email,
+    },
+    raw_data: source,
+  }
+}
 async function fetchRotaerByIcao(c: Context<{ Bindings: Bindings }>, icao: string): Promise<any> {
+  const normalizedIcao = icao.trim().toUpperCase()
+  try {
+    const detail = await cachedFetch(c, `rotaer-detail-${normalizedIcao}`, 1800,
+      () => fetchAisweb(c, 'rotaer', { icaoCode: normalizedIcao }))
+    const detailItem = rotaerItems(detail).find(item => rotaerIcao(item) === normalizedIcao) ?? rotaerItems(detail)[0]
+    if (detailItem) return normalizeRotaerAirport(detailItem, normalizedIcao)
+  } catch (error: any) {
+    log.warn(`[rotaer] ficha detalhada indisponível para ${normalizedIcao}: ${error.message}`)
+  }
   const data = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
-  const airport = rotaerItems(data).find(item => rotaerIcao(item) === icao)
-  if (!airport) throw new Error(`Aeródromo ${icao} não encontrado no ROTAER`)
-  return airport
+  const airport = rotaerItems(data).find(item => rotaerIcao(item) === normalizedIcao)
+  if (!airport) throw new Error(`Aeródromo ${normalizedIcao} não encontrado no ROTAER/AISWEB`)
+  return normalizeRotaerAirport(airport, normalizedIcao)
 }
 
 // ─── Nearby helper: tenta geiloc (4s), fallback para rotaer-all ──────────────
@@ -1257,7 +1292,7 @@ async function getRotaer(c: Context<{ Bindings: Bindings }>, icaoParam?: string)
   try {
     if (icaoCode) {
       const airport = await fetchRotaerByIcao(c, icaoCode)
-      return c.json({ item: [airport] })
+      return c.json({ item: [airport], airport, icao: icaoCode, source: 'AISWEB/DECEA' })
     }
 
     const data = await cachedFetch(c, `rotaer-${adep ?? ''}-${ades ?? ''}`, 1800,
