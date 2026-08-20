@@ -370,6 +370,8 @@ const AREA_NODE_MAP: Record<string, string> = {
   notam: 'notam',
   infotemp: 'infotemp',
   sol: 'sol',
+  // `routesp` é mantido como integração opcional: não é listado na documentação
+  // pública atual da AISWEB e pode retornar vazio mesmo com credenciais válidas.
   routesp: 'routesp',
   waypoints: 'waypoints',
   rotaer: 'rotaer',
@@ -525,15 +527,63 @@ async function fetchAisweb(
   try { return JSON.parse(text) } catch { }
 
   const parsed = parser.parse(text)
-  const root = parsed['aisweb'] ?? parsed
+  const root = parsed?.aisweb ?? parsed
   const node = AREA_NODE_MAP[area]
 
   if (!node) return root
-  if (!root[node]) {
-    log.warn(`Node "${node}" ausente para area="${area}". Chaves: [${Object.keys(root).join(', ')}]`)
-    return {}
-  }
-  return root[node]
+  // A AISWEB pode responder tanto com <aisweb><notam>...</notam></aisweb>
+  // quanto com JSON/XML já desembrulhado (<notam>...</notam> ou <item>...</item>).
+  if (root?.[node] != null) return root[node]
+  if (parsed?.[node] != null) return parsed[node]
+  if (root?.item != null || Array.isArray(root)) return root
+
+  log.warn(`Node "${node}" ausente para area="${area}". Chaves: [${Object.keys(root ?? {}).join(', ')}]`)
+  return root ?? {}
+}
+
+/** Converte envelopes AISWEB (`item`, `notam`, `data`) em uma lista plana. */
+function collectionItems(value: any): any[] {
+  if (value == null) return []
+  if (Array.isArray(value)) return value.flatMap(collectionItems)
+  if (value.item != null) return collectionItems(value.item)
+  if (value.notam != null) return collectionItems(value.notam)
+  if (value.data != null && typeof value.data === 'object') return collectionItems(value.data)
+  return typeof value === 'object' ? [value] : []
+}
+
+function normalizeNotamItems(data: any, icao: string): Record<string, any>[] {
+  return collectionItems(data)
+    .map((item: any) => ({
+      id: String(item?.id ?? item?.['@_id'] ?? `${icao}-${item?.n ?? item?.number ?? crypto.randomUUID()}`),
+      icao: String(item?.loc ?? item?.icao ?? item?.icaoairport_id ?? icao).toUpperCase(),
+      number: item?.n ?? item?.number ?? item?.cod ?? null,
+      type: item?.tp ?? item?.type ?? 'NOTAM',
+      category: item?.cat ?? item?.category ?? null,
+      message: String(item?.e ?? item?.texto ?? item?.text ?? item?.descricao ?? item?.notam ?? '').trim(),
+      start: item?.b ?? item?.startDate ?? null,
+      end: item?.c ?? item?.endDate ?? null,
+      schedule: item?.d ?? null,
+      lower: item?.f ?? item?.lower ?? null,
+      upper: item?.g ?? item?.upper ?? null,
+      scope: item?.s ?? item?.scope ?? null,
+      traffic: item?.traffic ?? null,
+      purpose: item?.purpose ?? null,
+      coordinates: item?.geo ?? item?.coordinates ?? null,
+      source: item?.origem ?? 'AISWEB/DECEA',
+    }))
+    .filter(item => item.message || item.number)
+}
+
+function normalizeRouteItems(data: any, adep: string, ades: string): Record<string, any>[] {
+  return collectionItems(data)
+    .map((item: any) => ({
+      route: String(item?.rota ?? item?.route ?? item?.Route ?? '').trim(),
+      level: item?.nivel ?? item?.level ?? item?.fl ?? '',
+      type: item?.tipo ?? item?.type ?? '',
+      remarks: item?.rmk ?? item?.obs ?? item?.remarks ?? '',
+    }))
+    .filter(item => item.route)
+    .map(item => ({ ...item, adep, ades }))
 }
 
 /**
@@ -1170,12 +1220,14 @@ app.get('/api/weather/:icao', async (c) => {
 
 app.get('/api/notam/:icao', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
-  const icao = c.req.param('icao').toUpperCase()
+  const icao = c.req.param('icao').trim().toUpperCase()
+  if (!/^[A-Z]{4}$/.test(icao)) return c.json({ error: 'ICAO inválido' }, 400)
   try {
     const data = await cachedFetch(c, `notam-${icao}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: icao }))
-    return c.json(data)
+    return c.json({ icao, notams: normalizeNotamItems(data, icao), fetched_at: new Date().toISOString(), source: 'AISWEB/DECEA' })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    log.error(`[notam] ${icao}:`, e.message)
+    return c.json({ icao, notams: [], error: e.message }, 502)
   }
 })
 
@@ -1222,23 +1274,32 @@ app.get('/api/rotaer/:icao', (c) => getRotaer(c, c.req.param('icao')))
 
 app.get('/api/routes', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
-  const adep = c.req.query('adep')?.toUpperCase()
-  const ades = c.req.query('ades')?.toUpperCase()
+  const adep = c.req.query('adep')?.trim().toUpperCase()
+  const ades = c.req.query('ades')?.trim().toUpperCase()
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
+  if (!/^[A-Z]{4}$/.test(adep) || !/^[A-Z]{4}$/.test(ades)) return c.json({ error: 'adep e ades devem ser códigos ICAO válidos' }, 400)
   try {
     const data = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
-    const raw = data?.item
-    const items = Array.isArray(raw) ? raw : (raw ? [raw] : [])
+    const preferred = normalizeRouteItems(data, adep, ades)
+    const routes = preferred.length > 0
+      ? preferred.map(({ adep: _adep, ades: _ades, ...route }) => route)
+      : [{
+          route: `${adep} DCT ${ades}`,
+          level: '',
+          type: 'DCT',
+          remarks: 'Rota direta sugerida; a AISWEB não retornou uma rota preferencial publicada para este trecho.',
+          source: 'fallback',
+        }]
+    return c.json({ adep, ades, routes, preferred_available: preferred.length > 0, source: preferred.length > 0 ? 'AISWEB/DECEA' : 'fallback' })
+  } catch (e: any) {
+    log.warn(`[routes] ${adep}-${ades}: ${e.message}; usando rota direta`)
     return c.json({
       adep, ades,
-      routes: items.map((r: any) => ({
-        route: r?.rota ?? r?.route ?? '',
-        level: r?.nivel ?? r?.level ?? '',
-        remarks: r?.rmk ?? r?.remarks ?? '',
-      })),
+      routes: [{ route: `${adep} DCT ${ades}`, level: '', type: 'DCT', remarks: 'Rota direta sugerida; consulta AISWEB indisponível.', source: 'fallback' }],
+      preferred_available: false,
+      source: 'fallback',
+      warning: e.message,
     })
-  } catch (e: any) {
-    return c.json({ error: e.message }, 500)
   }
 })
 
@@ -1366,11 +1427,18 @@ app.get('/api/flightplan', async (c) => {
     const totalFuel = tripFuel + reserveFuel + taxiFuel
 
     let routeStr = `${adep} DCT ${ades}`
+    let routeSource: 'AISWEB/DECEA' | 'fallback' = 'fallback'
     try {
-      // Reaproveita o mesmo cache de /api/routes em vez de bater direto na AISWEB.
+      // Reaproveita o cache e normaliza o envelope real da AISWEB.
       const routePref = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
-      routeStr = routePref?.item?.[0]?.rota ?? routeStr
-    } catch { }
+      const preferredRoutes = normalizeRouteItems(routePref, adep, ades)
+      if (preferredRoutes[0]?.route) {
+        routeStr = preferredRoutes[0].route
+        routeSource = 'AISWEB/DECEA'
+      }
+    } catch (error: any) {
+      log.warn(`[flightplan] rota preferencial indisponível: ${error.message}`)
+    }
 
     const [alternates, notamDep, notamDes] = await Promise.all([
       fetchNearby(c, lat2, lon2),
@@ -1383,17 +1451,15 @@ app.get('/api/flightplan', async (c) => {
       .sort((a, b) => a.distKm - b.distKm)
       .slice(0, 3)
 
-    const toItems = (n: any) => Array.isArray(n?.item) ? n.item : (n?.item ? [n.item] : [])
-    const notamAlerts = [...toItems(notamDep), ...toItems(notamDes)]
-      .map((n: any) => n?.texto ?? n?.notam)
-      .filter(Boolean)
-      .slice(0, 5)
+    const notamAlerts = [...normalizeNotamItems(notamDep, adep), ...normalizeNotamItems(notamDes, ades)]
+      .slice(0, 20)
 
     return c.json({
       flightplan: {
         adep,
         ades,
         route: routeStr,
+        route_source: routeSource,
         distance_nm: Math.round(distanceNm),
         estimated_time: `${hours}h${String(minutes).padStart(2, '0')}m`,
         flight_minutes: Math.round(flightHours * 60),
@@ -1425,6 +1491,7 @@ app.get('/api/flightplan', async (c) => {
         distance_km: a.distKm,
       })),
       notam_alerts: notamAlerts,
+      notam_count: notamAlerts.length,
     })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
