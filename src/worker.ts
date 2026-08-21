@@ -23,6 +23,8 @@ type Bindings = {
   WINSOCK_AUTH_PREFIX?: string    // default: '' (sem prefixo)
   ANTHROPIC_API_KEY: string       // usado no OCR de demonstrativos (Claude Vision/Document)
   ALLOWED_ORIGINS?: string        // opcional: lista separada por vírgula de origens permitidas no CORS. Se ausente, libera '*'.
+  CLOUDFLARE_TURN_KEY_ID?: string
+  CLOUDFLARE_TURN_API_TOKEN?: string
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -1238,6 +1240,36 @@ app.post('/api/us-aircraft-estimate', async (c) => {
   } catch (error: any) {
     log.error('[windsock-market-estimate]', error.message)
     return c.json({ error: error.message }, 502)
+  }
+})
+
+app.get('/api/turn/ice-servers', async (c) => {
+  const authorization = c.req.header('authorization')
+  if (!authorization?.startsWith('Bearer ') || !(await requireAuthenticatedUser(c))) {
+    return c.json({ error: 'Não autorizado' }, 401)
+  }
+  const keyId = c.env.CLOUDFLARE_TURN_KEY_ID
+  const apiToken = c.env.CLOUDFLARE_TURN_API_TOKEN
+  if (!keyId || !apiToken) {
+    return c.json({ error: 'TURN Cloudflare ainda não está configurado no Worker.' }, 503)
+  }
+  const ttlRaw = Number(c.req.query('ttl') ?? 3600)
+  const ttl = Number.isFinite(ttlRaw) ? Math.min(Math.max(Math.floor(ttlRaw), 600), 86_400) : 3600
+  try {
+    const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl }),
+    })
+    const payload = await response.json() as Record<string, unknown>
+    if (!response.ok) {
+      log.warn(`[turn] Cloudflare respondeu ${response.status}`)
+      return c.json({ error: 'Não foi possível gerar credenciais TURN temporárias.' }, 502)
+    }
+    return c.json({ ...payload, ttl, expires_at: new Date(Date.now() + ttl * 1000).toISOString(), provider: 'cloudflare' })
+  } catch (error: any) {
+    log.error('[turn] erro ao gerar credenciais:', error?.message ?? error)
+    return c.json({ error: 'Falha de comunicação com o serviço TURN.' }, 502)
   }
 })
 
