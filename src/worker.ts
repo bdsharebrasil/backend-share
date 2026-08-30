@@ -2231,6 +2231,18 @@ type PortalParticipacao = {
   aeronave_id: string
   percentual_sociedade: number
   modelo_aeronave: string | null
+  matricula_registro: string | null
+  fabricante: string | null
+  modelo: string | null
+  numero_serie: string | null
+  nome_proprietario: string | null
+  status: string | null
+  ano: string | null
+  base: string | null
+  preco_hora: string | null
+  url_imagem: string | null
+  velocidade_cruzeiro: string | null
+  tipo_aeronave: string | null
 }
 
 type PortalSession = PortalUser & { exp: number }
@@ -2339,7 +2351,7 @@ async function portalContext(c: Context<{ Bindings: Bindings }>, user: PortalUse
     user.socio_id
       ? db.prepare('SELECT id, cliente_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes FROM hold_socios WHERE id = ?1').bind(user.socio_id).first<PortalSocio>()
       : Promise.resolve(null),
-    db.prepare('SELECT id, cliente_id, socio_id, aeronave_id, percentual_sociedade, modelo_aeronave FROM cotista_aeronave WHERE cliente_id = ?1 OR socio_id = ?2 ORDER BY criado_em DESC').bind(user.cliente_id, user.socio_id).all<PortalParticipacao>(),
+    db.prepare('SELECT ca.id, ca.cliente_id, ca.socio_id, ca.aeronave_id, ca.percentual_sociedade, ca.modelo_aeronave, a.matricula_registro, a.fabricante, a.modelo, a.numero_serie, a.nome_proprietario, a.status, a.ano, a.base, a.preco_hora, a.url_imagem, a.velocidade_cruzeiro, a.tipo_aeronave FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id WHERE ca.cliente_id = ?1 OR ca.socio_id = ?2 ORDER BY ca.criado_em DESC').bind(user.cliente_id, user.socio_id).all<PortalParticipacao>(),
   ])
 
   return { user, cliente: cliente ?? null, socio: socio ?? null, participacoes: participacoes.results }
