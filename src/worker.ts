@@ -2237,6 +2237,8 @@ type PortalSession = PortalUser & { exp: number }
 const portalEncoder = new TextEncoder()
 const portalDecoder = new TextDecoder()
 const PORTAL_SESSION_TTL = 8 * 60 * 60
+// O workerd em produção limita PBKDF2 a 100.000 iterações.
+const PORTAL_PBKDF2_ITERATIONS = 100_000
 
 function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
   return c.env.SHARE_DB ?? c.env.DB
@@ -2258,7 +2260,7 @@ async function portalHmacKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', portalEncoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
 }
 
-async function portalHashPassword(password: string, salt: Uint8Array, iterations = 210_000): Promise<Uint8Array> {
+async function portalHashPassword(password: string, salt: Uint8Array, iterations = PORTAL_PBKDF2_ITERATIONS): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey('raw', portalEncoder.encode(password), 'PBKDF2', false, ['deriveBits'])
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, key, 256)
   return new Uint8Array(bits)
@@ -2289,7 +2291,7 @@ async function portalVerifyPassword(password: string, stored: string): Promise<{
 
 async function portalCreatePasswordHash(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16))
-  return `pbkdf2_sha256$210000$${portalBase64Url(salt)}$${portalBase64Url(await portalHashPassword(password, salt))}`
+  return `pbkdf2_sha256$${PORTAL_PBKDF2_ITERATIONS}$${portalBase64Url(salt)}$${portalBase64Url(await portalHashPassword(password, salt))}`
 }
 
 function portalSessionSecret(c: Context<{ Bindings: Bindings }>): string {
