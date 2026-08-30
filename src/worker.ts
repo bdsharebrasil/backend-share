@@ -2511,8 +2511,9 @@ app.post('/api/colaborador/foto', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const formData = await c.req.formData()
-  const file = formData.get('foto')
-  if (!(file instanceof File) || !file.type.startsWith('image/')) return c.json({ error: 'foto_invalida' }, 400)
+  const fileValue = formData.get('foto') as unknown
+  if (!fileValue || typeof fileValue !== 'object' || !('type' in fileValue) || typeof fileValue.type !== 'string' || !fileValue.type.startsWith('image/')) return c.json({ error: 'foto_invalida' }, 400)
+  const file = fileValue as File
   try {
     const key = await salvarArquivoColaborador(c, colaborador.id, file, 'fotos')
     await portalDb(c).prepare('UPDATE user_profiles SET url_avatar = ?, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?').bind(key, colaborador.id).run()
@@ -2533,9 +2534,10 @@ app.post('/api/colaborador/documentos', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const formData = await c.req.formData()
-  const file = formData.get('arquivo')
+  const fileValue = formData.get('arquivo') as unknown
   const categoria = String(formData.get('tipo_documento') || '').trim()
-  if (!(file instanceof File) || !categoria) return c.json({ error: 'tipo_e_arquivo_obrigatorios' }, 400)
+  if (!fileValue || typeof fileValue !== 'object' || !('type' in fileValue) || !categoria) return c.json({ error: 'tipo_e_arquivo_obrigatorios' }, 400)
+  const file = fileValue as File
   if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
   try {
     const key = await salvarArquivoColaborador(c, colaborador.id, file, 'documentos')
@@ -2662,8 +2664,17 @@ app.post('/api/portal/solicitacoes', async c => {
   return c.json({ success: true, solicitacao_id: id, notification_sent: notificationSent, message: 'Solicitação enviada com sucesso. Aguarde a confirmação da coordenação.' }, 201)
 })
 
+/**
+ * Autoriza somente o sistema interno.
+ *
+ * O Portal do Cliente usa `portalSession`, baseada na tabela D1 `user_cliente`,
+ * e nunca deve ser aceito nas rotas `/api/interno/*`. Aqui só entram tokens
+ * Supabase de colaboradores ou o token técnico entre serviços.
+ */
 async function requireShareInternal(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
-  return (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
+  const colaboradorSupabaseAutenticado = await requireAuthenticatedUser(c)
+  if (colaboradorSupabaseAutenticado) return true
+  return checkInternalAuth(c)
 }
 
 app.get('/api/interno/solicitacoes', async c => {
