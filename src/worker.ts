@@ -2181,8 +2181,56 @@ type PortalUser = {
   id: string
   login: string
   nome_exibicao: string | null
+  url_avatar: string | null
   cliente_id: string | null
   socio_id: string | null
+}
+
+type PortalCliente = {
+  id: string
+  razao_social: string | null
+  cnpj: string | null
+  inscricao_estadual: string | null
+  proprietario: string | null
+  endereco: string | null
+  cidade: string | null
+  uf: string | null
+  contato_financeiro: string | null
+  telefone_financeiro: string | null
+  telefone_cliente: string | null
+  telefone_outro: string | null
+  email_principal: string | null
+  emails: string
+  url_logo: string | null
+  status: string | null
+  holding: number
+  codigo_cliente: string | null
+  observacoes: string | null
+}
+
+type PortalSocio = {
+  id: string
+  cliente_id: string
+  nome: string
+  cpf: string
+  email_principal: string | null
+  emails: string
+  endereco: string | null
+  cidade: string | null
+  uf: string | null
+  contato_financeiro: string | null
+  telefone_financeiro: string | null
+  telefone: string | null
+  observacoes: string | null
+}
+
+type PortalParticipacao = {
+  id: string
+  cliente_id: string | null
+  socio_id: string | null
+  aeronave_id: string
+  percentual_sociedade: number
+  modelo_aeronave: string | null
 }
 
 type PortalSession = PortalUser & { exp: number }
@@ -2225,7 +2273,10 @@ function portalEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 async function portalVerifyPassword(password: string, stored: string): Promise<{ valid: boolean; legacy: boolean }> {
   const parts = stored.split('$')
-  if (parts.length !== 4 || parts[0] !== 'pbkdf2_sha256') return { valid: stored === password, legacy: stored === password }
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2_sha256') {
+    const valid = portalEqual(portalEncoder.encode(stored), portalEncoder.encode(password))
+    return { valid, legacy: valid }
+  }
   const iterations = Number(parts[1])
   if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return { valid: false, legacy: false }
   try {
@@ -2241,34 +2292,55 @@ async function portalCreatePasswordHash(password: string): Promise<string> {
   return `pbkdf2_sha256$210000$${portalBase64Url(salt)}$${portalBase64Url(await portalHashPassword(password, salt))}`
 }
 
+function portalSessionSecret(c: Context<{ Bindings: Bindings }>): string {
+  const secret = c.env.CLIENT_SESSION_SECRET || c.env.INTERNAL_TOKEN
+  if (!secret) throw new Error('Segredo de sessão não configurado')
+  return secret
+}
+
 async function portalCreateSession(user: PortalUser, c: Context<{ Bindings: Bindings }>): Promise<{ token: string; expires_at: string }> {
-  if (!c.env.CLIENT_SESSION_SECRET) throw new Error('CLIENT_SESSION_SECRET não configurado')
   const exp = Math.floor(Date.now() / 1000) + Number(c.env.CLIENT_SESSION_TTL_SECONDS || PORTAL_SESSION_TTL)
   const encoded = portalBase64Url(portalEncoder.encode(JSON.stringify({ ...user, exp })))
-  const signature = portalBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', await portalHmacKey(c.env.CLIENT_SESSION_SECRET), portalEncoder.encode(encoded))))
+  const signature = portalBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', await portalHmacKey(portalSessionSecret(c)), portalEncoder.encode(encoded))))
   return { token: `${encoded}.${signature}`, expires_at: new Date(exp * 1000).toISOString() }
 }
 
 async function portalSession(c: Context<{ Bindings: Bindings }>): Promise<PortalUser | null> {
   const authorization = c.req.header('authorization')
-  if (!authorization?.startsWith('Bearer ') || !c.env.CLIENT_SESSION_SECRET) return null
+  if (!authorization?.startsWith('Bearer ')) return null
   const [encoded, signature] = authorization.slice(7).trim().split('.')
   if (!encoded || !signature) return null
   try {
-    const valid = await crypto.subtle.verify('HMAC', await portalHmacKey(c.env.CLIENT_SESSION_SECRET), portalFromBase64Url(signature), portalEncoder.encode(encoded))
+    const valid = await crypto.subtle.verify('HMAC', await portalHmacKey(portalSessionSecret(c)), portalFromBase64Url(signature), portalEncoder.encode(encoded))
     const session = JSON.parse(portalDecoder.decode(portalFromBase64Url(encoded))) as PortalSession
     if (!valid || !session.id || !session.login || session.exp <= Math.floor(Date.now() / 1000)) return null
-    return { id: session.id, login: session.login, nome_exibicao: session.nome_exibicao, cliente_id: session.cliente_id, socio_id: session.socio_id }
+    return { id: session.id, login: session.login, nome_exibicao: session.nome_exibicao, url_avatar: session.url_avatar, cliente_id: session.cliente_id, socio_id: session.socio_id }
   } catch {
     return null
   }
 }
 
-async function portalClientId(c: Context<{ Bindings: Bindings }>, user: PortalUser): Promise<string | null> {
+async function portalClientId(c: Context<{ Bindings: Bindings }>, user: PortalUser): Promise<string |null> {
   if (user.cliente_id) return user.cliente_id
   if (!user.socio_id) return null
   const row = await portalDb(c).prepare('SELECT cliente_id FROM hold_socios WHERE id = ?1').bind(user.socio_id).first<{ cliente_id: string | null }>()
   return row?.cliente_id || null
+}
+
+async function portalContext(c: Context<{ Bindings: Bindings }>, user: PortalUser) {
+  const db = portalDb(c)
+  const clienteId = await portalClientId(c, user)
+  const [cliente, socio, participacoes] = await Promise.all([
+    clienteId
+      ? db.prepare('SELECT id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, url_logo, status, holding, codigo_cliente, observacoes FROM cliente WHERE id = ?1').bind(clienteId).first<PortalCliente>()
+      : Promise.resolve(null),
+    user.socio_id
+      ? db.prepare('SELECT id, cliente_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes FROM hold_socios WHERE id = ?1').bind(user.socio_id).first<PortalSocio>()
+      : Promise.resolve(null),
+    db.prepare('SELECT id, cliente_id, socio_id, aeronave_id, percentual_sociedade, modelo_aeronave FROM cotista_aeronave WHERE cliente_id = ?1 OR socio_id = ?2 ORDER BY criado_em DESC').bind(user.cliente_id, user.socio_id).all<PortalParticipacao>(),
+  ])
+
+  return { user, cliente: cliente ?? null, socio: socio ?? null, participacoes: participacoes.results }
 }
 
 async function portalTelegram(c: Context<{ Bindings: Bindings }>, message: string): Promise<void> {
@@ -2290,16 +2362,25 @@ function portalTelegramText(row: Record<string, unknown>, fallbackName: string):
 }
 
 app.post('/api/portal/login', async c => {
-  const body = await c.req.json<{ login?: string; senha?: string }>().catch(() => null)
-  const login = body?.login?.trim().toLowerCase()
-  const senha = body?.senha || ''
-  if (!login || !senha) return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
-  const row = await portalDb(c).prepare('SELECT id, login, senha, nome_exibicao, cliente_id, socio_id FROM user_cliente WHERE lower(login) = ?1 LIMIT 1').bind(login).first<PortalUser & { senha: string }>()
-  if (!row || !(await portalVerifyPassword(senha, row.senha)).valid) return c.json({ error: 'credenciais_invalidas' }, 401)
-  const verification = await portalVerifyPassword(senha, row.senha)
-  if (verification.legacy) await portalDb(c).prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(senha), row.id).run()
-  const user: PortalUser = { id: row.id, login: row.login, nome_exibicao: row.nome_exibicao, cliente_id: row.cliente_id, socio_id: row.socio_id }
-  return c.json({ user, ...(await portalCreateSession(user, c)) })
+  try {
+    if (!(await checkRateLimit(c, `portal-login:${clientIp(c)}`, 12))) return c.json({ error: 'muitas_tentativas' }, 429)
+    const body = await c.req.json<{ login?: string; senha?: string }>().catch(() => null)
+    const login = body?.login?.trim().toLowerCase()
+    const senha = body?.senha || ''
+    if (!login || !senha) return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
+
+    const row = await portalDb(c).prepare('SELECT id, login, senha, nome_exibicao, url_avatar, cliente_id, socio_id FROM user_cliente WHERE lower(login) = ?1 LIMIT 1').bind(login).first<PortalUser & { senha: string }>()
+    const verification = row ? await portalVerifyPassword(senha, row.senha) : null
+    if (!row || !verification?.valid) return c.json({ error: 'credenciais_invalidas' }, 401)
+    if (Boolean(row.cliente_id) === Boolean(row.socio_id)) return c.json({ error: 'vinculo_usuario_invalido' }, 409)
+    if (verification.legacy) await portalDb(c).prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(senha), row.id).run()
+
+    const user: PortalUser = { id: row.id, login: row.login, nome_exibicao: row.nome_exibicao, url_avatar: row.url_avatar, cliente_id: row.cliente_id, socio_id: row.socio_id }
+    return c.json({ user, ...(await portalCreateSession(user, c)) })
+  } catch (error: any) {
+    log.error('[portal/login]', error?.message ?? error)
+    return c.json({ error: 'portal_login_indisponivel' }, 500)
+  }
 })
 
 app.use('/api/portal/*', async (c, next) => {
@@ -2309,6 +2390,12 @@ app.use('/api/portal/*', async (c, next) => {
 })
 
 app.get('/api/portal/me', async c => c.json({ user: await portalSession(c) }))
+
+app.get('/api/portal/contexto', async c => {
+  const user = await portalSession(c)
+  if (!user) return c.json({ error: 'client_auth_required' }, 401)
+  return c.json(await portalContext(c, user))
+})
 
 app.get('/api/portal/disponibilidade', async c => {
   const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
