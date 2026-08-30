@@ -2411,6 +2411,13 @@ app.get('/api/portal/contexto', async c => {
   return c.json(await portalContext(c, user))
 })
 
+app.get('/api/portal/aerodromos', async c => {
+  const query = (c.req.query('q') || '').trim().toLowerCase()
+  const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
+  const result = await portalDb(c).prepare("SELECT id, nome, designativo_icao FROM aerodromo WHERE lower(nome) LIKE ?1 ESCAPE '\\' OR lower(designativo_icao) LIKE ?1 ESCAPE '\\' ORDER BY designativo_icao LIMIT 50").bind(pattern).all<{ id: string; nome: string; designativo_icao: string }>()
+  return c.json({ aerodromos: result.results })
+})
+
 app.get('/api/portal/disponibilidade', async c => {
   const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
   const to = c.req.query('ate') || from
