@@ -10,6 +10,7 @@ type Bindings = {
   CACHE_KV: KVNamespace
   FILES: R2Bucket
   DB: D1Database
+  SHARE_DB: D1Database
   RESEND_API_KEY: string
   INTERNAL_TOKEN: string
   EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
@@ -23,6 +24,9 @@ type Bindings = {
   WINSOCK_AUTH_PREFIX?: string    // default: '' (sem prefixo)
   ANTHROPIC_API_KEY: string       // usado no OCR de demonstrativos (Claude Vision/Document)
   ALLOWED_ORIGINS?: string        // opcional: lista separada por vírgula de origens permitidas no CORS. Se ausente, libera '*'.
+  TELEGRAM_BOT_TOKEN?: string
+  CLIENT_SESSION_SECRET?: string
+  CLIENT_SESSION_TTL_SECONDS?: string
   CLOUDFLARE_TURN_KEY_ID?: string
   CLOUDFLARE_TURN_API_TOKEN?: string
 }
@@ -2169,6 +2173,227 @@ app.post('/api/hotel-reservation', async (c) => {
     log.error('[hotel-reservation]', error?.message ?? error)
     return c.json({ error: 'Falha ao processar solicitação de reserva' }, 500)
   }
+})
+
+// ─── Portal Cliente e fluxo de reservas Share Brasil ─────────────────────────
+
+type PortalUser = {
+  id: string
+  login: string
+  nome_exibicao: string | null
+  cliente_id: string | null
+  socio_id: string | null
+}
+
+type PortalSession = PortalUser & { exp: number }
+const portalEncoder = new TextEncoder()
+const portalDecoder = new TextDecoder()
+const PORTAL_SESSION_TTL = 8 * 60 * 60
+
+function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
+  return c.env.SHARE_DB ?? c.env.DB
+}
+
+function portalBase64Url(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function portalFromBase64Url(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4)
+  const binary = atob(normalized)
+  return Uint8Array.from(binary, char => char.charCodeAt(0))
+}
+
+async function portalHmacKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', portalEncoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+}
+
+async function portalHashPassword(password: string, salt: Uint8Array, iterations = 210_000): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey('raw', portalEncoder.encode(password), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, key, 256)
+  return new Uint8Array(bits)
+}
+
+function portalEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false
+  let result = 0
+  for (let index = 0; index < left.length; index += 1) result |= left[index] ^ right[index]
+  return result === 0
+}
+
+async function portalVerifyPassword(password: string, stored: string): Promise<{ valid: boolean; legacy: boolean }> {
+  const parts = stored.split('$')
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2_sha256') return { valid: stored === password, legacy: stored === password }
+  const iterations = Number(parts[1])
+  if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return { valid: false, legacy: false }
+  try {
+    const hash = await portalHashPassword(password, portalFromBase64Url(parts[2]), iterations)
+    return { valid: portalEqual(hash, portalFromBase64Url(parts[3])), legacy: false }
+  } catch {
+    return { valid: false, legacy: false }
+  }
+}
+
+async function portalCreatePasswordHash(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  return `pbkdf2_sha256$210000$${portalBase64Url(salt)}$${portalBase64Url(await portalHashPassword(password, salt))}`
+}
+
+async function portalCreateSession(user: PortalUser, c: Context<{ Bindings: Bindings }>): Promise<{ token: string; expires_at: string }> {
+  if (!c.env.CLIENT_SESSION_SECRET) throw new Error('CLIENT_SESSION_SECRET não configurado')
+  const exp = Math.floor(Date.now() / 1000) + Number(c.env.CLIENT_SESSION_TTL_SECONDS || PORTAL_SESSION_TTL)
+  const encoded = portalBase64Url(portalEncoder.encode(JSON.stringify({ ...user, exp })))
+  const signature = portalBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', await portalHmacKey(c.env.CLIENT_SESSION_SECRET), portalEncoder.encode(encoded))))
+  return { token: `${encoded}.${signature}`, expires_at: new Date(exp * 1000).toISOString() }
+}
+
+async function portalSession(c: Context<{ Bindings: Bindings }>): Promise<PortalUser | null> {
+  const authorization = c.req.header('authorization')
+  if (!authorization?.startsWith('Bearer ') || !c.env.CLIENT_SESSION_SECRET) return null
+  const [encoded, signature] = authorization.slice(7).trim().split('.')
+  if (!encoded || !signature) return null
+  try {
+    const valid = await crypto.subtle.verify('HMAC', await portalHmacKey(c.env.CLIENT_SESSION_SECRET), portalFromBase64Url(signature), portalEncoder.encode(encoded))
+    const session = JSON.parse(portalDecoder.decode(portalFromBase64Url(encoded))) as PortalSession
+    if (!valid || !session.id || !session.login || session.exp <= Math.floor(Date.now() / 1000)) return null
+    return { id: session.id, login: session.login, nome_exibicao: session.nome_exibicao, cliente_id: session.cliente_id, socio_id: session.socio_id }
+  } catch {
+    return null
+  }
+}
+
+async function portalClientId(c: Context<{ Bindings: Bindings }>, user: PortalUser): Promise<string | null> {
+  if (user.cliente_id) return user.cliente_id
+  if (!user.socio_id) return null
+  const row = await portalDb(c).prepare('SELECT cliente_id FROM hold_socios WHERE id = ?1').bind(user.socio_id).first<{ cliente_id: string | null }>()
+  return row?.cliente_id || null
+}
+
+async function portalTelegram(c: Context<{ Bindings: Bindings }>, message: string): Promise<void> {
+  if (!c.env.TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN não configurado')
+  const company = await portalDb(c).prepare('SELECT telegram_chat_id FROM empresa ORDER BY criado_em LIMIT 1').first<{ telegram_chat_id: string | null }>()
+  const chatId = company?.telegram_chat_id?.trim()
+  if (!chatId) throw new Error('telegram_chat_id não configurado')
+  const response = await fetch(`https://api.telegram.org/bot${encodeURIComponent(c.env.TELEGRAM_BOT_TOKEN)}/sendMessage`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' }),
+  })
+  const result = await response.json() as { ok?: boolean }
+  if (!response.ok || !result.ok) throw new Error('Telegram recusou a notificação')
+}
+
+function portalTelegramText(row: Record<string, unknown>, fallbackName: string): string {
+  const value = (key: string, fallback = '—') => String(row[key] ?? fallback).replace(/[&<>\"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[char] || char))
+  const aircraft = [row.matricula_registro, row.fabricante, row.modelo].filter(Boolean).join(' · ') || '—'
+  return `<b>Nova solicitação de reserva de voo</b>\nCliente: <b>${value('cliente_razao_social', fallbackName)}</b>\nAeronave: ${value('aeronave_label', aircraft)}\nOrigem → destino: ${value('origem')} → ${value('destino')}\nData: ${value('data_agendada')} · Horário: ${value('horario_previsto_agendamento')}\nDuração: ${value('dias_duracao')} dia(s) · Passageiros: ${value('numero_passageiros')}\nVoo de empréstimo: ${value('voo_emprestado')}\nObservações: ${value('observacoes')}\nID: <code>${value('id')}</code>\nAcesse o Sistema Interno Share Brasil para aprovar ou reprovar.`
+}
+
+app.post('/api/portal/login', async c => {
+  const body = await c.req.json<{ login?: string; senha?: string }>().catch(() => null)
+  const login = body?.login?.trim().toLowerCase()
+  const senha = body?.senha || ''
+  if (!login || !senha) return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
+  const row = await portalDb(c).prepare('SELECT id, login, senha, nome_exibicao, cliente_id, socio_id FROM user_cliente WHERE lower(login) = ?1 LIMIT 1').bind(login).first<PortalUser & { senha: string }>()
+  if (!row || !(await portalVerifyPassword(senha, row.senha)).valid) return c.json({ error: 'credenciais_invalidas' }, 401)
+  const verification = await portalVerifyPassword(senha, row.senha)
+  if (verification.legacy) await portalDb(c).prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(senha), row.id).run()
+  const user: PortalUser = { id: row.id, login: row.login, nome_exibicao: row.nome_exibicao, cliente_id: row.cliente_id, socio_id: row.socio_id }
+  return c.json({ user, ...(await portalCreateSession(user, c)) })
+})
+
+app.use('/api/portal/*', async (c, next) => {
+  if (c.req.path === '/api/portal/login') return next()
+  if (!(await portalSession(c))) return c.json({ error: 'client_auth_required' }, 401)
+  return next()
+})
+
+app.get('/api/portal/me', async c => c.json({ user: await portalSession(c) }))
+
+app.get('/api/portal/disponibilidade', async c => {
+  const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
+  const to = c.req.query('ate') || from
+  const [aircraft, reservations] = await Promise.all([
+    portalDb(c).prepare("SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, status FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
+    portalDb(c).prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
+  ])
+  return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
+})
+
+app.get('/api/portal/solicitacoes', async c => {
+  const user = await portalSession(c)
+  const clientId = user ? await portalClientId(c, user) : null
+  if (!clientId) return c.json([])
+  const result = await portalDb(c).prepare("SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.cliente_id = ?1 ORDER BY s.criado_em DESC").bind(clientId).all()
+  return c.json(result.results)
+})
+
+app.post('/api/portal/solicitacoes', async c => {
+  const user = await portalSession(c)
+  const clientId = user ? await portalClientId(c, user) : null
+  if (!clientId) return c.json({ error: 'cliente_nao_vinculado' }, 409)
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null)
+  if (!body || !body.aeronave_id || !body.origem || !body.destino || !body.data_agendada) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
+  const aircraft = await portalDb(c).prepare("SELECT id, status FROM aeronave WHERE id = ?1").bind(String(body.aeronave_id)).first<{ id: string; status: string }>()
+  if (!aircraft || aircraft.status.toLowerCase() !== 'ativa') return c.json({ error: 'aeronave_indisponivel' }, 409)
+  const id = crypto.randomUUID()
+  await portalDb(c).prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), String(body.data_agendada), body.horario_previsto_agendamento ? String(body.horario_previsto_agendamento) : null, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
+  const row = await portalDb(c).prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
+  try {
+    await portalTelegram(c, portalTelegramText(row || { ...body, id }, user?.nome_exibicao || 'Cliente'))
+  } catch (error) {
+    log.error('[portal] telegram notification failed', error)
+    return c.json({ error: 'solicitacao_salva_mas_telegram_falhou', solicitacao_id: id }, 502)
+  }
+  return c.json({ success: true, solicitacao_id: id, message: 'Solicitação enviada com sucesso. Aguarde a confirmação da coordenação.' }, 201)
+})
+
+async function requireShareInternal(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
+  return (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
+}
+
+app.get('/api/interno/solicitacoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const status = c.req.query('status')
+  const query = status ? "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.status = ?1 ORDER BY s.data_agendada" : "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id ORDER BY s.data_agendada"
+  const result = status ? await portalDb(c).prepare(query).bind(status).all() : await portalDb(c).prepare(query).all()
+  return c.json(result.results)
+})
+
+app.post('/api/interno/seguranca/migrar-senhas', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const rows = await portalDb(c).prepare("SELECT id, senha FROM user_cliente WHERE senha NOT LIKE 'pbkdf2_sha256$%'").all<{ id: string; senha: string }>()
+  for (const row of rows.results) await portalDb(c).prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(row.senha), row.id).run()
+  return c.json({ success: true, migrated: rows.results.length })
+})
+
+async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string): Promise<string> {
+  const sequence = await portalDb(c).prepare('UPDATE voo_sequencia SET ultimo_numero = ultimo_numero + 1 WHERE id = 1 RETURNING ultimo_numero').first<{ ultimo_numero: number }>()
+  if (!sequence) throw new Error('flight_sequence_not_initialized')
+  return `${clientCode}-${String(sequence.ultimo_numero).padStart(4, '0')}`
+}
+
+app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const id = c.req.param('id')
+  const reservation = await portalDb(c).prepare('SELECT s.*, c.codigo_cliente FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id WHERE s.id = ?1').bind(id).first<{ status: string; codigo_cliente: string | null }>()
+  if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
+  const body = await c.req.json<{ piloto_id?: string; copiloto_id?: string }>().catch(() => ({} as { piloto_id?: string; copiloto_id?: string }))
+  if (!body.piloto_id) return c.json({ error: 'piloto_obrigatorio' }, 400)
+  if (!reservation.codigo_cliente) return c.json({ error: 'codigo_cliente_obrigatorio' }, 409)
+  const flightNumber = await portalFlightSequence(c, reservation.codigo_cliente)
+  await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, body.piloto_id, body.copiloto_id || null, id).run()
+  return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: flightNumber })
+})
+
+app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<{ motivo_rejeicao?: string }>().catch(() => ({} as { motivo_rejeicao?: string }))
+  if (!body.motivo_rejeicao?.trim()) return c.json({ error: 'motivo_rejeicao_obrigatorio' }, 400)
+  const result = await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'reprovada', motivo_rejeicao = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'").bind(body.motivo_rejeicao.trim(), c.req.param('id')).run()
+  if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
+  return c.json({ success: true, status: 'reprovada', solicitacao_id: c.req.param('id') })
 })
 
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
