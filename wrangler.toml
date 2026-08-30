@@ -26,6 +26,12 @@ binding = "DB"
 database_name = "share-brasil-aux"
 database_id = "b7048c06-cc46-4832-bac5-641a24ce245c"
 
+# ── D1 principal do Portal Cliente e das reservas de voo ────────────────────
+[[d1_databases]]
+binding = "SHARE_DB"
+database_name = "bd_sharebrasil"
+database_id = "4267a49f-e38f-442f-8b6f-47fe02dea308"
+
 # ── Secrets (NÃO colocar valores aqui — usar `wrangler secret put <NOME>`) ──
 # AISWEB_API_KEY
 # AISWEB_API_PASS
