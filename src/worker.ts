@@ -827,6 +827,85 @@ function extractSupabaseUserId(c: Context<{ Bindings: Bindings }>): string | nul
   }
 }
 
+type Colaborador = {
+  id: string
+  email: string
+  nome_completo: string
+  nome_exibicao: string | null
+  url_avatar: string | null
+  endereco: string | null
+  cidade: string | null
+  uf: string | null
+  telefone: string | null
+  data_criacao: string
+  data_atualizacao: string
+  data_nascimento: string | null
+  data_admissao: string | null
+  cpf: string | null
+  rg: string | null
+  canac: string | null
+  status: string
+  nome_banco: string | null
+  tipo_conta: string | null
+  conta_numero: string | null
+  agencia_numero: string | null
+  tipo_chave_pix: string | null
+  pix: string | null
+  tipo_user: string | null
+  departamento: string | null
+  cliente_id: string | null
+}
+
+type ColaboradorClaims = { id: string; email: string }
+
+function extractSupabaseClaims(c: Context<{ Bindings: Bindings }>): ColaboradorClaims | null {
+  const authHeader = c.req.header('authorization')
+  if (!authHeader?.startsWith('Bearer ')) return null
+  try {
+    const token = authHeader.slice(7)
+    const payloadB64 = token.split('.')[1]
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')))
+    const id = typeof payload?.sub === 'string' ? payload.sub : ''
+    const email = typeof payload?.email === 'string' ? payload.email.toLowerCase() : ''
+    return id && email ? { id, email } : null
+  } catch {
+    return null
+  }
+}
+
+async function authenticatedColaborador(c: Context<{ Bindings: Bindings }>): Promise<Colaborador | null> {
+  if (!(await requireAuthenticatedUser(c))) return null
+  const claims = extractSupabaseClaims(c)
+  if (!claims) return null
+  return portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
+}
+
+function colaboradorExtensao(file: File): string {
+  return file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin'
+}
+
+async function salvarArquivoColaborador(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: string): Promise<string> {
+  if (!file.size) throw new Error('arquivo_vazio')
+  if (file.size > 10 * 1024 * 1024) throw new Error('arquivo_excede_10mb')
+  const key = `colaboradores/${userId}/${pasta}/${Date.now()}-${uuid().slice(0, 8)}.${colaboradorExtensao(file)}`
+  await c.env.FILES.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
+  return key
+}
+
+function documentoColaborador(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    tipo_documento: row.categoria || 'documentos',
+    nome_arquivo: row.nome_arquivo,
+    mime_type: row.tipo_arquivo,
+    tamanho_bytes: row.tamanho_arquivo || 0,
+    status: 'em_analise',
+    criado_em: row.criado_em,
+    atualizado_em: row.criado_em,
+    arquivo_url: `/api/colaborador/documentos/${row.id}/arquivo`,
+  }
+}
+
 /**
  * Converte um ArrayBuffer (conteúdo lido do R2) para base64, em chunks para
  * não estourar o limite de argumentos do String.fromCharCode em arquivos grandes.
@@ -2374,6 +2453,132 @@ function portalTelegramText(row: Record<string, unknown>, fallbackName: string):
   const aircraft = [row.matricula_registro, row.fabricante, row.modelo].filter(Boolean).join(' · ') || '—'
   return `<b>Nova solicitação de reserva de voo</b>\nCliente: <b>${value('cliente_razao_social', fallbackName)}</b>\nAeronave: ${value('aeronave_label', aircraft)}\nOrigem → destino: ${value('origem')} → ${value('destino')}\nData: ${value('data_agendada')} · Horário: ${value('horario_previsto_agendamento')}\nDuração: ${value('dias_duracao')} dia(s) · Passageiros: ${value('numero_passageiros')}\nVoo de empréstimo: ${value('voo_emprestado')}\nObservações: ${value('observacoes')}\nID: <code>${value('id')}</code>\nAcesse o Sistema Interno Share Brasil para aprovar ou reprovar.`
 }
+
+function diasDoPeriodo(dataInicio: string, dataFim: string): number {
+  const inicio = new Date(`${dataInicio}T00:00:00Z`)
+  const fim = new Date(`${dataFim}T00:00:00Z`)
+  if (Number.isNaN(inicio.getTime()) || Number.isNaN(fim.getTime()) || fim < inicio) return 0
+  return Math.floor((fim.getTime() - inicio.getTime()) / 86_400_000) + 1
+}
+
+app.get('/api/colaborador/perfil', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = portalDb(c)
+  const [pagamentos, documentos, ferias] = await Promise.all([
+    db.prepare("SELECT id, descricao, NULL AS competencia, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, status, observacoes FROM movimentacoes WHERE colaborador_id = ?1 AND (lower(status) = 'pago' OR data_pagamento IS NOT NULL) ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC").bind(colaborador.id).all(),
+    db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all(),
+    db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE user_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all(),
+  ])
+  const diasUtilizados = (ferias.results as Array<{ quantidade_dias: number; status: string }>)
+    .filter(item => item.status === 'aprovada')
+    .reduce((total, item) => total + item.quantidade_dias, 0)
+  return c.json({
+    perfil: { ...colaborador, foto_url: colaborador.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 },
+    pagamentos: pagamentos.results,
+    documentos: documentos.results.map(row => documentoColaborador(row as Record<string, unknown>)),
+    ferias: ferias.results,
+    resumo_ferias: { dias_direito: 30, dias_utilizados: diasUtilizados, dias_disponiveis: Math.max(0, 30 - diasUtilizados) },
+  })
+})
+
+app.patch('/api/colaborador/perfil', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null)
+  if (!body) return c.json({ error: 'corpo_invalido' }, 400)
+  const fields = ['nome_completo', 'cpf', 'telefone'] as const
+  const updates = fields.filter(field => body[field] !== undefined).map(field => ({ field, value: body[field] === null ? null : String(body[field]).trim() }))
+  if (updates.length === 0) return c.json({ perfil: colaborador })
+  const assignments = updates.map(({ field }) => `${field} = ?`).join(', ')
+  await portalDb(c).prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
+  const updated = await portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(colaborador.id).first<Colaborador>()
+  return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 } })
+})
+
+app.get('/api/colaborador/foto', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador?.url_avatar) return c.notFound()
+  const object = await c.env.FILES.get(colaborador.url_avatar)
+  if (!object) return c.notFound()
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('Cache-Control', 'private, max-age=300')
+  return new Response(object.body, { headers })
+})
+
+app.post('/api/colaborador/foto', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const formData = await c.req.formData()
+  const file = formData.get('foto')
+  if (!(file instanceof File) || !file.type.startsWith('image/')) return c.json({ error: 'foto_invalida' }, 400)
+  try {
+    const key = await salvarArquivoColaborador(c, colaborador.id, file, 'fotos')
+    await portalDb(c).prepare('UPDATE user_profiles SET url_avatar = ?, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?').bind(key, colaborador.id).run()
+    return c.json({ foto_url: '/api/colaborador/foto' })
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_foto' }, 400)
+  }
+})
+
+app.get('/api/colaborador/documentos', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all()
+  return c.json(result.results.map(row => documentoColaborador(row as Record<string, unknown>)))
+})
+
+app.post('/api/colaborador/documentos', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const formData = await c.req.formData()
+  const file = formData.get('arquivo')
+  const categoria = String(formData.get('tipo_documento') || '').trim()
+  if (!(file instanceof File) || !categoria) return c.json({ error: 'tipo_e_arquivo_obrigatorios' }, 400)
+  if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
+  try {
+    const key = await salvarArquivoColaborador(c, colaborador.id, file, 'documentos')
+    const id = uuid()
+    await portalDb(c).prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, file.name, key, file.type, file.size, colaborador.id, categoria).run()
+    return c.json({ id, tipo_documento: categoria, nome_arquivo: file.name, status: 'em_analise', arquivo_url: `/api/colaborador/documentos/${id}/arquivo` }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_documento' }, 400)
+  }
+})
+
+app.get('/api/colaborador/documentos/:id/arquivo', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const documento = await portalDb(c).prepare('SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), colaborador.id).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()
+  if (!documento) return c.notFound()
+  const object = await c.env.FILES.get(documento.caminho_arquivo)
+  if (!object) return c.notFound()
+  const headers = new Headers({ 'Content-Type': documento.tipo_arquivo, 'Content-Disposition': `attachment; filename="${documento.nome_arquivo.replace(/[^a-zA-Z0-9._-]/g, '_')}"` })
+  return new Response(object.body, { headers })
+})
+
+app.get('/api/colaborador/ferias', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE user_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all()
+  return c.json(result.results)
+})
+
+app.post('/api/colaborador/ferias', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ data_inicio?: string; data_fim?: string; observacoes?: string }>().catch(() => null)
+  const dataInicio = body?.data_inicio?.trim() || ''
+  const dataFim = body?.data_fim?.trim() || ''
+  const quantidadeDias = diasDoPeriodo(dataInicio, dataFim)
+  if (!quantidadeDias || quantidadeDias > 30) return c.json({ error: 'periodo_de_ferias_invalido' }, 400)
+  const saldo = await portalDb(c).prepare("SELECT COALESCE(SUM(quantidade_dias), 0) AS total FROM solicitacoes_ferias WHERE user_id = ?1 AND status IN ('solicitada', 'aprovada')").bind(colaborador.id).first<{ total: number }>()
+  if (Number(saldo?.total || 0) + quantidadeDias > 30) return c.json({ error: 'saldo_de_ferias_insuficiente' }, 409)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO solicitacoes_ferias (id, user_id, data_inicio, data_fim, quantidade_dias, observacoes) VALUES (?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, dataInicio, dataFim, quantidadeDias, body?.observacoes?.trim() || null).run()
+  return c.json({ id, data_inicio: dataInicio, data_fim: dataFim, quantidade_dias: quantidadeDias, status: 'solicitada' }, 201)
+})
 
 app.post('/api/portal/login', async c => {
   try {
