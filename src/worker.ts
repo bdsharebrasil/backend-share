@@ -2447,13 +2447,14 @@ app.post('/api/portal/solicitacoes', async c => {
   const id = crypto.randomUUID()
   await portalDb(c).prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), String(body.data_agendada), body.horario_previsto_agendamento ? String(body.horario_previsto_agendamento) : null, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
   const row = await portalDb(c).prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
+  let notificationSent = true
   try {
     await portalTelegram(c, portalTelegramText(row || { ...body, id }, user?.nome_exibicao || 'Cliente'))
   } catch (error) {
-    log.error('[portal] telegram notification failed', error)
-    return c.json({ error: 'solicitacao_salva_mas_telegram_falhou', solicitacao_id: id }, 502)
+    notificationSent = false
+    log.error('[portal] telegram notification failed after saving request', error)
   }
-  return c.json({ success: true, solicitacao_id: id, message: 'Solicitação enviada com sucesso. Aguarde a confirmação da coordenação.' }, 201)
+  return c.json({ success: true, solicitacao_id: id, notification_sent: notificationSent, message: 'Solicitação enviada com sucesso. Aguarde a confirmação da coordenação.' }, 201)
 })
 
 async function requireShareInternal(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
