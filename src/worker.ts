@@ -2444,8 +2444,11 @@ async function portalTelegram(c: Context<{ Bindings: Bindings }>, message: strin
   const response = await fetch(`https://api.telegram.org/bot${encodeURIComponent(c.env.TELEGRAM_BOT_TOKEN)}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' }),
   })
-  const result = await response.json() as { ok?: boolean }
-  if (!response.ok || !result.ok) throw new Error('Telegram recusou a notificação')
+  const result = await response.json().catch(() => ({})) as { ok?: boolean; error_code?: number; description?: string }
+  if (!response.ok || !result.ok) {
+    const detail = [result.error_code, result.description].filter(Boolean).join(' - ') || 'resposta inválida'
+    throw new Error(`Telegram HTTP ${response.status}: ${detail}`)
+  }
 }
 
 function portalTelegramText(row: Record<string, unknown>, fallbackName: string): string {
