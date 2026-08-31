@@ -3904,6 +3904,54 @@ function isTaskManager(user: Colaborador): boolean {
   return ['admin', 'administrador', 'gestor_master', 'gestormaster'].includes(role)
 }
 
+function isColaboradorManager(user: Colaborador): boolean {
+  const role = (user.tipo_user || '').toLowerCase().replace(/[\s-]+/g, '_')
+  return ['admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster'].includes(role)
+}
+
+app.get('/api/gestor/gestao-colaborador', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !isColaboradorManager(user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const result = await portalDb(c).prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
+  return c.json(result.results)
+})
+
+app.post('/api/gestor/gestao-colaborador', async c => {
+  const creator = await shareBrasilUser(c)
+  if (!creator || !isColaboradorManager(creator)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const email = String(body.email || '').trim().toLowerCase()
+  const senha = String(body.senha || '')
+  const nome = String(body.nome_completo || '').trim()
+  if (!email || !/^\S+@\S+\.\S+$/.test(email) || senha.length < 6 || !nome) return c.json({ error: 'nome_email_e_senha_validos_sao_obrigatorios' }, 400)
+  if (!c.env.SUPABASE_URL || !c.env.SUPABASE_SERVICE_ROLE_KEY) return c.json({ error: 'supabase_admin_nao_configurado' }, 503)
+  const authResponse = await fetch(`${c.env.SUPABASE_URL}/auth/v1/admin/users`, { method: 'POST', headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: senha, email_confirm: true, user_metadata: { nome_completo: nome, tipo_user: 'colaborador' } }) })
+  const authData = await authResponse.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  if (!authResponse.ok || !authData.id) return c.json({ error: authData.msg || authData.message || 'nao_foi_possivel_criar_usuario_supabase' }, authResponse.status === 422 ? 409 : 502)
+  const id = String(authData.id)
+  try {
+    await portalDb(c).prepare(`INSERT INTO user_profiles (id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
+  } catch (error) {
+    await fetch(`${c.env.SUPABASE_URL}/auth/v1/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}` } }).catch(() => undefined)
+    log.error('[gestao-colaborador] falha ao inserir perfil D1:', error)
+    return c.json({ error: 'usuario_criado_no_supabase_mas_falha_ao_salvar_perfil_d1' }, 500)
+  }
+  return c.json(await portalDb(c).prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
+})
+
+app.patch('/api/gestor/gestao-colaborador/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !isColaboradorManager(user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const id = c.req.param('id'); const current = await portalDb(c).prepare('SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
+  if (!current) return c.notFound()
+  const fields = ['nome_completo', 'nome_exibicao', 'telefone', 'cidade', 'uf', 'data_nascimento', 'data_admissao', 'cpf', 'rg', 'canac', 'departamento', 'status']
+  const updates = fields.filter(field => body[field] !== undefined)
+  if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
+  await portalDb(c).prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
+  return c.json(await portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
+})
+
 function jsonArray(value: unknown): string {
   return JSON.stringify(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [])
 }
