@@ -9,6 +9,7 @@ type Bindings = {
   AISWEB_API_PASS: string
   CACHE_KV: KVNamespace
   FILES: R2Bucket
+  SHARE_FILES?: R2Bucket
   DB: D1Database
   SHARE_DB: D1Database
   RESEND_API_KEY: string
@@ -887,11 +888,19 @@ function colaboradorExtensao(file: File): string {
   return file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin'
 }
 
-async function salvarArquivoColaborador(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: string): Promise<string> {
+function bucketColaborador(c: Context<{ Bindings: Bindings }>): R2Bucket {
+  return c.env.SHARE_FILES || c.env.FILES
+}
+
+function bucketParaChaveColaborador(c: Context<{ Bindings: Bindings }>, key: string): R2Bucket {
+  return key.startsWith('avatar_profiles/') || key.startsWith('documentos_colaboradores/') ? bucketColaborador(c) : c.env.FILES
+}
+
+async function salvarArquivoColaborador(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'avatar_profiles' | 'documentos_colaboradores'): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
   if (file.size > 10 * 1024 * 1024) throw new Error('arquivo_excede_10mb')
-  const key = `colaboradores/${userId}/${pasta}/${Date.now()}-${uuid().slice(0, 8)}.${colaboradorExtensao(file)}`
-  await c.env.FILES.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
+  const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}.${colaboradorExtensao(file)}`
+  await bucketColaborador(c).put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
   return key
 }
 
@@ -2507,7 +2516,7 @@ app.patch('/api/colaborador/perfil', async c => {
 app.get('/api/colaborador/foto', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador?.url_avatar) return c.notFound()
-  const object = await c.env.FILES.get(colaborador.url_avatar)
+  const object = await bucketParaChaveColaborador(c, colaborador.url_avatar).get(colaborador.url_avatar)
   if (!object) return c.notFound()
   const headers = new Headers()
   object.writeHttpMetadata(headers)
@@ -2523,7 +2532,7 @@ app.post('/api/colaborador/foto', async c => {
   if (!fileValue || typeof fileValue !== 'object' || !('type' in fileValue) || typeof fileValue.type !== 'string' || !fileValue.type.startsWith('image/')) return c.json({ error: 'foto_invalida' }, 400)
   const file = fileValue as File
   try {
-    const key = await salvarArquivoColaborador(c, colaborador.id, file, 'fotos')
+    const key = await salvarArquivoColaborador(c, colaborador.id, file, 'avatar_profiles')
     await portalDb(c).prepare('UPDATE user_profiles SET url_avatar = ?, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?').bind(key, colaborador.id).run()
     return c.json({ foto_url: '/api/colaborador/foto' })
   } catch (error: any) {
@@ -2548,7 +2557,7 @@ app.post('/api/colaborador/documentos', async c => {
   const file = fileValue as File
   if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
   try {
-    const key = await salvarArquivoColaborador(c, colaborador.id, file, 'documentos')
+    const key = await salvarArquivoColaborador(c, colaborador.id, file, 'documentos_colaboradores')
     const id = uuid()
     await portalDb(c).prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, file.name, key, file.type, file.size, colaborador.id, categoria).run()
     return c.json({ id, tipo_documento: categoria, nome_arquivo: file.name, status: 'em_analise', arquivo_url: `/api/colaborador/documentos/${id}/arquivo` }, 201)
@@ -2562,7 +2571,7 @@ app.get('/api/colaborador/documentos/:id/arquivo', async c => {
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const documento = await portalDb(c).prepare('SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), colaborador.id).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()
   if (!documento) return c.notFound()
-  const object = await c.env.FILES.get(documento.caminho_arquivo)
+  const object = await bucketParaChaveColaborador(c, documento.caminho_arquivo).get(documento.caminho_arquivo)
   if (!object) return c.notFound()
   const headers = new Headers({ 'Content-Type': documento.tipo_arquivo, 'Content-Disposition': `attachment; filename="${documento.nome_arquivo.replace(/[^a-zA-Z0-9._-]/g, '_')}"` })
   return new Response(object.body, { headers })
@@ -2786,7 +2795,7 @@ app.get('/api/interno/agendamento', async c => {
       WHERE date(s.data_agendada) BETWEEN ?1 AND ?2
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all(),
     db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
-    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.foto_url AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all(),
+    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all(),
     db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
         CASE WHEN EXISTS (SELECT 1 FROM tripulacao t WHERE t.id = e.tripulacao_id) THEN 'tripulacao' ELSE 'freelancer' END AS tripulante_origem,

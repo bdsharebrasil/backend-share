@@ -21,6 +21,11 @@ enabled = true
 binding = "FILES"
 bucket_name = "nf-boletos-clients"
 
+# ── R2 do portal Share: avatares e documentos de colaboradores ───────────────
+[[r2_buckets]]
+binding = "SHARE_FILES"
+bucket_name = "share"
+
 # ── D1 para templates de email, log de envios, short links e mensageria ────
 [[d1_databases]]
 binding = "DB"
