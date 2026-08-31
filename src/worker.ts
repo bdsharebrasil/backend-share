@@ -2744,14 +2744,16 @@ async function garantirTabelaDisponibilidadeTripulacao(c: Context<{ Bindings: Bi
   await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN socio_id TEXT NULL`).run().catch(() => undefined)
   await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS escala_tripulacao (
     id TEXT PRIMARY KEY NOT NULL,
-    tripulante_id TEXT NOT NULL,
-    tripulante_origem TEXT NOT NULL,
+    tripulacao_id TEXT NOT NULL,
+    aeronave_id TEXT NULL,
+    solicitacao_id TEXT NULL,
+    funcao TEXT NOT NULL DEFAULT 'PIC',
     data_inicio TEXT NOT NULL,
     data_fim TEXT NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NULL,
     observacoes TEXT NULL,
-    criado_em TEXT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NULL DEFAULT CURRENT_TIMESTAMP
+    criado_por TEXT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run()
 }
 
@@ -2784,12 +2786,14 @@ app.get('/api/interno/agendamento', async c => {
       WHERE date(s.data_agendada) BETWEEN ?1 AND ?2
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all(),
     db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
-    db.prepare("SELECT id, nome_completo, canac, status, tipo_licenca, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
-    db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
-    db.prepare(`SELECT id, tripulante_id, tripulante_origem, data_inicio, data_fim, status, observacoes
-      FROM escala_tripulacao
-      WHERE date(data_inicio) <= date(?2) AND date(data_fim) >= date(?1)
-      ORDER BY date(data_inicio), tripulante_id`).bind(inicio, fim).all(),
+    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.foto_url AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all(),
+    db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
+    db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
+        CASE WHEN EXISTS (SELECT 1 FROM tripulacao t WHERE t.id = e.tripulacao_id) THEN 'tripulacao' ELSE 'freelancer' END AS tripulante_origem,
+        e.data_inicio, e.data_fim, e.status, e.observacoes
+      FROM escala_tripulacao e
+      WHERE date(e.data_inicio) <= date(?2) AND date(e.data_fim) >= date(?1)
+      ORDER BY date(e.data_inicio), e.tripulacao_id`).bind(inicio, fim).all(),
   ])
   const tripulantes = [...tripulacao.results, ...freelancers.results]
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
@@ -2824,8 +2828,8 @@ app.post('/api/interno/agendamento/disponibilidade', async c => {
   const tripulante = await buscarTripulante(c, tripulanteId)
   if (!tripulante) return c.json({ error: 'tripulante_nao_encontrado' }, 404)
   const id = uuid()
-  await portalDb(c).prepare(`INSERT INTO escala_tripulacao (id, tripulante_id, tripulante_origem, data_inicio, data_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, tripulante.id, tripulante.origem, dataInicio, dataFim, status, body?.observacoes?.trim() || null).run()
+  await portalDb(c).prepare(`INSERT INTO escala_tripulacao (id, tripulacao_id, data_inicio, data_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?)`)
+    .bind(id, tripulante.id, dataInicio, dataFim, status, body?.observacoes?.trim() || null).run()
   return c.json({ id, ...body, tripulante_origem: tripulante.origem, tripulante_nome: tripulante.nome_completo }, 201)
 })
 
