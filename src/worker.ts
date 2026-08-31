@@ -3207,6 +3207,103 @@ app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
 
 
 
+
+// ─── Operações: abastecimentos ─────────────────────────────────────────────
+async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS abastecimentos (
+    id TEXT PRIMARY KEY NOT NULL,
+    cliente_id TEXT NULL, socio_id TEXT NULL, aeronave_id TEXT NULL,
+    data TEXT NOT NULL, tipo_combustivel TEXT NULL, trecho TEXT NULL, local TEXT NOT NULL,
+    numero_comanda TEXT NULL, numero_nf TEXT NULL, litros REAL NOT NULL DEFAULT 0,
+    valor_unitario REAL NOT NULL DEFAULT 0, valor_total REAL NOT NULL DEFAULT 0, desconto REAL NULL,
+    comanda_url TEXT NULL, nota_url TEXT NULL, boleto_url TEXT NULL, fornecedor_id TEXT NULL,
+    status TEXT NULL, observacao TEXT NULL, forma_pagamento TEXT NULL, data_vencimento_boleto TEXT NULL,
+    criado_por TEXT NULL, lancamento_diario_id TEXT NULL, data_pagamento TEXT NULL, banco TEXT NULL,
+    voo_emprestado INTEGER NOT NULL DEFAULT 0, numero_voo TEXT NULL
+  )`).run()
+}
+
+app.get('/api/interno/abastecimentos/opcoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaAbastecimentos(c)
+  const db = portalDb(c)
+  const [clientes, socios, aeronaves, fornecedores, diarios] = await Promise.all([
+    db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
+    db.prepare('SELECT s.id, s.nome, s.cliente_id, c.razao_social AS cliente_nome FROM hold_socios s LEFT JOIN cliente c ON c.id = s.cliente_id ORDER BY s.nome').all(),
+    db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
+    db.prepare('SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo), nome_completo').all(),
+    db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo ORDER BY date(data_registro) DESC LIMIT 100').all(),
+  ])
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, diarios: diarios.results })
+})
+
+app.post('/api/interno/abastecimentos/fornecedores', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => null)
+  if (!body?.nome_completo?.trim()) return c.json({ error: 'nome_fornecedor_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO fornecedores_favoritos (id, nome_completo, endereco, cidade, uf, codigo_icao, pessoa_contato, preco_avgas, preco_jet, telefone, documento, apelido, conta_pagamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome_completo.trim(), body.endereco || null, body.cidade || null, body.uf || null, body.codigo_icao || null, body.pessoa_contato || null, Number(body.preco_avgas || 0), Number(body.preco_jet || 0), body.telefone || null, body.documento || null, body.apelido || null, body.conta_pagamento || null).run()
+  return c.json({ id, success: true }, 201)
+})
+
+app.get('/api/interno/abastecimentos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaAbastecimentos(c)
+  const inicio = c.req.query('inicio') || '1900-01-01'; const fim = c.req.query('fim') || '2999-12-31'
+  const aeronaveId = c.req.query('aeronave_id') || ''; const clienteId = c.req.query('cliente_id') || ''; const fornecedorId = c.req.query('fornecedor_id') || ''; const busca = (c.req.query('busca') || '').trim()
+  const conditions = ['date(a.data) BETWEEN ?1 AND ?2']; const binds: unknown[] = [inicio, fim]; let index = 3
+  if (aeronaveId) { conditions.push(`a.aeronave_id = ?${index++}`); binds.push(aeronaveId) }
+  if (clienteId) { conditions.push(`a.cliente_id = ?${index++}`); binds.push(clienteId) }
+  if (fornecedorId) { conditions.push(`a.fornecedor_id = ?${index++}`); binds.push(fornecedorId) }
+  if (busca) { conditions.push(`(lower(COALESCE(a.local, '')) LIKE ?${index} OR lower(COALESCE(a.trecho, '')) LIKE ?${index} OR lower(COALESCE(a.numero_comanda, '')) LIKE ?${index} OR lower(COALESCE(a.numero_nf, '')) LIKE ?${index})`); binds.push(`%${busca.toLowerCase()}%`); index++ }
+  const result = await portalDb(c).prepare(`SELECT a.*, c.razao_social AS cliente_nome, s.nome AS socio_nome, ar.matricula_registro, ar.fabricante, ar.modelo, f.nome_completo AS fornecedor_nome, f.apelido AS fornecedor_apelido, u.nome_completo AS criado_por_nome FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN fornecedores_favoritos f ON f.id = a.fornecedor_id LEFT JOIN user_profiles u ON u.id = a.criado_por WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.criado_em DESC`).bind(...binds).all()
+  return c.json({ abastecimentos: result.results })
+})
+
+app.post('/api/interno/abastecimentos', async c => {
+  const authenticated = await authenticatedColaborador(c)
+  if (!authenticated && !checkInternalAuth(c)) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaAbastecimentos(c)
+  const body = await c.req.json<Record<string, any>>().catch(() => null)
+  const data = String(body?.data || '').trim(); const local = String(body?.local || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !local) return c.json({ error: 'data_e_local_obrigatorios' }, 400)
+  const id = uuid(); const litros = Number(body?.litros || 0); const valorUnitario = Number(body?.valor_unitario || 0); const valorTotal = Number(body?.valor_total ?? litros * valorUnitario)
+  await portalDb(c).prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, forma_pagamento, data_vencimento_boleto, criado_por, lancamento_diario_id, data_pagamento, banco, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, body?.cliente_id || null, body?.socio_id || null, body?.aeronave_id || null, data, body?.tipo_combustivel || null, body?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, Number.isFinite(litros) ? litros : 0, Number.isFinite(valorUnitario) ? valorUnitario : 0, Number.isFinite(valorTotal) ? valorTotal : 0, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, authenticated?.id || extractSupabaseUserId(c) || null, body?.lancamento_diario_id || null, body?.data_pagamento || null, body?.banco || null, body?.voo_emprestado ? 1 : 0, body?.numero_voo || null).run()
+  return c.json({ id, success: true }, 201)
+})
+
+app.patch('/api/interno/abastecimentos/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaAbastecimentos(c); const body = await c.req.json<Record<string, any>>().catch(() => ({} as any)); const id = c.req.param('id')
+  const result = await portalDb(c).prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, data_pagamento = ?, banco = ?, voo_emprestado = ?, numero_voo = ? WHERE id = ?`).bind(body.cliente_id || null, body.socio_id || null, body.aeronave_id || null, body.data, body.tipo_combustivel || null, body.trecho || null, body.local, body.numero_comanda || null, body.numero_nf || null, Number(body.litros || 0), Number(body.valor_unitario || 0), Number(body.valor_total || 0), body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, body.lancamento_diario_id || null, body.data_pagamento || null, body.banco || null, body.voo_emprestado ? 1 : 0, body.numero_voo || null, id).run()
+  if (!result.meta.changes) return c.notFound(); return c.json({ success: true, id })
+})
+
+app.delete('/api/interno/abastecimentos/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const result = await portalDb(c).prepare('DELETE FROM abastecimentos WHERE id = ?1').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
+})
+
+app.post('/api/interno/abastecimentos/:id/arquivo', async c => {
+  const authenticated = await authenticatedColaborador(c)
+  if (!authenticated && !checkInternalAuth(c)) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaAbastecimentos(c); const id = c.req.param('id'); const form = await c.req.parseBody(); const file = form.arquivo; const tipo = String(form.tipo || 'comanda')
+  if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  if (!['comanda', 'nota', 'boleto'].includes(tipo)) return c.json({ error: 'tipo_arquivo_invalido' }, 400)
+  const objectKey = await salvarArquivoShareBrasil(c, authenticated?.id || extractSupabaseUserId(c) || 'interno', file, 'abastecimentos')
+  const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
+  await portalDb(c).prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(objectKey, id).run()
+  return c.json({ success: true, caminho_arquivo: objectKey })
+})
+
+app.get('/api/interno/abastecimentos/:id/arquivo/:tipo', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const tipo = c.req.param('tipo'); const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
+  const row = await portalDb(c).prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?`).bind(c.req.param('id')).first<{ caminho: string | null }>(); if (!row?.caminho) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.caminho); if (!object) return c.notFound(); return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `inline; filename="${row.caminho.split('/').pop() || 'abastecimento'}"` } })
+})
+
 // ─── Share Brasil: ponto, documentos, senhas e contatos ─────────────────────
 async function shareBrasilUser(c: Context<{ Bindings: Bindings }>): Promise<Colaborador | null> {
   return authenticatedColaborador(c)
@@ -3220,7 +3317,7 @@ function shareBrasilFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
 }
 
-async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes'): Promise<string> {
+async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes' | 'abastecimentos'): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
   if (file.size > 25 * 1024 * 1024) throw new Error('arquivo_excede_25mb')
   const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
