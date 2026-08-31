@@ -2468,10 +2468,11 @@ app.get('/api/colaborador/perfil', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const db = portalDb(c)
-  const [pagamentos, documentos, ferias] = await Promise.all([
+  const [pagamentos, documentos, funcoes, ferias] = await Promise.all([
     db.prepare("SELECT id, descricao, NULL AS competencia, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, status, observacoes FROM movimentacoes WHERE colaborador_id = ?1 AND (lower(status) = 'pago' OR data_pagamento IS NOT NULL) ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC").bind(colaborador.id).all(),
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all(),
-    db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE user_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all(),
+    db.prepare('SELECT id, funcao, criado_em FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY funcao').bind(colaborador.id).all(),
+    db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all(),
   ])
   const diasUtilizados = (ferias.results as Array<{ quantidade_dias: number; status: string }>)
     .filter(item => item.status === 'aprovada')
@@ -2480,6 +2481,7 @@ app.get('/api/colaborador/perfil', async c => {
     perfil: { ...colaborador, foto_url: colaborador.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 },
     pagamentos: pagamentos.results,
     documentos: documentos.results.map(row => documentoColaborador(row as Record<string, unknown>)),
+    funcoes: funcoes.results,
     ferias: ferias.results,
     resumo_ferias: { dias_direito: 30, dias_utilizados: diasUtilizados, dias_disponiveis: Math.max(0, 30 - diasUtilizados) },
   })
@@ -2566,7 +2568,7 @@ app.get('/api/colaborador/documentos/:id/arquivo', async c => {
 app.get('/api/colaborador/ferias', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE user_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all()
+  const result = await portalDb(c).prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all()
   return c.json(result.results)
 })
 
@@ -2578,10 +2580,10 @@ app.post('/api/colaborador/ferias', async c => {
   const dataFim = body?.data_fim?.trim() || ''
   const quantidadeDias = diasDoPeriodo(dataInicio, dataFim)
   if (!quantidadeDias || quantidadeDias > 30) return c.json({ error: 'periodo_de_ferias_invalido' }, 400)
-  const saldo = await portalDb(c).prepare("SELECT COALESCE(SUM(quantidade_dias), 0) AS total FROM solicitacoes_ferias WHERE user_id = ?1 AND status IN ('solicitada', 'aprovada')").bind(colaborador.id).first<{ total: number }>()
+  const saldo = await portalDb(c).prepare("SELECT COALESCE(SUM(quantidade_dias), 0) AS total FROM solicitacoes_ferias WHERE colaborador_id = ?1 AND status IN ('solicitada', 'aprovada')").bind(colaborador.id).first<{ total: number }>()
   if (Number(saldo?.total || 0) + quantidadeDias > 30) return c.json({ error: 'saldo_de_ferias_insuficiente' }, 409)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO solicitacoes_ferias (id, user_id, data_inicio, data_fim, quantidade_dias, observacoes) VALUES (?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, dataInicio, dataFim, quantidadeDias, body?.observacoes?.trim() || null).run()
+  await portalDb(c).prepare('INSERT INTO solicitacoes_ferias (id, colaborador_id, data_inicio, data_fim, quantidade_dias, observacoes) VALUES (?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, dataInicio, dataFim, quantidadeDias, body?.observacoes?.trim() || null).run()
   return c.json({ id, data_inicio: dataInicio, data_fim: dataFim, quantidade_dias: quantidadeDias, status: 'solicitada' }, 201)
 })
 
