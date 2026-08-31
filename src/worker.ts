@@ -3599,6 +3599,51 @@ app.post('/api/sharebrasil/calendario', async c => {
   return c.json({ id: calendarId, titulo: body.titulo.trim(), data: body.data, hora: body.hora || null, visibilidade: visibility }, 201)
 })
 
+
+
+// ─── Recados compartilhados entre dashboards ─────────────────────────────────
+app.get('/api/colaborador/recados/departamentos', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare("SELECT DISTINCT trim(departamento) AS departamento FROM user_profiles WHERE departamento IS NOT NULL AND trim(departamento) <> '' ORDER BY departamento").all()
+  return c.json(result.results)
+})
+
+app.get('/api/colaborador/recados', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare("SELECT r.id, r.criado_em, r.atualizado_em, r.autor_id, r.mensagem, r.fixado, r.departamento_id, r.lido_por, COALESCE(a.nome_exibicao, a.nome_completo, a.email) AS autor_nome, uf.funcao AS departamento FROM recados r LEFT JOIN user_profiles a ON a.id = r.autor_id LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?1, '')) ORDER BY r.fixado DESC, r.criado_em DESC LIMIT 100").bind(user.departamento || null).all()
+  return c.json(result.results.map((item: any) => ({ ...item, fixado: Boolean(item.fixado), lido: JSON.parse(item.lido_por || '[]').includes(user.id) })))
+})
+
+app.post('/api/colaborador/recados', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ mensagem?: string; departamento?: string | null; fixado?: boolean }>().catch(() => ({} as any))
+  if (!body.mensagem?.trim()) return c.json({ error: 'mensagem_obrigatoria' }, 400)
+  let departamentoId: string | null = null
+  const departamento = body.departamento?.trim()
+  if (departamento) {
+    const target = await portalDb(c).prepare('SELECT id FROM usuarios_funcoes WHERE lower(funcao) = lower(?1) LIMIT 1').bind(departamento).first<{ id: string }>()
+    if (!target) return c.json({ error: 'departamento_nao_encontrado' }, 400)
+    departamentoId = target.id
+  }
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO recados (id, autor_id, mensagem, fixado, departamento_id) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, body.mensagem.trim(), body.fixado ? 1 : 0, departamentoId).run()
+  return c.json({ id, mensagem: body.mensagem.trim(), departamento: departamento || null, fixado: Boolean(body.fixado) }, 201)
+})
+
+app.patch('/api/colaborador/recados/:id/lido', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare("SELECT r.id, r.lido_por FROM recados r LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.id = ?1 AND (r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?2, '')))").bind(c.req.param('id'), user.departamento || null).first<{ id: string; lido_por: string }>()
+  if (!row) return c.notFound()
+  const readers = JSON.parse(row.lido_por || '[]') as unknown
+  const lidoPor = Array.isArray(readers) ? [...new Set([...readers.filter((item): item is string => typeof item === 'string'), user.id])] : [user.id]
+  await portalDb(c).prepare('UPDATE recados SET lido_por = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(lidoPor), row.id).run()
+  return c.json({ success: true, lido: true })
+})
+
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
