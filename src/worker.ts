@@ -4042,6 +4042,91 @@ app.post('/api/sharebrasil/calendario', async c => {
 
 
 
+// ─── Hotéis Share Brasil: contatos, CRUD e reservas por email ─────────────────
+async function garantirTabelaHoteis(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS hoteis (
+    id TEXT PRIMARY KEY NOT NULL, nome TEXT NOT NULL, telefone TEXT, endereco TEXT, uf TEXT, cidade TEXT,
+    preco_single REAL, preco_duplo REAL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    estrelas INTEGER, convenio INTEGER NOT NULL DEFAULT 0, email TEXT, telefone_reservas TEXT, contato_comercial TEXT,
+    telefone_comercial TEXT, email_comercial TEXT, observacoes TEXT
+  )`).run()
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS reservas_hoteis (
+    id TEXT PRIMARY KEY NOT NULL, hotel_id TEXT NOT NULL, criado_por TEXT, data_checkin TEXT NOT NULL, data_checkout TEXT NOT NULL,
+    tipo_quarto TEXT, quantidade_hospedes INTEGER NOT NULL, hospede_nome TEXT NOT NULL, hospede_telefone TEXT NOT NULL,
+    hospede_email TEXT, observacoes TEXT, destinatario_email TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'SOLICITADA', criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+}
+
+function hotelPayload(row: Record<string, any>) {
+  return { ...row, convenio: Boolean(row.convenio), estrelas: Number(row.estrelas || 0), preco_single: row.preco_single == null ? null : Number(row.preco_single), preco_duplo: row.preco_duplo == null ? null : Number(row.preco_duplo) }
+}
+
+app.get('/api/sharebrasil/hoteis', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaHoteis(c)
+  const busca = (c.req.query('q') || '').trim()
+  const ordem = c.req.query('ordem') === 'cidade' ? 'cidade, nome' : c.req.query('ordem') === 'estrelas' ? 'estrelas DESC, nome' : 'nome'
+  const query = busca ? `SELECT * FROM hoteis WHERE nome LIKE ?1 OR cidade LIKE ?1 OR contato_comercial LIKE ?1 OR email LIKE ?1 ORDER BY ${ordem}` : `SELECT * FROM hoteis ORDER BY ${ordem}`
+  const result = busca ? await portalDb(c).prepare(query).bind(`%${busca}%`).all() : await portalDb(c).prepare(query).all()
+  return c.json(result.results.map(row => hotelPayload(row as Record<string, any>)))
+})
+
+app.post('/api/sharebrasil/hoteis', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await garantirTabelaHoteis(c)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const nome = String(body.nome || '').trim()
+  if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare(`INSERT INTO hoteis (id, nome, telefone, endereco, uf, cidade, preco_single, preco_duplo, estrelas, convenio, email, telefone_reservas, contato_comercial, telefone_comercial, email_comercial, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, nome, body.telefone || null, body.endereco || null, body.uf || null, body.cidade || null, body.preco_single == null || body.preco_single === '' ? null : Number(body.preco_single), body.preco_duplo == null || body.preco_duplo === '' ? null : Number(body.preco_duplo), Math.max(0, Math.min(5, Math.trunc(Number(body.estrelas) || 0))), body.convenio ? 1 : 0, body.email || null, body.telefone_reservas || null, body.contato_comercial || null, body.telefone_comercial || null, body.email_comercial || null, body.observacoes || null).run()
+  return c.json(hotelPayload(await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(id).first<Record<string, any>>() || { id, nome }), 201)
+})
+
+app.patch('/api/sharebrasil/hoteis/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await garantirTabelaHoteis(c)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const current = await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
+  if (!current) return c.notFound()
+  const value = (key: string) => body[key] === undefined ? current[key] : body[key]
+  await portalDb(c).prepare('UPDATE hoteis SET nome=?, telefone=?, endereco=?, uf=?, cidade=?, preco_single=?, preco_duplo=?, estrelas=?, convenio=?, email=?, telefone_reservas=?, contato_comercial=?, telefone_comercial=?, email_comercial=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(String(value('nome') || '').trim(), value('telefone') || null, value('endereco') || null, value('uf') || null, value('cidade') || null, value('preco_single') === '' || value('preco_single') == null ? null : Number(value('preco_single')), value('preco_duplo') === '' || value('preco_duplo') == null ? null : Number(value('preco_duplo')), Math.max(0, Math.min(5, Math.trunc(Number(value('estrelas')) || 0))), value('convenio') ? 1 : 0, value('email') || null, value('telefone_reservas') || null, value('contato_comercial') || null, value('telefone_comercial') || null, value('email_comercial') || null, value('observacoes') || null, current.id).run()
+  return c.json(hotelPayload(await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(current.id).first<Record<string, any>>() || current))
+})
+
+app.delete('/api/sharebrasil/hoteis/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await garantirTabelaHoteis(c)
+  const result = await portalDb(c).prepare('DELETE FROM hoteis WHERE id = ?1').bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.post('/api/sharebrasil/hoteis/:id/reservar', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaHoteis(c)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const hotel = await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
+  if (!hotel) return c.notFound()
+  const destinatario = String(hotel.email || hotel.email_comercial || '').trim()
+  if (!destinatario) return c.json({ error: 'hotel_sem_email' }, 422)
+  const checkin = String(body.data_checkin || '').trim(); const checkout = String(body.data_checkout || '').trim(); const hospede = String(body.hospede_nome || '').trim(); const telefone = String(body.hospede_telefone || '').trim(); const quantidade = Number(body.quantidade_hospedes || 1)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkin) || !/^\d{4}-\d{2}-\d{2}$/.test(checkout) || !hospede || !telefone || !Number.isInteger(quantidade) || quantidade < 1) return c.json({ error: 'dados_da_reserva_invalidos' }, 400)
+  if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
+  const emailResponse = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [destinatario], reply_to: body.hospede_email || undefined, subject: `Solicitação de reserva — ${hotel.nome} (${checkin} a ${checkout})`, html: `<h2>Solicitação de reserva</h2><p><strong>Hotel:</strong> ${escapeHtml(hotel.nome)}</p><p><strong>Check-in:</strong> ${escapeHtml(checkin)}</p><p><strong>Check-out:</strong> ${escapeHtml(checkout)}</p><p><strong>Quarto:</strong> ${escapeHtml(body.tipo_quarto || 'Não informado')}</p><p><strong>Hóspede:</strong> ${escapeHtml(hospede)}</p><p><strong>Telefone:</strong> ${escapeHtml(telefone)}</p><p><strong>Quantidade:</strong> ${escapeHtml(quantidade)}</p><p><strong>Observações:</strong> ${escapeHtml(body.observacoes || '—')}</p>` }) })
+  if (!emailResponse.ok) return c.json({ error: 'falha_ao_enviar_email' }, 502)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO reservas_hoteis (id, hotel_id, criado_por, data_checkin, data_checkout, tipo_quarto, quantidade_hospedes, hospede_nome, hospede_telefone, hospede_email, observacoes, destinatario_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, hotel.id, user.id, checkin, checkout, body.tipo_quarto || null, quantidade, hospede, telefone, body.hospede_email || null, body.observacoes || null, destinatario).run()
+  return c.json({ success: true, id, destinatario_email: destinatario }, 201)
+})
+
 // ─── Centro de Treinamento: tutoriais, treinamentos e salas colaborativas ────
 async function ensureTrainingTables(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
