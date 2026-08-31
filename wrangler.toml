@@ -5,6 +5,7 @@ compatibility_date = "2024-01-01"
 # ============= VARS (não sensíveis) =============
 [vars]
 EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
+SUPABASE_URL = "https://jilmlmdgeyzubylncpjy.supabase.co"
 
 # ============= KV NAMESPACE =============
 [[kv_namespaces]]
