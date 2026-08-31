@@ -630,8 +630,40 @@ function parseCoord(raw: any): number | null {
   return isNaN(n) ? null : n
 }
 
+function metarNumber(value: string): number | null {
+  if (!value) return null
+  const normalized = value.startsWith('M') ? `-${value.slice(1)}` : value
+  const number = Number(normalized)
+  return Number.isFinite(number) ? number : null
+}
+
+function decodeMetar(metar: string): Record<string, any> {
+  const tokens = metar.trim().split(/\s+/).filter(Boolean)
+  const windToken = tokens.find(token => /^(VRB|\d{3})\d{2,3}(G\d{2,3})?KT$/.test(token))
+  const temperatureToken = tokens.find(token => /^M?\d{2}/.test(token) && token.includes('/'))
+  const qnhToken = tokens.find(token => /^Q\d{4}$/.test(token) || /^A\d{4}$/.test(token))
+  const timeToken = tokens.find(token => /^\d{6}Z$/.test(token))
+  const windMatch = windToken?.match(/^(VRB|\d{3})(\d{2,3})(?:G(\d{2,3}))?KT$/)
+  const temperatureMatch = temperatureToken?.match(/^(M?\d{2})\/(M?\d{2}|XX)$/)
+  const qnhMatch = qnhToken?.match(/^([QA])(\d{4})$/)
+  const windDirection = windMatch?.[1] === 'VRB' ? null : Number(windMatch?.[1])
+  const qnh = qnhMatch ? (qnhMatch[1] === 'Q' ? Number(qnhMatch[2]) : Math.round(Number(qnhMatch[2]) * 33.8639)) : null
+  return {
+    observed_at: timeToken ?? null,
+    temperature_c: temperatureMatch ? metarNumber(temperatureMatch[1]) : null,
+    dew_point_c: temperatureMatch && temperatureMatch[2] !== 'XX' ? metarNumber(temperatureMatch[2]) : null,
+    qnh_hpa: qnh,
+    wind: windMatch ? {
+      direction_deg: windDirection,
+      speed_kt: Number(windMatch[2]),
+      gust_kt: windMatch[3] ? Number(windMatch[3]) : null,
+      variable: windMatch[1] === 'VRB',
+    } : null,
+  }
+}
+
 function normalizeMet(data: any, icao: string): Record<string, any> {
-  if (!data || typeof data !== 'object') return { loc: icao, metar: '', taf: '' }
+  if (!data || typeof data !== 'object') return { loc: icao, metar: '', taf: '', ...decodeMetar('') }
 
   const metarStr =
     (typeof data.rawOb === 'string' ? data.rawOb : null) ??
@@ -656,6 +688,8 @@ function normalizeMet(data: any, icao: string): Record<string, any> {
     loc: data.metar?.loc ?? data.loc ?? icao,
     metar: metarStr,
     taf: tafStr,
+    ...decodeMetar(metarStr),
+    source: 'AISWEB/DECEA',
   }
 }
 
@@ -1365,6 +1399,26 @@ app.get('/api/turn/ice-servers', async (c) => {
   } catch (error: any) {
     log.error('[turn] erro ao gerar credenciais:', error?.message ?? error)
     return c.json({ error: 'Falha de comunicação com o serviço TURN.' }, 502)
+  }
+})
+
+app.get('/api/aerodromos', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+  const query = (c.req.query('q') ?? '').trim().toUpperCase()
+  try {
+    const data = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
+    const aerodromos = rotaerItems(data)
+      .map(item => ({
+        id: rotaerIcao(item),
+        label: `${rotaerIcao(item)} · ${item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item)}`,
+        name: item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item),
+        city: item?.cidade ?? item?.city ?? null,
+      }))
+      .filter(item => item.id && (!query || `${item.id} ${item.label}`.includes(query)))
+      .slice(0, 100)
+    return c.json({ aerodromos, source: 'AISWEB/DECEA' })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 502)
   }
 })
 
@@ -2765,6 +2819,43 @@ async function garantirTabelaDisponibilidadeTripulacao(c: Context<{ Bindings: Bi
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run()
 }
+
+async function garantirTabelaPlanosVoo(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS planos_voo (
+    id TEXT PRIMARY KEY NOT NULL,
+    numero_voo TEXT NULL,
+    adep TEXT NOT NULL,
+    ades TEXT NOT NULL,
+    data_voo TEXT NULL,
+    eobt TEXT NULL,
+    payload_json TEXT NOT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+}
+
+app.get('/api/interno/planos-voo', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaPlanosVoo(c)
+  const rows = await portalDb(c).prepare(`SELECT id, numero_voo, adep, ades, data_voo, eobt, payload_json, criado_em AS created_at FROM planos_voo ORDER BY criado_em DESC LIMIT 50`).all<any>()
+  return c.json(rows.results.map(row => ({ ...row, payload: JSON.parse(row.payload_json) })))
+})
+
+app.post('/api/interno/planos-voo', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => null)
+  const flightplan = body?.flightplan
+  const adep = String(body?.adep ?? flightplan?.adep ?? '').trim().toUpperCase()
+  const ades = String(body?.ades ?? flightplan?.ades ?? '').trim().toUpperCase()
+  if (!/^[A-Z]{4}$/.test(adep) || !/^[A-Z]{4}$/.test(ades)) return c.json({ error: 'adep_ades_obrigatorios' }, 400)
+  await garantirTabelaPlanosVoo(c)
+  const id = uuid()
+  const numeroVoo = body?.numero_voo ? String(body.numero_voo).trim() : null
+  const dataVoo = body?.data_voo ? String(body.data_voo).trim() : null
+  const eobt = body?.eobt ? String(body.eobt).trim() : null
+  await portalDb(c).prepare(`INSERT INTO planos_voo (id, numero_voo, adep, ades, data_voo, eobt, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, numeroVoo, adep, ades, dataVoo, eobt, JSON.stringify(body)).run()
+  return c.json({ id, created_at: new Date().toISOString() }, 201)
+})
 
 app.get('/api/interno/agendamento/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
