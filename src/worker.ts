@@ -2898,6 +2898,7 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
   if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
   if (!Number.isInteger(ano) || !Number.isInteger(mes) || mes < 1 || mes > 12) return c.json({ error: 'periodo_invalido' }, 400)
   const db = portalDb(c)
+  await garantirTabelaAbastecimentos(c)
   const aeronave = await db.prepare('SELECT id, matricula_registro, fabricante, modelo, status, consumo_combustivel, base FROM aeronave WHERE id = ?1').bind(aeronaveId).first<any>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
   const diarioMes = await db.prepare('SELECT * FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
@@ -2905,13 +2906,21 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
   if (!diarioMes) return c.json({ aeronave, diario_mes: null, lancamentos: [], meses_disponiveis: meses.results })
   const lancamentos = await db.prepare(`SELECT l.*, c.razao_social AS cliente_nome, s.nome AS socio_nome,
       COALESCE(NULLIF(l.pic_nome, ''), (SELECT t.nome_completo FROM tripulacao t WHERE upper(t.canac) = upper(l.pic_canac) LIMIT 1), (SELECT f.nome_completo FROM tripulacao_freelancer f WHERE upper(f.canac) = upper(l.pic_canac) LIMIT 1)) AS pic_nome_exibicao,
-      COALESCE(NULLIF(l.sic_nome, ''), (SELECT t.nome_completo FROM tripulacao t WHERE upper(t.canac) = upper(l.sic_canac) LIMIT 1), (SELECT f.nome_completo FROM tripulacao_freelancer f WHERE upper(f.canac) = upper(l.sic_canac) LIMIT 1)) AS sic_nome_exibicao
+      COALESCE(NULLIF(l.sic_nome, ''), (SELECT t.nome_completo FROM tripulacao t WHERE upper(t.canac) = upper(l.sic_canac) LIMIT 1), (SELECT f.nome_completo FROM tripulacao_freelancer f WHERE upper(f.canac) = upper(l.sic_canac) LIMIT 1)) AS sic_nome_exibicao,
+      COALESCE((SELECT SUM(ab.litros) FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id), 0) AS abastecimento_litros,
+      (SELECT ab.data FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_data,
+      (SELECT COALESCE(ca.razao_social, so.nome) FROM abastecimentos ab LEFT JOIN cliente ca ON ca.id = ab.cliente_id LEFT JOIN hold_socios so ON so.id = ab.socio_id WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_pagador_nome,
+      (SELECT ab.numero_comanda FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_comanda,
+      (SELECT ab.numero_nf FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_nota,
+      (SELECT ab.id FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_id
     FROM lancamentos_diario_bordo l
     LEFT JOIN cliente c ON c.id = l.cliente_id
     LEFT JOIN hold_socios s ON s.id = l.socio_id
     WHERE l.diario_mes_id = ?1
     ORDER BY date(l.data_registro), l.numero_sequencial, l.id`).bind(diarioMes.id).all<any>()
-  return c.json({ aeronave, diario_mes: diarioMes, lancamentos: lancamentos.results, meses_disponiveis: meses.results })
+  const horasCotistas = await db.prepare(`SELECT COALESCE(l.socio_id, l.cliente_id) AS cotista_id, COALESCE(s.nome, c.razao_social, c.proprietario, 'Cotista não identificado') AS cotista_nome, COALESCE(SUM(l.tempo_voo), 0) AS horas_voo FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.diario_mes_id = ?1 GROUP BY COALESCE(l.socio_id, l.cliente_id), COALESCE(s.nome, c.razao_social, c.proprietario) ORDER BY horas_voo DESC`).bind(diarioMes.id).all()
+  const horasEmprestadas = await db.prepare(`SELECT COALESCE(SUM(e.horas_emprestadas - COALESCE(e.horas_devolvidas, 0)), 0) AS horas_total, COUNT(*) AS quantidade FROM emprestimos_aeronave e LEFT JOIN lancamentos_diario_bordo l ON l.id = e.lancamento_diario_id WHERE l.diario_mes_id = ?1`).bind(diarioMes.id).first<any>()
+  return c.json({ aeronave, diario_mes: diarioMes, lancamentos: lancamentos.results, meses_disponiveis: meses.results, horas_cotistas: horasCotistas.results, horas_emprestadas: { horas_total: Number(horasEmprestadas?.horas_total || 0), quantidade: Number(horasEmprestadas?.quantidade || 0) } })
 })
 
 app.post('/api/interno/diario-bordo/mes', async c => {
@@ -3009,6 +3018,11 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const row = normalizarLancamentoDiario({ ...body, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(body.tempo_total)), criadoPor: extractSupabaseUserId(c) })
   const columns = ['id', ...Object.keys(row)]
   await db.prepare(`INSERT INTO lancamentos_diario_bordo (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).bind(id, ...columns.slice(1).map(column => row[column])).run()
+  const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
+  if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
+    await garantirTabelaAbastecimentos(c)
+    await db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(uuid(), abastecimento.cliente_id || null, abastecimento.socio_id || null, aeronaveId, abastecimento.data || data, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimento.local || row.local_combustivel || String(body.aerodromo_partida || ''), abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Criado no Diário de Bordo', extractSupabaseUserId(c), id, diarioBoolean(body.voo_emprestado), row.numero_voo || null).run()
+  }
   await recalcularDiarioMes(c, diarioMesId)
   const inserted = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
   return c.json(inserted, 201)
@@ -3382,6 +3396,24 @@ app.delete('/api/interno/agendamento/:id', async c => {
   return c.json({ success: true, agendamento_id: id })
 })
 
+async function garantirTabelaChecklist(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS checklist_pre_voo (id TEXT PRIMARY KEY NOT NULL, solicitacao_id TEXT NOT NULL, usuario_id TEXT, itens TEXT NOT NULL DEFAULT '{}', observacoes TEXT, abastecimento_id TEXT, status TEXT NOT NULL DEFAULT 'pendente', criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+}
+app.get('/api/interno/agendamento/:id/checklist', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaChecklist(c); const row = await portalDb(c).prepare('SELECT * FROM checklist_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
+  return c.json(row ? { ...row, itens: JSON.parse(row.itens || '{}') } : null)
+})
+app.post('/api/interno/agendamento/:id/checklist', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaChecklist(c); await garantirTabelaAbastecimentos(c)
+  const idAgendamento = c.req.param('id'); const agendamento = await portalDb(c).prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>(); if (!agendamento) return c.notFound()
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any)); const userId = extractSupabaseUserId(c); let abastecimentoId: string | null = null
+  if (body.abastecimento && Number(body.abastecimento.litros) > 0) { abastecimentoId = uuid(); const a = body.abastecimento; await portalDb(c).prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, trecho, local, litros, numero_comanda, status, observacao, criado_por, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(abastecimentoId, a.cliente_id || agendamento.cliente_id || null, a.socio_id || agendamento.socio_id || null, agendamento.aeronave_id, a.data || agendamento.data_agendada, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local || agendamento.origem, Number(a.litros), a.numero_comanda || null, 'pendente', 'Criado no checklist pré-voo; aguardando nota e boleto', userId, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null).run() }
+  const id = uuid(); await portalDb(c).prepare('INSERT INTO checklist_pre_voo (id, solicitacao_id, usuario_id, itens, observacoes, abastecimento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, body.status || 'concluido').run()
+  return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
+})
+
 app.get('/api/interno/solicitacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const status = c.req.query('status')
@@ -3410,7 +3442,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   await garantirTabelaDisponibilidadeTripulacao(c)
   await garantirComplianceTripulacao(c)
   const id = c.req.param('id')
-  const reservation = await portalDb(c).prepare(`SELECT s.*, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente
+  const reservation = await portalDb(c).prepare(`SELECT s.*, CASE WHEN s.cliente_emprestimo_id IS NOT NULL OR s.socio_emprestimo_id IS NOT NULL OR lower(COALESCE(s.voo_emprestado, '')) IN ('sim', 'true', '1') THEN COALESCE(ce.codigo_cliente, cae.codigo_cliente) ELSE COALESCE(c.codigo_cliente, ca.codigo_cliente) END AS codigo_cliente
     FROM solicitacoes_reserva_voo s
     LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
@@ -3532,7 +3564,8 @@ app.post('/api/interno/abastecimentos/:id/arquivo', async c => {
   await garantirTabelaAbastecimentos(c); const id = c.req.param('id'); const form = await c.req.parseBody(); const file = form.arquivo; const tipo = String(form.tipo || 'comanda')
   if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
   if (!['comanda', 'nota', 'boleto'].includes(tipo)) return c.json({ error: 'tipo_arquivo_invalido' }, 400)
-  const objectKey = await salvarArquivoShareBrasil(c, authenticated?.id || extractSupabaseUserId(c) || 'interno', file, 'abastecimentos')
+  const pasta = tipo === 'nota' ? 'abastecimentos/nota-fiscal' : tipo === 'boleto' ? 'abastecimentos/boleto' : 'abastecimentos/comanda'
+  const objectKey = await salvarArquivoShareBrasil(c, authenticated?.id || extractSupabaseUserId(c) || 'interno', file, pasta)
   const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
   await portalDb(c).prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(objectKey, id).run()
   return c.json({ success: true, caminho_arquivo: objectKey })
@@ -3558,7 +3591,7 @@ function shareBrasilFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
 }
 
-async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes' | 'abastecimentos' | 'manual_tutoriais'): Promise<string> {
+async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes' | 'abastecimentos' | 'abastecimentos/comanda' | 'abastecimentos/nota-fiscal' | 'abastecimentos/boleto' | 'manual_tutoriais'): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
   if (file.size > 25 * 1024 * 1024) throw new Error('arquivo_excede_25mb')
   const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
@@ -3909,6 +3942,31 @@ async function isMeetingManager(c: Context<{ Bindings: Bindings }>, user: Colabo
   const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(funcao, ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster') LIMIT 1").bind(user.id).first()
   return Boolean(result)
 }
+
+app.get('/api/interno/aerodromos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const q = (c.req.query('q') || '').trim().toUpperCase(); const termo = `%${q}%`
+  const rows = await portalDb(c).prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE ?1 OR upper(nome) LIKE ?1) ORDER BY designativo_icao").bind(termo).all()
+  return c.json({ aerodromos: rows.results })
+})
+app.post('/api/interno/aerodromos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !(await isMeetingManager(c, user))) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<{ nome?: string; designativo_icao?: string; coordenadas?: string }>().catch(() => ({} as any)); const nome = body.nome?.trim() || ''; const icao = body.designativo_icao?.trim().toUpperCase() || ''
+  if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
+  const id = uuid(); await portalDb(c).prepare('INSERT INTO aerodromo (id, nome, designativo_icao, coordenadas) VALUES (?, ?, ?, ?)').bind(id, nome, icao, body.coordenadas?.trim() || null).run()
+  return c.json({ id, nome, designativo_icao: icao, coordenadas: body.coordenadas?.trim() || null }, 201)
+})
+app.patch('/api/interno/aerodromos/:id', async c => {
+  const user = await shareBrasilUser(c); if (!user || !(await isMeetingManager(c, user))) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<{ nome?: string; designativo_icao?: string; coordenadas?: string }>().catch(() => ({} as any)); const nome = body.nome?.trim() || ''; const icao = body.designativo_icao?.trim().toUpperCase() || ''
+  if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
+  const result = await portalDb(c).prepare('UPDATE aerodromo SET nome = ?, designativo_icao = ?, coordenadas = ? WHERE id = ?').bind(nome, icao, body.coordenadas?.trim() || null, c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
+})
+app.delete('/api/interno/aerodromos/:id', async c => {
+  const user = await shareBrasilUser(c); if (!user || !(await isMeetingManager(c, user))) return c.json({ error: 'permissao_necessaria' }, 403)
+  const result = await portalDb(c).prepare('DELETE FROM aerodromo WHERE id = ?').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
+})
 
 function isColaboradorManager(user: Colaborador): boolean {
   const role = (user.tipo_user || '').toLowerCase().replace(/[\s-]+/g, '_')
