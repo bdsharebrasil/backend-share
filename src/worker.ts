@@ -3901,7 +3901,13 @@ app.get('/api/sharebrasil/clientes/documentos/:id/arquivo', async c => {
 // ─── Share Brasil: tarefas, notificações e calendário ─────────────────────────
 function isTaskManager(user: Colaborador): boolean {
   const role = (user.tipo_user || '').toLowerCase().replace(/[\s-]+/g, '_')
-  return ['admin', 'administrador', 'gestor_master', 'gestormaster'].includes(role)
+  return ['admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster'].includes(role)
+}
+
+async function isMeetingManager(c: Context<{ Bindings: Bindings }>, user: Colaborador): Promise<boolean> {
+  if (isTaskManager(user)) return true
+  const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(funcao, ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster') LIMIT 1").bind(user.id).first()
+  return Boolean(result)
 }
 
 function isColaboradorManager(user: Colaborador): boolean {
@@ -4311,7 +4317,7 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes', async c => {
 app.post('/api/sharebrasil/centro-treinamento/reunioes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   const body = await c.req.json<{ titulo?: string; descricao?: string }>().catch(() => ({} as { titulo?: string; descricao?: string }))
   const titulo = body.titulo?.trim() || ''
@@ -4324,7 +4330,7 @@ app.post('/api/sharebrasil/centro-treinamento/reunioes', async c => {
 app.post('/api/sharebrasil/centro-treinamento/reunioes/:id/encerrar', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   await portalDb(c).prepare("UPDATE centro_reunioes SET status = 'ENCERRADA', encerrado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(c.req.param('id')).run()
   return c.json({ success: true })
