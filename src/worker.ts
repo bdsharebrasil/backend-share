@@ -3410,7 +3410,13 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   const idAgendamento = c.req.param('id'); const agendamento = await portalDb(c).prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>(); if (!agendamento) return c.notFound()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any)); const userId = extractSupabaseUserId(c); let abastecimentoId: string | null = null
   if (body.abastecimento && Number(body.abastecimento.litros) > 0) { abastecimentoId = uuid(); const a = body.abastecimento; await portalDb(c).prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, trecho, local, litros, numero_comanda, status, observacao, criado_por, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(abastecimentoId, a.cliente_id || agendamento.cliente_id || null, a.socio_id || agendamento.socio_id || null, agendamento.aeronave_id, a.data || agendamento.data_agendada, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local || agendamento.origem, Number(a.litros), a.numero_comanda || null, 'pendente', 'Criado no checklist pré-voo; aguardando nota e boleto', userId, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null).run() }
-  const id = uuid(); await portalDb(c).prepare('INSERT INTO checklist_pre_voo (id, solicitacao_id, usuario_id, itens, observacoes, abastecimento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, body.status || 'concluido').run()
+  const existente = await portalDb(c).prepare('SELECT id FROM checklist_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string }>()
+  const status = body.status || 'concluido'
+  if (existente) {
+    await portalDb(c).prepare('UPDATE checklist_pre_voo SET usuario_id = ?, itens = ?, observacoes = ?, abastecimento_id = COALESCE(?, abastecimento_id), status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, status, existente.id).run()
+    return c.json({ id: existente.id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId || null })
+  }
+  const id = uuid(); await portalDb(c).prepare('INSERT INTO checklist_pre_voo (id, solicitacao_id, usuario_id, itens, observacoes, abastecimento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, status).run()
   return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
 })
 
@@ -4187,7 +4193,7 @@ app.get('/api/sharebrasil/hoteis', async c => {
 app.post('/api/sharebrasil/hoteis', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const nome = String(body.nome || '').trim()
@@ -4200,7 +4206,7 @@ app.post('/api/sharebrasil/hoteis', async c => {
 app.patch('/api/sharebrasil/hoteis/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const current = await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
@@ -4213,7 +4219,7 @@ app.patch('/api/sharebrasil/hoteis/:id', async c => {
 app.delete('/api/sharebrasil/hoteis/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
   const result = await portalDb(c).prepare('DELETE FROM hoteis WHERE id = ?1').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
@@ -4292,7 +4298,7 @@ app.get('/api/sharebrasil/centro-treinamento/materiais', async c => {
 app.post('/api/sharebrasil/centro-treinamento/materiais', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   const form = await c.req.formData()
   const titulo = String(form.get('titulo') || '').trim()
@@ -4310,11 +4316,13 @@ app.post('/api/sharebrasil/centro-treinamento/materiais', async c => {
   try {
     if (fileValue && typeof fileValue === 'object' && 'type' in fileValue) {
       const file = fileValue as File
+      const extensao = file.name.toLowerCase().split('.').pop() || ''
+      const tipoDetectado = file.type || (extensao === 'html' || extensao === 'htm' ? 'text/html' : '')
       const allowed = ['video/mp4', 'video/webm', 'application/pdf', 'text/html']
-      if (!allowed.includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
+      if (!allowed.includes(tipoDetectado)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
       if (file.size > 100 * 1024 * 1024) return c.json({ error: 'arquivo_excede_100mb' }, 413)
       arquivoUrl = await salvarArquivoShareBrasil(c, user.id, file, 'manual_tutoriais')
-      tipoArquivo = file.type
+      tipoArquivo = tipoDetectado
       tamanhoArquivo = file.size
     }
     const id = uuid()
@@ -4329,7 +4337,7 @@ app.post('/api/sharebrasil/centro-treinamento/materiais', async c => {
 app.patch('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
   const current = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
@@ -4344,7 +4352,7 @@ app.patch('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
 app.delete('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   const row = await portalDb(c).prepare('SELECT arquivo_url FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null }>()
   if (!row) return c.notFound()
