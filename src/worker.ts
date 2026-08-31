@@ -1410,12 +1410,11 @@ app.get('/api/aerodromos', async (c) => {
     const aerodromos = rotaerItems(data)
       .map(item => ({
         id: rotaerIcao(item),
-        label: `${rotaerIcao(item)} · ${item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item)}`,
+        label: `${rotaerIcao(item)} · ${item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item)}${item?.cidade || item?.city ? ` · ${item?.cidade ?? item?.city}` : ''}`,
         name: item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item),
         city: item?.cidade ?? item?.city ?? null,
       }))
       .filter(item => item.id && (!query || `${item.id} ${item.label}`.includes(query)))
-      .slice(0, 100)
     return c.json({ aerodromos, source: 'AISWEB/DECEA' })
   } catch (e: any) {
     return c.json({ error: e.message }, 502)
@@ -2805,6 +2804,8 @@ async function buscarTripulante(c: Context<{ Bindings: Bindings }>, id: string):
 
 async function garantirTabelaDisponibilidadeTripulacao(c: Context<{ Bindings: Bindings }>) {
   await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN socio_id TEXT NULL`).run().catch(() => undefined)
+  await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN cliente_emprestimo_id TEXT NULL`).run().catch(() => undefined)
+  await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN socio_emprestimo_id TEXT NULL`).run().catch(() => undefined)
   await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS escala_tripulacao (
     id TEXT PRIMARY KEY NOT NULL,
     tripulacao_id TEXT NOT NULL,
@@ -2863,7 +2864,7 @@ app.get('/api/interno/agendamento/opcoes', async c => {
   const [clientes, socios, aeronaves, vinculos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, cliente_id FROM hold_socios ORDER BY nome").all(),
-    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
+    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave ORDER BY matricula_registro").all(),
     db.prepare(`SELECT ca.id, ca.cliente_id, ca.socio_id, ca.aeronave_id, ca.codigo_cliente, a.matricula_registro, a.modelo
       FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente, a.matricula_registro`).all(),
   ])
@@ -2877,15 +2878,18 @@ app.get('/api/interno/agendamento', async c => {
   const db = portalDb(c)
   await garantirTabelaDisponibilidadeTripulacao(c)
   const [agendamentos, aeronaves, tripulacao, freelancers, disponibilidades] = await Promise.all([
-    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id, c.razao_social AS cliente_razao_social, so.nome AS socio_nome, COALESCE(c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave
+    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id, c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave
       FROM solicitacoes_reserva_voo s
       LEFT JOIN cliente c ON c.id = s.cliente_id
       LEFT JOIN hold_socios so ON so.id = s.socio_id
+      LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
+      LEFT JOIN hold_socios se ON se.id = s.socio_emprestimo_id
       LEFT JOIN cotista_aeronave ca ON (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id
+      LEFT JOIN cotista_aeronave cae ON (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id OR (se.cliente_id IS NOT NULL AND cae.cliente_id = se.cliente_id)) AND cae.aeronave_id = s.aeronave_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       WHERE date(s.data_agendada) BETWEEN ?1 AND ?2
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all(),
-    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
+    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave ORDER BY matricula_registro").all(),
     db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all(),
     db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
@@ -2935,31 +2939,63 @@ app.post('/api/interno/agendamento/disponibilidade', async c => {
 
 app.post('/api/interno/agendamento', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const body = await c.req.json<{ cliente_id?: string; socio_id?: string; aeronave_id?: string; origem?: string; destino?: string; data_agendada?: string; horario_previsto_agendamento?: string; dias_duracao?: number; numero_passageiros?: number; voo_emprestado?: string; piloto_id?: string; copiloto_id?: string; observacoes?: string }>().catch(() => null)
-  const origem = body?.origem?.trim() || ''
-  const destino = body?.destino?.trim() || ''
+  await garantirTabelaDisponibilidadeTripulacao(c)
+  const body = await c.req.json<{ cliente_id?: string; socio_id?: string; aeronave_id?: string; origem?: string; destino?: string; data_agendada?: string; data_fim?: string; horario_previsto_agendamento?: string; dias_duracao?: number; numero_passageiros?: number; cliente_emprestimo_id?: string; socio_emprestimo_id?: string; voo_emprestado?: string; piloto_id?: string; copiloto_id?: string; observacoes?: string }>().catch(() => null)
+  const origem = body?.origem?.trim().toUpperCase() || ''
+  const destino = body?.destino?.trim().toUpperCase() || ''
   const dataAgendada = body?.data_agendada?.trim() || ''
+  const dataFim = body?.data_fim?.trim() || dataAgendada
   const aeronaveId = body?.aeronave_id?.trim() || ''
-  if (!origem || !destino || !dataAgendada || !aeronaveId) return c.json({ error: 'origem_destino_data_e_aeronave_obrigatorios' }, 400)
-  const aeronave = await portalDb(c).prepare("SELECT id FROM aeronave WHERE id = ?1 AND lower(status) = 'ativa'").bind(aeronaveId).first<{ id: string }>()
+  if (!origem || !destino || !dataAgendada || !dataFim || !aeronaveId) return c.json({ error: 'origem_destino_periodo_e_aeronave_obrigatorios' }, 400)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataAgendada) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim) || dataFim < dataAgendada) return c.json({ error: 'periodo_invalido' }, 400)
+  const inicioMs = Date.parse(`${dataAgendada}T00:00:00Z`)
+  const fimMs = Date.parse(`${dataFim}T00:00:00Z`)
+  const diasDuracao = Math.floor((fimMs - inicioMs) / 86_400_000) + 1
+  if (!Number.isFinite(diasDuracao) || diasDuracao < 1) return c.json({ error: 'periodo_invalido' }, 400)
+  const aeronave = await portalDb(c).prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string }>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_disponivel' }, 409)
   const cliente = body?.cliente_id ? await portalDb(c).prepare('SELECT id, codigo_cliente FROM cliente WHERE id = ?1').bind(body.cliente_id).first<{ id: string; codigo_cliente: string | null }>() : null
   const socio = body?.socio_id ? await portalDb(c).prepare('SELECT id, cliente_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; cliente_id: string | null }>() : null
   if (!cliente && !socio) return c.json({ error: 'cliente_ou_socio_obrigatorio' }, 400)
   if (cliente && socio) return c.json({ error: 'selecione_cliente_ou_socio' }, 400)
   const clienteId = cliente?.id || socio?.cliente_id || null
-  const vinculo = await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteId, socio?.id || null).first<{ codigo_cliente: string }>()
-  const codigoCliente = vinculo?.codigo_cliente?.trim().toUpperCase() || ''
+  const clienteEmprestimoId = body?.cliente_emprestimo_id?.trim() || null
+  const socioEmprestimoId = body?.socio_emprestimo_id?.trim() || null
+  if (clienteEmprestimoId && socioEmprestimoId) return c.json({ error: 'selecione_apenas_um_cedente' }, 400)
+  if (clienteEmprestimoId && clienteEmprestimoId === clienteId) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
+  if (socioEmprestimoId && socioEmprestimoId === socio?.id) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
+  const cedenteCliente = clienteEmprestimoId ? await portalDb(c).prepare('SELECT id FROM cliente WHERE id = ?1').bind(clienteEmprestimoId).first<{ id: string }>() : null
+  const cedenteSocio = socioEmprestimoId ? await portalDb(c).prepare('SELECT id, cliente_id FROM hold_socios WHERE id = ?1').bind(socioEmprestimoId).first<{ id: string; cliente_id: string | null }>() : null
+  if (clienteEmprestimoId && !cedenteCliente) return c.json({ error: 'cliente_emprestimo_nao_encontrado' }, 400)
+  if (socioEmprestimoId && !cedenteSocio) return c.json({ error: 'socio_emprestimo_nao_encontrado' }, 400)
+  const vinculoTitular = await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteId, socio?.id || null).first<{ codigo_cliente: string }>()
+  const vinculoCedente = clienteEmprestimoId || socioEmprestimoId
+    ? await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteEmprestimoId || cedenteSocio?.cliente_id || null, socioEmprestimoId).first<{ codigo_cliente: string }>()
+    : null
+  const codigoCliente = (vinculoTitular?.codigo_cliente || vinculoCedente?.codigo_cliente || '').trim().toUpperCase()
   if (!codigoCliente) return c.json({ error: 'aeronave_sem_codigo_cotista' }, 409)
+  const vooEmprestado = clienteEmprestimoId || socioEmprestimoId ? 'sim' : 'nao'
   const piloto = body?.piloto_id ? await buscarTripulante(c, body.piloto_id.trim()) : null
   const copiloto = body?.copiloto_id ? await buscarTripulante(c, body.copiloto_id.trim()) : null
   if (body?.piloto_id && !piloto) return c.json({ error: 'piloto_nao_encontrado' }, 400)
   if (body?.copiloto_id && !copiloto) return c.json({ error: 'copiloto_nao_encontrado' }, 400)
   if (body?.piloto_id && body?.copiloto_id && body.piloto_id === body.copiloto_id) return c.json({ error: 'tripulantes_iguais' }, 400)
   const id = uuid()
-  await portalDb(c).prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, clienteId, socio?.id || null, aeronaveId, body?.voo_emprestado?.trim() || 'nao', origem, destino, dataAgendada, body?.horario_previsto_agendamento?.trim() || null, Math.max(1, Number(body?.dias_duracao || 1)), Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, null, null, null, null).run()
+  await portalDb(c).prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, cliente_emprestimo_id, socio_emprestimo_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, clienteId, socio?.id || null, clienteEmprestimoId, socioEmprestimoId, aeronaveId, vooEmprestado, origem, destino, dataAgendada, body?.horario_previsto_agendamento?.trim() || null, diasDuracao, Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, null, null, null, null).run()
   return c.json({ id, status: 'pendente', numero_voo: null }, 201)
+})
+
+app.delete('/api/interno/agendamento/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaDisponibilidadeTripulacao(c)
+  const id = c.req.param('id').trim()
+  if (!id) return c.json({ error: 'agendamento_id_obrigatorio' }, 400)
+  const db = portalDb(c)
+  await db.prepare('DELETE FROM escala_tripulacao WHERE solicitacao_id = ?1').bind(id).run().catch(() => undefined)
+  const result = await db.prepare('DELETE FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).run()
+  if (!result.meta.changes) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
+  return c.json({ success: true, agendamento_id: id })
 })
 
 app.get('/api/interno/solicitacoes', async c => {
@@ -2987,11 +3023,15 @@ async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCo
 
 app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaDisponibilidadeTripulacao(c)
   const id = c.req.param('id')
-  const reservation = await portalDb(c).prepare(`SELECT s.*, COALESCE(c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente
+  const reservation = await portalDb(c).prepare(`SELECT s.*, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente
     FROM solicitacoes_reserva_voo s
     LEFT JOIN cliente c ON c.id = s.cliente_id
+    LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
+    LEFT JOIN hold_socios se ON se.id = s.socio_emprestimo_id
     LEFT JOIN cotista_aeronave ca ON (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id
+    LEFT JOIN cotista_aeronave cae ON (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id OR (se.cliente_id IS NOT NULL AND cae.cliente_id = se.cliente_id)) AND cae.aeronave_id = s.aeronave_id
     WHERE s.id = ?1`).bind(id).first<{ status: string; codigo_cliente: string | null }>()
   if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
   if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
