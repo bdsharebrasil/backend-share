@@ -2873,6 +2873,99 @@ async function garantirTabelaPlanosVoo(c: Context<{ Bindings: Bindings }>) {
   )`).run()
 }
 
+
+async function garantirComplianceTripulacao(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare('ALTER TABLE aeronave ADD COLUMN numero_motores INTEGER NULL').run().catch(() => undefined)
+}
+
+async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>, tripulanteId: string, aeronaveId: string): Promise<string | null> {
+  const tripulante = await buscarTripulante(c, tripulanteId)
+  if (!tripulante) return 'tripulante_nao_encontrado'
+  if (tripulante.origem === 'freelancer') return null
+  const hoje = new Date().toISOString().slice(0, 10)
+  const habilitacoes = await portalDb(c).prepare('SELECT tipo_habilitacao, data_validade, validade_cma FROM habilitacoes_tripulante WHERE tripulacao_id = ?1').bind(tripulanteId).all<{ tipo_habilitacao: string; data_validade: string | null; validade_cma: string | null }>()
+  const cma = habilitacoes.results.find((item) => item.validade_cma)
+  if (!cma?.validade_cma || cma.validade_cma < hoje) return 'cma_vencido_ou_nao_cadastrado'
+  const aeronave = await portalDb(c).prepare('SELECT numero_motores, modelo FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ numero_motores: number | null; modelo: string }>()
+  if (Number(aeronave?.numero_motores || 0) >= 2) {
+    const mlte = habilitacoes.results.find((item) => /(^|[^A-Z])MLTE([^A-Z]|$)/i.test(item.tipo_habilitacao || '') && (!item.data_validade || item.data_validade >= hoje))
+    if (!mlte) return 'habilitacao_mlte_necessaria'
+  }
+  return null
+}
+
+app.get('/api/interno/tripulacao/gestao', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirComplianceTripulacao(c)
+  const db = portalDb(c)
+  const [tripulantes, habilitacoes, freelancers, aeronaves] = await Promise.all([
+    db.prepare(`SELECT t.id, t.user_id, t.canac, t.nome_completo, t.status, t.tipo_licenca, up.email, up.telefone, up.url_avatar, up.departamento FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id ORDER BY t.nome_completo`).all(),
+    db.prepare('SELECT * FROM habilitacoes_tripulante ORDER BY data_validade, validade_cma').all(),
+    db.prepare('SELECT f.*, a.matricula_registro, a.fabricante, a.modelo FROM tripulacao_freelancer f LEFT JOIN aeronave a ON a.id = f.aeronave_id ORDER BY f.nome_completo').all(),
+    db.prepare('SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, numero_motores, status FROM aeronave ORDER BY matricula_registro').all(),
+  ])
+  return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronaves: aeronaves.results })
+})
+
+app.patch('/api/interno/tripulacao/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<{ canac?: string; nome_completo?: string; status?: string; tipo_licenca?: string }>().catch(() => ({} as any))
+  const result = await portalDb(c).prepare('UPDATE tripulacao SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), status = COALESCE(?3, status), tipo_licenca = COALESCE(?4, tipo_licenca) WHERE id = ?5').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.status?.trim() || null, body.tipo_licenca?.trim() || null, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.post('/api/interno/tripulacao/:id/habilitacoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string; classe_cma?: string; validade_cma?: string; fs_rh?: string }>().catch(() => ({} as any))
+  if (!body.tipo_habilitacao?.trim()) return c.json({ error: 'tipo_habilitacao_obrigatorio' }, 400)
+  const tripulante = await portalDb(c).prepare('SELECT id FROM tripulacao WHERE id = ?1').bind(c.req.param('id')).first()
+  if (!tripulante) return c.notFound()
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO habilitacoes_tripulante (id, tripulacao_id, tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.tipo_habilitacao.trim(), body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null).run()
+  return c.json({ id, ...body }, 201)
+})
+
+app.patch('/api/interno/tripulacao/habilitacoes/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string | null; classe_cma?: string | null; validade_cma?: string | null; fs_rh?: string | null }>().catch(() => ({} as any))
+  const result = await portalDb(c).prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = COALESCE(?1, tipo_habilitacao), data_validade = ?, classe_cma = ?, validade_cma = ?, fs_rh = ? WHERE id = ?6').bind(body.tipo_habilitacao?.trim() || null, body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.post('/api/interno/tripulacao-freelancer', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  if (!body.nome_completo?.trim() || !body.canac?.trim()) return c.json({ error: 'nome_e_canac_obrigatorios' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO tripulacao_freelancer (id, canac, nome_completo, data_nascimento, url_avatar, status, rg, cpf, endereco, cidade, uf, telefone, aeronave_id, observacao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.canac.trim(), body.nome_completo.trim(), body.data_nascimento || null, body.url_avatar || null, body.status || 'ativo', body.rg || null, body.cpf || null, body.endereco || null, body.cidade || null, body.uf || null, body.telefone || null, body.aeronave_id || null, body.observacao || null).run()
+  return c.json({ id, ...body, origem: 'freelancer' }, 201)
+})
+
+app.patch('/api/interno/tripulacao-freelancer/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  const result = await portalDb(c).prepare('UPDATE tripulacao_freelancer SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), telefone = ?, aeronave_id = ?, observacao = ?, status = COALESCE(?6, status) WHERE id = ?7').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.telefone || null, body.aeronave_id || null, body.observacao || null, body.status || null, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.get('/api/interno/tripulacao/horas', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const mes = c.req.query('mes')
+  const inicio = c.req.query('inicio') || (/^\d{4}-\d{2}$/.test(mes || '') ? `${mes}-01` : '1900-01-01')
+  const fim = c.req.query('fim') || (/^\d{4}-\d{2}$/.test(mes || '') ? `${mes}-31` : '2999-12-31')
+  const aircraft = c.req.query('aeronave_id') || ''
+  const query = aircraft ? 'SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE date(l.data_registro) BETWEEN ?1 AND ?2 AND l.aeronave_id = ?3 ORDER BY date(l.data_registro) DESC' : 'SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE date(l.data_registro) BETWEEN ?1 AND ?2 ORDER BY date(l.data_registro) DESC'
+  const result = aircraft ? await portalDb(c).prepare(query).bind(inicio, fim, aircraft).all<any>() : await portalDb(c).prepare(query).bind(inicio, fim).all<any>()
+  const totals = new Map<string, any>(); const voos = result.results.map((row: any) => ({ id: row.id, data_registro: row.data_registro, matricula_registro: row.matricula_registro, pic_canac: row.pic_canac, pic_nome: row.pic_nome, sic_canac: row.sic_canac, sic_nome: row.sic_nome, tempo_voo: Number(row.tempo_voo || row.tempo_total || 0), horas_diurnas: Number(row.horas_diurnas || 0), horas_noturnas: Number(row.horas_noturnas || 0), tempo_ifr: Number(row.tempo_ifr || 0) }))
+  const add = (canac: string | null, nome: string | null, role: 'PIC' | 'SIC', row: any) => { if (!canac && !nome) return; const key = `${role}:${canac || nome}`; const current = totals.get(key) || { canac: canac || null, nome: nome || canac || 'Tripulante', funcao: role, horas_totais: 0, horas_pic: 0, horas_sic: 0, horas_diurnas: 0, horas_noturnas: 0, horas_ifr: 0, voos: 0 }; current.horas_totais += row.tempo_voo; current[`horas_${role.toLowerCase()}`] += row.tempo_voo; current.horas_diurnas += row.horas_diurnas; current.horas_noturnas += row.horas_noturnas; current.horas_ifr += row.tempo_ifr; current.voos += 1; totals.set(key, current) }
+  for (const row of voos) { add(row.pic_canac, row.pic_nome, 'PIC', row); add(row.sic_canac, row.sic_nome, 'SIC', row) }
+  const round = (value: number) => Math.round(value * 100) / 100
+  return c.json({ inicio, fim, voos, totais: [...totals.values()].map((item) => Object.fromEntries(Object.entries(item).map(([key, value]) => [key, typeof value === 'number' ? round(value as number) : value]))) })
+})
+
 app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
@@ -2985,6 +3078,7 @@ app.post('/api/interno/agendamento/disponibilidade', async c => {
 app.post('/api/interno/agendamento', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
+  await garantirComplianceTripulacao(c)
   const body = await c.req.json<{ cliente_id?: string; socio_id?: string; aeronave_id?: string; origem?: string; destino?: string; data_agendada?: string; data_fim?: string; horario_previsto_agendamento?: string; dias_duracao?: number; numero_passageiros?: number; cliente_emprestimo_id?: string; socio_emprestimo_id?: string; voo_emprestado?: string; piloto_id?: string; copiloto_id?: string; observacoes?: string }>().catch(() => null)
   const origem = body?.origem?.trim().toUpperCase() || ''
   const destino = body?.destino?.trim().toUpperCase() || ''
@@ -3025,6 +3119,10 @@ app.post('/api/interno/agendamento', async c => {
   if (body?.piloto_id && !piloto) return c.json({ error: 'piloto_nao_encontrado' }, 400)
   if (body?.copiloto_id && !copiloto) return c.json({ error: 'copiloto_nao_encontrado' }, 400)
   if (body?.piloto_id && body?.copiloto_id && body.piloto_id === body.copiloto_id) return c.json({ error: 'tripulantes_iguais' }, 400)
+  for (const assigned of [body?.piloto_id, body?.copiloto_id].filter((value): value is string => Boolean(value))) {
+    const eligibility = await validarElegibilidadeTripulante(c, assigned, aeronaveId)
+    if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
+  }
   const id = uuid()
   await portalDb(c).prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, cliente_emprestimo_id, socio_emprestimo_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, clienteId, socio?.id || null, clienteEmprestimoId, socioEmprestimoId, aeronaveId, vooEmprestado, origem, destino, dataAgendada, body?.horario_previsto_agendamento?.trim() || null, diasDuracao, Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, null, null, null, null).run()
@@ -3069,6 +3167,7 @@ async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCo
 app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
+  await garantirComplianceTripulacao(c)
   const id = c.req.param('id')
   const reservation = await portalDb(c).prepare(`SELECT s.*, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente
     FROM solicitacoes_reserva_voo s
@@ -3088,6 +3187,10 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   const copiloto = body.copiloto_id ? await buscarTripulante(c, body.copiloto_id) : null
   if (!piloto) return c.json({ error: 'piloto_nao_encontrado' }, 400)
   if (body.copiloto_id && !copiloto) return c.json({ error: 'copiloto_nao_encontrado' }, 400)
+  for (const assigned of [body.piloto_id, body.copiloto_id].filter((value): value is string => Boolean(value))) {
+    const eligibility = await validarElegibilidadeTripulante(c, assigned, (reservation as any).aeronave_id)
+    if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
+  }
   const flightNumber = await portalFlightSequence(c, reservation.codigo_cliente)
   await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, piloto.id, copiloto?.id || null, id).run()
   return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: flightNumber, piloto, copiloto })
