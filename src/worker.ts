@@ -3968,21 +3968,21 @@ app.delete('/api/interno/aerodromos/:id', async c => {
   const result = await portalDb(c).prepare('DELETE FROM aerodromo WHERE id = ?').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
 })
 
-function isColaboradorManager(user: Colaborador): boolean {
-  const role = (user.tipo_user || '').toLowerCase().replace(/[\s-]+/g, '_')
-  return ['admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster'].includes(role)
+async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Colaborador): Promise<boolean> {
+  const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'financeiro_master', 'gestor_master') LIMIT 1").bind(user.id).first()
+  return Boolean(result)
 }
 
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
-  if (!user || !isColaboradorManager(user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
   const result = await portalDb(c).prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
   return c.json(result.results)
 })
 
 app.post('/api/gestor/gestao-colaborador', async c => {
   const creator = await shareBrasilUser(c)
-  if (!creator || !isColaboradorManager(creator)) return c.json({ error: 'permissao_necessaria' }, 403)
+  if (!creator || !await isColaboradorManager(c, creator)) return c.json({ error: 'permissao_necessaria' }, 403)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const email = String(body.email || '').trim().toLowerCase()
   const senha = String(body.senha || '')
@@ -4005,7 +4005,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
 
 app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   const user = await shareBrasilUser(c)
-  if (!user || !isColaboradorManager(user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const id = c.req.param('id'); const current = await portalDb(c).prepare('SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!current) return c.notFound()
