@@ -1429,20 +1429,20 @@ app.get('/api/turn/ice-servers', async (c) => {
 })
 
 app.get('/api/aerodromos', async (c) => {
-  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const query = (c.req.query('q') ?? '').trim().toUpperCase()
   try {
-    const data = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
-    const aerodromos = rotaerItems(data)
-      .map(item => ({
-        id: rotaerIcao(item),
-        label: `${rotaerIcao(item)} · ${item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item)}${item?.cidade || item?.city ? ` · ${item?.cidade ?? item?.city}` : ''}`,
-        name: item?.nome ?? item?.name ?? item?.cidade ?? rotaerIcao(item),
-        city: item?.cidade ?? item?.city ?? null,
-      }))
-      .filter(item => item.id && (!query || `${item.id} ${item.label}`.includes(query)))
-    return c.json({ aerodromos, source: 'AISWEB/DECEA' })
+    const termo = `%${query}%`
+    const result = await portalDb(c).prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE ?1 OR upper(nome) LIKE ?1) ORDER BY designativo_icao").bind(termo).all<{ id: string; nome: string; designativo_icao: string; coordenadas: string | null }>()
+    const aerodromos = result.results.map(item => ({
+      id: item.designativo_icao.trim().toUpperCase(),
+      label: `${item.designativo_icao.trim().toUpperCase()} · ${item.nome}`,
+      name: item.nome,
+      city: null,
+      coordenadas: item.coordenadas,
+    })).filter(item => item.id)
+    return c.json({ aerodromos, source: 'D1/aerodromo' })
   } catch (e: any) {
+    log.error('[aerodromos] erro ao consultar D1:', e.message)
     return c.json({ error: e.message }, 502)
   }
 })
