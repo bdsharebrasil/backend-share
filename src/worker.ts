@@ -3455,6 +3455,150 @@ app.get('/api/sharebrasil/clientes/documentos/:id/arquivo', async c => {
   return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `attachment; filename="${shareBrasilFileName(row.nome_arquivo)}"` } })
 })
 
+
+
+// ─── Share Brasil: tarefas, notificações e calendário ─────────────────────────
+function isTaskManager(user: Colaborador): boolean {
+  const role = (user.tipo_user || '').toLowerCase().replace(/[\s-]+/g, '_')
+  return ['admin', 'administrador', 'gestor_master', 'gestormaster'].includes(role)
+}
+
+function jsonArray(value: unknown): string {
+  return JSON.stringify(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [])
+}
+
+async function visibleTask(c: Context<{ Bindings: Bindings }>, user: Colaborador, id: string): Promise<any | null> {
+  const manager = isTaskManager(user)
+  const sql = manager
+    ? 'SELECT * FROM tarefas WHERE id = ?1 AND origem = \'KANBAN\''
+    : 'SELECT * FROM tarefas WHERE id = ?1 AND origem = \'KANBAN\' AND (criado_por = ?2 OR publico = 1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(atribuido_para, \'[]\')) WHERE json_each.value = ?2))'
+  return manager ? portalDb(c).prepare(sql).bind(id).first() : portalDb(c).prepare(sql).bind(id, user.id).first()
+}
+
+async function notifyTask(c: Context<{ Bindings: Bindings }>, taskId: string, recipients: string[], mensagem: string, status?: string): Promise<void> {
+  const unique = [...new Set(recipients.filter(Boolean))]
+  if (!unique.length) return
+  const db = portalDb(c)
+  for (const recipient of unique) {
+    await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, status || null).run()
+  }
+}
+
+app.get('/api/sharebrasil/tarefas/usuarios', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !isTaskManager(user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const result = await portalDb(c).prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, departamento FROM user_profiles WHERE status IS NULL OR lower(status) IN ('ativo', 'active') ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
+  return c.json(result.results)
+})
+
+app.get('/api/sharebrasil/tarefas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const manager = isTaskManager(user)
+  const sql = manager
+    ? "SELECT * FROM tarefas WHERE origem = 'KANBAN' ORDER BY CASE status WHEN 'ABERTO' THEN 1 WHEN 'EM_ANDAMENTO' THEN 2 WHEN 'CONCLUIDA' THEN 3 ELSE 4 END, prazo IS NULL, prazo, criado_em DESC"
+    : "SELECT * FROM tarefas WHERE origem = 'KANBAN' AND (criado_por = ?1 OR publico = 1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(atribuido_para, '[]')) WHERE json_each.value = ?1)) ORDER BY prazo IS NULL, prazo, criado_em DESC"
+  const tasks = manager ? await portalDb(c).prepare(sql).all() : await portalDb(c).prepare(sql).bind(user.id).all()
+  const taskIds = tasks.results.map((row: any) => row.id)
+  const comments: any[] = []
+  for (const taskId of taskIds) {
+    const result = await portalDb(c).prepare('SELECT c.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS usuario_nome FROM tarefas_comentarios c LEFT JOIN user_profiles u ON u.id = c.usuario_id WHERE c.tarefa_id = ?1 ORDER BY c.criado_em ASC').bind(taskId).all()
+    comments.push(...result.results)
+  }
+  const notifications = await portalDb(c).prepare('SELECT * FROM tarefas_notificacoes WHERE user_id = ?1 ORDER BY criado_em DESC LIMIT 50').bind(user.id).all()
+  return c.json({ tarefas: tasks.results.map((task: any) => ({ ...task, atribuido_para: JSON.parse(task.atribuido_para || '[]'), comentarios: comments.filter((item) => item.tarefa_id === task.id) })), notificacoes: notifications.results })
+})
+
+app.post('/api/sharebrasil/tarefas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ titulo?: string; descricao?: string; prioridade?: string; prazo?: string; publico?: boolean; atribuido_para?: string[] }>().catch(() => ({} as any))
+  if (!body.titulo?.trim()) return c.json({ error: 'titulo_obrigatorio' }, 400)
+  const assigned = Array.isArray(body.atribuido_para) ? body.atribuido_para : []
+  if ((assigned.length || body.publico) && !isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master_pode_atribuir' }, 403)
+  const id = uuid(); const publico = body.publico ? 1 : 0; const assignedJson = jsonArray(assigned)
+  await portalDb(c).prepare("INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, prazo, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', ?, ?, ?, ?, 'KANBAN', ?, 0)").bind(id, body.titulo.trim(), body.descricao?.trim() || null, body.prioridade || 'MEDIA', user.id, body.prazo || null, publico, assignedJson).run()
+  await notifyTask(c, id, assigned, `Nova tarefa atribuída: ${body.titulo.trim()}`)
+  return c.json({ id, titulo: body.titulo.trim(), status: 'ABERTO', publico, atribuido_para: assigned }, 201)
+})
+
+app.patch('/api/sharebrasil/tarefas/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const task = await visibleTask(c, user, c.req.param('id')) as any
+  if (!task) return c.notFound()
+  const body = await c.req.json<{ titulo?: string; descricao?: string; status?: string; prioridade?: string; prazo?: string | null; progresso?: number; publico?: boolean; atribuido_para?: string[] }>().catch(() => ({} as any))
+  const assigned = body.atribuido_para === undefined ? JSON.parse(task.atribuido_para || '[]') : body.atribuido_para
+  if ((body.atribuido_para !== undefined || body.publico !== undefined) && !isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master_pode_atribuir' }, 403)
+  const status = body.status || task.status
+  const progress = body.progresso == null ? (status === 'CONCLUIDA' ? 100 : task.progresso) : Math.max(0, Math.min(100, Number(body.progresso)))
+  await portalDb(c).prepare('UPDATE tarefas SET titulo = COALESCE(?, titulo), descricao = COALESCE(?, descricao), status = ?, prioridade = COALESCE(?, prioridade), prazo = ?, progresso = ?, publico = COALESCE(?, publico), atribuido_para = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.titulo?.trim() || null, body.descricao?.trim() || null, status, body.prioridade || null, body.prazo === undefined ? task.prazo : body.prazo, progress, body.publico === undefined ? null : (body.publico ? 1 : 0), jsonArray(assigned), task.id).run()
+  if (status === 'CONCLUIDA' && task.status !== 'CONCLUIDA' && task.criado_por && task.criado_por !== user.id) await notifyTask(c, task.id, [task.criado_por], `A tarefa foi concluída: ${task.titulo}`, 'CONCLUIDA')
+  if (body.atribuido_para) await notifyTask(c, task.id, assigned, `A tarefa foi atualizada: ${body.titulo || task.titulo}`)
+  return c.json({ success: true, status, progresso: progress, atribuido_para: assigned })
+})
+
+app.post('/api/sharebrasil/tarefas/:id/comentarios', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const task = await visibleTask(c, user, c.req.param('id')) as any
+  if (!task) return c.notFound()
+  const body = await c.req.json<{ comentario?: string }>().catch(() => ({} as any))
+  if (!body.comentario?.trim()) return c.json({ error: 'comentario_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO tarefas_comentarios (id, tarefa_id, usuario_id, comentario) VALUES (?, ?, ?, ?)').bind(id, task.id, user.id, body.comentario.trim()).run()
+  const recipients = [task.criado_por, ...JSON.parse(task.atribuido_para || '[]')].filter((recipient: string) => recipient && recipient !== user.id)
+  await notifyTask(c, task.id, recipients, `Novo comentário na tarefa: ${task.titulo}`)
+  return c.json({ id, tarefa_id: task.id, comentario: body.comentario.trim() }, 201)
+})
+
+app.patch('/api/sharebrasil/notificacoes/:id/lida', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('UPDATE tarefas_notificacoes SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.get('/api/sharebrasil/calendario/categorias', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('SELECT * FROM categorias_calendario WHERE usuario_id = ?1 ORDER BY nome').bind(user.id).all()
+  return c.json(result.results)
+})
+
+app.post('/api/sharebrasil/calendario/categorias', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ nome?: string; cor?: string }>().catch(() => ({} as any))
+  if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO categorias_calendario (id, usuario_id, nome, cor) VALUES (?, ?, ?, ?)').bind(id, user.id, body.nome.trim(), body.cor || '#2fb9a7').run()
+  return c.json({ id, nome: body.nome.trim(), cor: body.cor || '#2fb9a7' }, 201)
+})
+
+app.get('/api/sharebrasil/calendario', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const inicio = c.req.query('inicio') || '1900-01-01'; const fim = c.req.query('fim') || '2999-12-31'
+  const result = await portalDb(c).prepare("SELECT l.*, c.nome AS categoria_nome, c.cor AS categoria_cor FROM lembretes_calendario l LEFT JOIN categorias_calendario c ON c.id = l.cor_categoria_id WHERE l.data BETWEEN ?1 AND ?2 AND (l.visibilidade = 'TODOS' OR l.usuario_id = ?3) ORDER BY l.data, l.hora").bind(inicio, fim, user.id).all()
+  return c.json(result.results)
+})
+
+app.post('/api/sharebrasil/calendario', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ titulo?: string; descricao?: string; data?: string; hora?: string; visibilidade?: 'PRIVADO' | 'TODOS'; cor_categoria_id?: string }>().catch(() => ({} as any))
+  if (!body.titulo?.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(body.data || '')) return c.json({ error: 'titulo_e_data_obrigatorios' }, 400)
+  const visibility = body.visibilidade === 'TODOS' ? 'TODOS' : 'PRIVADO'
+  const calendarId = uuid(); const taskId = uuid()
+  await portalDb(c).prepare("INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, prazo, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'MEDIA', ?, ?, ?, 'CALENDARIO', ?, 0)").bind(taskId, body.titulo.trim(), body.descricao?.trim() || null, user.id, body.data, visibility === 'TODOS' ? 1 : 0, jsonArray([user.id])).run()
+  await portalDb(c).prepare('INSERT INTO lembretes_calendario (id, usuario_id, titulo, descricao, data, hora, visibilidade, cor_categoria_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(calendarId, user.id, body.titulo.trim(), body.descricao?.trim() || null, body.data, body.hora || null, visibility, body.cor_categoria_id || null).run()
+  const users = visibility === 'TODOS' ? await portalDb(c).prepare("SELECT id FROM user_profiles WHERE status IS NULL OR lower(status) IN ('ativo', 'active')").all() : { results: [{ id: user.id }] }
+  await notifyTask(c, taskId, users.results.map((item: any) => item.id), `Novo evento no calendário: ${body.titulo.trim()}`)
+  return c.json({ id: calendarId, titulo: body.titulo.trim(), data: body.data, hora: body.hora || null, visibilidade: visibility }, 201)
+})
+
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
