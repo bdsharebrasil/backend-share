@@ -2677,6 +2677,45 @@ async function requireShareInternal(c: Context<{ Bindings: Bindings }>): Promise
   return checkInternalAuth(c)
 }
 
+app.get('/api/interno/dashboard/operacoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const dataReferencia = c.req.query('data') || new Date().toISOString().slice(0, 10)
+  const [resumo, solicitacoes] = await Promise.all([
+    portalDb(c).prepare(`SELECT
+      SUM(CASE WHEN date(data_agendada) = ?1 THEN 1 ELSE 0 END) AS voos_hoje,
+      SUM(CASE WHEN status = 'pendente' THEN 1 ELSE 0 END) AS pendencias,
+      COUNT(*) AS reservas_abertas
+      FROM solicitacoes_reserva_voo
+      WHERE date(data_agendada) >= ?1 AND status IN ('pendente', 'aprovada')`).bind(dataReferencia).first<Record<string, number>>(),
+    portalDb(c).prepare(`SELECT s.id, s.cliente_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo
+      FROM solicitacoes_reserva_voo s
+      LEFT JOIN cliente c ON c.id = s.cliente_id
+      LEFT JOIN aeronave a ON a.id = s.aeronave_id
+      WHERE date(s.data_agendada) >= ?1
+      ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em
+      LIMIT 50`).bind(dataReferencia).all(),
+  ])
+  const aeronavesAtivas = await portalDb(c).prepare("SELECT COUNT(*) AS total FROM aeronave WHERE lower(status) = 'ativa'").first<{ total: number }>()
+  return c.json({ data_referencia: dataReferencia, resumo: { voos_hoje: Number(resumo?.voos_hoje || 0), pendencias: Number(resumo?.pendencias || 0), reservas_abertas: Number(resumo?.reservas_abertas || 0), aeronaves_ativas: Number(aeronavesAtivas?.total || 0) }, solicitacoes: solicitacoes.results })
+})
+
+app.get('/api/interno/dashboard/financeiro', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const [resumo, movimentacoes] = await Promise.all([
+    portalDb(c).prepare(`SELECT
+      COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN COALESCE(valor_rateado, valor_total, 0) ELSE 0 END), 0) AS total_a_receber,
+      COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) = 'pago' OR data_pagamento IS NOT NULL THEN COALESCE(valor_pago_real, valor_rateado, valor_total, 0) ELSE 0 END), 0) AS total_pago,
+      SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN 1 ELSE 0 END) AS pendencias,
+      SUM(CASE WHEN lower(COALESCE(status, '')) = 'pago' OR data_pagamento IS NOT NULL THEN 1 ELSE 0 END) AS pagamentos_confirmados
+      FROM movimentacoes`).first<Record<string, number>>(),
+    portalDb(c).prepare(`SELECT id, descricao, status, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, observacoes, criado_em
+      FROM movimentacoes
+      ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC
+      LIMIT 20`).all(),
+  ])
+  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, movimentacoes: movimentacoes.results })
+})
+
 app.get('/api/interno/solicitacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const status = c.req.query('status')
