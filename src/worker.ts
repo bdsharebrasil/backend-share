@@ -585,13 +585,19 @@ function normalizeNotamItems(data: any, icao: string): Record<string, any>[] {
 }
 
 function normalizeRouteItems(data: any, adep: string, ades: string): Record<string, any>[] {
-  return collectionItems(data)
-    .map((item: any) => ({
-      route: String(item?.rota ?? item?.route ?? item?.Route ?? '').trim(),
-      level: item?.nivel ?? item?.level ?? item?.fl ?? '',
-      type: item?.tipo ?? item?.type ?? '',
-      remarks: item?.rmk ?? item?.obs ?? item?.remarks ?? '',
-    }))
+  const source = data?.routesp ?? data?.routes ?? data?.rotas ?? data
+  const candidates = typeof source === 'string' ? [source] : collectionItems(source)
+  return candidates
+    .map((item: any) => {
+      const nested = item?.route ?? item?.rota ?? item?.route_preferencial ?? item?.rota_preferencial
+      const route = typeof item === 'string' ? item : typeof nested === 'string' ? nested : typeof nested?.route === 'string' ? nested.route : typeof nested?.rota === 'string' ? nested.rota : item?.Route ?? item?.ROUTE ?? ''
+      return {
+        route: String(route).replace(/\s+/g, ' ').trim(),
+        level: item?.nivel ?? item?.level ?? item?.fl ?? '',
+        type: item?.tipo ?? item?.type ?? '',
+        remarks: item?.rmk ?? item?.obs ?? item?.remarks ?? '',
+      }
+    })
     .filter(item => item.route)
     .map(item => ({ ...item, adep, ades }))
 }
@@ -614,6 +620,11 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+function numericValue(raw: unknown): number | null {
+  const value = typeof raw === 'number' ? raw : Number(String(raw ?? '').replace(',', '.'))
+  return Number.isFinite(value) && value > 0 ? value : null
 }
 
 function parseCoord(raw: any): number | null {
@@ -1610,13 +1621,29 @@ app.get('/api/flightplan', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const adep = c.req.query('adep')?.toUpperCase()
   const ades = c.req.query('ades')?.toUpperCase()
-  const speed = parseInt(c.req.query('speed') ?? '120')
-  const burn = parseFloat(c.req.query('fuel_burn') ?? '32')
-  const reserveMin = parseInt(c.req.query('reserve') ?? '45')
+  const aircraftId = c.req.query('aeronave_id') || c.req.query('aircraft_id')
+  const requestedSpeed = numericValue(c.req.query('speed'))
+  const requestedBurn = numericValue(c.req.query('fuel_burn'))
+  const reserveMin = numericValue(c.req.query('reserve')) || 45
 
   if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
 
   try {
+    let aircraftData: any = null
+    if (aircraftId) {
+      try {
+        aircraftData = await portalDb(c).prepare(`SELECT a.id, a.fabricante, a.modelo, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, a.performance_aeronave_id, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
+          FROM aeronave a
+          LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
+          WHERE a.id = ?1`).bind(aircraftId).first()
+      } catch (error: any) {
+        log.warn(`[flightplan] performance_aeronave indisponível: ${error.message}`)
+        aircraftData = await portalDb(c).prepare('SELECT id, fabricante, modelo, tipo_aeronave, consumo_combustivel, velocidade_cruzeiro FROM aeronave WHERE id = ?1').bind(aircraftId).first()
+      }
+    }
+    const speed = requestedSpeed || numericValue(aircraftData?.performance_velocidade_cruzeiro_kt) || numericValue(aircraftData?.velocidade_cruzeiro) || 120
+    const burn = requestedBurn || numericValue(aircraftData?.consumo_combustivel) || 32
+
     const [depItem, desItem] = await Promise.all([
       fetchRotaerByIcao(c, adep),
       fetchRotaerByIcao(c, ades),
@@ -1680,6 +1707,18 @@ app.get('/api/flightplan', async (c) => {
         flight_minutes: Math.round(flightHours * 60),
         cruise_speed: speed,
       },
+      performance: aircraftData ? {
+        source: aircraftData.performance_velocidade_cruzeiro_kt || aircraftData.performance_categoria ? 'performance_aeronave' : 'aeronave',
+        fabricante: aircraftData.fabricante ?? null,
+        modelo: aircraftData.modelo ?? null,
+        tipo_aeronave: aircraftData.tipo_aeronave ?? null,
+        velocidade_cruzeiro_kt: numericValue(aircraftData.performance_velocidade_cruzeiro_kt) || numericValue(aircraftData.velocidade_cruzeiro) || speed,
+        consumo_combustivel_lh: numericValue(aircraftData.consumo_combustivel) || burn,
+        categoria: aircraftData.performance_categoria ?? null,
+        teto_servico_ft: aircraftData.performance_teto_servico_ft ?? null,
+        taxa_subida_fpm: aircraftData.performance_taxa_subida_fpm ?? null,
+        taxa_descida_fpm: aircraftData.performance_taxa_descida_fpm ?? null,
+      } : null,
       fuel: {
         burn_lh: burn,
         trip_liters: Math.round(tripFuel),
@@ -2864,7 +2903,10 @@ app.get('/api/interno/agendamento/opcoes', async c => {
   const [clientes, socios, aeronaves, vinculos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, cliente_id FROM hold_socios ORDER BY nome").all(),
-    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave ORDER BY matricula_registro").all(),
+    db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
+      FROM aeronave a
+      LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
+      ORDER BY a.matricula_registro`).all(),
     db.prepare(`SELECT ca.id, ca.cliente_id, ca.socio_id, ca.aeronave_id, ca.codigo_cliente, a.matricula_registro, a.modelo
       FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente, a.matricula_registro`).all(),
   ])
@@ -2889,7 +2931,10 @@ app.get('/api/interno/agendamento', async c => {
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       WHERE date(s.data_agendada) BETWEEN ?1 AND ?2
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all(),
-    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, ano, base, url_imagem, tipo_aeronave FROM aeronave ORDER BY matricula_registro").all(),
+    db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
+      FROM aeronave a
+      LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
+      ORDER BY a.matricula_registro`).all(),
     db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all(),
     db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
