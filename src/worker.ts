@@ -107,6 +107,10 @@ async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Pro
   const authorization = c.req.header('authorization')
   log.debug('[auth] Authorization header present:', Boolean(authorization))
   const { SUPABASE_URL, SUPABASE_ANON_KEY, VITE_SUPABASE_PUBLISHABLE_KEY } = c.env
+  // Aceita a chave anon legada ou a chave pública publicada no projeto Supabase.
+  // A autorização continua sendo feita pelo Bearer do colaborador; a chave apenas
+  // identifica o projeto na chamada /auth/v1/user.
+  const supabaseApiKey = SUPABASE_ANON_KEY || VITE_SUPABASE_PUBLISHABLE_KEY
 
   if (!authorization?.startsWith('Bearer ')) {
     log.debug('[auth] missing Bearer token')
@@ -116,16 +120,15 @@ async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Pro
     log.warn('[auth] SUPABASE_URL não definido')
     return false
   }
-  if (!SUPABASE_ANON_KEY) {
-    // Publishable key NÃO serve para validar usuário no endpoint /auth/v1/user
-    log.warn('[auth] SUPABASE_ANON_KEY ausente. VITE_SUPABASE_PUBLISHABLE_KEY presente:', Boolean(VITE_SUPABASE_PUBLISHABLE_KEY))
+  if (!supabaseApiKey) {
+    log.warn('[auth] nenhuma chave pública do Supabase configurada (SUPABASE_ANON_KEY/VITE_SUPABASE_PUBLISHABLE_KEY)')
     return false
   }
 
   try {
     const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: {
-        apikey: SUPABASE_ANON_KEY,
+        apikey: supabaseApiKey,
         Authorization: authorization,
       },
     })
