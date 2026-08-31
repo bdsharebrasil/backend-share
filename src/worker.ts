@@ -3102,6 +3102,359 @@ app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
   return c.json({ success: true, status: 'reprovada', solicitacao_id: c.req.param('id') })
 })
 
+
+
+// ─── Share Brasil: ponto, documentos, senhas e contatos ─────────────────────
+async function shareBrasilUser(c: Context<{ Bindings: Bindings }>): Promise<Colaborador | null> {
+  return authenticatedColaborador(c)
+}
+
+function shareBrasilBucket(c: Context<{ Bindings: Bindings }>): R2Bucket {
+  return c.env.SHARE_FILES || c.env.FILES
+}
+
+function shareBrasilFileName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
+}
+
+async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes'): Promise<string> {
+  if (!file.size) throw new Error('arquivo_vazio')
+  if (file.size > 25 * 1024 * 1024) throw new Error('arquivo_excede_25mb')
+  const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
+  await shareBrasilBucket(c).put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
+  return key
+}
+
+function shareBrasilMonth(value: string | undefined): { inicio: string; fim: string } {
+  const month = /^\d{4}-\d{2}$/.test(value || '') ? value! : new Date().toISOString().slice(0, 7)
+  return { inicio: `${month}-01`, fim: `${month}-31` }
+}
+
+function horasEntre(inicio: string | null, fim: string | null): number | null {
+  if (!inicio || !fim) return null
+  const [ih, im] = inicio.split(':').map(Number)
+  const [fh, fm] = fim.split(':').map(Number)
+  if (![ih, im, fh, fm].every(Number.isFinite)) return null
+  const total = ((fh * 60 + fm) - (ih * 60 + im)) / 60
+  return total >= 0 ? Math.round(total * 100) / 100 : null
+}
+
+app.get('/api/sharebrasil/ponto', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const { inicio, fim } = shareBrasilMonth(c.req.query('mes'))
+  const db = portalDb(c)
+  const [lancamentos, anexos, justificativas, correcoes] = await Promise.all([
+    db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND date(data_entrada) BETWEEN ?2 AND ?3 ORDER BY data_entrada DESC').bind(user.id, inicio, fim).all(),
+    db.prepare('SELECT * FROM lancamento_ponto_anexos WHERE user_id = ?1 AND date(data_entrada) BETWEEN ?2 AND ?3 ORDER BY criado_em DESC').bind(user.id, inicio, fim).all(),
+    db.prepare('SELECT * FROM justificativa_ausencia WHERE id_usuario = ?1 AND date(data_registro) BETWEEN ?2 AND ?3 ORDER BY data_registro DESC').bind(user.id, inicio, fim).all(),
+    db.prepare('SELECT * FROM solicitacoes_correcao_ponto WHERE user_id = ?1 AND date(data_entrada) BETWEEN ?2 AND ?3 ORDER BY data_entrada DESC, criado_em DESC').bind(user.id, inicio, fim).all(),
+  ])
+  return c.json({ mes: inicio.slice(0, 7), lancamentos: lancamentos.results, anexos: anexos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/ponto/anexos/${item.id}/arquivo` })), justificativas: justificativas.results, correcoes: correcoes.results })
+})
+
+app.post('/api/sharebrasil/ponto/marcar', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ acao?: string; data?: string; hora?: string }>().catch(() => ({} as { acao?: string; data?: string; hora?: string }))
+  const acao = body.acao || ''
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(body.data || '') ? body.data! : new Date().toISOString().slice(0, 10)
+  const hora = /^\d{2}:\d{2}(:\d{2})?$/.test(body.hora || '') ? body.hora!.slice(0, 5) : new Date().toISOString().slice(11, 16)
+  const columns: Record<string, { campo: string; status: string }> = {
+    entrada: { campo: 'entrada_hora', status: 'working' },
+    inicio_almoco: { campo: 'inicio_almoco', status: 'lunch' },
+    fim_almoco: { campo: 'fim_almoco', status: 'working' },
+    pausa: { campo: 'inicio_almoco', status: 'paused' },
+    saida: { campo: 'saida_hora', status: 'finished' },
+    encerrar: { campo: 'saida_hora', status: 'finished' },
+  }
+  const target = columns[acao]
+  if (!target) return c.json({ error: 'acao_invalida' }, 400)
+  const db = portalDb(c)
+  let row = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
+  if (!row) {
+    const id = uuid()
+    await db.prepare('INSERT INTO lancamento_ponto (id, user_id, data_entrada, status) VALUES (?, ?, ?, ?)').bind(id, user.id, data, target.status).run()
+    row = { id, user_id: user.id, data_entrada: data }
+  }
+  const entrada = target.campo === 'entrada_hora' ? hora : row.entrada_hora
+  const saida = target.campo === 'saida_hora' ? hora : row.saida_hora
+  const total = horasEntre(entrada, saida)
+  await db.prepare(`UPDATE lancamento_ponto SET ${target.campo} = ?, status = ?, horas_totais = COALESCE(?, horas_totais), atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`).bind(hora, target.status, total, row.id, user.id).run()
+  return c.json({ success: true, id: row.id, data_entrada: data, campo: target.campo, hora, status: target.status, horas_totais: total })
+})
+
+app.post('/api/sharebrasil/ponto/correcao', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ data_entrada?: string; lancamento_ponto_id?: string; tipo_correcao?: string; tempo_original?: string; tempo_corrigido?: string; justificativa?: string }>().catch(() => ({} as any))
+  if (!body.data_entrada || !body.tipo_correcao || !body.tempo_corrigido || !body.justificativa?.trim()) return c.json({ error: 'campos_obrigatorios' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO solicitacoes_correcao_ponto (id, user_id, data_entrada, lancamento_ponto_id, tipo_correcao, tempo_original, tempo_corrigido, justificativa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, user.id, body.data_entrada, body.lancamento_ponto_id || null, body.tipo_correcao, body.tempo_original || null, body.tempo_corrigido, body.justificativa.trim()).run()
+  return c.json({ id, status: 'pending' }, 201)
+})
+
+app.post('/api/sharebrasil/ponto/justificativa', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const form = await c.req.formData()
+  const data = String(form.get('data_registro') || '').trim()
+  const justificativa = String(form.get('justificativa') || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !justificativa) return c.json({ error: 'data_e_justificativa_obrigatorias' }, 400)
+  const id = uuid()
+  let key: string | null = null
+  const fileValue = form.get('arquivo') as unknown
+  try {
+    if (fileValue && typeof fileValue === 'object' && 'size' in fileValue && Number(fileValue.size) > 0) key = await salvarArquivoShareBrasil(c, user.id, fileValue as File, 'anexos_ponto')
+    await portalDb(c).prepare('INSERT INTO justificativa_ausencia (id, id_usuario, data_registro, justificativa, url_documento) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, data, justificativa, key).run()
+    if (key) {
+      const lancamento = await portalDb(c).prepare('SELECT id FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<{ id: string }>()
+      await portalDb(c).prepare('INSERT INTO lancamento_ponto_anexos (id, lancamento_ponto_id, user_id, data_entrada, caminho_arquivo, nome_arquivo, tipo_arquivo, tipo_justificativa, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uuid(), lancamento?.id || null, user.id, data, key, (fileValue as File).name, (fileValue as File).type || null, 'medical', justificativa).run()
+    }
+    return c.json({ id, status: 'pendente', url_documento: key }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_justificativa' }, 400)
+  }
+})
+
+app.get('/api/sharebrasil/ponto/anexos/:id/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM lancamento_ponto_anexos WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
+  if (!row) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo || 'application/octet-stream', 'Content-Disposition': `attachment; filename="${shareBrasilFileName(row.nome_arquivo)}"` } })
+})
+
+app.get('/api/sharebrasil/documentos/pastas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('SELECT * FROM pastas_documentos ORDER BY nome').all()
+  return c.json(result.results)
+})
+
+app.post('/api/sharebrasil/documentos/pastas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ nome?: string; pasta_pai_id?: string }>().catch(() => ({} as any))
+  if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO pastas_documentos (id, nome, pasta_pai_id, criado_por) VALUES (?, ?, ?, ?)').bind(id, body.nome.trim(), body.pasta_pai_id || null, user.id).run()
+  return c.json({ id, nome: body.nome.trim(), pasta_pai_id: body.pasta_pai_id || null }, 201)
+})
+
+app.get('/api/sharebrasil/documentos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const pastaId = c.req.query('pasta_id') || null
+  const result = pastaId ? await portalDb(c).prepare('SELECT * FROM documentos_internos WHERE pasta_id = ?1 ORDER BY criado_em DESC').bind(pastaId).all() : await portalDb(c).prepare('SELECT * FROM documentos_internos ORDER BY criado_em DESC').all()
+  return c.json(result.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/documentos/${item.id}/arquivo` })))
+})
+
+app.post('/api/sharebrasil/documentos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const form = await c.req.formData()
+  const fileValue = form.get('arquivo') as unknown
+  const pastaId = String(form.get('pasta_id') || '').trim() || null
+  if (!fileValue || typeof fileValue !== 'object' || !('size' in fileValue) || Number(fileValue.size) <= 0) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const file = fileValue as File
+  try {
+    const key = await salvarArquivoShareBrasil(c, user.id, file, 'documentos_internos')
+    const id = uuid()
+    await portalDb(c).prepare('INSERT INTO documentos_internos (id, pasta_id, nome, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, pastaId, file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
+    return c.json({ id, nome: file.name, pasta_id: pastaId, arquivo_url: `/api/sharebrasil/documentos/${id}/arquivo` }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_documento' }, 400)
+  }
+})
+
+app.get('/api/sharebrasil/documentos/:id/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome, tipo_arquivo FROM documentos_internos WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome: string; tipo_arquivo: string }>()
+  if (!row) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `attachment; filename="${shareBrasilFileName(row.nome)}"` } })
+})
+
+app.get('/api/sharebrasil/senhas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('SELECT id, titulo, site, login, observacoes, criado_por, criado_em, atualizado_em, setor FROM senhas ORDER BY titulo').all()
+  return c.json(result.results)
+})
+
+app.get('/api/sharebrasil/senhas/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT id, titulo, site, login, senha, observacoes, criado_por, criado_em, atualizado_em, setor FROM senhas WHERE id = ?1').bind(c.req.param('id')).first()
+  if (!row) return c.notFound()
+  return c.json(row)
+})
+
+app.post('/api/sharebrasil/senhas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ titulo?: string; site?: string; login?: string; senha?: string; observacoes?: string; setor?: string }>().catch(() => ({} as any))
+  if (!body.titulo?.trim() || !body.site?.trim() || !body.login?.trim() || !body.senha) return c.json({ error: 'campos_obrigatorios' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO senhas (id, titulo, site, login, senha, observacoes, criado_por, setor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.titulo.trim(), body.site.trim(), body.login.trim(), body.senha, body.observacoes?.trim() || null, user.id, body.setor?.trim() || null).run()
+  return c.json({ id, titulo: body.titulo.trim() }, 201)
+})
+
+app.patch('/api/sharebrasil/senhas/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ titulo?: string; site?: string; login?: string; senha?: string; observacoes?: string; setor?: string }>().catch(() => ({} as any))
+  const result = await portalDb(c).prepare('UPDATE senhas SET titulo = COALESCE(?, titulo), site = COALESCE(?, site), login = COALESCE(?, login), senha = COALESCE(?, senha), observacoes = ?, setor = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.titulo?.trim() || null, body.site?.trim() || null, body.login?.trim() || null, body.senha || null, body.observacoes?.trim() || null, body.setor?.trim() || null, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.delete('/api/sharebrasil/senhas/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('DELETE FROM senhas WHERE id = ?1').bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.get('/api/sharebrasil/contatos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('SELECT * FROM agenda_contatos ORDER BY nome').all()
+  return c.json(result.results)
+})
+
+app.post('/api/sharebrasil/contatos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
+  if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome.trim(), body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null).run()
+  return c.json({ id }, 201)
+})
+
+app.patch('/api/sharebrasil/contatos/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
+  const result = await portalDb(c).prepare('UPDATE agenda_contatos SET nome = COALESCE(?, nome), telefone = ?, email = ?, empresa = ?, cargo = ?, observacoes = ?, endereco = ?, uf = ?, cidade = ?, categoria = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.nome?.trim() || null, body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.delete('/api/sharebrasil/contatos/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.get('/api/sharebrasil/clientes', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = portalDb(c)
+  const [clientes, socios, vinculos, documentos, aeronaves] = await Promise.all([
+    db.prepare('SELECT * FROM cliente ORDER BY razao_social').all(),
+    db.prepare('SELECT * FROM hold_socios ORDER BY nome').all(),
+    db.prepare('SELECT ca.*, a.matricula_registro, a.fabricante, a.modelo FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente').all(),
+    db.prepare('SELECT * FROM documentos_cliente ORDER BY criado_em DESC').all(),
+    db.prepare('SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave FROM aeronave ORDER BY matricula_registro').all(),
+  ])
+  return c.json({ clientes: clientes.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })) })
+})
+
+app.post('/api/sharebrasil/clientes', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  if (!body.razao_social?.trim()) return c.json({ error: 'razao_social_obrigatoria' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO cliente (id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, status, holding, codigo_cliente, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.razao_social.trim(), body.cnpj || null, body.inscricao_estadual || null, body.proprietario || null, body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone_cliente || null, body.telefone_outro || null, body.email_principal || null, JSON.stringify(body.emails || []), body.status || 'ativo', body.holding ? 1 : 0, body.codigo_cliente || null, body.observacoes || null).run()
+  return c.json({ id }, 201)
+})
+
+app.patch('/api/sharebrasil/clientes/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const fields = ['razao_social','cnpj','inscricao_estadual','proprietario','endereco','cidade','uf','contato_financeiro','telefone_financeiro','telefone_cliente','telefone_outro','email_principal','status','codigo_cliente','observacoes']
+  const values = fields.map((field) => body[field] ?? null)
+  const result = await portalDb(c).prepare(`UPDATE cliente SET ${fields.map((field) => `${field} = COALESCE(?, ${field})`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...values, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
+app.post('/api/sharebrasil/clientes/:id/aeronaves', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ aeronave_id?: string; percentual_sociedade?: number; codigo_cliente?: string }>().catch(() => ({} as any))
+  if (!body.aeronave_id) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, Number(body.percentual_sociedade || 100), body.codigo_cliente || null).run()
+  return c.json({ id }, 201)
+})
+
+app.post('/api/sharebrasil/clientes/:id/logo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const form = await c.req.formData()
+  const fileValue = form.get('arquivo') as unknown
+  if (!fileValue || typeof fileValue !== 'object' || !('size' in fileValue)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const file = fileValue as File
+  if (!file.type.startsWith('image/')) return c.json({ error: 'logo_deve_ser_imagem' }, 415)
+  try {
+    const key = await salvarArquivoShareBrasil(c, user.id, file, 'logos_clientes')
+    await portalDb(c).prepare('UPDATE cliente SET url_logo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(key, c.req.param('id')).run()
+    return c.json({ url_logo: `/api/sharebrasil/clientes/${c.req.param('id')}/logo/arquivo` })
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_logo' }, 400)
+  }
+})
+
+app.get('/api/sharebrasil/clientes/:id/logo/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT url_logo FROM cliente WHERE id = ?1').bind(c.req.param('id')).first<{ url_logo: string | null }>()
+  if (!row?.url_logo) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.url_logo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': 'image/*', 'Cache-Control': 'private, max-age=300' } })
+})
+
+app.post('/api/sharebrasil/clientes/:id/documentos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const form = await c.req.formData()
+  const fileValue = form.get('arquivo') as unknown
+  if (!fileValue || typeof fileValue !== 'object' || !('size' in fileValue)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const file = fileValue as File
+  try {
+    const key = await salvarArquivoShareBrasil(c, user.id, file, 'documentos_clientes')
+    const id = uuid()
+    await portalDb(c).prepare('INSERT INTO documentos_cliente (id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), file.name, key, file.type || 'application/octet-stream', file.size, user.id, String(form.get('categoria') || 'geral')).run()
+    return c.json({ id, arquivo_url: `/api/sharebrasil/clientes/documentos/${id}/arquivo` }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_documento_cliente' }, 400)
+  }
+})
+
+app.get('/api/sharebrasil/clientes/documentos/:id/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM documentos_cliente WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string }>()
+  if (!row) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `attachment; filename="${shareBrasilFileName(row.nome_arquivo)}"` } })
+})
+
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
