@@ -38,6 +38,15 @@ binding = "SHARE_DB"
 database_name = "bd_sharebrasil"
 database_id = "4267a49f-e38f-442f-8b6f-47fe02dea308"
 
+# ── Durable Object para sinalização WebRTC das salas colaborativas ──────────
+[[durable_objects.bindings]]
+name = "MEETING_ROOMS"
+class_name = "MeetingRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MeetingRoom"]
+
 # ── Secrets (NÃO colocar valores aqui — usar `wrangler secret put <NOME>`) ──
 # AISWEB_API_KEY
 # AISWEB_API_PASS

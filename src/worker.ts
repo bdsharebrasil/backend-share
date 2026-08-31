@@ -30,6 +30,7 @@ type Bindings = {
   CLIENT_SESSION_TTL_SECONDS?: string
   CLOUDFLARE_TURN_KEY_ID?: string
   CLOUDFLARE_TURN_API_TOKEN?: string
+  MEETING_ROOMS: DurableObjectNamespace
 }
 
 interface Airport { icao: string; name: string; lat: number; lon: number; distKm: number }
@@ -907,11 +908,8 @@ type Colaborador = {
 
 type ColaboradorClaims = { id: string; email: string }
 
-function extractSupabaseClaims(c: Context<{ Bindings: Bindings }>): ColaboradorClaims | null {
-  const authHeader = c.req.header('authorization')
-  if (!authHeader?.startsWith('Bearer ')) return null
+function claimsFromBearerToken(token: string): ColaboradorClaims | null {
   try {
-    const token = authHeader.slice(7)
     const payloadB64 = token.split('.')[1]
     const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')))
     const id = typeof payload?.sub === 'string' ? payload.sub : ''
@@ -922,9 +920,26 @@ function extractSupabaseClaims(c: Context<{ Bindings: Bindings }>): ColaboradorC
   }
 }
 
+function extractSupabaseClaims(c: Context<{ Bindings: Bindings }>): ColaboradorClaims | null {
+  const authHeader = c.req.header('authorization')
+  return authHeader?.startsWith('Bearer ') ? claimsFromBearerToken(authHeader.slice(7)) : null
+}
+
 async function authenticatedColaborador(c: Context<{ Bindings: Bindings }>): Promise<Colaborador | null> {
   if (!(await requireAuthenticatedUser(c))) return null
   const claims = extractSupabaseClaims(c)
+  if (!claims) return null
+  return portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
+}
+
+async function authenticatedColaboradorToken(c: Context<{ Bindings: Bindings }>, token: string): Promise<Colaborador | null> {
+  const normalizedToken = token.trim()
+  if (!normalizedToken || !c.env.SUPABASE_URL) return null
+  const apiKey = c.env.SUPABASE_ANON_KEY || c.env.VITE_SUPABASE_PUBLISHABLE_KEY
+  if (!apiKey) return null
+  const response = await fetch(`${c.env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: apiKey, Authorization: `Bearer ${normalizedToken}` } }).catch(() => null)
+  if (!response?.ok) return null
+  const claims = claimsFromBearerToken(normalizedToken)
   if (!claims) return null
   return portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
 }
@@ -3541,7 +3556,7 @@ function shareBrasilFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
 }
 
-async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes' | 'abastecimentos'): Promise<string> {
+async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes' | 'abastecimentos' | 'manual_tutoriais'): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
   if (file.size > 25 * 1024 * 1024) throw new Error('arquivo_excede_25mb')
   const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
@@ -4025,6 +4040,189 @@ app.post('/api/sharebrasil/calendario', async c => {
 
 
 
+// ─── Centro de Treinamento: tutoriais, treinamentos e salas colaborativas ────
+async function ensureTrainingTables(c: Context<{ Bindings: Bindings }>) {
+  const db = portalDb(c)
+  await db.prepare(`CREATE TABLE IF NOT EXISTS centro_reunioes (
+    id TEXT PRIMARY KEY NOT NULL,
+    titulo TEXT NOT NULL,
+    descricao TEXT,
+    status TEXT NOT NULL DEFAULT 'ATIVA',
+    criado_por TEXT NOT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    encerrado_em TEXT NULL
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS manual_tutoriais (
+    id TEXT PRIMARY KEY NOT NULL,
+    titulo TEXT NOT NULL,
+    descricao TEXT NOT NULL DEFAULT '',
+    video_url TEXT,
+    conteudo_html TEXT,
+    categoria TEXT NOT NULL DEFAULT 'TUTORIAL',
+    ordem INTEGER NOT NULL DEFAULT 0,
+    criado_por TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    tema TEXT,
+    arquivo_url TEXT,
+    tipo_arquivo TEXT,
+    tamanho_arquivo INTEGER,
+    publicado INTEGER NOT NULL DEFAULT 1
+  )`).run()
+  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN tema TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN arquivo_url TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN tipo_arquivo TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN tamanho_arquivo INTEGER').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN publicado INTEGER NOT NULL DEFAULT 1').run().catch(() => undefined)
+}
+
+function trainingPayload(row: Record<string, any>) {
+  return { ...row, publicado: Boolean(row.publicado), arquivo_url: row.arquivo_url ? `/api/sharebrasil/centro-treinamento/materiais/${row.id}/arquivo` : null }
+}
+
+app.get('/api/sharebrasil/centro-treinamento/materiais', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await ensureTrainingTables(c)
+  const categoria = (c.req.query('categoria') || '').trim().toUpperCase()
+  const query = categoria ? 'SELECT * FROM manual_tutoriais WHERE publicado = 1 AND upper(categoria) = ?1 ORDER BY ordem, criado_em DESC' : 'SELECT * FROM manual_tutoriais WHERE publicado = 1 ORDER BY categoria, ordem, criado_em DESC'
+  const result = categoria ? await portalDb(c).prepare(query).bind(categoria).all() : await portalDb(c).prepare(query).all()
+  return c.json(result.results.map(row => trainingPayload(row as Record<string, any>)))
+})
+
+app.post('/api/sharebrasil/centro-treinamento/materiais', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  const form = await c.req.formData()
+  const titulo = String(form.get('titulo') || '').trim()
+  const descricao = String(form.get('descricao') || '').trim()
+  const categoria = String(form.get('categoria') || 'TUTORIAL').trim().toUpperCase()
+  const tema = String(form.get('tema') || '').trim() || null
+  const videoUrl = String(form.get('video_url') || '').trim() || null
+  const conteudoHtml = String(form.get('conteudo_html') || '').trim() || null
+  const ordem = Number(form.get('ordem') || 0)
+  const fileValue = form.get('arquivo')
+  if (!titulo || !['TUTORIAL', 'TREINAMENTO'].includes(categoria)) return c.json({ error: 'titulo_e_categoria_obrigatorios' }, 400)
+  let arquivoUrl: string | null = null
+  let tipoArquivo: string | null = null
+  let tamanhoArquivo: number | null = null
+  try {
+    if (fileValue && typeof fileValue === 'object' && 'type' in fileValue) {
+      const file = fileValue as File
+      const allowed = ['video/mp4', 'video/webm', 'application/pdf', 'text/html']
+      if (!allowed.includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
+      if (file.size > 100 * 1024 * 1024) return c.json({ error: 'arquivo_excede_100mb' }, 413)
+      arquivoUrl = await salvarArquivoShareBrasil(c, user.id, file, 'manual_tutoriais')
+      tipoArquivo = file.type
+      tamanhoArquivo = file.size
+    }
+    const id = uuid()
+    await portalDb(c).prepare('INSERT INTO manual_tutoriais (id, titulo, descricao, video_url, conteudo_html, categoria, ordem, criado_por, tema, arquivo_url, tipo_arquivo, tamanho_arquivo, publicado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(id, titulo, descricao, videoUrl, conteudoHtml, categoria, Number.isFinite(ordem) ? ordem : 0, user.id, tema, arquivoUrl, tipoArquivo, tamanhoArquivo).run()
+    const row = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(id).first<Record<string, any>>()
+    return c.json(trainingPayload(row || { id, titulo, descricao, categoria }), 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_material' }, 400)
+  }
+})
+
+app.patch('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+  const current = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
+  if (!current) return c.notFound()
+  const categoria = body.categoria == null ? current.categoria : String(body.categoria).toUpperCase()
+  if (!['TUTORIAL', 'TREINAMENTO'].includes(categoria)) return c.json({ error: 'categoria_invalida' }, 400)
+  await portalDb(c).prepare('UPDATE manual_tutoriais SET titulo = ?, descricao = ?, categoria = ?, tema = ?, video_url = ?, conteudo_html = ?, ordem = ?, publicado = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(String(body.titulo ?? current.titulo).trim(), String(body.descricao ?? current.descricao).trim(), categoria, body.tema == null ? current.tema : String(body.tema), body.video_url == null ? current.video_url : String(body.video_url), body.conteudo_html == null ? current.conteudo_html : String(body.conteudo_html), Number(body.ordem ?? current.ordem) || 0, body.publicado == null ? current.publicado : (body.publicado ? 1 : 0), current.id).run()
+  const row = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(current.id).first<Record<string, any>>()
+  return c.json(trainingPayload(row || current))
+})
+
+app.delete('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  const row = await portalDb(c).prepare('SELECT arquivo_url FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null }>()
+  if (!row) return c.notFound()
+  await portalDb(c).prepare('DELETE FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).run()
+  if (row.arquivo_url) await shareBrasilBucket(c).delete(row.arquivo_url).catch(() => undefined)
+  return c.json({ success: true })
+})
+
+app.get('/api/sharebrasil/centro-treinamento/materiais/:id/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await ensureTrainingTables(c)
+  const row = await portalDb(c).prepare('SELECT arquivo_url, tipo_arquivo, titulo FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null; tipo_arquivo: string | null; titulo: string }>()
+  if (!row?.arquivo_url) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.arquivo_url)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo || 'application/octet-stream', 'Content-Disposition': `inline; filename="${shareBrasilFileName(row.titulo)}"`, 'Cache-Control': 'private, max-age=3600' } })
+})
+
+app.get('/api/sharebrasil/centro-treinamento/reunioes', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await ensureTrainingTables(c)
+  const result = await portalDb(c).prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por WHERE r.status = 'ATIVA' ORDER BY r.criado_em DESC`).all()
+  return c.json(result.results)
+})
+
+app.post('/api/sharebrasil/centro-treinamento/reunioes', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  const body = await c.req.json<{ titulo?: string; descricao?: string }>().catch(() => ({} as { titulo?: string; descricao?: string }))
+  const titulo = body.titulo?.trim() || ''
+  if (!titulo) return c.json({ error: 'titulo_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO centro_reunioes (id, titulo, descricao, criado_por) VALUES (?, ?, ?, ?)').bind(id, titulo, body.descricao?.trim() || null, user.id).run()
+  return c.json({ id, titulo, descricao: body.descricao?.trim() || null, status: 'ATIVA' }, 201)
+})
+
+app.post('/api/sharebrasil/centro-treinamento/reunioes/:id/encerrar', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  await portalDb(c).prepare("UPDATE centro_reunioes SET status = 'ENCERRADA', encerrado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+app.get('/api/sharebrasil/centro-treinamento/turn', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const fallback = [{ urls: 'stun:stun.cloudflare.com:3478' }]
+  if (!c.env.CLOUDFLARE_TURN_KEY_ID || !c.env.CLOUDFLARE_TURN_API_TOKEN) return c.json({ ice_servers: fallback, turn_configurado: false })
+  const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(c.env.CLOUDFLARE_TURN_KEY_ID)}/credentials/generate`, { method: 'POST', headers: { Authorization: `Bearer ${c.env.CLOUDFLARE_TURN_API_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ttl: 86_400, customIdentifier: user.id }) }).catch(() => null)
+  if (!response?.ok) return c.json({ ice_servers: fallback, turn_configurado: false })
+  const data = await response.json() as { iceServers?: unknown }
+  return c.json({ ice_servers: data.iceServers || fallback, turn_configurado: true })
+})
+
+app.get('/api/sharebrasil/centro-treinamento/reunioes/:id/ws', async c => {
+  if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') return c.json({ error: 'websocket_obrigatorio' }, 426)
+  const token = c.req.query('access_token') || ''
+  const user = await authenticatedColaboradorToken(c, token)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await ensureTrainingTables(c)
+  const room = await portalDb(c).prepare("SELECT id FROM centro_reunioes WHERE id = ?1 AND status = 'ATIVA'").bind(c.req.param('id')).first()
+  if (!room) return c.notFound()
+  const roomId = c.env.MEETING_ROOMS.idFromName(c.req.param('id'))
+  const stub = c.env.MEETING_ROOMS.get(roomId)
+  const target = new URL('https://meeting-room/websocket')
+  target.searchParams.set('user_id', user.id)
+  target.searchParams.set('name', user.nome_exibicao || user.nome_completo || user.email)
+  target.searchParams.set('participant_id', c.req.query('participant_id') || uuid())
+  return stub.fetch(new Request(target, { headers: { Upgrade: 'websocket' } }))
+})
+
 // ─── Recados compartilhados entre dashboards ─────────────────────────────────
 app.get('/api/colaborador/recados/departamentos', async c => {
   const user = await authenticatedColaborador(c)
@@ -4067,6 +4265,62 @@ app.patch('/api/colaborador/recados/:id/lido', async c => {
   await portalDb(c).prepare('UPDATE recados SET lido_por = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(lidoPor), row.id).run()
   return c.json({ success: true, lido: true })
 })
+
+export class MeetingRoom {
+  constructor(private readonly state: DurableObjectState) {}
+
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected WebSocket', { status: 400 })
+    const url = new URL(request.url)
+    const pair = new WebSocketPair()
+    const [client, server] = Object.values(pair)
+    const attachment = { id: url.searchParams.get('participant_id') || crypto.randomUUID(), userId: url.searchParams.get('user_id') || '', name: url.searchParams.get('name') || 'Participante' }
+    this.state.acceptWebSocket(server)
+    server.serializeAttachment(attachment)
+    server.send(JSON.stringify({ type: 'room_state', participants: this.participants(), whiteboard: await this.state.storage.get<unknown[]>('whiteboard') || [] }))
+    this.broadcast({ type: 'participant_joined', participant: attachment }, server)
+    return new Response(null, { status: 101, webSocket: client })
+  }
+
+  async webSocketMessage(sender: WebSocket, message: string | ArrayBuffer) {
+    const raw = typeof message === 'string' ? message : new TextDecoder().decode(message)
+    let data: Record<string, any>
+    try { data = JSON.parse(raw) } catch { return }
+    const senderAttachment = sender.deserializeAttachment() as { id: string; userId: string; name: string } | null
+    if (!senderAttachment) return
+    if (data.type === 'whiteboard' && data.action) {
+      const board = await this.state.storage.get<any[]>('whiteboard') || []
+      board.push({ ...data.action, author: senderAttachment.name, createdAt: Date.now() })
+      await this.state.storage.put('whiteboard', board.slice(-1000))
+    }
+    const outgoing = { ...data, from: senderAttachment.id, fromName: senderAttachment.name }
+    if (data.to) this.sendTo(String(data.to), outgoing)
+    else this.broadcast(outgoing, sender)
+  }
+
+  async webSocketClose(sender: WebSocket) {
+    const attachment = sender.deserializeAttachment() as { id: string; name: string } | null
+    if (attachment) this.broadcast({ type: 'participant_left', participantId: attachment.id, name: attachment.name }, sender)
+  }
+
+  async webSocketError(sender: WebSocket) { await this.webSocketClose(sender) }
+
+  private participants() {
+    return this.state.getWebSockets().map((socket) => socket.deserializeAttachment()).filter(Boolean)
+  }
+
+  private sendTo(participantId: string, data: Record<string, any>) {
+    for (const socket of this.state.getWebSockets()) {
+      const attachment = socket.deserializeAttachment() as { id?: string } | null
+      if (attachment?.id === participantId && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data))
+    }
+  }
+
+  private broadcast(data: Record<string, any>, except?: WebSocket) {
+    const serialized = JSON.stringify(data)
+    for (const socket of this.state.getWebSockets()) if (socket !== except && socket.readyState === WebSocket.OPEN) socket.send(serialized)
+  }
+}
 
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
