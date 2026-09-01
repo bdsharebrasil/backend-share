@@ -2985,6 +2985,15 @@ async function nomeAerodromoDiario(c: Context<{ Bindings: Bindings }>, valor: st
   const item = await portalDb(c).prepare('SELECT nome FROM aerodromo WHERE upper(designativo_icao) = ?1 LIMIT 1').bind(codigo).first<{ nome: string }>()
   return item?.nome?.trim() || codigo
 }
+async function nomeTripulantePorCanac(c: Context<{ Bindings: Bindings }>, canac: string): Promise<string | null> {
+  const codigo = String(canac || '').trim().toUpperCase()
+  if (!codigo) return null
+  const tripulante = await portalDb(c).prepare('SELECT nome_completo FROM tripulacao WHERE upper(canac) = ?1 LIMIT 1').bind(codigo).first<{ nome_completo: string | null }>()
+  if (tripulante?.nome_completo) return tripulante.nome_completo
+  const freelancer = await portalDb(c).prepare('SELECT nome_completo FROM tripulacao_freelancer WHERE upper(canac) = ?1 LIMIT 1').bind(codigo).first<{ nome_completo: string | null }>()
+  return freelancer?.nome_completo || null
+}
+
 async function trechoAerodromosDiario(c: Context<{ Bindings: Bindings }>, partida: string, chegada: string): Promise<string> {
   const [nomePartida, nomeChegada] = await Promise.all([nomeAerodromoDiario(c, partida), nomeAerodromoDiario(c, chegada)])
   return `${nomePartida} X ${nomeChegada}`
@@ -3034,8 +3043,8 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const last = await db.prepare('SELECT COALESCE(MAX(numero_sequencial), 0) AS sequencial FROM lancamentos_diario_bordo WHERE diario_mes_id = ?1').bind(diarioMesId).first<{ sequencial: number }>()
   const id = uuid()
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
-  const trecho = await trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)
-  const row = normalizarLancamentoDiario({ ...body, trecho, pic_nome: body.pic_nome || perfilPic?.nome_completo || null, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(body.tempo_total)), criadoPor: extractSupabaseUserId(c) })
+  const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac), nomeTripulantePorCanac(c, body.sic_canac), trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)])
+  const row = normalizarLancamentoDiario({ ...body, cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(body.tempo_total)), criadoPor: extractSupabaseUserId(c) })
   const columns = ['id', ...Object.keys(row)]
   await db.prepare(`INSERT INTO lancamentos_diario_bordo (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).bind(id, ...columns.slice(1).map(column => row[column])).run()
   const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
@@ -3061,8 +3070,8 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
     consumo_combustivel_voo: body.consumo_combustivel_voo === undefined ? undefined : body.consumo_combustivel_voo,
     consumo_combustivel_total: body.consumo_combustivel_total === undefined ? undefined : body.consumo_combustivel_total }
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
-  const trecho = body.aerodromo_partida || body.aerodromo_chegada ? await trechoAerodromosDiario(c, body.aerodromo_partida || current.aerodromo_partida, body.aerodromo_chegada || current.aerodromo_chegada) : current.trecho
-  const row = normalizarLancamentoDiario({ ...merged, trecho, pic_nome: body.pic_nome || current.pic_nome || perfilPic?.nome_completo || null }, aeronave, { diarioMesId: current.diario_mes_id, sequencial: current.numero_sequencial, criadoPor: current.criado_por })
+  const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac || current.pic_canac), nomeTripulantePorCanac(c, body.sic_canac || current.sic_canac), body.aerodromo_partida || body.aerodromo_chegada ? trechoAerodromosDiario(c, body.aerodromo_partida || current.aerodromo_partida, body.aerodromo_chegada || current.aerodromo_chegada) : Promise.resolve(current.trecho)])
+  const row = normalizarLancamentoDiario({ ...merged, cliente_id: body.cliente_id !== undefined ? String(body.cliente_id || '').trim() || null : current.cliente_id, socio_id: body.socio_id !== undefined ? String(body.socio_id || '').trim() || null : current.socio_id, trecho, pic_nome: nomePic || body.pic_nome || current.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || current.sic_nome || null }, aeronave, { diarioMesId: current.diario_mes_id, sequencial: current.numero_sequencial, criadoPor: current.criado_por })
   const updates = DIARIO_LANCAMENTO_FIELDS.filter(field => body[field] !== undefined).map(field => [field, row[field]] as const)
   if (body.data_registro !== undefined) updates.push(['data_registro', row.data_registro])
   if (updates.length === 0) return c.json({ error: 'nenhum_campo_informado' }, 400)
