@@ -2814,9 +2814,10 @@ app.get('/api/interno/dashboard/operacoes', async c => {
       COUNT(*) AS reservas_abertas
       FROM solicitacoes_reserva_voo
       WHERE date(data_agendada) >= ?1 AND status IN ('pendente', 'aprovada')`).bind(dataReferencia).first<Record<string, number>>(),
-    portalDb(c).prepare(`SELECT s.id, s.cliente_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo
+    portalDb(c).prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, hs.nome AS socio_nome, c.codigo_cliente, a.matricula_registro, a.modelo
       FROM solicitacoes_reserva_voo s
       LEFT JOIN cliente c ON c.id = s.cliente_id
+      LEFT JOIN hold_socios hs ON hs.id = s.socio_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       WHERE date(s.data_agendada) >= ?1
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em
