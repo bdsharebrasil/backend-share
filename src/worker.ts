@@ -67,6 +67,16 @@ interface HotelReservationHotel {
 
 const app = new Hono<{ Bindings: Bindings }>()
 
+app.use('*', async (c, next) => {
+  const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
+  const corsMiddleware = cors({
+    origin: allowed && allowed.length > 0 ? allowed : '*',
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+  })
+  return corsMiddleware(c, next)
+})
+
 class CloudflareSseTransport {
   readonly sessionId = crypto.randomUUID()
   private controller: ReadableStreamDefaultController<Uint8Array> | undefined
@@ -76,10 +86,13 @@ class CloudflareSseTransport {
   onerror?: (error: Error) => void
   onmessage?: (message: JSONRPCMessage) => void
 
+  constructor(private readonly requestUrl: string) {}
+
   readonly stream = new ReadableStream<Uint8Array>({
     start: controller => {
       this.controller = controller
-      this.write(`event: endpoint\ndata: /mcp/messages?sessionId=${this.sessionId}\n\n`)
+      const endpointUrl = new URL(`/mcp/messages?sessionId=${this.sessionId}`, this.requestUrl).toString()
+      this.write(`event: endpoint\ndata: ${endpointUrl}\n\n`)
     },
     cancel: () => this.close(),
   })
@@ -138,7 +151,7 @@ function createMcpServer(db: D1Database): McpServer {
 }
 
 app.get('/mcp', async c => {
-  const transport = new CloudflareSseTransport()
+  const transport = new CloudflareSseTransport(c.req.url)
   const session: McpSession = { transport, server: createMcpServer(c.env.SHARE_DB) }
   mcpSessions.set(transport.sessionId, session)
   transport.onclose = () => mcpSessions.delete(transport.sessionId)
@@ -168,14 +181,6 @@ app.post('/mcp/messages', async c => {
   } catch (error) {
     return c.text(`Erro ao processar mensagem MCP: ${error instanceof Error ? error.message : String(error)}`, 400)
   }
-})
-
-app.use('*', async (c, next) => {
-  const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
-  const corsMiddleware = cors({
-    origin: allowed && allowed.length > 0 ? allowed : '*',
-  })
-  return corsMiddleware(c, next)
 })
 
 const isDev = false
