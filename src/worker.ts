@@ -2904,7 +2904,10 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
   const diarioMes = await db.prepare('SELECT * FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
   const meses = await db.prepare('SELECT id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal FROM diario_mes WHERE aeronave_id = ?1 ORDER BY ano DESC, mes DESC').bind(aeronaveId).all<any>()
   if (!diarioMes) return c.json({ aeronave, diario_mes: null, lancamentos: [], meses_disponiveis: meses.results })
-  const lancamentos = await db.prepare(`SELECT l.*, c.razao_social AS cliente_nome, s.nome AS socio_nome,
+  const lancamentos = await db.prepare(`SELECT l.*, c.razao_social AS cliente_nome, c.codigo_cliente AS cliente_codigo, c.proprietario AS cliente_proprietario, s.nome AS socio_nome,
+      ct.razao_social AS cliente_tomador_nome, ct.codigo_cliente AS cliente_tomador_codigo, st.nome AS socio_tomador_nome,
+      COALESCE(adp.designativo_icao, l.aerodromo_partida) AS aerodromo_partida_icao, COALESCE(adp.nome, l.aerodromo_partida) AS aerodromo_partida_nome,
+      COALESCE(adg.designativo_icao, l.aerodromo_chegada) AS aerodromo_chegada_icao, COALESCE(adg.nome, l.aerodromo_chegada) AS aerodromo_chegada_nome,
       COALESCE(NULLIF(l.pic_nome, ''), (SELECT t.nome_completo FROM tripulacao t WHERE upper(t.canac) = upper(l.pic_canac) LIMIT 1), (SELECT f.nome_completo FROM tripulacao_freelancer f WHERE upper(f.canac) = upper(l.pic_canac) LIMIT 1)) AS pic_nome_exibicao,
       COALESCE(NULLIF(l.sic_nome, ''), (SELECT t.nome_completo FROM tripulacao t WHERE upper(t.canac) = upper(l.sic_canac) LIMIT 1), (SELECT f.nome_completo FROM tripulacao_freelancer f WHERE upper(f.canac) = upper(l.sic_canac) LIMIT 1)) AS sic_nome_exibicao,
       COALESCE((SELECT SUM(ab.litros) FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id), 0) AS abastecimento_litros,
@@ -2916,6 +2919,10 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
     FROM lancamentos_diario_bordo l
     LEFT JOIN cliente c ON c.id = l.cliente_id
     LEFT JOIN hold_socios s ON s.id = l.socio_id
+    LEFT JOIN cliente ct ON ct.id = l.cliente_tomador_emprestimo_id
+    LEFT JOIN hold_socios st ON st.id = l.socio_tomador_emprestimo_id
+    LEFT JOIN aerodromo adp ON upper(adp.designativo_icao) = upper(l.aerodromo_partida)
+    LEFT JOIN aerodromo adg ON upper(adg.designativo_icao) = upper(l.aerodromo_chegada)
     WHERE l.diario_mes_id = ?1
     ORDER BY date(l.data_registro), l.numero_sequencial, l.id`).bind(diarioMes.id).all<any>()
   const horasCotistas = await db.prepare(`SELECT COALESCE(l.socio_id, l.cliente_id) AS cotista_id, COALESCE(s.nome, c.razao_social, c.proprietario, 'Cotista não identificado') AS cotista_nome, COALESCE(SUM(l.tempo_voo), 0) AS horas_voo FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.diario_mes_id = ?1 GROUP BY COALESCE(l.socio_id, l.cliente_id), COALESCE(s.nome, c.razao_social, c.proprietario) ORDER BY horas_voo DESC`).bind(diarioMes.id).all()
