@@ -3506,7 +3506,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   await garantirTabelaSequenciaVoos(c)
   const reservation = await portalDb(c).prepare(`SELECT s.*, a.matricula_registro,
       COALESCE((SELECT codigo_cliente FROM cotista_aeronave WHERE socio_id = s.socio_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1),
-        (SELECT codigo_cliente FROM cotista_aeronave WHERE cliente_id = s.cliente_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1)) AS codigo_cliente
+        (SELECT codigo_cliente FROM cotista_aeronave WHERE cliente_id = s.cliente_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1)) AS codigo_cotista
     FROM solicitacoes_reserva_voo s
     LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
@@ -3514,13 +3514,13 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
     LEFT JOIN cotista_aeronave ca ON (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id
     LEFT JOIN cotista_aeronave cae ON (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id OR (se.cliente_id IS NOT NULL AND cae.cliente_id = se.cliente_id)) AND cae.aeronave_id = s.aeronave_id
     LEFT JOIN aeronave a ON a.id = s.aeronave_id
-    WHERE s.id = ?1`).bind(id).first<{ status: string; cliente_id: string | null; socio_id: string | null; codigo_cliente: string | null; matricula_registro: string | null; cliente_emprestimo_id: string | null; socio_emprestimo_id: string | null; voo_emprestado: string | null }>()
+  WHERE s.id = ?1`).bind(id).first<{ status: string; cliente_id: string | null; socio_id: string | null; codigo_cotista: string | null; matricula_registro: string | null; cliente_emprestimo_id: string | null; socio_emprestimo_id: string | null; voo_emprestado: string | null }>()
   if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
   if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
   const body = await c.req.json<{ piloto_id?: string; copiloto_id?: string }>().catch(() => ({} as { piloto_id?: string; copiloto_id?: string }))
   if (!body.piloto_id) return c.json({ error: 'piloto_obrigatorio' }, 400)
   if (body.copiloto_id && body.copiloto_id === body.piloto_id) return c.json({ error: 'tripulantes_iguais' }, 400)
-  if (!reservation.codigo_cliente) return c.json({ error: 'codigo_cliente_obrigatorio' }, 409)
+  if (!reservation.codigo_cotista) return c.json({ error: 'codigo_cliente_obrigatorio' }, 409)
   const piloto = await buscarTripulante(c, body.piloto_id)
   const copiloto = body.copiloto_id ? await buscarTripulante(c, body.copiloto_id) : null
   if (!piloto) return c.json({ error: 'piloto_nao_encontrado' }, 400)
@@ -3532,8 +3532,8 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   const isLoan = Boolean(reservation.cliente_emprestimo_id || reservation.socio_emprestimo_id) || ['sim', 'true', '1'].includes(String(reservation.voo_emprestado).toLowerCase())
   const cotistaKey = reservation.socio_id ? `socio:${reservation.socio_id}` : `cliente:${reservation.cliente_id}`
   const flightNumber = isLoan
-    ? await portalLoanFlightSequence(c, reservation.codigo_cliente, reservation.matricula_registro, cotistaKey)
-    : await portalFlightSequence(c, reservation.codigo_cliente, cotistaKey)
+    ? await portalLoanFlightSequence(c, reservation.codigo_cotista, reservation.matricula_registro, cotistaKey)
+    : await portalFlightSequence(c, reservation.codigo_cotista, cotistaKey)
   await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, piloto.id, copiloto?.id || null, id).run()
   return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: flightNumber, piloto, copiloto })
 })
