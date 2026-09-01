@@ -3469,8 +3469,13 @@ app.post('/api/interno/seguranca/migrar-senhas', async c => {
   return c.json({ success: true, migrated: rows.results.length })
 })
 
-async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string): Promise<string> {
-  const sequence = await portalDb(c).prepare('UPDATE voo_sequencia SET ultimo_numero = ultimo_numero + 1 WHERE id = 1 RETURNING ultimo_numero').first<{ ultimo_numero: number }>()
+async function garantirTabelaSequenciaVoos(c: Context<{ Bindings: Bindings }>): Promise<void> {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS voo_sequencia_cotista (cotista_key TEXT PRIMARY KEY NOT NULL, ultimo_numero INTEGER NOT NULL DEFAULT 0)`).run()
+}
+async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, cotistaKey: string): Promise<string> {
+  const sequence = await portalDb(c).prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
+    ON CONFLICT(cotista_key) DO UPDATE SET ultimo_numero = ultimo_numero + 1
+    RETURNING ultimo_numero`).bind(cotistaKey).first<{ ultimo_numero: number }>()
   if (!sequence) throw new Error('flight_sequence_not_initialized')
   const codigo = clientCode.trim().toUpperCase().slice(0, 3)
   const ano = String(new Date().getFullYear()).slice(-2)
@@ -3485,8 +3490,10 @@ function portalLoanFlightNumber(clientCode: string, registration: string | null 
   const ano = String(new Date().getFullYear()).slice(-2)
   return `${codigo}-${portalAircraftSuffix(registration)}${String(sequence).padStart(3, '0')}/${ano}`
 }
-async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, registration: string | null | undefined): Promise<string> {
-  const sequence = await portalDb(c).prepare('UPDATE voo_sequencia SET ultimo_numero = ultimo_numero + 1 WHERE id = 1 RETURNING ultimo_numero').first<{ ultimo_numero: number }>()
+async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, registration: string | null | undefined, cotistaKey: string): Promise<string> {
+  const sequence = await portalDb(c).prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
+    ON CONFLICT(cotista_key) DO UPDATE SET ultimo_numero = ultimo_numero + 1
+    RETURNING ultimo_numero`).bind(cotistaKey).first<{ ultimo_numero: number }>()
   if (!sequence) throw new Error('flight_sequence_not_initialized')
   return portalLoanFlightNumber(clientCode, registration, sequence.ultimo_numero)
 }
@@ -3496,7 +3503,10 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   await garantirTabelaDisponibilidadeTripulacao(c)
   await garantirComplianceTripulacao(c)
   const id = c.req.param('id')
-  const reservation = await portalDb(c).prepare(`SELECT s.*, a.matricula_registro, COALESCE(c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente
+  await garantirTabelaSequenciaVoos(c)
+  const reservation = await portalDb(c).prepare(`SELECT s.*, a.matricula_registro,
+      COALESCE((SELECT codigo_cliente FROM cotista_aeronave WHERE socio_id = s.socio_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1),
+        (SELECT codigo_cliente FROM cotista_aeronave WHERE cliente_id = s.cliente_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1), c.codigo_cliente) AS codigo_cliente
     FROM solicitacoes_reserva_voo s
     LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
@@ -3504,7 +3514,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
     LEFT JOIN cotista_aeronave ca ON (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id
     LEFT JOIN cotista_aeronave cae ON (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id OR (se.cliente_id IS NOT NULL AND cae.cliente_id = se.cliente_id)) AND cae.aeronave_id = s.aeronave_id
     LEFT JOIN aeronave a ON a.id = s.aeronave_id
-    WHERE s.id = ?1`).bind(id).first<{ status: string; codigo_cliente: string | null; matricula_registro: string | null; cliente_emprestimo_id: string | null; socio_emprestimo_id: string | null; voo_emprestado: string | null }>()
+    WHERE s.id = ?1`).bind(id).first<{ status: string; cliente_id: string | null; socio_id: string | null; codigo_cliente: string | null; matricula_registro: string | null; cliente_emprestimo_id: string | null; socio_emprestimo_id: string | null; voo_emprestado: string | null }>()
   if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
   if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
   const body = await c.req.json<{ piloto_id?: string; copiloto_id?: string }>().catch(() => ({} as { piloto_id?: string; copiloto_id?: string }))
@@ -3520,9 +3530,10 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
     if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
   }
   const isLoan = Boolean(reservation.cliente_emprestimo_id || reservation.socio_emprestimo_id) || ['sim', 'true', '1'].includes(String(reservation.voo_emprestado).toLowerCase())
+  const cotistaKey = reservation.socio_id ? `socio:${reservation.socio_id}` : `cliente:${reservation.cliente_id}`
   const flightNumber = isLoan
-    ? await portalLoanFlightSequence(c, reservation.codigo_cliente, reservation.matricula_registro)
-    : await portalFlightSequence(c, reservation.codigo_cliente)
+    ? await portalLoanFlightSequence(c, reservation.codigo_cliente, reservation.matricula_registro, cotistaKey)
+    : await portalFlightSequence(c, reservation.codigo_cliente, cotistaKey)
   await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, piloto.id, copiloto?.id || null, id).run()
   return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: flightNumber, piloto, copiloto })
 })
