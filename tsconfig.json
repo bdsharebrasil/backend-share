@@ -5,7 +5,7 @@
     "lib": ["ES2021"],
     "types": ["@cloudflare/workers-types"],
     "jsx": "react",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
