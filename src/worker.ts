@@ -3644,8 +3644,21 @@ function shareBrasilBucket(c: Context<{ Bindings: Bindings }>): R2Bucket {
 function shareBrasilFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
 }
-
-async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'anexos_ponto' | 'documentos_internos' | 'logos_clientes' | 'documentos_clientes' | 'abastecimentos' | 'abastecimentos/comanda' | 'abastecimentos/nota-fiscal' | 'abastecimentos/boleto' | 'manual_tutoriais'): Promise<string> {
+const DOCUMENTOS_CLIENTE_CATEGORIAS: Record<string, string> = {
+  'avatar_logo': 'avatar_logo',
+  'cartao-cnpj': 'cartao-cnpj',
+  'comprovante-endereco': 'comprovante-endereco',
+  'contrato-share': 'contrato-share',
+  'contrato-social': 'contrato-social',
+  'documentos-pessoais': 'documentos-pessoais',
+  'inscricao-estadual': 'inscricao-estadual',
+  'geral': 'documentos-pessoais',
+}
+function categoriaDocumentoCliente(value: unknown): string {
+  const normalized = String(value || 'geral').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[_\s]+/g, '-')
+  return DOCUMENTOS_CLIENTE_CATEGORIAS[normalized] || 'documentos-pessoais'
+}
+async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: string): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
   if (file.size > 25 * 1024 * 1024) throw new Error('arquivo_excede_25mb')
   const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
@@ -3888,14 +3901,16 @@ app.get('/api/sharebrasil/clientes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const db = portalDb(c)
-  const [clientes, socios, vinculos, documentos, aeronaves] = await Promise.all([
+  await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+  const [clientes, socios, vinculos, documentos, documentosSocios, aeronaves] = await Promise.all([
     db.prepare('SELECT * FROM cliente ORDER BY razao_social').all(),
     db.prepare('SELECT * FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT ca.*, a.matricula_registro, a.fabricante, a.modelo FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente').all(),
     db.prepare('SELECT * FROM documentos_cliente ORDER BY criado_em DESC').all(),
+    db.prepare('SELECT * FROM documentos_socio ORDER BY criado_em DESC').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave FROM aeronave ORDER BY matricula_registro').all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })) })
+  return c.json({ clientes: clientes.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
 })
 
 app.post('/api/sharebrasil/clientes', async c => {
@@ -3950,7 +3965,7 @@ app.post('/api/sharebrasil/clientes/:id/logo', async c => {
   const file = fileValue as File
   if (!file.type.startsWith('image/')) return c.json({ error: 'logo_deve_ser_imagem' }, 415)
   try {
-    const key = await salvarArquivoShareBrasil(c, user.id, file, 'logos_clientes')
+    const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_cliente/avatar_logo/${c.req.param('id')}`)
     await portalDb(c).prepare('UPDATE cliente SET url_logo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(key, c.req.param('id')).run()
     return c.json({ url_logo: `/api/sharebrasil/clientes/${c.req.param('id')}/logo/arquivo` })
   } catch (error: any) {
@@ -3976,9 +3991,10 @@ app.post('/api/sharebrasil/clientes/:id/documentos', async c => {
   if (!fileValue || typeof fileValue !== 'object' || !('size' in fileValue)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
   const file = fileValue as File
   try {
-    const key = await salvarArquivoShareBrasil(c, user.id, file, 'documentos_clientes')
+    const categoria = categoriaDocumentoCliente(form.get('categoria'))
+    const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_cliente/${categoria}/${c.req.param('id')}`)
     const id = uuid()
-    await portalDb(c).prepare('INSERT INTO documentos_cliente (id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), file.name, key, file.type || 'application/octet-stream', file.size, user.id, String(form.get('categoria') || 'geral')).run()
+    await portalDb(c).prepare('INSERT INTO documentos_cliente (id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), file.name, key, file.type || 'application/octet-stream', file.size, user.id, categoria).run()
     return c.json({ id, arquivo_url: `/api/sharebrasil/clientes/documentos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_documento_cliente' }, 400)
@@ -3997,6 +4013,37 @@ app.get('/api/sharebrasil/clientes/documentos/:id/arquivo', async c => {
 
 
 
+app.post('/api/sharebrasil/socios/:id/documentos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = portalDb(c)
+  await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+  const socio = await db.prepare('SELECT id, cliente_id FROM hold_socios WHERE id = ?1').bind(c.req.param('id')).first<{ id: string; cliente_id: string | null }>()
+  if (!socio) return c.notFound()
+  const form = await c.req.formData()
+  const fileValue = form.get('arquivo') as unknown
+  if (!fileValue || typeof fileValue !== 'object' || !('size' in fileValue)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const file = fileValue as File
+  try {
+    const categoria = categoriaDocumentoCliente(form.get('categoria'))
+    const clientePath = socio.cliente_id || 'sem-cliente'
+    const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_cliente/${categoria}/${clientePath}/socios/${socio.id}`)
+    const id = uuid()
+    await db.prepare('INSERT INTO documentos_socio (id, socio_id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, socio.id, socio.cliente_id, file.name, key, file.type || 'application/octet-stream', file.size, user.id, categoria).run()
+    return c.json({ id, arquivo_url: `/api/sharebrasil/socios/documentos/${id}/arquivo` }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_documento_socio' }, 400)
+  }
+})
+app.get('/api/sharebrasil/socios/documentos/:id/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM documentos_socio WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string }>()
+  if (!row) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `attachment; filename="${shareBrasilFileName(row.nome_arquivo)}"` } })
+})
 // ─── Share Brasil: tarefas, notificações e calendário ─────────────────────────
 function isTaskManager(user: Colaborador): boolean {
   const role = (user.tipo_user || '').toLowerCase().replace(/[\s-]+/g, '_')
