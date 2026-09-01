@@ -3441,14 +3441,42 @@ app.get('/api/interno/agendamento/:id/checklist', async c => {
 app.post('/api/interno/agendamento/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaChecklist(c); await garantirTabelaAbastecimentos(c)
-  const idAgendamento = c.req.param('id'); const agendamento = await portalDb(c).prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>(); if (!agendamento) return c.notFound()
-  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any)); const userId = extractSupabaseUserId(c); let abastecimentoId: string | null = null
-  if (body.abastecimento && Number(body.abastecimento.litros) > 0) { abastecimentoId = uuid(); const a = body.abastecimento; await portalDb(c).prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, trecho, local, litros, numero_comanda, status, observacao, criado_por, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(abastecimentoId, a.cliente_id || agendamento.cliente_id || null, a.socio_id || agendamento.socio_id || null, agendamento.aeronave_id, a.data || agendamento.data_agendada, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local || agendamento.origem, Number(a.litros), a.numero_comanda || null, 'pendente', 'Criado no checklist pré-voo; aguardando nota e boleto', userId, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null).run() }
-  const existente = await portalDb(c).prepare('SELECT id FROM checklist_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string }>()
+  const idAgendamento = c.req.param('id')
+  const agendamento = await portalDb(c).prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>()
+  if (!agendamento) return c.notFound()
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  const userId = extractSupabaseUserId(c)
+  const existente = await portalDb(c).prepare('SELECT id, abastecimento_id FROM checklist_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null }>()
   const status = body.status || 'concluido'
+  const precisaAbastecer = Boolean(body.abastecimento?.necessita_abastecer)
+  const a = body.abastecimento || {}
+  if (status === 'concluido' && precisaAbastecer && (!a.data || !a.local || !a.tipo_combustivel || Number(a.litros) <= 0 || Number(a.valor_unitario) < 0)) {
+    return c.json({ error: 'abastecimento_incompleto', detail: 'Para concluir o checklist, preencha data, tipo de combustível, local, litros e valor unitário do abastecimento.' }, 400)
+  }
+  let abastecimentoId = existente?.abastecimento_id || null
+  if (precisaAbastecer && a.data && a.local && Number(a.litros) > 0) {
+    let pagador = { cliente_id: a.cliente_id || agendamento.cliente_id || null, socio_id: a.socio_id || agendamento.socio_id || null }
+    if (a.lancamento_diario_id) {
+      const trecho = await portalDb(c).prepare('SELECT cliente_id, socio_id FROM lancamentos_diario_bordo WHERE id = ?1 AND aeronave_id = ?2').bind(a.lancamento_diario_id, agendamento.aeronave_id).first<{ cliente_id: string | null; socio_id: string | null }>()
+      if (!trecho) return c.json({ error: 'trecho_diario_invalido', detail: 'O último trecho informado não pertence à aeronave deste agendamento.' }, 400)
+      pagador = { cliente_id: trecho.cliente_id, socio_id: trecho.socio_id }
+    }
+    const prazoDias = Number(a.prazo_envio_cliente_dias || 0)
+    const prazoEm = prazoDias > 0 ? new Date(Date.now() + prazoDias * 86400000).toISOString().slice(0, 10) : null
+    const valores = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', 'Criado no checklist pré-voo; aguardando finalização financeira', userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
+    const valoresInsert = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', 'Criado no checklist pré-voo; aguardando finalização financeira', userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
+    if (abastecimentoId) {
+      await portalDb(c).prepare(`UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, litros=?, valor_unitario=?, valor_total=?, desconto=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, lancamento_diario_id=?, voo_emprestado=?, numero_voo=?, prazo_envio_cliente_dias=?, prazo_envio_cliente_em=? WHERE id=?`).bind(...valores, abastecimentoId).run()
+    } else {
+      abastecimentoId = uuid()
+      await portalDb(c).prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo, prazo_envio_cliente_dias, prazo_envio_cliente_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(abastecimentoId, ...valoresInsert).run()
+    }
+  } else if (status === 'concluido' && precisaAbastecer) {
+    return c.json({ error: 'abastecimento_incompleto', detail: 'Salve os dados do abastecimento antes de concluir o checklist.' }, 400)
+  }
   if (existente) {
-    await portalDb(c).prepare('UPDATE checklist_pre_voo SET usuario_id = ?, itens = ?, observacoes = ?, abastecimento_id = COALESCE(?, abastecimento_id), status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, status, existente.id).run()
-    return c.json({ id: existente.id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId || null })
+    await portalDb(c).prepare('UPDATE checklist_pre_voo SET usuario_id=?, itens=?, observacoes=?, abastecimento_id=?, status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, status, existente.id).run()
+    return c.json({ id: existente.id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId })
   }
   const id = uuid(); await portalDb(c).prepare('INSERT INTO checklist_pre_voo (id, solicitacao_id, usuario_id, itens, observacoes, abastecimento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, status).run()
   return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
@@ -3573,18 +3601,23 @@ async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) 
     criado_por TEXT NULL, lancamento_diario_id TEXT NULL, data_pagamento TEXT NULL, banco TEXT NULL,
     voo_emprestado INTEGER NOT NULL DEFAULT 0, numero_voo TEXT NULL
   )`).run()
+  await portalDb(c).prepare('ALTER TABLE abastecimentos ADD COLUMN prazo_envio_cliente_dias INTEGER NULL').run().catch(() => undefined)
+  await portalDb(c).prepare('ALTER TABLE abastecimentos ADD COLUMN prazo_envio_cliente_em TEXT NULL').run().catch(() => undefined)
 }
 
 app.get('/api/interno/abastecimentos/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaAbastecimentos(c)
   const db = portalDb(c)
+  const aeronaveId = c.req.query('aeronave_id') || ''
   const [clientes, socios, aeronaves, fornecedores, diarios] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare('SELECT s.id, s.nome, s.cliente_id, c.razao_social AS cliente_nome FROM hold_socios s LEFT JOIN cliente c ON c.id = s.cliente_id ORDER BY s.nome').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare('SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo), nome_completo').all(),
-    db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo ORDER BY date(data_registro) DESC LIMIT 100').all(),
+    aeronaveId
+      ? db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, cliente_id, socio_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 ORDER BY date(data_registro) DESC, id DESC LIMIT 1').bind(aeronaveId).all()
+      : db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, cliente_id, socio_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo ORDER BY date(data_registro) DESC LIMIT 100').all(),
   ])
   return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, diarios: diarios.results })
 })
