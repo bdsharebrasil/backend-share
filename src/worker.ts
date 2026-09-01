@@ -3535,7 +3535,10 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
          AND (ca.socio_id = ?1 OR ca.cliente_id = ?2 OR EXISTS (SELECT 1 FROM hold_socios hs WHERE hs.id = ca.socio_id AND hs.cliente_id = ?2))
        ORDER BY CASE WHEN ca.socio_id = ?1 THEN 0 WHEN ca.cliente_id = ?2 THEN 1 ELSE 2 END
        LIMIT 1`
-  const cotista = await portalDb(c).prepare(cotistaQuery).bind(reservation.socio_id, reservation.cliente_id, reservation.aeronave_id).first<{ codigo_cliente: string; socio_id: string | null }>()
+  const cotistaStatement = portalDb(c).prepare(cotistaQuery)
+  const cotista = isLoan
+    ? await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id).first<{ codigo_cliente: string; socio_id: string | null }>()
+    : await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id, reservation.aeronave_id).first<{ codigo_cliente: string; socio_id: string | null }>()
   if (!cotista?.codigo_cliente?.trim()) return c.json({ error: 'codigo_cotista_nao_encontrado', detail: isLoan ? 'Voo emprestado: nenhum codigo_cliente foi encontrado para o cotista tomador, independentemente da aeronave cedida.' : 'Nenhum registro em cotista_aeronave possui codigo_cliente para esta aeronave e este cliente/socio.', solicitacao_id: id, cliente_id: reservation.cliente_id, socio_id: reservation.socio_id, aeronave_id: reservation.aeronave_id, voo_emprestado: isLoan }, 409)
   const cotistaKey = cotista.socio_id ? `socio:${cotista.socio_id}` : `cliente:${reservation.cliente_id}`
   const flightNumber = isLoan
