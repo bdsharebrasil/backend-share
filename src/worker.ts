@@ -651,6 +651,8 @@ function metarNumber(value: string): number | null {
 
 function decodeMetar(metar: string): Record<string, any> {
   const tokens = metar.trim().split(/\s+/).filter(Boolean)
+  const fenomenos = tokens.filter(token => /^[-+]?(?:VC)?(?:MI|BC|PR|DR|BL|SH|TS)?(?:DZ|RA|SN|SG|IC|PL|GR|GS|UP)$/.test(token))
+  const weatherCondition = fenomenos.some(token => /TS/.test(token)) ? 'storm' : fenomenos.some(token => /RA|DZ/.test(token)) ? 'rain' : fenomenos.some(token => /SN|SG|IC|PL|GR|GS/.test(token)) ? 'snow' : tokens.some(token => /^(?:BKN|OVC)/.test(token)) ? 'cloudy' : 'clear'
   const windToken = tokens.find(token => /^(VRB|\d{3})\d{2,3}(G\d{2,3})?KT$/.test(token))
   const temperatureToken = tokens.find(token => /^M?\d{2}/.test(token) && token.includes('/'))
   const qnhToken = tokens.find(token => /^Q\d{4}$/.test(token) || /^A\d{4}$/.test(token))
@@ -661,6 +663,7 @@ function decodeMetar(metar: string): Record<string, any> {
   const windDirection = windMatch?.[1] === 'VRB' ? null : Number(windMatch?.[1])
   const qnh = qnhMatch ? (qnhMatch[1] === 'Q' ? Number(qnhMatch[2]) : Math.round(Number(qnhMatch[2]) * 33.8639)) : null
   return {
+    weather_condition: weatherCondition,
     observed_at: timeToken ?? null,
     temperature_c: temperatureMatch ? metarNumber(temperatureMatch[1]) : null,
     dew_point_c: temperatureMatch && temperatureMatch[2] !== 'XX' ? metarNumber(temperatureMatch[2]) : null,
@@ -3473,20 +3476,35 @@ async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCo
   const ano = String(new Date().getFullYear()).slice(-2)
   return `${codigo}-${String(sequence.ultimo_numero).padStart(4, '0')}/${ano}`
 }
+function portalAircraftSuffix(registration: string | null | undefined): string {
+  const normalized = String(registration ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  return normalized.replace(/^PR/, '').slice(-3) || 'AER'
+}
+function portalLoanFlightNumber(clientCode: string, registration: string | null | undefined, sequence: number): string {
+  const codigo = clientCode.trim().toUpperCase().slice(0, 3)
+  const ano = String(new Date().getFullYear()).slice(-2)
+  return `${codigo}-${portalAircraftSuffix(registration)}${String(sequence).padStart(3, '0')}/${ano}`
+}
+async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, registration: string | null | undefined): Promise<string> {
+  const sequence = await portalDb(c).prepare('UPDATE voo_sequencia SET ultimo_numero = ultimo_numero + 1 WHERE id = 1 RETURNING ultimo_numero').first<{ ultimo_numero: number }>()
+  if (!sequence) throw new Error('flight_sequence_not_initialized')
+  return portalLoanFlightNumber(clientCode, registration, sequence.ultimo_numero)
+}
 
 app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
   await garantirComplianceTripulacao(c)
   const id = c.req.param('id')
-  const reservation = await portalDb(c).prepare(`SELECT s.*, CASE WHEN s.cliente_emprestimo_id IS NOT NULL OR s.socio_emprestimo_id IS NOT NULL OR lower(COALESCE(s.voo_emprestado, '')) IN ('sim', 'true', '1') THEN COALESCE(ce.codigo_cliente, cae.codigo_cliente) ELSE COALESCE(c.codigo_cliente, ca.codigo_cliente) END AS codigo_cliente
+  const reservation = await portalDb(c).prepare(`SELECT s.*, a.matricula_registro, COALESCE(c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente
     FROM solicitacoes_reserva_voo s
     LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
     LEFT JOIN hold_socios se ON se.id = s.socio_emprestimo_id
     LEFT JOIN cotista_aeronave ca ON (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id
     LEFT JOIN cotista_aeronave cae ON (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id OR (se.cliente_id IS NOT NULL AND cae.cliente_id = se.cliente_id)) AND cae.aeronave_id = s.aeronave_id
-    WHERE s.id = ?1`).bind(id).first<{ status: string; codigo_cliente: string | null }>()
+    LEFT JOIN aeronave a ON a.id = s.aeronave_id
+    WHERE s.id = ?1`).bind(id).first<{ status: string; codigo_cliente: string | null; matricula_registro: string | null; cliente_emprestimo_id: string | null; socio_emprestimo_id: string | null; voo_emprestado: string | null }>()
   if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
   if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
   const body = await c.req.json<{ piloto_id?: string; copiloto_id?: string }>().catch(() => ({} as { piloto_id?: string; copiloto_id?: string }))
@@ -3501,7 +3519,10 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
     const eligibility = await validarElegibilidadeTripulante(c, assigned, (reservation as any).aeronave_id)
     if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
   }
-  const flightNumber = await portalFlightSequence(c, reservation.codigo_cliente)
+  const isLoan = Boolean(reservation.cliente_emprestimo_id || reservation.socio_emprestimo_id) || ['sim', 'true', '1'].includes(String(reservation.voo_emprestado).toLowerCase())
+  const flightNumber = isLoan
+    ? await portalLoanFlightSequence(c, reservation.codigo_cliente, reservation.matricula_registro)
+    : await portalFlightSequence(c, reservation.codigo_cliente)
   await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, piloto.id, copiloto?.id || null, id).run()
   return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: flightNumber, piloto, copiloto })
 })
