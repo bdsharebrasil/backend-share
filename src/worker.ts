@@ -3425,10 +3425,19 @@ app.delete('/api/interno/agendamento/:id', async c => {
   const id = c.req.param('id').trim()
   if (!id) return c.json({ error: 'agendamento_id_obrigatorio' }, 400)
   const db = portalDb(c)
+  const agendamento = await db.prepare('SELECT cliente_id, socio_id, status, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<{ cliente_id: string | null; socio_id: string | null; status: string | null; numero_voo: string | null }>()
+  if (!agendamento) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
   await db.prepare('DELETE FROM escala_tripulacao WHERE solicitacao_id = ?1').bind(id).run().catch(() => undefined)
   const result = await db.prepare('DELETE FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).run()
   if (!result.meta.changes) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
-  return c.json({ success: true, agendamento_id: id })
+  if (agendamento.numero_voo) {
+    const cotistaKey = agendamento.socio_id ? `socio:${agendamento.socio_id}` : agendamento.cliente_id ? `cliente:${agendamento.cliente_id}` : null
+    if (cotistaKey) {
+      const restante = await db.prepare(`SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo IS NOT NULL AND status = 'aprovada' AND ((?1 IS NOT NULL AND socio_id = ?1) OR (?1 IS NULL AND socio_id IS NULL AND cliente_id = ?2)) LIMIT 1`).bind(agendamento.socio_id, agendamento.cliente_id).first<{ id: string }>()
+      if (!restante) await db.prepare('DELETE FROM voo_sequencia_cotista WHERE cotista_key = ?1').bind(cotistaKey).run().catch(() => undefined)
+    }
+  }
+  return c.json({ success: true, agendamento_id: id, sequencia_cotista_removida: Boolean(agendamento.numero_voo) })
 })
 
 async function garantirTabelaChecklist(c: Context<{ Bindings: Bindings }>) {
