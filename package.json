@@ -7,10 +7,12 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@supabase/supabase-js": "^2.39.0",
     "fast-xml-parser": "^5.3.5",
     "hono": "^4.0.0",
-    "node": "^25.6.0"
+    "node": "^25.6.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
