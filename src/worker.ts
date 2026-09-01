@@ -4529,6 +4529,35 @@ export class MeetingRoom {
   }
 }
 
+
+// ─── Financeiro: envio de despesas para programação ─────────────────────────
+async function garantirTabelaEnvioDespesas(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS envio_despesas (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL CHECK (tipo IN ('share', 'reembolso', 'cliente')), descricao TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, data_despesa TEXT, vencimento TEXT, fornecedor TEXT, cliente_id TEXT, socio_id TEXT, aeronave_id TEXT, numero_voo TEXT, centro_custo TEXT, observacoes TEXT, status TEXT NOT NULL DEFAULT 'enviado', criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+}
+app.get('/api/financeiro/envios-pagamento', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaEnvioDespesas(c)
+  const tipo = c.req.query('tipo')
+  const query = tipo ? 'SELECT * FROM envio_despesas WHERE tipo = ? ORDER BY criado_em DESC LIMIT 200' : 'SELECT * FROM envio_despesas ORDER BY criado_em DESC LIMIT 200'
+  const rows = tipo ? await portalDb(c).prepare(query).bind(tipo).all() : await portalDb(c).prepare(query).all()
+  return c.json({ envios: rows.results })
+})
+app.post('/api/financeiro/envios-pagamento', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaEnvioDespesas(c)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const tipo = String(body.tipo || '').toLowerCase()
+  const descricao = String(body.descricao || '').trim()
+  const valor = Number(body.valor)
+  if (!['share', 'reembolso', 'cliente'].includes(tipo) || !descricao || !Number.isFinite(valor) || valor <= 0) return c.json({ error: 'tipo_descricao_e_valor_obrigatorios' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO envio_despesas (id, tipo, descricao, valor, data_despesa, vencimento, fornecedor, cliente_id, socio_id, aeronave_id, numero_voo, centro_custo, observacoes, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, tipo, descricao, valor, body.data_despesa || null, body.vencimento || null, body.fornecedor || null, body.cliente_id || null, body.socio_id || null, body.aeronave_id || null, body.numero_voo || null, body.centro_custo || null, body.observacoes || null, user.id).run()
+  const row = await portalDb(c).prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first()
+  return c.json(row, 201)
+})
+
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
