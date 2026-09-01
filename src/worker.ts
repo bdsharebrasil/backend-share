@@ -3919,6 +3919,18 @@ app.patch('/api/sharebrasil/clientes/:id', async c => {
   return c.json({ success: true })
 })
 
+app.patch('/api/sharebrasil/socios/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const fields = ['nome', 'cpf', 'email_principal', 'telefone', 'endereco', 'cidade', 'uf', 'observacoes']
+  const provided = fields.filter((field) => body[field] !== undefined)
+  if (!provided.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
+  const values = provided.map((field) => body[field] ?? null)
+  const result = await portalDb(c).prepare(`UPDATE hold_socios SET ${provided.map((field) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...values, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
 app.post('/api/sharebrasil/clientes/:id/aeronaves', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
