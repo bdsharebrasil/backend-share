@@ -3473,8 +3473,8 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
     }
     const prazoDias = Number(a.prazo_envio_cliente_dias || 0)
     const prazoEm = prazoDias > 0 ? new Date(Date.now() + prazoDias * 86400000).toISOString().slice(0, 10) : null
-    const valores = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', 'Criado no checklist pré-voo; aguardando finalização financeira', userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
-    const valoresInsert = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', 'Criado no checklist pré-voo; aguardando finalização financeira', userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
+    const valores = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
+    const valoresInsert = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
     if (abastecimentoId) {
       await portalDb(c).prepare(`UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, litros=?, valor_unitario=?, valor_total=?, desconto=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, lancamento_diario_id=?, voo_emprestado=?, numero_voo=?, prazo_envio_cliente_dias=?, prazo_envio_cliente_em=? WHERE id=?`).bind(...valores, abastecimentoId).run()
     } else {
@@ -3713,18 +3713,22 @@ app.post('/api/interno/abastecimentos/:id/arquivo', async c => {
   await garantirTabelaAbastecimentos(c); const id = c.req.param('id'); const form = await c.req.parseBody(); const file = form.arquivo; const tipo = String(form.tipo || 'comanda')
   if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
   if (!['comanda', 'nota', 'boleto'].includes(tipo)) return c.json({ error: 'tipo_arquivo_invalido' }, 400)
-  const pasta = tipo === 'nota' ? 'share/abastecimentos/nota fiscal' : tipo === 'boleto' ? 'share/abastecimentos/boleto' : 'share/abastecimentos/comanda'
+  const pasta = tipo === 'nota' ? 'abastecimentos/nota fiscal' : tipo === 'boleto' ? 'abastecimentos/boleto' : 'abastecimentos/comanda'
   const objectKey = await salvarArquivoShareBrasil(c, authenticated?.id || extractSupabaseUserId(c) || 'interno', file, pasta)
   const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
-  await portalDb(c).prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(objectKey, id).run()
-  return c.json({ success: true, caminho_arquivo: objectKey })
+  const arquivoUrl = new URL(`/api/interno/abastecimentos/${encodeURIComponent(id)}/arquivo/${tipo}`, c.req.url)
+  arquivoUrl.searchParams.set('key', objectKey)
+  await portalDb(c).prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(arquivoUrl.toString(), id).run()
+  return c.json({ success: true, caminho_arquivo: objectKey, url: arquivoUrl.toString() })
 })
 
 app.get('/api/interno/abastecimentos/:id/arquivo/:tipo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const tipo = c.req.param('tipo'); const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
   const row = await portalDb(c).prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?`).bind(c.req.param('id')).first<{ caminho: string | null }>(); if (!row?.caminho) return c.notFound()
-  const object = await shareBrasilBucket(c).get(row.caminho); if (!object) return c.notFound(); return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `inline; filename="${row.caminho.split('/').pop() || 'abastecimento'}"` } })
+  let objectKey = row.caminho
+  try { const storedUrl = new URL(row.caminho); objectKey = storedUrl.searchParams.get('key') || row.caminho } catch { /* compatibilidade com registros antigos que armazenavam a chave */ }
+  const object = await shareBrasilBucket(c).get(objectKey); if (!object) return c.notFound(); return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `inline; filename="${objectKey.split('/').pop() || 'abastecimento'}"` } })
 })
 
 // ─── Share Brasil: ponto, documentos, senhas e contatos ─────────────────────
