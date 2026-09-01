@@ -4910,6 +4910,106 @@ app.post('/api/financeiro/envios-pagamento', async c => {
   return c.json(row, 201)
 })
 
+async function garantirTabelaFichaPeso(c: Context<{ Bindings: Bindings }>) {
+  const db = portalDb(c)
+  await db.prepare(`CREATE TABLE IF NOT EXISTS ctm_ficha_peso_balanceamento (
+    id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+    aeronave_id TEXT NOT NULL,
+    peso_balanceamento_id TEXT NOT NULL,
+    data_voo TEXT NOT NULL,
+    numero_voo TEXT,
+    piloto_responsavel TEXT NOT NULL,
+    peso_vazio_kg REAL NOT NULL,
+    braco_vazio REAL,
+    momento_vazio REAL,
+    itens_carregamento TEXT NOT NULL DEFAULT '[]',
+    fuel_litros REAL, fuel_kg REAL, fuel_braco REAL, fuel_momento REAL,
+    peso_total_kg REAL, momento_total REAL, cg_calculado REAL,
+    peso_maximo_decolagem REAL, peso_maximo_pouso REAL, peso_maximo_sem_combustivel REAL,
+    cg_limite_dianteiro REAL, cg_limite_traseiro REAL,
+    dentro_dos_limites INTEGER,
+    status TEXT NOT NULL DEFAULT 'RASCUNHO',
+    snapshot_limites TEXT NOT NULL,
+    observacoes TEXT,
+    solicitacao_id TEXT,
+    assinatura_nome TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    finalizado_em TEXT
+  )`).run()
+  await db.prepare('ALTER TABLE ctm_ficha_peso_balanceamento ADD COLUMN solicitacao_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE ctm_ficha_peso_balanceamento ADD COLUMN assinatura_nome TEXT').run().catch(() => undefined)
+}
+
+const parseJsonOr = (value: unknown, fallback: unknown) => {
+  try { return JSON.parse(String(value ?? '')) } catch { return fallback }
+}
+
+app.get('/api/interno/agendamento/:id/peso-balanceamento', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaFichaPeso(c)
+  const db = portalDb(c)
+  const id = c.req.param('id')
+  const reserva = await db.prepare(`SELECT s.id, s.aeronave_id, s.numero_voo, s.data_agendada, s.origem, s.destino, s.numero_passageiros, s.piloto_id, s.copiloto_id,
+      a.matricula_registro, a.modelo, a.fabricante
+    FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1`).bind(id).first<any>()
+  if (!reserva) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  const [piloto, copiloto, config, ficha] = await Promise.all([
+    reserva.piloto_id ? buscarTripulante(c, reserva.piloto_id) : null,
+    reserva.copiloto_id ? buscarTripulante(c, reserva.copiloto_id) : null,
+    db.prepare('SELECT * FROM ctm_peso_balanceamento WHERE aeronave_id = ?1').bind(reserva.aeronave_id).first<any>().catch(() => null),
+    db.prepare('SELECT * FROM ctm_ficha_peso_balanceamento WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(id).first<any>(),
+  ])
+  return c.json({
+    solicitacao: reserva,
+    piloto: piloto ? { id: piloto.id, nome: piloto.nome_completo, canac: (piloto as any).canac ?? null } : null,
+    copiloto: copiloto ? { id: copiloto.id, nome: copiloto.nome_completo, canac: (copiloto as any).canac ?? null } : null,
+    configuracao: config || null,
+    ficha: ficha ? { ...ficha, itens_carregamento: parseJsonOr(ficha.itens_carregamento, []), snapshot_limites: parseJsonOr(ficha.snapshot_limites, {}) } : null,
+  })
+})
+
+app.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaFichaPeso(c)
+  const db = portalDb(c)
+  const solicitacaoId = c.req.param('id')
+  const body = await c.req.json<Record<string, any>>().catch(() => null)
+  if (!body) return c.json({ error: 'payload_invalido' }, 400)
+  const reserva = await db.prepare('SELECT id, aeronave_id, numero_voo, data_agendada FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<any>()
+  if (!reserva) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  const piloto = String(body.piloto_responsavel || '').trim()
+  if (!piloto) return c.json({ error: 'piloto_responsavel_obrigatorio' }, 400)
+  const itens = Array.isArray(body.itens_carregamento) ? body.itens_carregamento : []
+  const num = (valor: unknown) => (valor === null || valor === undefined || valor === '' ? null : Number(valor))
+  const status = body.status === 'FINALIZADA' ? 'FINALIZADA' : 'RASCUNHO'
+  const existente = await db.prepare('SELECT id, status FROM ctm_ficha_peso_balanceamento WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(solicitacaoId).first<any>()
+  if (existente?.status === 'FINALIZADA') return c.json({ error: 'ficha_ja_finalizada', id: existente.id }, 409)
+  const id = existente?.id || crypto.randomUUID()
+  const valores = [
+    reserva.aeronave_id, String(body.peso_balanceamento_id || ''), String(body.data_voo || reserva.data_agendada),
+    body.numero_voo ?? reserva.numero_voo ?? null, piloto, Number(body.peso_vazio_kg || 0), num(body.braco_vazio), num(body.momento_vazio),
+    JSON.stringify(itens), num(body.fuel_litros), num(body.fuel_kg), num(body.fuel_braco), num(body.fuel_momento), num(body.peso_total_kg), num(body.momento_total), num(body.cg_calculado),
+    num(body.peso_maximo_decolagem), num(body.peso_maximo_pouso), num(body.peso_maximo_sem_combustivel), num(body.cg_limite_dianteiro), num(body.cg_limite_traseiro),
+    body.dentro_dos_limites ? 1 : 0, status, JSON.stringify(body.snapshot_limites || {}), body.observacoes?.toString().trim() || null,
+    solicitacaoId, body.assinatura_nome?.toString().trim() || piloto, status === 'FINALIZADA' ? new Date().toISOString() : null,
+  ]
+  if (existente) {
+    await db.prepare(`UPDATE ctm_ficha_peso_balanceamento SET aeronave_id = ?, peso_balanceamento_id = ?, data_voo = ?, numero_voo = ?, piloto_responsavel = ?,
+      peso_vazio_kg = ?, braco_vazio = ?, momento_vazio = ?, itens_carregamento = ?, fuel_litros = ?, fuel_kg = ?, fuel_braco = ?, fuel_momento = ?,
+      peso_total_kg = ?, momento_total = ?, cg_calculado = ?, peso_maximo_decolagem = ?, peso_maximo_pouso = ?, peso_maximo_sem_combustivel = ?,
+      cg_limite_dianteiro = ?, cg_limite_traseiro = ?, dentro_dos_limites = ?, status = ?, snapshot_limites = ?, observacoes = ?, solicitacao_id = ?,
+      assinatura_nome = ?, finalizado_em = ? WHERE id = ?`).bind(...valores, id).run()
+  } else {
+    await db.prepare(`INSERT INTO ctm_ficha_peso_balanceamento (aeronave_id, peso_balanceamento_id, data_voo, numero_voo, piloto_responsavel,
+      peso_vazio_kg, braco_vazio, momento_vazio, itens_carregamento, fuel_litros, fuel_kg, fuel_braco, fuel_momento,
+      peso_total_kg, momento_total, cg_calculado, peso_maximo_decolagem, peso_maximo_pouso, peso_maximo_sem_combustivel,
+      cg_limite_dianteiro, cg_limite_traseiro, dentro_dos_limites, status, snapshot_limites, observacoes, solicitacao_id,
+      assinatura_nome, finalizado_em, id) VALUES (${new Array(29).fill('?').join(', ')})`).bind(...valores, id).run()
+  }
+  const ficha = await db.prepare('SELECT * FROM ctm_ficha_peso_balanceamento WHERE id = ?1').bind(id).first<any>()
+  return c.json({ success: true, ficha: { ...ficha, itens_carregamento: parseJsonOr(ficha?.itens_carregamento, []), snapshot_limites: parseJsonOr(ficha?.snapshot_limites, {}) } }, existente ? 200 : 201)
+})
+
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
