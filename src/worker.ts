@@ -3525,15 +3525,32 @@ app.post('/api/interno/abastecimentos/fornecedores', async c => {
   return c.json({ id, success: true }, 201)
 })
 
+app.patch('/api/interno/abastecimentos/fornecedores/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  if (!String(body.nome_completo || '').trim()) return c.json({ error: 'nome_fornecedor_obrigatorio' }, 400)
+  const result = await portalDb(c).prepare('UPDATE fornecedores_favoritos SET nome_completo = ?, apelido = ?, cidade = ?, uf = ?, codigo_icao = ?, telefone = ?, preco_avgas = ?, preco_jet = ?, pessoa_contato = ?, conta_pagamento = ? WHERE id = ?').bind(String(body.nome_completo).trim(), body.apelido || null, body.cidade || null, body.uf || null, body.codigo_icao || null, body.telefone || null, Number(body.preco_avgas || 0), Number(body.preco_jet || 0), body.pessoa_contato || null, body.conta_pagamento || null, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true, id: c.req.param('id') })
+})
+app.delete('/api/interno/abastecimentos/fornecedores/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const result = await portalDb(c).prepare('DELETE FROM fornecedores_favoritos WHERE id = ?').bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
 app.get('/api/interno/abastecimentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaAbastecimentos(c)
   const inicio = c.req.query('inicio') || '1900-01-01'; const fim = c.req.query('fim') || '2999-12-31'
-  const aeronaveId = c.req.query('aeronave_id') || ''; const clienteId = c.req.query('cliente_id') || ''; const fornecedorId = c.req.query('fornecedor_id') || ''; const busca = (c.req.query('busca') || '').trim()
+  const aeronaveId = c.req.query('aeronave_id') || ''; const clienteId = c.req.query('cliente_id') || ''; const fornecedorId = c.req.query('fornecedor_id') || ''; const status = c.req.query('status') || ''; const valorMin = c.req.query('valor_min') || ''; const valorMax = c.req.query('valor_max') || ''; const busca = (c.req.query('busca') || '').trim()
   const conditions = ['date(a.data) BETWEEN ?1 AND ?2']; const binds: unknown[] = [inicio, fim]; let index = 3
   if (aeronaveId) { conditions.push(`a.aeronave_id = ?${index++}`); binds.push(aeronaveId) }
   if (clienteId) { conditions.push(`a.cliente_id = ?${index++}`); binds.push(clienteId) }
   if (fornecedorId) { conditions.push(`a.fornecedor_id = ?${index++}`); binds.push(fornecedorId) }
+  if (status) { conditions.push(`lower(COALESCE(a.status, '')) = lower(?${index++})`); binds.push(status) }
+  if (valorMin && Number.isFinite(Number(valorMin))) { conditions.push(`a.valor_total >= ?${index++}`); binds.push(Number(valorMin)) }
+  if (valorMax && Number.isFinite(Number(valorMax))) { conditions.push(`a.valor_total <= ?${index++}`); binds.push(Number(valorMax)) }
   if (busca) { conditions.push(`(lower(COALESCE(a.local, '')) LIKE ?${index} OR lower(COALESCE(a.trecho, '')) LIKE ?${index} OR lower(COALESCE(a.numero_comanda, '')) LIKE ?${index} OR lower(COALESCE(a.numero_nf, '')) LIKE ?${index})`); binds.push(`%${busca.toLowerCase()}%`); index++ }
   const result = await portalDb(c).prepare(`SELECT a.*, c.razao_social AS cliente_nome, s.nome AS socio_nome, ar.matricula_registro, ar.fabricante, ar.modelo, f.nome_completo AS fornecedor_nome, f.apelido AS fornecedor_apelido, u.nome_completo AS criado_por_nome FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN fornecedores_favoritos f ON f.id = a.fornecedor_id LEFT JOIN user_profiles u ON u.id = a.criado_por WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`).bind(...binds).all()
   return c.json({ abastecimentos: result.results })
