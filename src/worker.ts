@@ -3349,12 +3349,12 @@ app.get('/api/interno/agendamento', async c => {
 app.post('/api/interno/agendamento/disponibilidade', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
-  const body = await c.req.json<{ tripulante_id?: string; tripulante_origem?: 'tripulacao' | 'freelancer'; data_inicio?: string; data_fim?: string; status?: 'aviso' | 'ferias' | 'disponivel'; observacoes?: string }>().catch(() => null)
+  const body = await c.req.json<{ tripulante_id?: string; tripulante_origem?: 'tripulacao' | 'freelancer'; data_inicio?: string; data_fim?: string; status?: 'aviso' | 'ferias' | 'folga' | 'atestado_medico' | 'treinamento' | 'acompanhando_manutencao' | 'disponivel'; observacoes?: string }>().catch(() => null)
   const tripulanteId = body?.tripulante_id?.trim() || ''
   const dataInicio = body?.data_inicio?.trim() || ''
   const dataFim = body?.data_fim?.trim() || dataInicio
   const status = body?.status || 'disponivel'
-  if (!tripulanteId || !dataInicio || !dataFim || !['aviso', 'ferias', 'disponivel'].includes(status)) return c.json({ error: 'tripulante_periodo_e_status_obrigatorios' }, 400)
+  if (!tripulanteId || !dataInicio || !dataFim || !['aviso', 'ferias', 'folga', 'atestado_medico', 'treinamento', 'acompanhando_manutencao', 'disponivel'].includes(status)) return c.json({ error: 'tripulante_periodo_e_status_obrigatorios' }, 400)
   if (dataFim < dataInicio) return c.json({ error: 'periodo_invalido' }, 400)
   const tripulante = await buscarTripulante(c, tripulanteId)
   if (!tripulante) return c.json({ error: 'tripulante_nao_encontrado' }, 404)
@@ -3506,7 +3506,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   await garantirTabelaSequenciaVoos(c)
   const reservation = await portalDb(c).prepare(`SELECT s.*, a.matricula_registro,
       COALESCE((SELECT codigo_cliente FROM cotista_aeronave WHERE socio_id = s.socio_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1),
-        (SELECT codigo_cliente FROM cotista_aeronave WHERE cliente_id = s.cliente_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1), c.codigo_cliente) AS codigo_cliente
+        (SELECT codigo_cliente FROM cotista_aeronave WHERE cliente_id = s.cliente_id AND aeronave_id = s.aeronave_id AND codigo_cliente IS NOT NULL LIMIT 1)) AS codigo_cliente
     FROM solicitacoes_reserva_voo s
     LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
