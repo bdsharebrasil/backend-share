@@ -17,17 +17,17 @@ type Bindings = {
   SHARE_DB: D1Database
   RESEND_API_KEY: string
   INTERNAL_TOKEN: string
-  EMAIL_FROM: string // ex: "Financeiro Share Brasil <financeiro@seudominio.com>"
+  EMAIL_FROM: string
   SUPABASE_URL: string
   SUPABASE_ANON_KEY: string
   SUPABASE_SERVICE_ROLE_KEY: string
-  VITE_SUPABASE_PUBLISHABLE_KEY?: string // usado só para diagnóstico em log; não substitui SUPABASE_ANON_KEY
-  WINSOCK_VALUATION_URL: string   // https://windsock.ai/api/v3/valuations
+  VITE_SUPABASE_PUBLISHABLE_KEY?: string
+  WINSOCK_VALUATION_URL: string
   WINSOCK_API_KEY: string
-  WINSOCK_AUTH_HEADER?: string    // default: 'X-API-Key'
-  WINSOCK_AUTH_PREFIX?: string    // default: '' (sem prefixo)
-  ANTHROPIC_API_KEY: string       // usado no OCR de demonstrativos (Claude Vision/Document)
-  ALLOWED_ORIGINS?: string        // opcional: lista separada por vírgula de origens permitidas no CORS. Se ausente, libera '*'.
+  WINSOCK_AUTH_HEADER?: string
+  WINSOCK_AUTH_PREFIX?: string
+  ANTHROPIC_API_KEY: string
+  ALLOWED_ORIGINS?: string
   TELEGRAM_BOT_TOKEN?: string
   CLIENT_SESSION_SECRET?: string
   CLIENT_SESSION_TTL_SECONDS?: string
@@ -63,10 +63,11 @@ interface HotelReservationHotel {
   telefone_reservas: string | null
 }
 
-// ─── App & Logger ─────────────────────────────────────────────────────────────
+// ─── App Initialization ───────────────────────────────────────────────────────
 
 const app = new Hono<{ Bindings: Bindings }>()
 
+// CRUCIAL: O CORS precisa ser o primeiro middleware global executado
 app.use('*', async (c, next) => {
   const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
   const corsMiddleware = cors({
@@ -76,6 +77,8 @@ app.use('*', async (c, next) => {
   })
   return corsMiddleware(c, next)
 })
+
+// ─── Cloudflare MCP SSE Transport ─────────────────────────────────────────────
 
 class CloudflareSseTransport {
   readonly sessionId = crypto.randomUUID()
@@ -91,6 +94,7 @@ class CloudflareSseTransport {
   readonly stream = new ReadableStream<Uint8Array>({
     start: controller => {
       this.controller = controller
+      // AJUSTADO: Gera a rota absoluta dinamicamente baseado na origem da requisição
       const endpointUrl = new URL(`/mcp/messages?sessionId=${this.sessionId}`, this.requestUrl).toString()
       this.write(`event: endpoint\ndata: ${endpointUrl}\n\n`)
     },
@@ -131,6 +135,8 @@ const mcpSessions = new Map<string, McpSession>()
 
 function createMcpServer(db: D1Database): McpServer {
   const server = new McpServer({ name: 'Share Brasil MCP', version: '1.0.0' })
+
+  // AJUSTADO: Tool estruturada enviando as respostas de consulta para o Lovable
   server.tool(
     'executar_query_d1',
     'Executa comandos SQL de leitura e escrita no banco de dados SHARE_DB',
@@ -150,11 +156,14 @@ function createMcpServer(db: D1Database): McpServer {
   return server
 }
 
+// ─── MCP Roteamento (CORS Aplicado Corretamente) ──────────────────────────────
+
 app.get('/mcp', async c => {
   const transport = new CloudflareSseTransport(c.req.url)
   const session: McpSession = { transport, server: createMcpServer(c.env.SHARE_DB) }
   mcpSessions.set(transport.sessionId, session)
   transport.onclose = () => mcpSessions.delete(transport.sessionId)
+
   try {
     await session.server.connect(transport)
     return new Response(transport.stream, {
@@ -175,6 +184,7 @@ app.post('/mcp/messages', async c => {
   const sessionId = c.req.query('sessionId')
   const session = sessionId ? mcpSessions.get(sessionId) : undefined
   if (!session) return c.text('Sessão MCP não encontrada ou expirada', 404)
+
   try {
     await session.transport.handleMessage(await c.req.json())
     return c.text('OK')
@@ -183,6 +193,8 @@ app.post('/mcp/messages', async c => {
   }
 })
 
+// ─── Outras Configurações & Helpers Originais ──────────────────────────────────
+
 const isDev = false
 const log = {
   debug: (...a: any[]) => isDev && console.log('[DEBUG]', ...a),
@@ -190,15 +202,13 @@ const log = {
   error: (...a: any[]) => console.error('[ERROR]', ...a),
 }
 
-// ─── XML Parser & Constants ───────────────────────────────────────────────────
-
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   isArray: (name) => ['item', 'notam', 'carta', 'sol'].includes(name),
 })
 
-const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/'
+const AISWEB_BASE_URL = 'https://decea.mil.br'
 const WINSOCK_VALUATION_CACHE_TTL = 86_400
 const WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i
 
@@ -212,17 +222,10 @@ function escapeHtml(value: string | number): string {
   })[char]!)
 }
 
-/**
- * Valida o Bearer token do Supabase chamando /auth/v1/user.
- * Inclui logs de diagnóstico (log.debug só imprime com isDev=true — ver nota no final do arquivo).
- */
 async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
   const authorization = c.req.header('authorization')
   log.debug('[auth] Authorization header present:', Boolean(authorization))
   const { SUPABASE_URL, SUPABASE_ANON_KEY, VITE_SUPABASE_PUBLISHABLE_KEY } = c.env
-  // Aceita a chave anon legada ou a chave pública publicada no projeto Supabase.
-  // A autorização continua sendo feita pelo Bearer do colaborador; a chave apenas
-  // identifica o projeto na chamada /auth/v1/user.
   const supabaseApiKey = SUPABASE_ANON_KEY || VITE_SUPABASE_PUBLISHABLE_KEY
 
   if (!authorization?.startsWith('Bearer ')) {
@@ -234,7 +237,7 @@ async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Pro
     return false
   }
   if (!supabaseApiKey) {
-    log.warn('[auth] nenhuma chave pública do Supabase configurada (SUPABASE_ANON_KEY/VITE_SUPABASE_PUBLISHABLE_KEY)')
+    log.warn('[auth] nenhuma chave pública do Supabase configurada')
     return false
   }
 
