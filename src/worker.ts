@@ -73,7 +73,7 @@ app.use('*', async (c, next) => {
   const corsMiddleware = cors({
     origin: allowed && allowed.length > 0 ? allowed : '*',
     allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
   })
   return corsMiddleware(c, next)
 })
@@ -3631,6 +3631,17 @@ async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
   await db.prepare(`CREATE TABLE IF NOT EXISTS pernas_jornada_voo (id TEXT PRIMARY KEY NOT NULL, jornada_id TEXT NOT NULL, numero INTEGER NOT NULL, origem TEXT NOT NULL, destino TEXT NOT NULL, horario_ac TEXT NULL, horario_dep TEXT NULL, horario_pouso TEXT NULL, horario_corte TEXT NULL, status TEXT NOT NULL DEFAULT 'em_voo', lancamento_diario_id TEXT NULL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
 }
 function minutosEntre(inicio: string | null, fim: string | null): number { if (!inicio || !fim) return 0; const a = new Date(inicio).getTime(), b = new Date(fim).getTime(); return Number.isFinite(a) && Number.isFinite(b) && b >= a ? Math.round((b-a)/60000) : 0 }
+function normalizarHorarioJornada(data: string, valor: unknown): string | null {
+  const texto = String(valor || '').trim()
+  if (!texto) return null
+  const iso = new Date(texto)
+  if (/^\d{4}-\d{2}-\d{2}T/.test(texto) && Number.isFinite(iso.getTime())) return iso.toISOString()
+  if (/^\d{2}:\d{2}(?::\d{2})?$/.test(texto)) {
+    const dataIso = new Date(`${data}T${texto.length === 5 ? `${texto}:00` : texto}`)
+    if (Number.isFinite(dataIso.getTime())) return dataIso.toISOString()
+  }
+  return null
+}
 app.get('/api/interno/agendamento/:id/jornada', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401); await garantirTabelaJornadas(c)
   const jornada = await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
@@ -3638,8 +3649,8 @@ app.get('/api/interno/agendamento/:id/jornada', async c => {
 })
 app.post('/api/interno/agendamento/:id/jornada', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401); await garantirTabelaJornadas(c); const idSolicitacao=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const voo=await portalDb(c).prepare('SELECT aeronave_id, piloto_id, data_agendada FROM solicitacoes_reserva_voo WHERE id=?').bind(idSolicitacao).first<any>(); if(!voo) return c.notFound()
-  const data=String(body.data||voo.data_agendada||''); const ac=String(body.horario_acionamento||''); if(!/^\d{4}-\d{2}-\d{2}$/.test(data)||!ac) return c.json({error:'data_e_acionamento_obrigatorios'},400)
-  const id=uuid(); const apresentacao=body.horario_apresentacao||new Date(new Date(`${data}T${ac}`).getTime()-30*60000).toISOString(); const acionamento=new Date(`${data}T${ac}`).toISOString(); await portalDb(c).prepare('INSERT INTO jornadas_voo (id, solicitacao_id, aeronave_id, tripulante_id, data, horario_acionamento, horario_apresentacao, horario_corte_inicio, status, observacoes, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id,idSolicitacao,voo.aeronave_id,body.tripulante_id||voo.piloto_id||null,data,acionamento,apresentacao,body.horario_corte_inicio||null,'em_rota',body.observacoes||null,extractSupabaseUserId(c)).run(); return c.json({id,status:'em_rota',data,horario_acionamento:acionamento,horario_apresentacao:apresentacao,pernas:[]},201)
+  const data=String(body.data||voo.data_agendada||''); const acionamento=normalizarHorarioJornada(data, body.horario_acionamento); if(!/^\d{4}-\d{2}-\d{2}$/.test(data)||!acionamento) return c.json({error:'data_e_acionamento_obrigatorios'},400)
+  const apresentacao=normalizarHorarioJornada(data, body.horario_apresentacao) || new Date(new Date(acionamento).getTime()-30*60000).toISOString(); const corteInicio=normalizarHorarioJornada(data, body.horario_corte_inicio); const id=uuid(); await portalDb(c).prepare('INSERT INTO jornadas_voo (id, solicitacao_id, aeronave_id, tripulante_id, data, horario_acionamento, horario_apresentacao, horario_corte_inicio, status, observacoes, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id,idSolicitacao,voo.aeronave_id,body.tripulante_id||voo.piloto_id||null,data,acionamento,apresentacao,corteInicio,'em_rota',body.observacoes||null,extractSupabaseUserId(c)).run(); return c.json({id,status:'em_rota',data,horario_acionamento:acionamento,horario_apresentacao:apresentacao,pernas:[]},201)
 })
 app.patch('/api/interno/jornadas/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({error:'internal_auth_required'},401); await garantirTabelaJornadas(c); const id=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const atual=await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first<any>(); if(!atual) return c.notFound(); const fim=body.horario_corte_final||atual.horario_corte_final; if(body.status==='encerrada' && !fim) return c.json({error:'corte_final_obrigatorio'},400); if(body.status==='encerrada' && minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim)>540) return c.json({error:'limite_jornada_9_horas_excedido',detail:'A jornada ultrapassa o limite de 9 horas.'},409); if (body.status === 'encerrada' && atual.tripulante_id) { const db=portalDb(c); const minutos= minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim); const semana=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND date(data)>=date(?,'-6 days') AND date(data)<=date(?)").bind(atual.tripulante_id,atual.data,atual.data).first<any>(); const mes=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND strftime('%Y-%m',data)=strftime('%Y-%m',?)").bind(atual.tripulante_id,atual.data).first<any>(); if(Number(semana?.minutos||0)+minutos>2640) return c.json({error:'limite_jornada_semanal_excedido',detail:'O tripulante ultrapassaria 44 horas na semana.'},409); if(Number(mes?.minutos||0)+minutos>10560) return c.json({error:'limite_jornada_mensal_excedido',detail:'O tripulante ultrapassaria 176 horas no mês.'},409); } await portalDb(c).prepare('UPDATE jornadas_voo SET horario_acionamento=?, horario_apresentacao=?, horario_corte_inicio=?, horario_corte_final=?, data=?, status=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(body.horario_acionamento||atual.horario_acionamento,body.horario_apresentacao||atual.horario_apresentacao,body.horario_corte_inicio||atual.horario_corte_inicio,fim,body.data||atual.data,body.status||atual.status,body.observacoes||atual.observacoes,id).run(); return c.json(await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first())
