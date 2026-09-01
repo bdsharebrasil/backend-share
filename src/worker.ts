@@ -3636,7 +3636,7 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare('SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo), nome_completo').all(),
     aeronaveId
-      ? db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, cliente_id, socio_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 ORDER BY date(data_registro) DESC, id DESC LIMIT 1').bind(aeronaveId).all()
+      ? db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.socio_id, l.aerodromo_partida, l.aerodromo_chegada, c.razao_social AS cliente_nome, s.nome AS socio_nome FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.aeronave_id = ?1 ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 1').bind(aeronaveId).all()
       : db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, cliente_id, socio_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo ORDER BY date(data_registro) DESC LIMIT 100').all(),
   ])
   return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, diarios: diarios.results })
