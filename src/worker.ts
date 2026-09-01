@@ -3713,7 +3713,7 @@ app.post('/api/interno/abastecimentos/:id/arquivo', async c => {
   await garantirTabelaAbastecimentos(c); const id = c.req.param('id'); const form = await c.req.parseBody(); const file = form.arquivo; const tipo = String(form.tipo || 'comanda')
   if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
   if (!['comanda', 'nota', 'boleto'].includes(tipo)) return c.json({ error: 'tipo_arquivo_invalido' }, 400)
-  const pasta = tipo === 'nota' ? 'abastecimentos/nota-fiscal' : tipo === 'boleto' ? 'abastecimentos/boleto' : 'abastecimentos/comanda'
+  const pasta = tipo === 'nota' ? 'share/abastecimentos/nota fiscal' : tipo === 'boleto' ? 'share/abastecimentos/boleto' : 'share/abastecimentos/comanda'
   const objectKey = await salvarArquivoShareBrasil(c, authenticated?.id || extractSupabaseUserId(c) || 'interno', file, pasta)
   const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
   await portalDb(c).prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(objectKey, id).run()
