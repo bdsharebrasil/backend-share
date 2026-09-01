@@ -3433,18 +3433,15 @@ app.delete('/api/interno/agendamento/:id', async c => {
 
 async function garantirTabelaChecklist(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS checklist_pre_voo (id TEXT PRIMARY KEY NOT NULL, solicitacao_id TEXT NOT NULL, usuario_id TEXT, itens TEXT NOT NULL DEFAULT '{}', observacoes TEXT, abastecimento_id TEXT, status TEXT NOT NULL DEFAULT 'pendente', criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS checklists_pre_voo (id TEXT PRIMARY KEY NOT NULL, solicitacao_id TEXT NULL, aeronave_id TEXT NULL, cliente_id TEXT NULL, status TEXT NOT NULL DEFAULT 'rascunho', precisa_abastecer INTEGER NULL, abastecimento_id TEXT NULL, respostas TEXT NOT NULL DEFAULT '{}', observacoes TEXT NULL, executado_por TEXT NULL, executado_por_nome TEXT NULL, concluido_em TEXT NULL, criado_por TEXT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, numero_voo TEXT NULL, nivel_oleo TEXT NULL, alerta_id TEXT NULL)`).run()
   await db.prepare(`CREATE TABLE IF NOT EXISTS alerta_checklist (id TEXT PRIMARY KEY NOT NULL, checklists_pre_voo_id TEXT NULL, alerta1 TEXT NULL, alerta2 TEXT NULL, alerta3 TEXT NULL, alerta4 TEXT NULL, alerta5 TEXT NULL, alerta6 TEXT NULL, alerta7 TEXT NULL, alerta8 TEXT NULL, alerta9 TEXT NULL, alerta10 TEXT NULL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
-  for (const sql of [
-    'ALTER TABLE checklist_pre_voo ADD COLUMN precisa_abastecer INTEGER NULL',
-    'ALTER TABLE checklist_pre_voo ADD COLUMN nivel_oleo TEXT NULL',
-    'ALTER TABLE checklist_pre_voo ADD COLUMN alerta_id TEXT NULL',
-    'ALTER TABLE checklist_pre_voo ADD COLUMN concluido_em TEXT NULL',
-  ]) await db.prepare(sql).run().catch(() => undefined)
+  // Compatibilidade: migra dados da tabela reduzida criada anteriormente, sem usá-la novamente.
+  await db.prepare(`INSERT OR IGNORE INTO checklists_pre_voo (id, solicitacao_id, respostas, observacoes, abastecimento_id, status, executado_por, criado_em, atualizado_em, precisa_abastecer, nivel_oleo, alerta_id, concluido_em) SELECT id, solicitacao_id, itens, observacoes, abastecimento_id, status, usuario_id, criado_em, atualizado_em, precisa_abastecer, nivel_oleo, alerta_id, concluido_em FROM checklist_pre_voo`).run().catch(() => undefined)
 }
+
 app.get('/api/interno/agendamento/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaChecklist(c); const row = await portalDb(c).prepare('SELECT * FROM checklist_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
+  await garantirTabelaChecklist(c); const row = await portalDb(c).prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
   return c.json(row ? { ...row, itens: JSON.parse(row.itens || '{}') } : null)
 })
 app.post('/api/interno/agendamento/:id/checklist', async c => {
@@ -3455,7 +3452,9 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   if (!agendamento) return c.notFound()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
   const userId = extractSupabaseUserId(c)
-  const existente = await portalDb(c).prepare('SELECT id, abastecimento_id, alerta_id FROM checklist_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null; alerta_id: string | null }>()
+  const executor = userId ? await portalDb(c).prepare('SELECT COALESCE(nome_exibicao, nome_completo, email) AS nome FROM user_profiles WHERE id=?').bind(userId).first<{ nome: string }>() : null
+  const userName = executor?.nome || userId || 'Usuário não identificado'
+  const existente = await portalDb(c).prepare('SELECT id, abastecimento_id, alerta_id FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null; alerta_id: string | null }>()
   const status = body.status || 'concluido'
   const precisaAbastecer = body.abastecimento?.necessita_abastecer === true || body.abastecimento?.necessita_abastecer === 'sim'
   const alertas = Object.entries(body.alertas || {}).filter(([, texto]) => String(texto || '').trim()).map(([item, texto]) => `${item}: ${String(texto).trim()}`).slice(0, 10)
@@ -3496,10 +3495,10 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   const precisaValor = precisaAbastecer ? 1 : 0
   const concluidoEm = status === 'concluido' ? new Date().toISOString() : null
   if (existente) {
-    await portalDb(c).prepare('UPDATE checklist_pre_voo SET usuario_id=?, itens=?, observacoes=?, abastecimento_id=?, precisa_abastecer=?, nivel_oleo=?, alerta_id=?, status=?, concluido_em=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, existente.id).run()
+    await portalDb(c).prepare('UPDATE checklists_pre_voo SET executado_por=?, executado_por_nome=?, respostas=?, observacoes=?, abastecimento_id=?, precisa_abastecer=?, nivel_oleo=?, alerta_id=?, status=?, concluido_em=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, existente.id).run()
     return c.json({ id: existente.id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId })
   }
-  const id = uuid(); if (alertaId) await portalDb(c).prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(id, alertaId).run(); await portalDb(c).prepare('INSERT INTO checklist_pre_voo (id, solicitacao_id, usuario_id, itens, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, userId, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm).run()
+  const id = uuid(); if (alertaId) await portalDb(c).prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(id, alertaId).run(); await portalDb(c).prepare('INSERT INTO checklists_pre_voo (id, solicitacao_id, aeronave_id, cliente_id, executado_por, executado_por_nome, respostas, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em, numero_voo, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, agendamento.aeronave_id || null, agendamento.cliente_id || null, userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, agendamento.numero_voo || null, userId).run()
   return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
 })
 
@@ -3529,7 +3528,7 @@ app.get('/api/interno/solicitacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaChecklist(c)
   const status = c.req.query('status')
-  const query = status ? "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo, (SELECT cp.status FROM checklist_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.status = ?1 ORDER BY s.data_agendada" : "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo, (SELECT cp.status FROM checklist_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id ORDER BY s.data_agendada"
+  const query = status ? "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.status = ?1 ORDER BY s.data_agendada" : "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id ORDER BY s.data_agendada"
   const result = status ? await portalDb(c).prepare(query).bind(status).all() : await portalDb(c).prepare(query).all()
   return c.json(result.results)
 })
