@@ -2638,7 +2638,7 @@ app.get('/api/colaborador/perfil', async c => {
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const db = portalDb(c)
   const [pagamentos, documentos, funcoes, ferias] = await Promise.all([
-    db.prepare("SELECT id, descricao, NULL AS competencia, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, status, observacoes FROM movimentacoes WHERE colaborador_id = ?1 AND (lower(status) = 'pago' OR data_pagamento IS NOT NULL) ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC").bind(colaborador.id).all(),
+    db.prepare("SELECT id, descricao, NULL AS competencia, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, status, observacoes FROM lancamentos WHERE colaborador_id = ?1 AND (lower(status) = 'pago' OR data_pagamento IS NOT NULL) ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC").bind(colaborador.id).all(),
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all(),
     db.prepare('SELECT id, funcao, criado_em FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY funcao').bind(colaborador.id).all(),
     db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all(),
@@ -3147,19 +3147,19 @@ app.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
 
 app.get('/api/interno/dashboard/financeiro', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const [resumo, movimentacoes] = await Promise.all([
+  const [resumo, lancamentos] = await Promise.all([
     portalDb(c).prepare(`SELECT
       COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN COALESCE(valor_rateado, valor_total, 0) ELSE 0 END), 0) AS total_a_receber,
       COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) = 'pago' OR data_pagamento IS NOT NULL THEN COALESCE(valor_pago_real, valor_rateado, valor_total, 0) ELSE 0 END), 0) AS total_pago,
       SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN 1 ELSE 0 END) AS pendencias,
       SUM(CASE WHEN lower(COALESCE(status, '')) = 'pago' OR data_pagamento IS NOT NULL THEN 1 ELSE 0 END) AS pagamentos_confirmados
-      FROM movimentacoes`).first<Record<string, number>>(),
+      FROM lancamentos`).first<Record<string, number>>(),
     portalDb(c).prepare(`SELECT id, descricao, status, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, observacoes, criado_em
-      FROM movimentacoes
+      FROM lancamentos
       ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC
       LIMIT 20`).all(),
   ])
-  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, movimentacoes: movimentacoes.results })
+  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, lancamentos: lancamentos.results })
 })
 
 type TripulanteDisponivel = {
@@ -4838,8 +4838,8 @@ export class MeetingRoom {
 // ─── Financeiro: envio de despesas para programação ─────────────────────────
 async function garantirTabelaEnvioDespesas(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS envio_despesas (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL CHECK (tipo IN ('share', 'reembolso', 'cliente')), descricao TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, data_despesa TEXT, vencimento TEXT, fornecedor TEXT, cliente_id TEXT, socio_id TEXT, aeronave_id TEXT, numero_voo TEXT, centro_custo TEXT, observacoes TEXT, status TEXT NOT NULL DEFAULT 'enviado', criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, grupo_categoria TEXT, tipo_caixa TEXT, tipo_despesa TEXT, pago_diretamente INTEGER DEFAULT 0, pago_por TEXT, movimentacao_id TEXT, rateio_id TEXT)`).run()
-  for (const coluna of ['grupo_categoria TEXT', 'tipo_caixa TEXT', 'tipo_despesa TEXT', 'pago_diretamente INTEGER DEFAULT 0', 'pago_por TEXT', 'movimentacao_id TEXT', 'rateio_id TEXT']) await db.prepare(`ALTER TABLE envio_despesas ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  await db.prepare(`CREATE TABLE IF NOT EXISTS envio_despesas (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL CHECK (tipo IN ('share', 'reembolso', 'cliente')), descricao TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, data_despesa TEXT, vencimento TEXT, fornecedor TEXT, cotista_id TEXT, aeronave_id TEXT, numero_voo TEXT, centro_custo TEXT, observacoes TEXT, status TEXT NOT NULL DEFAULT 'enviado', criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, grupo_categoria TEXT, tipo_caixa TEXT, tipo_despesa TEXT, pago_diretamente INTEGER DEFAULT 0, pago_por TEXT, lancamento_id TEXT, rateio_id TEXT)`).run()
+  for (const coluna of ['grupo_categoria TEXT', 'tipo_caixa TEXT', 'tipo_despesa TEXT', 'pago_diretamente INTEGER DEFAULT 0', 'pago_por TEXT', 'cotista_id TEXT', 'lancamento_id TEXT', 'rateio_id TEXT']) await db.prepare(`ALTER TABLE envio_despesas ADD COLUMN ${coluna}`).run().catch(() => undefined)
 }
 function regraFinanceira(tipo: string, grupoInformado?: string) {
   const gruposShare = ['FOLHA DE PAGAMENTO', 'DESPESAS EMPRESA', 'DESPESAS EMPRESA-BANCO', 'DESPESAS PARTICULARES', 'IMPOSTOS', 'RECEITAS OPERACIONAIS']
@@ -4847,17 +4847,17 @@ function regraFinanceira(tipo: string, grupoInformado?: string) {
   if (tipo === 'reembolso') return { grupo: 'DESPESAS REEMBOLSÁVEIS', caixa: 'share', rateio: true, pagoDiretamente: 0, reembolsavel: 1 }
   return { grupo: gruposShare.includes(String(grupoInformado)) ? String(grupoInformado) : 'DESPESAS EMPRESA', caixa: 'share', rateio: false, pagoDiretamente: 0, reembolsavel: 0 }
 }
-async function inserirMovimentacaoFinanceira(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, envioId: string, regra: ReturnType<typeof regraFinanceira>) {
+async function inserirLancamentoFinanceira(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, envioId: string, regra: ReturnType<typeof regraFinanceira>) {
   const db = portalDb(c)
   const id = uuid()
   const observacoes = [body.observacoes, body.tipo_despesa && `Tipo da despesa: ${body.tipo_despesa}`].filter(Boolean).join(' | ') || null
-  await db.prepare(`INSERT INTO movimentacoes (id, descricao, fluxo, categoria_nome, grupo_categoria, tipo_rateio, valor_total, valor_rateado, data_emissao, data_vencimento, aeronave_id, cliente_id, socio_id, reembolsavel, reembolso_quitado, status, fornecedor_nome, numero_voo, observacoes, criado_por, pago_diretamente, tipo_caixa, pago_por, reference_id) VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, body.descricao, regra.grupo, regra.grupo, regra.rateio ? 'cliente' : null, Number(body.valor), Number(body.valor), body.data_despesa || null, body.vencimento || null, body.aeronave_id || null, body.cliente_id || null, body.socio_id || null, regra.reembolsavel, body.fornecedor || null, body.numero_voo || null, observacoes, user.id, regra.pagoDiretamente, regra.caixa, body.pago_por || (body.tipo === 'cliente' ? body.cliente_id : 'share'), envioId).run()
+  await db.prepare(`INSERT INTO lancamentos (id, descricao, fluxo, categoria_nome, grupo_categoria, tipo_rateio, valor_total, valor_rateado, data_emissao, data_vencimento, aeronave_id, cotista_id, reembolsavel, reembolso_quitado, status, fornecedor_nome, numero_voo, observacoes, criado_por, pago_diretamente, tipo_caixa, pago_por, reference_id) VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, body.descricao, regra.grupo, regra.grupo, regra.rateio ? 'cliente' : null, Number.parseFloat(String(body.valor)), Number.parseFloat(String(body.valor)), body.data_despesa || null, body.vencimento || null, body.aeronave_id || null, body.cotista_id || null, regra.reembolsavel, body.fornecedor || null, body.numero_voo || null, observacoes, user.id, regra.pagoDiretamente, regra.caixa, body.pago_por || (body.tipo === 'cliente' ? body.cotista_id : 'share'), envioId).run()
   return id
 }
-async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, movimentacaoId: string, regra: ReturnType<typeof regraFinanceira>) {
+async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, lancamentoId: string, regra: ReturnType<typeof regraFinanceira>) {
   if (!regra.rateio) return null
   const id = uuid()
-  await portalDb(c).prepare(`INSERT INTO rateio_despesas (id, movimentacoes_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, numero_voo, categoria_nome, categoria_custo, cliente_id, socio_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa, valor_total, valor_rateado, status, observacoes, conferido_por) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, ?)`).bind(id, movimentacaoId, body.vencimento || null, body.data_despesa || null, body.numero_voo || null, regra.grupo, body.centro_custo || null, body.cliente_id || null, body.socio_id || null, body.pago_por || (body.tipo === 'cliente' ? body.cliente_id : 'share'), regra.pagoDiretamente, body.aeronave_id || null, body.descricao, Number(body.valor), Number(body.valor), body.observacoes || null, user.id).run()
+  await portalDb(c).prepare(`INSERT INTO rateio_despesas (id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, numero_voo, categoria_nome, categoria_custo, cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa, valor_total, valor_rateado, status, observacoes, conferido_por) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, ?)`).bind(id, lancamentoId, body.vencimento || null, body.data_despesa || null, body.numero_voo || null, regra.grupo, body.centro_custo || null, body.cotista_id || null, body.pago_por || (body.tipo === 'cliente' ? body.cotista_id : 'share'), regra.pagoDiretamente, body.aeronave_id || null, body.descricao, Number.parseFloat(String(body.valor)), Number.parseFloat(String(body.valor)), body.observacoes || null, user.id).run()
   return id
 }
 app.get('/api/financeiro/envios-pagamento', async c => {
@@ -4876,24 +4876,24 @@ app.post('/api/financeiro/envios-pagamento', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const tipo = String(body.tipo || '').toLowerCase()
   const descricao = String(body.descricao || '').trim()
-  const valor = Number(body.valor)
+  const valor = Number.parseFloat(String(body.valor))
   const regra = regraFinanceira(tipo, body.grupo_categoria)
   if (!['share', 'reembolso', 'cliente'].includes(tipo) || !descricao || !Number.isFinite(valor) || valor <= 0) return c.json({ error: 'tipo_descricao_e_valor_obrigatorios' }, 400)
-  if (regra.rateio && !String(body.cliente_id || '').trim()) return c.json({ error: 'cliente_obrigatorio_para_rateio' }, 400)
+  if (regra.rateio && !String(body.cotista_id || '').trim()) return c.json({ error: 'cotista_obrigatorio_para_rateio' }, 400)
   if (tipo === 'share' && !['fixo', 'variável'].includes(String(body.tipo_despesa || ''))) return c.json({ error: 'tipo_despesa_obrigatorio' }, 400)
   const db = portalDb(c)
   const envioId = uuid()
-  const movimentacaoId = await inserirMovimentacaoFinanceira(c, { ...body, tipo, descricao, valor }, user, envioId, regra)
+  const lancamentoId = await inserirLancamentoFinanceira(c, { ...body, tipo, descricao, valor }, user, envioId, regra)
   let rateioId: string | null = null
   try {
-    rateioId = await inserirRateioFinanceiro(c, { ...body, tipo, descricao, valor }, user, movimentacaoId, regra)
-    await db.prepare('INSERT INTO envio_despesas (id, tipo, descricao, valor, data_despesa, vencimento, fornecedor, cliente_id, socio_id, aeronave_id, numero_voo, centro_custo, observacoes, criado_por, grupo_categoria, tipo_caixa, tipo_despesa, pago_diretamente, pago_por, movimentacao_id, rateio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(envioId, tipo, descricao, valor, body.data_despesa || null, body.vencimento || null, body.fornecedor || null, body.cliente_id || null, body.socio_id || null, body.aeronave_id || null, body.numero_voo || null, body.centro_custo || null, body.observacoes || null, user.id, regra.grupo, regra.caixa, tipo === 'share' ? body.tipo_despesa : null, regra.pagoDiretamente, body.pago_por || (tipo === 'cliente' ? body.cliente_id : 'share'), movimentacaoId, rateioId).run()
+    rateioId = await inserirRateioFinanceiro(c, { ...body, tipo, descricao, valor }, user, lancamentoId, regra)
+    await db.prepare('INSERT INTO envio_despesas (id, tipo, descricao, valor, data_despesa, vencimento, fornecedor, cotista_id, aeronave_id, numero_voo, centro_custo, observacoes, criado_por, grupo_categoria, tipo_caixa, tipo_despesa, pago_diretamente, pago_por, lancamento_id, rateio_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(envioId, tipo, descricao, valor, body.data_despesa || null, body.vencimento || null, body.fornecedor || null, body.cotista_id || null, body.aeronave_id || null, body.numero_voo || null, body.centro_custo || null, body.observacoes || null, user.id, regra.grupo, regra.caixa, tipo === 'share' ? body.tipo_despesa : null, regra.pagoDiretamente, body.pago_por || (tipo === 'cliente' ? body.cotista_id : 'share'), lancamentoId, rateioId).run()
   } catch (error) {
-    await db.prepare('DELETE FROM movimentacoes WHERE id = ?').bind(movimentacaoId).run().catch(() => undefined)
+    await db.prepare('DELETE FROM lancamentos WHERE id = ?').bind(lancamentoId).run().catch(() => undefined)
     throw error
   }
   const row = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(envioId).first()
-  return c.json({ ...row, movimentacao_id: movimentacaoId, rateio_id: rateioId }, 201)
+  return c.json({ ...row, lancamento_id: lancamentoId, rateio_id: rateioId }, 201)
 })
 
 // ─── Financeiro: central de e-mail ───────────────────────────────────────────
@@ -4968,9 +4968,9 @@ app.post('/api/interno/emails', async c => {
   return c.json({ success: true, id }, 201)
 })
 // ─── Financeiro: emissão de recibos (cliente reembolsável / caixa cliente / colaborador) ──
-// Segue as regras de REGRAS_NEGOCIO_FINANCEIRO.md: toda despesa nasce em `movimentacoes`;
+// Segue as regras de REGRAS_NEGOCIO_FINANCEIRO.md: toda despesa nasce em `lancamentos`;
 // despesa de cliente (direta ou reembolsável) sempre gera `rateio_despesas`; `rateio_despesas`
-// é agnóstico a quem desembolsou (isso vive só em `movimentacoes`/`tipo_caixa`); rateio entre
+// é agnóstico a quem desembolsou (isso vive só em `lancamentos`/`tipo_caixa`); rateio entre
 // cotistas usa `cotista_aeronave` (cliente_id OU socio_id, cobrindo também clientes com holding).
 async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
@@ -4993,15 +4993,15 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     data_emissao TEXT NOT NULL,
     data_vencimento TEXT,
     forma_pagamento TEXT,
-    categoria_movimentacao_id TEXT,
+    categoria_lancamento_id TEXT,
     tipo_despesa TEXT,
     grupo_categoria TEXT NOT NULL,
     tipo_caixa TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'emitido' CHECK (status IN ('emitido','aguardando_reembolso','reembolsado','cancelado')),
     boleto_url TEXT,
     nf_url TEXT,
-    movimentacao_id TEXT NOT NULL,
-    movimentacao_reembolso_id TEXT,
+    lancamento_id TEXT NOT NULL,
+    lancamento_reembolso_id TEXT,
     criado_por TEXT,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run()
@@ -5011,12 +5011,14 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     id TEXT PRIMARY KEY NOT NULL,
     recibo_id TEXT NOT NULL,
     rateio_despesas_id TEXT NOT NULL,
-    cliente_id TEXT,
-    socio_id TEXT,
+    cotista_id TEXT NOT NULL,
     nome TEXT,
     percentual REAL NOT NULL,
     valor REAL NOT NULL
   )`).run()
+  await db.prepare('ALTER TABLE recibo_rateio ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE rateio_despesas ADD COLUMN lancamentos_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE rateio_despesas ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
   await db.prepare(`CREATE INDEX IF NOT EXISTS recibo_rateio_recibo_idx ON recibo_rateio(recibo_id)`).run()
 }
 
@@ -5044,7 +5046,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
     db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome_completo, nome_exibicao, nome_banco, tipo_conta, conta_numero, agencia_numero, pix FROM user_profiles WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY COALESCE(nome_exibicao, nome_completo)").all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
-    db.prepare(`SELECT ca.id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
+    db.prepare(`SELECT ca.id AS cotista_id, ca.aeronave_id, ca.percentual_sociedade,
                        COALESCE(cl.razao_social, hs.nome) AS nome
                 FROM cotista_aeronave ca
                 LEFT JOIN cliente cl ON cl.id = ca.cliente_id
@@ -5093,14 +5095,14 @@ app.post('/api/financeiro/recibos', async c => {
   const rateado = Boolean(body.rateado) && beneficiarioTipo === 'cliente'
   const descricao = String(body.descricao_servico || '').trim()
   const nomePagador = String(body.nome_pagador || '').trim()
-  const valor = Number(body.valor)
+  const valor = Number.parseFloat(String(body.valor))
   const dataEmissao = String(body.data_emissao || '').trim() || new Date().toISOString().slice(0, 10)
 
   if (!nomePagador) return c.json({ error: 'nome_pagador_obrigatorio' }, 400)
   if (!descricao) return c.json({ error: 'descricao_obrigatoria' }, 400)
   if (!Number.isFinite(valor) || valor <= 0) return c.json({ error: 'valor_invalido' }, 400)
   if (beneficiarioTipo === 'colaborador' && !String(body.colaborador_id || '').trim()) return c.json({ error: 'colaborador_obrigatorio' }, 400)
-  if (beneficiarioTipo === 'cliente' && !rateado && !String(body.cliente_id || '').trim()) return c.json({ error: 'cliente_obrigatorio' }, 400)
+  if (beneficiarioTipo === 'cliente' && !rateado && !String(body.cotista_id || '').trim()) return c.json({ error: 'cotista_obrigatorio' }, 400)
   if (rateado && !String(body.aeronave_id || '').trim()) return c.json({ error: 'aeronave_obrigatoria_para_rateio' }, 400)
   if (beneficiarioTipo === 'colaborador' && !['fixo', 'variável'].includes(String(body.tipo_despesa || ''))) return c.json({ error: 'tipo_despesa_obrigatorio' }, 400)
 
@@ -5108,25 +5110,25 @@ app.post('/api/financeiro/recibos', async c => {
 
   // Linhas de rateio: usa as informadas no formulário (permite editar % ou marcar quem pagou
   // diretamente); se não vierem, usa todos os cotistas da aeronave com o percentual_sociedade.
-  let linhasRateio: Array<{ cliente_id: string | null; socio_id: string | null; nome: string; percentual: number; valor: number; pago_por: string | null }> = []
+  let linhasRateio: Array<{ cotista_id: string; nome: string; percentual: number; valor: number; pago_por: string | null }> = []
   if (rateado) {
-    const cotistas = await db.prepare(`SELECT ca.id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
+    const cotistas = await db.prepare(`SELECT ca.id AS cotista_id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
                                                COALESCE(cl.razao_social, hs.nome) AS nome
                                         FROM cotista_aeronave ca
                                         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
                                         LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
-                                        WHERE ca.aeronave_id = ?1`).bind(body.aeronave_id).all<{ id: string; cliente_id: string | null; socio_id: string | null; percentual_sociedade: number; nome: string }>()
+                                        WHERE ca.aeronave_id = ?1`).bind(body.aeronave_id).all<{ cotista_id: string; cliente_id: string | null; socio_id: string | null; percentual_sociedade: number; nome: string }>()
     if (!cotistas.results.length) return c.json({ error: 'aeronave_sem_cotistas' }, 400)
 
     const overrides: Array<Record<string, any>> = Array.isArray(body.rateio_linhas) ? body.rateio_linhas : []
-    const overrideByCotista = new Map(overrides.map((linha) => [String(linha.cotista_id || linha.cliente_id || linha.socio_id), linha]))
+    const overrideByCotista = new Map(overrides.map((linha) => [String(linha.cotista_id), linha]))
     const selecionados = overrides.length
-      ? cotistas.results.filter((cotista) => overrideByCotista.has(String(cotista.id)) || overrideByCotista.has(String(cotista.cliente_id)) || overrideByCotista.has(String(cotista.socio_id)))
+      ? cotistas.results.filter((cotista) => overrideByCotista.has(String(cotista.cotista_id)))
       : cotistas.results
     if (!selecionados.length) return c.json({ error: 'nenhum_cotista_selecionado' }, 400)
 
     linhasRateio = selecionados.map((cotista) => {
-      const override = overrideByCotista.get(String(cotista.id)) || overrideByCotista.get(String(cotista.cliente_id)) || overrideByCotista.get(String(cotista.socio_id))
+      const override = overrideByCotista.get(String(cotista.cotista_id))
       const percentual = override && Number.isFinite(Number(override.percentual)) && Number(override.percentual) > 0
         ? Number(override.percentual)
         : Number(cotista.percentual_sociedade || 0)
@@ -5134,8 +5136,7 @@ app.post('/api/financeiro/recibos', async c => {
         ? Number(override.valor)
         : Number(((valor * percentual) / 100).toFixed(2))
       return {
-        cliente_id: cotista.cliente_id,
-        socio_id: cotista.socio_id,
+        cotista_id: cotista.cotista_id,
         nome: cotista.nome || 'Cotista',
         percentual,
         valor: valorLinha,
@@ -5145,26 +5146,26 @@ app.post('/api/financeiro/recibos', async c => {
   }
 
   const reciboId = uuid()
-  const movimentacaoId = uuid()
+  const lancamentoId = uuid()
   const numeroRecibo = await proximoNumeroRecibo(c, beneficiarioTipo === 'colaborador' ? 'SHE' : 'REC')
   const observacoes = body.observacoes ? String(body.observacoes) : null
 
   try {
-    // 1. movimentacoes: ponto de entrada único do caixa (Share ou cliente conforme tipo_caixa).
-    await db.prepare(`INSERT INTO movimentacoes (
+    // 1. lancamentos: ponto de entrada único do caixa (Share ou cliente conforme tipo_caixa).
+    await db.prepare(`INSERT INTO lancamentos (
         id, descricao, fluxo, categoria_nome, grupo_categoria, tipo_rateio, valor_total, valor_rateado,
-        data_emissao, data_vencimento, aeronave_id, cliente_id, socio_id, colaborador_id,
+        data_emissao, data_vencimento, aeronave_id, cotista_id, colaborador_id,
         reembolsavel, reembolso_quitado, status, fornecedor_nome, observacoes, criado_por,
         pago_diretamente, tipo_caixa, pago_por, reference_type, reference_id
       ) VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', ?, ?, ?, ?, ?, ?, 'recibo', ?)`)
       .bind(
-        movimentacaoId, descricao, regra.grupo, regra.grupo, regra.rateio ? 'cliente' : null, valor, valor,
+        lancamentoId, descricao, regra.grupo, regra.grupo, regra.rateio ? 'cliente' : null, valor, valor,
         dataEmissao, body.data_vencimento || null, body.aeronave_id || null,
-        rateado ? null : (beneficiarioTipo === 'cliente' ? body.cliente_id : null), null,
+        rateado ? null : (beneficiarioTipo === 'cliente' ? body.cotista_id : null), null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
         regra.reembolsavel, nomePagador, observacoes, user.id,
         regra.pagoDiretamente, regra.caixa,
-        rateado ? null : (beneficiarioTipo === 'cliente' ? (regra.reembolsavel ? 'share' : body.cliente_id) : 'share'),
+        rateado ? null : (beneficiarioTipo === 'cliente' ? (regra.reembolsavel ? 'share' : body.cotista_id) : 'share'),
         reciboId,
       ).run()
 
@@ -5176,42 +5177,42 @@ app.post('/api/financeiro/recibos', async c => {
         for (const linha of linhasRateio) {
           const rateioId = uuid()
           await db.prepare(`INSERT INTO rateio_despesas (
-              id, movimentacoes_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
-              cliente_id, socio_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
+              id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
+              cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
               valor_total, valor_rateado, status, observacoes
             ) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
-            .bind(rateioId, movimentacaoId, body.data_vencimento || null, dataEmissao, regra.grupo,
-              linha.cliente_id, linha.socio_id, linha.pago_por, regra.pagoDiretamente, body.aeronave_id || null,
+            .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, regra.grupo,
+              linha.cotista_id, linha.pago_por, regra.pagoDiretamente, body.aeronave_id || null,
               descricao, valor, linha.valor,
               `Rateio ${linha.percentual}% — ${linha.nome}`).run()
-          await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, cliente_id, socio_id, nome, percentual, valor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-            .bind(uuid(), reciboId, rateioId, linha.cliente_id, linha.socio_id, linha.nome, linha.percentual, linha.valor).run()
+          await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, cotista_id, nome, percentual, valor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .bind(uuid(), reciboId, rateioId, linha.cotista_id, linha.nome, linha.percentual, linha.valor).run()
           rateioIdsGerados.push(rateioId)
         }
       } else {
         const rateioId = uuid()
-        const pagoPor = regra.reembolsavel ? 'share' : body.cliente_id
+        const pagoPor = regra.reembolsavel ? 'share' : body.cotista_id
         await db.prepare(`INSERT INTO rateio_despesas (
-            id, movimentacoes_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
-            cliente_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
+            id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
+            cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
             valor_total, valor_rateado, status, observacoes
           ) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
-          .bind(rateioId, movimentacaoId, body.data_vencimento || null, dataEmissao, regra.grupo,
-            body.cliente_id, pagoPor, regra.pagoDiretamente, body.aeronave_id || null, descricao,
+          .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, regra.grupo,
+            body.cotista_id, pagoPor, regra.pagoDiretamente, body.aeronave_id || null, descricao,
             valor, valor, body.observacoes || null).run()
         rateioIdsGerados.push(rateioId)
       }
     }
 
-    // 3. recibo em si — snapshot para PDF/histórico, referenciando a movimentação de origem.
+    // 3. recibo em si — snapshot para PDF/histórico, referenciando a lançamento de origem.
     const tipoRecibo = beneficiarioTipo === 'colaborador' ? 'colaborador' : (reembolsavel ? 'cliente_reembolsavel' : 'cliente_direto')
     const statusRecibo = reembolsavel ? 'aguardando_reembolso' : 'emitido'
     await db.prepare(`INSERT INTO recibos (
         id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, aeronave_id, rateado,
         nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
         valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento,
-        categoria_movimentacao_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
-        boleto_url, nf_url, movimentacao_id, criado_por
+        categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
+        boleto_url, nf_url, lancamento_id, criado_por
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
         beneficiarioTipo === 'cliente' && !rateado ? body.cliente_id : null,
@@ -5219,21 +5220,21 @@ app.post('/api/financeiro/recibos', async c => {
         body.aeronave_id || null, rateado ? 1 : 0,
         nomePagador, body.documento_pagador || null, body.endereco_pagador || null, body.cidade_pagador || null, body.uf_pagador || null,
         valor, descricao, dataEmissao, body.data_vencimento || null, body.forma_pagamento || null,
-        body.categoria_movimentacao_id || null, body.tipo_despesa || null, regra.grupo, regra.caixa, statusRecibo,
-        body.boleto_url || null, body.nf_url || null, movimentacaoId, user.id).run()
+        body.categoria_lancamento_id || null, body.tipo_despesa || null, regra.grupo, regra.caixa, statusRecibo,
+        body.boleto_url || null, body.nf_url || null, lancamentoId, user.id).run()
 
     const recibo = await db.prepare('SELECT * FROM recibos WHERE id = ?1').bind(reciboId).first()
-    return c.json({ recibo, movimentacao_id: movimentacaoId, rateio_ids: rateioIdsGerados, rateio_linhas: linhasRateio }, 201)
+    return c.json({ recibo, lancamento_id: lancamentoId, rateio_ids: rateioIdsGerados, rateio_linhas: linhasRateio }, 201)
   } catch (error: any) {
-    await db.prepare('DELETE FROM rateio_despesas WHERE movimentacoes_id = ?1').bind(movimentacaoId).run().catch(() => undefined)
-    await db.prepare('DELETE FROM movimentacoes WHERE id = ?1').bind(movimentacaoId).run().catch(() => undefined)
+    await db.prepare('DELETE FROM rateio_despesas WHERE lancamentos_id = ?1').bind(lancamentoId).run().catch(() => undefined)
+    await db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(lancamentoId).run().catch(() => undefined)
     return c.json({ error: error?.message || 'falha_ao_emitir_recibo' }, 500)
   }
 })
 
 // Cliente reembolsa a Share pelo valor que ela antecipou: fecha o ciclo de
 // DESPESAS REEMBOLSÁVEIS gerando a entrada REEMBOLSOS ENTRADAS (tipo_caixa=share) e marcando a
-// movimentação original como reembolso_quitado. Nunca aplicável a recibo rateado por holding
+// lançamento original como reembolso_quitado. Nunca aplicável a recibo rateado por holding
 // (regra: cliente com sócios não usa fluxo de reembolso com a Share).
 app.post('/api/financeiro/recibos/:id/reembolso', async c => {
   const user = await shareBrasilUser(c)
@@ -5249,17 +5250,17 @@ app.post('/api/financeiro/recibos/:id/reembolso', async c => {
   const dataReembolso = String(body.data || '').trim() || new Date().toISOString().slice(0, 10)
   const reembolsoId = uuid()
 
-  await db.prepare(`INSERT INTO movimentacoes (
+  await db.prepare(`INSERT INTO lancamentos (
       id, descricao, fluxo, categoria_nome, grupo_categoria, valor_total, valor_rateado,
       data_emissao, aeronave_id, cliente_id, status, observacoes, criado_por, tipo_caixa, reference_type, reference_id
     ) VALUES (?, ?, 'entrada', 'REEMBOLSOS ENTRADAS', 'REEMBOLSOS ENTRADAS', ?, ?, ?, ?, ?, 'pago', ?, ?, 'share', 'recibo', ?)`)
     .bind(reembolsoId, `Reembolso recibo ${recibo.numero_recibo}`, recibo.valor, recibo.valor, dataReembolso,
       recibo.aeronave_id, recibo.cliente_id, body.observacoes || null, user.id, recibo.id).run()
 
-  await db.prepare('UPDATE movimentacoes SET reembolso_quitado = 1 WHERE id = ?1').bind(recibo.movimentacao_id).run()
-  await db.prepare("UPDATE recibos SET status = 'reembolsado', movimentacao_reembolso_id = ?1 WHERE id = ?2").bind(reembolsoId, recibo.id).run()
+  await db.prepare('UPDATE lancamentos SET reembolso_quitado = 1 WHERE id = ?1').bind(recibo.lancamento_id).run()
+  await db.prepare("UPDATE recibos SET status = 'reembolsado', lancamento_reembolso_id = ?1 WHERE id = ?2").bind(reembolsoId, recibo.id).run()
 
-  return c.json({ ok: true, movimentacao_reembolso_id: reembolsoId })
+  return c.json({ ok: true, lancamento_reembolso_id: reembolsoId })
 })
 
 app.post('/api/financeiro/recibos/:id/cancelar', async c => {
@@ -5271,8 +5272,8 @@ app.post('/api/financeiro/recibos/:id/cancelar', async c => {
   if (!recibo) return c.notFound()
   if (recibo.status === 'reembolsado') return c.json({ error: 'recibo_ja_reembolsado_nao_pode_cancelar' }, 400)
   if (recibo.status === 'cancelado') return c.json({ ok: true })
-  await db.prepare("UPDATE movimentacoes SET status = 'cancelado' WHERE id = ?1").bind(recibo.movimentacao_id).run()
-  await db.prepare("UPDATE rateio_despesas SET status = 'cancelado' WHERE movimentacoes_id = ?1").bind(recibo.movimentacao_id).run()
+  await db.prepare("UPDATE lancamentos SET status = 'cancelado' WHERE id = ?1").bind(recibo.lancamento_id).run()
+  await db.prepare("UPDATE rateio_despesas SET status = 'cancelado' WHERE lancamentos_id = ?1").bind(recibo.lancamento_id).run()
   await db.prepare("UPDATE recibos SET status = 'cancelado' WHERE id = ?1").bind(recibo.id).run()
   return c.json({ ok: true })
 })
@@ -5446,8 +5447,8 @@ function normalizarCategoriaShare(linha: LinhaGenerica) {
   }
 }
 
-const CAMPOS_MOVIMENTACAO_SHARE = [
-  'descricao', 'fluxo', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'valor_total',
+const CAMPOS_LANCAMENTO_SHARE = [
+  'descricao', 'fluxo', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'cotista_id', 'valor_total',
   'data_emissao', 'data_pagamento', 'data_vencimento', 'status', 'forma_pagamento', 'conta_bancaria',
   'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'observacoes',
   'periodicidade', 'comprovante_url', 'nf_url', 'boleto_url', 'recibo_url', 'aeronave_registro',
@@ -5468,7 +5469,7 @@ app.get('/api/interno/financeiro-share/opcoes', async c => {
   })
 })
 
-app.get('/api/interno/financeiro-share/movimentacoes', async c => {
+app.get('/api/interno/financeiro-share/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = portalDb(c)
   const mes = textoOuNulo(c.req.query('mes'))
@@ -5476,7 +5477,7 @@ app.get('/api/interno/financeiro-share/movimentacoes', async c => {
   const categoriaId = textoOuNulo(c.req.query('categoria_id'))
   const status = textoOuNulo(c.req.query('status'))
 
-  const condicoes: string[] = [`COALESCE(tipo_caixa, 'share') = 'share'`, 'cliente_id IS NULL']
+  const condicoes: string[] = [`COALESCE(tipo_caixa, 'share') = 'share'`, 'cotista_id IS NULL']
   const parametros: unknown[] = []
   if (mes) {
     parametros.push(mes)
@@ -5490,11 +5491,11 @@ app.get('/api/interno/financeiro-share/movimentacoes', async c => {
     condicoes.push(`(lower(COALESCE(descricao, '')) LIKE ?${indice} OR lower(COALESCE(categoria_nome, '')) LIKE ?${indice} OR lower(COALESCE(fornecedor_nome, '')) LIKE ?${indice} OR lower(COALESCE(numero_doc, '')) LIKE ?${indice})`)
   }
 
-  const consulta = `SELECT id, descricao, fluxo, categoria_id, categoria_nome, grupo_categoria, valor_total, valor_pago_real,
+  const consulta = `SELECT id, descricao, fluxo, categoria_id, categoria_nome, grupo_categoria, cotista_id, valor_total, valor_pago_real,
       data_emissao, data_pagamento, data_vencimento, status, forma_pagamento, conta_bancaria, fornecedor_nome,
       numero_doc, numero_nf, numero_recibo, numero_boleto, observacoes, periodicidade, comprovante_url, nf_url,
       boleto_url, recibo_url, tipo_caixa, criado_em
-    FROM movimentacoes
+    FROM lancamentos
     WHERE ${condicoes.join(' AND ')}
     ORDER BY COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em) DESC, criado_em DESC
     LIMIT 500`
@@ -5531,19 +5532,19 @@ app.get('/api/interno/financeiro-share/movimentacoes', async c => {
   })
 })
 
-async function corpoMovimentacaoShare(c: Context<{ Bindings: Bindings }>) {
+async function corpoLancamentoShare(c: Context<{ Bindings: Bindings }>) {
   const corpo = await c.req.json<LinhaGenerica>().catch(() => ({} as LinhaGenerica))
   const dados: LinhaGenerica = {}
-  for (const campo of CAMPOS_MOVIMENTACAO_SHARE) {
+  for (const campo of CAMPOS_LANCAMENTO_SHARE) {
     if (!(campo in corpo)) continue
     dados[campo] = campo === 'valor_total' ? numeroOuZero(corpo[campo]) : textoOuNulo(corpo[campo])
   }
   return dados
 }
 
-app.post('/api/interno/financeiro-share/movimentacoes', async c => {
+app.post('/api/interno/financeiro-share/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const dados = await corpoMovimentacaoShare(c)
+  const dados = await corpoLancamentoShare(c)
   if (!textoOuNulo(dados.descricao)) return c.json({ error: 'descricao_obrigatoria' }, 400)
   if (!textoOuNulo(dados.categoria_id)) return c.json({ error: 'categoria_obrigatoria' }, 400)
   if (numeroOuZero(dados.valor_total) <= 0) return c.json({ error: 'valor_invalido' }, 400)
@@ -5558,29 +5559,29 @@ app.post('/api/interno/financeiro-share/movimentacoes', async c => {
   }
   const colunas = Object.keys(registro)
   await portalDb(c).prepare(
-    `INSERT INTO movimentacoes (${colunas.join(', ')}) VALUES (${colunas.map((_, indice) => `?${indice + 1}`).join(', ')})`,
+    `INSERT INTO lancamentos (${colunas.join(', ')}) VALUES (${colunas.map((_, indice) => `?${indice + 1}`).join(', ')})`,
   ).bind(...colunas.map(coluna => registro[coluna] ?? null)).run()
 
-  const criado = await portalDb(c).prepare('SELECT * FROM movimentacoes WHERE id = ?1').bind(id).first()
+  const criado = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?1').bind(id).first()
   return c.json({ lancamento: criado }, 201)
 })
 
-app.patch('/api/interno/financeiro-share/movimentacoes/:id', async c => {
+app.patch('/api/interno/financeiro-share/lancamentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const id = c.req.param('id')
-  const dados = await corpoMovimentacaoShare(c)
+  const dados = await corpoLancamentoShare(c)
   const colunas = Object.keys(dados)
   if (colunas.length === 0) return c.json({ error: 'nada_para_atualizar' }, 400)
   await portalDb(c).prepare(
-    `UPDATE movimentacoes SET ${colunas.map((coluna, indice) => `${coluna} = ?${indice + 1}`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?${colunas.length + 1}`,
+    `UPDATE lancamentos SET ${colunas.map((coluna, indice) => `${coluna} = ?${indice + 1}`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?${colunas.length + 1}`,
   ).bind(...colunas.map(coluna => dados[coluna] ?? null), id).run()
-  const atualizado = await portalDb(c).prepare('SELECT * FROM movimentacoes WHERE id = ?1').bind(id).first()
+  const atualizado = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?1').bind(id).first()
   return c.json({ lancamento: atualizado })
 })
 
-app.delete('/api/interno/financeiro-share/movimentacoes/:id', async c => {
+app.delete('/api/interno/financeiro-share/lancamentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await portalDb(c).prepare('DELETE FROM movimentacoes WHERE id = ?1').bind(c.req.param('id')).run()
+  await portalDb(c).prepare('DELETE FROM lancamentos WHERE id = ?1').bind(c.req.param('id')).run()
   return c.json({ ok: true })
 })
 
