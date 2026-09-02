@@ -4898,6 +4898,77 @@ app.post('/api/financeiro/envios-pagamento', async c => {
   return c.json({ ...row, movimentacao_id: movimentacaoId, rateio_id: rateioId }, 201)
 })
 
+// ─── Financeiro: central de e-mail ───────────────────────────────────────────
+async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS emails_enviados (
+    id TEXT PRIMARY KEY NOT NULL,
+    destinatarios TEXT NOT NULL,
+    assunto TEXT NOT NULL,
+    mensagem TEXT NOT NULL,
+    anexos TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'enviado',
+    erro TEXT,
+    enviado_por TEXT,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+}
+function emailArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean)
+  try { const parsed = JSON.parse(String(value || '[]')); return Array.isArray(parsed) ? parsed.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean) : [] } catch { return [] }
+}
+function arrayBufferBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer); let binary = ''
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, Math.min(index + 0x8000, bytes.length)))
+  return btoa(binary)
+}
+app.get('/api/interno/emails', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = portalDb(c)
+  await garantirTabelaEmails(c)
+  const [clientes, socios, recibos, relatorios, historico] = await Promise.all([
+    db.prepare("SELECT id, razao_social, email_principal, emails FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
+    db.prepare("SELECT id, nome, email_principal, cliente_id FROM hold_socios WHERE email_principal IS NOT NULL AND trim(email_principal) <> '' ORDER BY nome").all(),
+    db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM recibo_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 100").all(),
+  ])
+  const contatos: any[] = []
+  for (const row of (clientes.results as any[])) {
+    const emails = [row.email_principal, ...emailArray(row.emails)]
+    for (const email of [...new Set(emails.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))]) contatos.push({ id: `${row.id}:${email}`, nome: row.razao_social, email, tipo: 'cliente', cliente_id: row.id })
+  }
+  for (const row of (socios.results as any[])) contatos.push({ id: `socio:${row.id}`, nome: row.nome, email: String(row.email_principal).trim().toLowerCase(), tipo: 'socio', cliente_id: row.cliente_id || null })
+  const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` }))]
+  return c.json({ contatos, anexos, historico: (historico.results as any[]).map((row) => ({ ...row, destinatarios: emailArray(row.destinatarios), quantidade_anexos: emailArray(row.anexos).length })) })
+})
+app.post('/api/interno/emails', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const destinatarios = emailArray(body.destinatarios)
+  const assunto = String(body.assunto || '').trim(); const mensagem = String(body.mensagem || '').trim(); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : []
+  if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
+  if (destinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
+  if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
+  await garantirTabelaEmails(c)
+  const db = portalDb(c); const anexos: any[] = []
+  for (const id of ids.slice(0, 10)) {
+    const [prefix, rawId] = id.includes(':') ? id.split(':', 2) : ['', id]
+    const table = prefix === 'recibo' ? 'recibo_anexos' : prefix === 'relatorio' ? 'relatorio_despesa_viagem_anexos' : ''
+    if (!table) continue
+    const row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
+    if (!row) continue
+    const object = await shareBrasilBucket(c).get(row.caminho_arquivo); if (!object) continue
+    anexos.push({ filename: row.nome_arquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: row.tipo_arquivo || 'application/octet-stream' })
+  }
+  const id = uuid(); let status = 'enviado'; let erro: string | null = null
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>`, attachments: anexos }) })
+  if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, status, erro, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), status, erro, user.id).run()
+  if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
+  return c.json({ success: true, id }, 201)
+})
 // ─── Financeiro: emissão de recibos (cliente reembolsável / caixa cliente / colaborador) ──
 // Segue as regras de REGRAS_NEGOCIO_FINANCEIRO.md: toda despesa nasce em `movimentacoes`;
 // despesa de cliente (direta ou reembolsável) sempre gera `rateio_despesas`; `rateio_despesas`
