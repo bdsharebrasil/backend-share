@@ -3499,8 +3499,16 @@ async function garantirTabelaChecklist(c: Context<{ Bindings: Bindings }>) {
 
 app.get('/api/interno/agendamento/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaChecklist(c); const row = await portalDb(c).prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
-  return c.json(row ? { ...row, itens: JSON.parse(row.itens || '{}') } : null)
+  await garantirTabelaChecklist(c)
+  const row = await portalDb(c).prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
+  if (!row) return c.json(null)
+  const alertas = row.alerta_id ? await portalDb(c).prepare('SELECT alerta1, alerta2, alerta3, alerta4, alerta5, alerta6, alerta7, alerta8, alerta9, alerta10 FROM alerta_checklist WHERE id = ?').bind(row.alerta_id).first<any>() : null
+  const alertasMap = Object.fromEntries(Object.entries(alertas || {}).filter(([key, value]) => key.startsWith('alerta') && String(value || '').trim()).map(([key, value]) => [key.replace(/^alerta/, ''), String(value).trim()]))
+  return c.json({
+    ...row,
+    itens: JSON.parse(row.itens || '{}'),
+    alertas: alertasMap,
+  })
 })
 app.post('/api/interno/agendamento/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
