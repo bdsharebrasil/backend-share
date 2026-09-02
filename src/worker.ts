@@ -3174,10 +3174,10 @@ app.get('/api/interno/dashboard/financeiro', async c => {
       COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) IN ('pago', 'quitado', 'conciliado') THEN COALESCE(valor_centavos, 0) ELSE 0 END), 0) / 100.0 AS total_pago,
       SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN 1 ELSE 0 END) AS pendencias,
       SUM(CASE WHEN lower(COALESCE(status, '')) IN ('pago', 'quitado', 'conciliado') THEN 1 ELSE 0 END) AS pagamentos_confirmados
-      FROM lancamentos WHERE lower(COALESCE(tipo_caixa, 'share')) = 'share'`).first<Record<string, number>>(),
+      FROM lancamentos WHERE lower(COALESCE(caixa, 'share')) = 'share'`).first<Record<string, number>>(),
     portalDb(c).prepare(`SELECT id, descricao, status, data AS data_pagamento, ROUND(COALESCE(valor_centavos, 0) / 100.0, 2) AS valor, observacoes, criado_em
       FROM lancamentos
-      WHERE lower(COALESCE(tipo_caixa, 'share')) = 'share'
+      WHERE lower(COALESCE(caixa, 'share')) = 'share'
       ORDER BY date(data) DESC, criado_em DESC
       LIMIT 20`).all(),
   ])
