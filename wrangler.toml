@@ -16,10 +16,7 @@ id = "83a861dc2e27486e86eb23909fbb9861"
 [observability]
 enabled = true
 
-# ── R2 para armazenar PDFs, boletos, NFs, comprovantes ──────────────────────
-[[r2_buckets]]
-binding = "FILES"
-bucket_name = "nf-boletos-clients"
+
 
 # ── R2 do portal Share: avatares e documentos de colaboradores ───────────────
 [[r2_buckets]]
