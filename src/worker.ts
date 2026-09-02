@@ -5554,6 +5554,87 @@ app.get('/api/balanco', async c => {
   }
 })
 
+// ─── Financeiro Cotista (clientes, rateios e balanço) ─────────────────────────
+
+app.get('/api/interno/financeiro-cotista/dashboard', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const inicio = textoOuNulo(c.req.query('inicio'))
+  const fim = textoOuNulo(c.req.query('fim'))
+  if ((inicio && !/^\d{4}-\d{2}-\d{2}$/.test(inicio)) || (fim && !/^\d{4}-\d{2}-\d{2}$/.test(fim))) {
+    return c.json({ error: 'filtro_de_data_invalido' }, 400)
+  }
+
+  try {
+    const service = await servicoFinanceiro(c)
+    const balanco = await service.obterConsolidadoBalanco(inicio || undefined, fim || undefined)
+    const lancamentos = balanco.lancamentos.filter((item) => item.rateios.length > 0 || item.caixa.toUpperCase() !== 'SHARE')
+    const valor = (item: typeof lancamentos[number]) => item.valorCentavos
+    const saidas = lancamentos.filter((item) => item.fluxo === 'SAIDA')
+    const entradas = lancamentos.filter((item) => item.fluxo === 'ENTRADA')
+    const valorRateado = (item: typeof lancamentos[number]) => item.rateios.reduce((total, rateio) => total + rateio.valorCentavos, 0)
+    const pendentes = lancamentos.filter((item) => !['PAGO', 'QUITADO', 'CONCILIADO', 'CANCELADO'].includes(item.status.toUpperCase()))
+
+    const meses = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number }>()
+    for (const item of lancamentos) {
+      const mes = item.data.slice(0, 7)
+      const linha = meses.get(mes) ?? { mes, entradas: 0, saidas: 0, custoRateado: 0, lancamentos: 0 }
+      linha.lancamentos += 1
+      if (item.fluxo === 'ENTRADA') linha.entradas += valor(item)
+      else { linha.saidas += valor(item); linha.custoRateado += valorRateado(item) }
+      meses.set(mes, linha)
+    }
+
+    const categorias = new Map<string, { categoria: string; grupo: string; valor: number; quantidade: number }>()
+    for (const item of saidas) {
+      const categoria = item.categoria || 'SEM CATEGORIA'
+      const atual = categorias.get(categoria) ?? { categoria, grupo: item.grupoCategoria || 'SEM GRUPO', valor: 0, quantidade: 0 }
+      atual.valor += valor(item)
+      atual.quantidade += 1
+      categorias.set(categoria, atual)
+    }
+
+    const cotistas = new Map<string, { cotista: string; devido: number; pago: number; quantidade: number }>()
+    for (const item of saidas) {
+      for (const rateio of item.rateios) {
+        const atual = cotistas.get(rateio.cotista) ?? { cotista: rateio.cotista, devido: 0, pago: 0, quantidade: 0 }
+        atual.devido += rateio.valorCentavos
+        atual.quantidade += 1
+        cotistas.set(rateio.cotista, atual)
+      }
+    }
+
+    const fechamentoMensal = [...meses.values()].sort((a, b) => a.mes.localeCompare(b.mes)).map((linha) => ({
+      ...linha,
+      saldo: linha.entradas - linha.saidas,
+      mediaPorLancamento: linha.lancamentos ? Math.round(linha.saidas / linha.lancamentos) : 0,
+    }))
+    const totalSaidas = saidas.reduce((total, item) => total + valor(item), 0)
+    const totalRateado = saidas.reduce((total, item) => total + valorRateado(item), 0)
+    const mesesComMovimento = fechamentoMensal.length || 1
+
+    return c.json({
+      lancamentos,
+      saldos: balanco.saldos,
+      matrizCompensacao: balanco.matrizCompensacao,
+      holdings: balanco.holdings,
+      resumo: {
+        entradas: entradas.reduce((total, item) => total + valor(item), 0),
+        saidas: totalSaidas,
+        saldo: entradas.reduce((total, item) => total + valor(item), 0) - totalSaidas,
+        custo_rateado: totalRateado,
+        pendentes: pendentes.length,
+        media_mensal: Math.round(totalSaidas / mesesComMovimento),
+        media_lancamento: saidas.length ? Math.round(totalSaidas / saidas.length) : 0,
+      },
+      fechamento_mensal: fechamentoMensal,
+      ranking_gastos: [...categorias.values()].sort((a, b) => b.valor - a.valor).slice(0, 10),
+      ranking_cotistas: [...cotistas.values()].sort((a, b) => b.devido - a.devido).slice(0, 10),
+    })
+  } catch (error) {
+    return respostaErroFinanceiro(c, error)
+  }
+})
+
 // ─── Financeiro Share (Caixa Share) ───────────────────────────────────────────
 
 type LinhaGenerica = Record<string, unknown>
@@ -5615,7 +5696,13 @@ app.get('/api/interno/financeiro-share/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = portalDb(c)
   const mes = textoOuNulo(c.req.query('mes'))
+  const inicio = textoOuNulo(c.req.query('inicio'))
+  const fim = textoOuNulo(c.req.query('fim'))
   const busca = textoOuNulo(c.req.query('busca'))
+  if ((inicio && !/^\d{4}-\d{2}-\d{2}$/.test(inicio)) || (fim && !/^\d{4}-\d{2}-\d{2}$/.test(fim)) || (mes && !/^\d{4}-\d{2}$/.test(mes))) {
+    return c.json({ error: 'filtro_de_data_invalido' }, 400)
+  }
+
   const categoriaId = textoOuNulo(c.req.query('categoria_id'))
   const status = textoOuNulo(c.req.query('status'))
 
@@ -5625,6 +5712,9 @@ app.get('/api/interno/financeiro-share/lancamentos', async c => {
     parametros.push(mes)
     condicoes.push(`substr(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em), 1, 7) = ?${parametros.length}`)
   }
+  if (inicio) { parametros.push(inicio); condicoes.push(`date(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em)) >= date(?${parametros.length})`) }
+  if (fim) { parametros.push(fim); condicoes.push(`date(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em)) <= date(?${parametros.length})`) }
+
   if (categoriaId) { parametros.push(categoriaId); condicoes.push(`categoria_id = ?${parametros.length}`) }
   if (status) { parametros.push(status.toLowerCase()); condicoes.push(`lower(COALESCE(status, 'pendente')) = ?${parametros.length}`) }
   if (busca) {
