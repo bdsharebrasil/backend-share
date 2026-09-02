@@ -5251,6 +5251,13 @@ app.post('/api/interno/emails', async c => {
   return c.json({ success: true, id }, 201)
 })
 // ─── Financeiro: emissão de recibos (cliente reembolsável / caixa cliente / colaborador) ──
+const PAGADOR_PADRAO_RECIBO = {
+  nome: 'SHARE BRASIL SERVIÇOS AERONÁUTICOS',
+  documento: '30.868.504/0001-00',
+  endereco: 'AV. PRESIDENTE ANTÔNIO BERNARDES, 5457',
+  cidade: 'VÁRZEA GRANDE',
+  uf: 'MT',
+} as const
 // Segue as regras de REGRAS_NEGOCIO_FINANCEIRO.md: toda despesa nasce em `lancamentos`;
 // despesa de cliente (direta ou reembolsável) sempre gera `rateio_despesas`; `rateio_despesas`
 // é agnóstico a quem desembolsou (isso vive só em `lancamentos`/`tipo_caixa`); rateio entre
@@ -5377,11 +5384,12 @@ app.post('/api/financeiro/recibos', async c => {
   const reembolsavel = Boolean(body.reembolsavel) && beneficiarioTipo === 'cliente'
   const rateado = Boolean(body.rateado) && beneficiarioTipo === 'cliente'
   const descricao = String(body.descricao_servico || '').trim()
-  const nomePagador = String(body.nome_pagador || '').trim()
+    const nomePagador = PAGADOR_PADRAO_RECIBO.nome
+
   const valor = Number.parseFloat(String(body.valor))
   const dataEmissao = String(body.data_emissao || '').trim() || new Date().toISOString().slice(0, 10)
 
-  if (!nomePagador) return c.json({ error: 'nome_pagador_obrigatorio' }, 400)
+
   if (!descricao) return c.json({ error: 'descricao_obrigatoria' }, 400)
   if (!Number.isFinite(valor) || valor <= 0) return c.json({ error: 'valor_invalido' }, 400)
   if (beneficiarioTipo === 'colaborador' && !String(body.colaborador_id || '').trim()) return c.json({ error: 'colaborador_obrigatorio' }, 400)
@@ -5501,7 +5509,8 @@ app.post('/api/financeiro/recibos', async c => {
         beneficiarioTipo === 'cliente' && !rateado ? body.cliente_id : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
         body.aeronave_id || null, rateado ? 1 : 0,
-        nomePagador, body.documento_pagador || null, body.endereco_pagador || null, body.cidade_pagador || null, body.uf_pagador || null,
+                nomePagador, PAGADOR_PADRAO_RECIBO.documento, PAGADOR_PADRAO_RECIBO.endereco, PAGADOR_PADRAO_RECIBO.cidade, PAGADOR_PADRAO_RECIBO.uf,
+
         valor, descricao, dataEmissao, body.data_vencimento || null, body.forma_pagamento || null,
         body.categoria_lancamento_id || null, body.tipo_despesa || null, regra.grupo, regra.caixa, statusRecibo,
         body.boleto_url || null, body.nf_url || null, lancamentoId, user.id).run()
