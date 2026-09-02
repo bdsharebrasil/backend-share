@@ -2,7 +2,7 @@ import { Hono, Context } from 'hono'
 import { cors } from 'hono/cors'
 import { XMLParser } from 'fast-xml-parser'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { JSONRPCMessageSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -78,65 +78,11 @@ app.use('*', async (c, next) => {
   return corsMiddleware(c, next)
 })
 
-// ─── Cloudflare MCP SSE Transport ─────────────────────────────────────────────
-
-class CloudflareSseTransport {
-  readonly sessionId = crypto.randomUUID()
-  private controller: ReadableStreamDefaultController<Uint8Array> | undefined
-  private readonly encoder = new TextEncoder()
-  private closed = false
-  onclose?: () => void
-  onerror?: (error: Error) => void
-  onmessage?: (message: JSONRPCMessage) => void
-
-  constructor(private readonly requestUrl: string) {}
-
-  readonly stream = new ReadableStream<Uint8Array>({
-    start: controller => {
-      this.controller = controller
-      // AJUSTADO: Gera a rota absoluta dinamicamente baseado na origem da requisição
-      const endpointUrl = new URL(`/mcp/messages?sessionId=${this.sessionId}`, this.requestUrl).toString()
-      this.write(`event: endpoint\ndata: ${endpointUrl}\n\n`)
-    },
-    cancel: () => this.close(),
-  })
-
-  async start(): Promise<void> {}
-
-  async send(message: JSONRPCMessage): Promise<void> {
-    this.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`)
-  }
-
-  async handleMessage(message: unknown): Promise<void> {
-    const parsed = JSONRPCMessageSchema.parse(message)
-    this.onmessage?.(parsed)
-  }
-
-  async close(): Promise<void> {
-    if (this.closed) return
-    this.closed = true
-    this.controller?.close()
-    this.controller = undefined
-    this.onclose?.()
-  }
-
-  private write(frame: string): void {
-    if (this.closed || !this.controller) return
-    try {
-      this.controller.enqueue(this.encoder.encode(frame))
-    } catch (error) {
-      this.onerror?.(error instanceof Error ? error : new Error(String(error)))
-    }
-  }
-}
-
-type McpSession = { transport: CloudflareSseTransport; server: McpServer }
-const mcpSessions = new Map<string, McpSession>()
+// ─── MCP transport oficial do SDK (Cloudflare Workers) ───────────────────────
 
 function createMcpServer(db: D1Database): McpServer {
   const server = new McpServer({ name: 'Share Brasil MCP', version: '1.0.0' })
 
-  // AJUSTADO: Tool estruturada enviando as respostas de consulta para o Lovable
   server.tool(
     'executar_query_d1',
     'Executa comandos SQL de leitura e escrita no banco de dados SHARE_DB',
@@ -153,43 +99,32 @@ function createMcpServer(db: D1Database): McpServer {
       }
     },
   )
+
   return server
 }
 
-// ─── MCP Roteamento (CORS Aplicado Corretamente) ──────────────────────────────
+// ─── MCP Roteamento oficial do SDK (web-standard transport) ───────────────────
 
-app.get('/mcp', async c => {
-  const transport = new CloudflareSseTransport(c.req.url)
-  const session: McpSession = { transport, server: createMcpServer(c.env.SHARE_DB) }
-  mcpSessions.set(transport.sessionId, session)
-  transport.onclose = () => mcpSessions.delete(transport.sessionId)
-
-  try {
-    await session.server.connect(transport)
-    return new Response(transport.stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-      },
-    })
-  } catch (error) {
-    mcpSessions.delete(transport.sessionId)
-    await transport.close()
-    return c.text(`Erro ao iniciar sessão MCP: ${error instanceof Error ? error.message : String(error)}`, 500)
-  }
+app.use('/mcp', async (c, next) => {
+  const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
+  const corsMiddleware = cors({
+    origin: allowed && allowed.length > 0 ? allowed : '*',
+    allowHeaders: ['Content-Type', 'Authorization', 'mcp-session-id', 'Last-Event-ID', 'mcp-protocol-version'],
+    exposeHeaders: ['mcp-session-id', 'mcp-protocol-version'],
+    allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  })
+  return corsMiddleware(c, next)
 })
 
-app.post('/mcp/messages', async c => {
-  const sessionId = c.req.query('sessionId')
-  const session = sessionId ? mcpSessions.get(sessionId) : undefined
-  if (!session) return c.text('Sessão MCP não encontrada ou expirada', 404)
+app.all('/mcp', async c => {
+  const transport = new WebStandardStreamableHTTPServerTransport()
+  const server = createMcpServer(c.env.SHARE_DB)
 
   try {
-    await session.transport.handleMessage(await c.req.json())
-    return c.text('OK')
+    await server.connect(transport)
+    return transport.handleRequest(c.req.raw)
   } catch (error) {
-    return c.text(`Erro ao processar mensagem MCP: ${error instanceof Error ? error.message : String(error)}`, 400)
+    return c.text(`Erro ao iniciar sessão MCP: ${error instanceof Error ? error.message : String(error)}`, 500)
   }
 })
 
