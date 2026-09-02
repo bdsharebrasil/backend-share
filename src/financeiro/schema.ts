@@ -1,19 +1,16 @@
 import type { D1Database } from "@cloudflare/workers-types"
 
 export async function garantirTabelasFinanceiras(db: D1Database): Promise<void> {
-  await db.prepare("ALTER TABLE lancamentos ADD COLUMN valor_centavos INTEGER").run().catch(() => undefined)
-  await db.prepare("ALTER TABLE rateio_despesas ADD COLUMN lancamentos_id TEXT").run().catch(() => undefined)
-  await db.prepare("ALTER TABLE rateio_despesas ADD COLUMN cotista_id TEXT").run().catch(() => undefined)
-
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS rateios_cotistas (
       id TEXT PRIMARY KEY NOT NULL,
       lancamento_id TEXT NOT NULL,
       cotista TEXT NOT NULL,
-      percentual REAL NOT NULL CHECK (percentual >= 0),
+      percentual REAL NOT NULL CHECK (percentual >= 0 AND percentual <= 100),
       valor_centavos INTEGER NOT NULL CHECK (valor_centavos >= 0),
       criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (lancamento_id) REFERENCES lancamentos(id)
+      FOREIGN KEY (lancamento_id) REFERENCES lancamentos(id) ON DELETE CASCADE,
+      FOREIGN KEY (cotista) REFERENCES cotistas(id) ON UPDATE CASCADE
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS rateios_cotistas_lancamento_idx ON rateios_cotistas(lancamento_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS rateios_cotistas_cotista_idx ON rateios_cotistas(cotista)"),
