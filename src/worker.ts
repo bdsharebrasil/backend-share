@@ -4931,7 +4931,7 @@ app.get('/api/interno/emails', async c => {
     db.prepare("SELECT id, nome, email_principal, cliente_id FROM hold_socios WHERE email_principal IS NOT NULL AND trim(email_principal) <> '' ORDER BY nome").all(),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM recibo_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
-    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 100").all(),
+    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 100").all(),
   ])
   const contatos: any[] = []
   for (const row of (clientes.results as any[])) {
@@ -4965,7 +4965,7 @@ app.post('/api/interno/emails', async c => {
   const id = uuid(); let status = 'enviado'; let erro: string | null = null
   const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>`, attachments: anexos }) })
   if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, status, erro, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), status, erro, user.id).run()
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), ids.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
 })
