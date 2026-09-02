@@ -4,6 +4,7 @@ import { XMLParser } from 'fast-xml-parser'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
+import { prepararFinanceiro, normalizarLancamentoInput, FinanceValidationError } from './financeiro/LancamentoService'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -5411,6 +5412,91 @@ app.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
 })
 
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
+
+// ─── Financeiro econômico dos cotistas e holdings ─────────────────────────────
+
+async function servicoFinanceiro(c: Context<{ Bindings: Bindings }>) {
+  return prepararFinanceiro(portalDb(c))
+}
+
+function respostaErroFinanceiro(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (error instanceof FinanceValidationError) {
+    return c.json({ error: error.message, code: error.code }, 400)
+  }
+  log.error('[financeiro] falha inesperada', error)
+  return c.json({ error: 'falha_ao_processar_lancamento' }, 500)
+}
+
+app.get('/api/lancamentos/opcoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const db = portalDb(c)
+  await prepararFinanceiro(db)
+  const [categorias, contas, cotistas, holdings] = await Promise.all([
+    db.prepare('SELECT * FROM categorias_caixa_share ORDER BY grupo, nome').all().catch(() => ({ results: [] })),
+    db.prepare('SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco').all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT ca.id AS id, COALESCE(cl.razao_social, hs.nome, ca.id) AS nome,
+                       ca.aeronave_id, ca.percentual_sociedade
+                FROM cotista_aeronave ca
+                LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+                LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+                ORDER BY nome`).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT id, nome, conta_bancaria FROM holdings WHERE ativo = 1 ORDER BY nome').all().catch(() => ({ results: [] })),
+  ])
+  return c.json({
+    categorias: categorias.results || [],
+    contas_bancarias: contas.results || [],
+    cotistas: cotistas.results || [],
+    holdings: holdings.results || [],
+    pagadores: [
+      { id: 'DGA_ADM', nome: 'Administração (DGA)' },
+      { id: 'SHARE', nome: 'Share Brasil' },
+      ...(cotistas.results || []).map((cotista: any) => ({ id: String(cotista.id), nome: String(cotista.nome || cotista.id) })),
+    ],
+  })
+})
+
+app.post('/api/lancamentos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const input = normalizarLancamentoInput(body, extractSupabaseUserId(c) || undefined)
+    const service = await servicoFinanceiro(c)
+    const resultado = await service.registrarLancamento(input)
+    return c.json(resultado, 201)
+  } catch (error) {
+    return respostaErroFinanceiro(c, error)
+  }
+})
+
+app.get('/api/lancamentos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const inicio = c.req.query('inicio')
+  const fim = c.req.query('fim')
+  if ((inicio && !/^\d{4}-\d{2}-\d{2}$/.test(inicio)) || (fim && !/^\d{4}-\d{2}-\d{2}$/.test(fim))) {
+    return c.json({ error: 'filtro_de_data_invalido' }, 400)
+  }
+  try {
+    const service = await servicoFinanceiro(c)
+    return c.json({ lancamentos: await service.listarLancamentos(inicio, fim) })
+  } catch (error) {
+    return respostaErroFinanceiro(c, error)
+  }
+})
+
+app.get('/api/balanco', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const inicio = c.req.query('inicio')
+  const fim = c.req.query('fim')
+  if ((inicio && !/^\d{4}-\d{2}-\d{2}$/.test(inicio)) || (fim && !/^\d{4}-\d{2}-\d{2}$/.test(fim))) {
+    return c.json({ error: 'filtro_de_data_invalido' }, 400)
+  }
+  try {
+    const service = await servicoFinanceiro(c)
+    return c.json(await service.obterConsolidadoBalanco(inicio, fim))
+  } catch (error) {
+    return respostaErroFinanceiro(c, error)
+  }
+})
 
 // ─── Financeiro Share (Caixa Share) ───────────────────────────────────────────
 
