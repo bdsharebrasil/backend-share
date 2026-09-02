@@ -3151,14 +3151,15 @@ app.get('/api/interno/dashboard/financeiro', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const [resumo, lancamentos] = await Promise.all([
     portalDb(c).prepare(`SELECT
-      COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN COALESCE(valor_rateado, valor_total, 0) ELSE 0 END), 0) AS total_a_receber,
-      COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) = 'pago' OR data_pagamento IS NOT NULL THEN COALESCE(valor_pago_real, valor_rateado, valor_total, 0) ELSE 0 END), 0) AS total_pago,
+      COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN COALESCE(valor_centavos, 0) ELSE 0 END), 0) / 100.0 AS total_a_receber,
+      COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) IN ('pago', 'quitado', 'conciliado') THEN COALESCE(valor_centavos, 0) ELSE 0 END), 0) / 100.0 AS total_pago,
       SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN 1 ELSE 0 END) AS pendencias,
-      SUM(CASE WHEN lower(COALESCE(status, '')) = 'pago' OR data_pagamento IS NOT NULL THEN 1 ELSE 0 END) AS pagamentos_confirmados
-      FROM lancamentos`).first<Record<string, number>>(),
-    portalDb(c).prepare(`SELECT id, descricao, status, data_pagamento, COALESCE(valor_pago_real, valor_rateado, valor_total, 0) AS valor, observacoes, criado_em
+      SUM(CASE WHEN lower(COALESCE(status, '')) IN ('pago', 'quitado', 'conciliado') THEN 1 ELSE 0 END) AS pagamentos_confirmados
+      FROM lancamentos WHERE lower(COALESCE(tipo_caixa, 'share')) = 'share'`).first<Record<string, number>>(),
+    portalDb(c).prepare(`SELECT id, descricao, status, data AS data_pagamento, ROUND(COALESCE(valor_centavos, 0) / 100.0, 2) AS valor, observacoes, criado_em
       FROM lancamentos
-      ORDER BY COALESCE(data_pagamento, criado_em) DESC, criado_em DESC
+      WHERE lower(COALESCE(tipo_caixa, 'share')) = 'share'
+      ORDER BY date(data) DESC, criado_em DESC
       LIMIT 20`).all(),
   ])
   return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, lancamentos: lancamentos.results })
@@ -3362,19 +3363,19 @@ app.get('/api/interno/agendamento', async c => {
       LEFT JOIN cotista_aeronave cae ON (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id OR (se.cliente_id IS NOT NULL AND cae.cliente_id = se.cliente_id)) AND cae.aeronave_id = s.aeronave_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       WHERE date(s.data_agendada) BETWEEN ?1 AND ?2
-      ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all(),
+      ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all().catch(error => { log.error('[agendamento] lançamentos indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
       FROM aeronave a
       LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
-      ORDER BY a.matricula_registro`).all(),
-    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all(),
-    db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
+      ORDER BY a.matricula_registro`).all().catch(error => { log.error('[agendamento] aeronaves indisponíveis', error); return { results: [] } }),
+    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
+    db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all().catch(error => { log.error('[agendamento] freelancers indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
         CASE WHEN EXISTS (SELECT 1 FROM tripulacao t WHERE t.id = e.tripulacao_id) THEN 'tripulacao' ELSE 'freelancer' END AS tripulante_origem,
         e.data_inicio, e.data_fim, e.status, e.observacoes
       FROM escala_tripulacao e
       WHERE date(e.data_inicio) <= date(?2) AND date(e.data_fim) >= date(?1)
-      ORDER BY date(e.data_inicio), e.tripulacao_id`).bind(inicio, fim).all(),
+      ORDER BY date(e.data_inicio), e.tripulacao_id`).bind(inicio, fim).all().catch(error => { log.error('[agendamento] disponibilidades indisponíveis', error); return { results: [] } }),
   ])
   const tripulantes = [...tripulacao.results, ...freelancers.results]
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
