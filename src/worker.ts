@@ -5929,74 +5929,68 @@ app.get('/api/interno/financeiro-share/opcoes', async c => {
 
 app.get('/api/interno/financeiro-share/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const db = portalDb(c)
   const mes = textoOuNulo(c.req.query('mes'))
   const inicio = textoOuNulo(c.req.query('inicio'))
   const fim = textoOuNulo(c.req.query('fim'))
-  const busca = textoOuNulo(c.req.query('busca'))
+  const busca = textoOuNulo(c.req.query('busca'))?.toLowerCase() || ''
+  const categoriaId = textoOuNulo(c.req.query('categoria_id'))
+  const status = textoOuNulo(c.req.query('status'))?.toUpperCase() || ''
   if ((inicio && !/^\d{4}-\d{2}-\d{2}$/.test(inicio)) || (fim && !/^\d{4}-\d{2}-\d{2}$/.test(fim)) || (mes && !/^\d{4}-\d{2}$/.test(mes))) {
     return c.json({ error: 'filtro_de_data_invalido' }, 400)
   }
 
-  const categoriaId = textoOuNulo(c.req.query('categoria_id'))
-  const status = textoOuNulo(c.req.query('status'))
-
-  const condicoes: string[] = [`COALESCE(tipo_caixa, 'share') = 'share'`, 'cotista_id IS NULL']
-  const parametros: unknown[] = []
-  if (mes) {
-    parametros.push(mes)
-    condicoes.push(`substr(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em), 1, 7) = ?${parametros.length}`)
+  try {
+    const service = await servicoFinanceiro(c)
+    const canonicos = await service.listarLancamentos(inicio || undefined, fim || undefined)
+    const filtrados = canonicos.filter((item) => {
+      const dataMes = item.data.slice(0, 7)
+      const texto = `${item.descricao} ${item.categoria} ${item.fornecedor || ''} ${item.documento || ''}`.toLowerCase()
+      const caixaShare = item.caixa.toUpperCase() === 'SHARE' && item.rateios.length === 0
+      return caixaShare && (!mes || dataMes === mes) && (!busca || texto.includes(busca)) && (!categoriaId || item.categoria === categoriaId) && (!status || item.status.toUpperCase() === status)
+    })
+    const pago = (statusAtual: string, data: string | null) => ['PAGO', 'QUITADO', 'CONCILIADO'].includes(statusAtual.toUpperCase()) || Boolean(data)
+    const lancamentos: LinhaGenerica[] = filtrados.map((item) => ({
+      id: item.id,
+      descricao: item.descricao,
+      fluxo: item.fluxo.toLowerCase(),
+      categoria_id: null,
+      categoria_nome: item.categoria,
+      grupo_categoria: item.grupoCategoria,
+      tipo: item.tipo,
+      cotista_id: null,
+      valor_total: item.valorCentavos / 100,
+      valor_pago_real: pago(item.status, item.prazo) ? item.valorCentavos / 100 : null,
+      data_emissao: item.data,
+      data_pagamento: pago(item.status, item.prazo) ? item.data : null,
+      data_vencimento: item.prazo,
+      status: item.status.toLowerCase(),
+      forma_pagamento: null,
+      conta_bancaria: item.caixa,
+      fornecedor_nome: item.fornecedor,
+      numero_doc: item.documento,
+      numero_nf: null,
+      numero_recibo: null,
+      numero_boleto: null,
+      observacoes: item.observacoes,
+      periodicidade: null,
+      comprovante_url: null,
+      nf_url: null,
+      boleto_url: null,
+      recibo_url: null,
+      tipo_caixa: item.caixa.toLowerCase(),
+      criado_em: item.data,
+    }))
+    const valorDe = (linha: LinhaGenerica) => numeroOuZero(linha.valor_pago_real ?? linha.valor_total)
+    const ehEntrada = (linha: LinhaGenerica) => String(linha.fluxo || '').toLowerCase() === 'entrada'
+    const pendentes = lancamentos.filter((linha) => !pago(String(linha.status || ''), textoOuNulo(linha.data_pagamento)))
+    const entradas = lancamentos.filter(ehEntrada).reduce((total, linha) => total + valorDe(linha), 0)
+    const saidas = lancamentos.filter((linha) => !ehEntrada(linha)).reduce((total, linha) => total + valorDe(linha), 0)
+    const porGrupo = new Map<string, number>()
+    for (const linha of lancamentos) if (!ehEntrada(linha)) { const grupo = textoOuNulo(linha.grupo_categoria) || 'SEM GRUPO'; porGrupo.set(grupo, (porGrupo.get(grupo) || 0) + valorDe(linha)) }
+    return c.json({ lancamentos, resumo: { entradas, saidas, saldo: entradas - saidas, total_lancamentos: lancamentos.length, pendentes: pendentes.length, valor_pendente: pendentes.reduce((total, linha) => total + valorDe(linha), 0) }, grupos: [...porGrupo.entries()].map(([grupo, valor]) => ({ grupo, valor })).sort((a, b) => b.valor - a.valor) })
+  } catch (error) {
+    return respostaErroFinanceiro(c, error)
   }
-  if (inicio) { parametros.push(inicio); condicoes.push(`date(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em)) >= date(?${parametros.length})`) }
-  if (fim) { parametros.push(fim); condicoes.push(`date(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em)) <= date(?${parametros.length})`) }
-
-  if (categoriaId) { parametros.push(categoriaId); condicoes.push(`categoria_id = ?${parametros.length}`) }
-  if (status) { parametros.push(status.toLowerCase()); condicoes.push(`lower(COALESCE(status, 'pendente')) = ?${parametros.length}`) }
-  if (busca) {
-    parametros.push(`%${busca.toLowerCase()}%`)
-    const indice = parametros.length
-    condicoes.push(`(lower(COALESCE(descricao, '')) LIKE ?${indice} OR lower(COALESCE(categoria_nome, '')) LIKE ?${indice} OR lower(COALESCE(fornecedor_nome, '')) LIKE ?${indice} OR lower(COALESCE(numero_doc, '')) LIKE ?${indice})`)
-  }
-
-  const consulta = `SELECT id, descricao, fluxo, categoria_id, categoria_nome, grupo_categoria, cotista_id, valor_total, valor_pago_real,
-      data_emissao, data_pagamento, data_vencimento, status, forma_pagamento, conta_bancaria, fornecedor_nome,
-      numero_doc, numero_nf, numero_recibo, numero_boleto, tipo, observacoes, periodicidade, comprovante_url, nf_url,
-      boleto_url, recibo_url, tipo_caixa, criado_em
-    FROM lancamentos
-    WHERE ${condicoes.join(' AND ')}
-    ORDER BY COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em) DESC, criado_em DESC
-    LIMIT 500`
-
-  const { results } = await db.prepare(consulta).bind(...parametros).all<LinhaGenerica>()
-  const lancamentos = results || []
-
-  const valorDe = (linha: LinhaGenerica) => numeroOuZero(linha.valor_pago_real ?? linha.valor_total)
-  const ehEntrada = (linha: LinhaGenerica) => String(linha.fluxo || '').toLowerCase() === 'entrada'
-  const ehPago = (linha: LinhaGenerica) => ['pago', 'quitado', 'conciliado'].includes(String(linha.status || '').toLowerCase()) || Boolean(linha.data_pagamento)
-
-  const entradas = lancamentos.filter(ehEntrada).reduce((total, linha) => total + valorDe(linha), 0)
-  const saidas = lancamentos.filter(linha => !ehEntrada(linha)).reduce((total, linha) => total + valorDe(linha), 0)
-  const pendentes = lancamentos.filter(linha => !ehPago(linha))
-
-  const porGrupo = new Map<string, number>()
-  for (const linha of lancamentos) {
-    if (ehEntrada(linha)) continue
-    const grupo = textoOuNulo(linha.grupo_categoria) || 'SEM GRUPO'
-    porGrupo.set(grupo, (porGrupo.get(grupo) || 0) + valorDe(linha))
-  }
-
-  return c.json({
-    lancamentos,
-    resumo: {
-      entradas,
-      saidas,
-      saldo: entradas - saidas,
-      total_lancamentos: lancamentos.length,
-      pendentes: pendentes.length,
-      valor_pendente: pendentes.reduce((total, linha) => total + valorDe(linha), 0),
-    },
-    grupos: [...porGrupo.entries()].map(([grupo, valor]) => ({ grupo, valor })).sort((a, b) => b.valor - a.valor),
-  })
 })
 
 async function corpoLancamentoShare(c: Context<{ Bindings: Bindings }>) {
