@@ -143,7 +143,7 @@ const parser = new XMLParser({
   isArray: (name) => ['item', 'notam', 'carta', 'sol'].includes(name),
 })
 
-const AISWEB_BASE_URL = 'https://decea.mil.br'
+const AISWEB_BASE_URL = 'https://api.decea.mil.br/aisweb/'
 const WINSOCK_VALUATION_CACHE_TTL = 86_400
 const WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i
 
