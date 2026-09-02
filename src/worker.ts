@@ -2586,9 +2586,7 @@ async function portalSession(c: Context<{ Bindings: Bindings }>): Promise<Portal
 
 async function portalClientId(c: Context<{ Bindings: Bindings }>, user: PortalUser): Promise<string |null> {
   if (user.cliente_id) return user.cliente_id
-  if (!user.socio_id) return null
-  const row = await portalDb(c).prepare('SELECT cliente_id FROM hold_socios WHERE id = ?1').bind(user.socio_id).first<{ cliente_id: string | null }>()
-  return row?.cliente_id || null
+  return null
 }
 
 async function portalContext(c: Context<{ Bindings: Bindings }>, user: PortalUser) {
@@ -2918,7 +2916,7 @@ app.get('/api/interno/diario-bordo/opcoes', async c => {
   const db = portalDb(c)
   const [clientes, socios, tripulacao, freelancers, aerodromos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente, proprietario FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
-    db.prepare('SELECT id, nome, cliente_id FROM hold_socios ORDER BY nome').all(),
+    db.prepare('SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome').all(),
     db.prepare("SELECT id, canac, nome_completo, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare("SELECT id, canac, nome_completo, status, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare('SELECT id, designativo_icao AS designativo, nome FROM aerodromo ORDER BY designativo_icao').all(),
@@ -3334,7 +3332,7 @@ app.get('/api/interno/agendamento/opcoes', async c => {
   const db = portalDb(c)
   const [clientes, socios, aeronaves, vinculos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
-    db.prepare("SELECT id, nome, cliente_id FROM hold_socios ORDER BY nome").all(),
+    db.prepare("SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome").all(),
     db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
       FROM aeronave a
       LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
@@ -3433,22 +3431,22 @@ app.post('/api/interno/agendamento', async c => {
   const aeronave = await portalDb(c).prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string }>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_disponivel' }, 409)
   const cliente = body?.cliente_id ? await portalDb(c).prepare('SELECT id, codigo_cliente FROM cliente WHERE id = ?1').bind(body.cliente_id).first<{ id: string; codigo_cliente: string | null }>() : null
-  const socio = body?.socio_id ? await portalDb(c).prepare('SELECT id, cliente_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; cliente_id: string | null }>() : null
+  const socio = body?.socio_id ? await portalDb(c).prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; cotista_id: string; holding_id: string | null }>() : null
   if (!cliente && !socio) return c.json({ error: 'cliente_ou_socio_obrigatorio' }, 400)
   if (cliente && socio) return c.json({ error: 'selecione_cliente_ou_socio' }, 400)
-  const clienteId = cliente?.id || socio?.cliente_id || null
+  const clienteId = cliente?.id || null
   const clienteEmprestimoId = body?.cliente_emprestimo_id?.trim() || null
   const socioEmprestimoId = body?.socio_emprestimo_id?.trim() || null
   if (clienteEmprestimoId && socioEmprestimoId) return c.json({ error: 'selecione_apenas_um_cedente' }, 400)
   if (clienteEmprestimoId && clienteEmprestimoId === clienteId) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
   if (socioEmprestimoId && socioEmprestimoId === socio?.id) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
   const cedenteCliente = clienteEmprestimoId ? await portalDb(c).prepare('SELECT id FROM cliente WHERE id = ?1').bind(clienteEmprestimoId).first<{ id: string }>() : null
-  const cedenteSocio = socioEmprestimoId ? await portalDb(c).prepare('SELECT id, cliente_id FROM hold_socios WHERE id = ?1').bind(socioEmprestimoId).first<{ id: string; cliente_id: string | null }>() : null
+  const cedenteSocio = socioEmprestimoId ? await portalDb(c).prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(socioEmprestimoId).first<{ id: string; cotista_id: string; holding_id: string | null }>() : null
   if (clienteEmprestimoId && !cedenteCliente) return c.json({ error: 'cliente_emprestimo_nao_encontrado' }, 400)
   if (socioEmprestimoId && !cedenteSocio) return c.json({ error: 'socio_emprestimo_nao_encontrado' }, 400)
   const vinculoTitular = await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteId, socio?.id || null).first<{ codigo_cliente: string }>()
   const vinculoCedente = clienteEmprestimoId || socioEmprestimoId
-    ? await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteEmprestimoId || cedenteSocio?.cliente_id || null, socioEmprestimoId).first<{ codigo_cliente: string }>()
+    ? await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteEmprestimoId || null, socioEmprestimoId).first<{ codigo_cliente: string }>()
     : null
   const codigoCliente = (vinculoTitular?.codigo_cliente || vinculoCedente?.codigo_cliente || '').trim().toUpperCase()
   if (!codigoCliente) return c.json({ error: 'aeronave_sem_codigo_cotista' }, 409)
@@ -3675,13 +3673,13 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
     ? `SELECT ca.codigo_cliente, ca.socio_id
        FROM cotista_aeronave ca
        WHERE ca.codigo_cliente IS NOT NULL
-         AND (ca.socio_id = ?1 OR ca.cliente_id = ?2 OR EXISTS (SELECT 1 FROM hold_socios hs WHERE hs.id = ca.socio_id AND hs.cliente_id = ?2))
+         AND (ca.socio_id = ?1 OR ca.cliente_id = ?2)
        ORDER BY CASE WHEN ca.socio_id = ?1 THEN 0 WHEN ca.cliente_id = ?2 THEN 1 ELSE 2 END
        LIMIT 1`
     : `SELECT ca.codigo_cliente, ca.socio_id
        FROM cotista_aeronave ca
        WHERE ca.aeronave_id = ?3 AND ca.codigo_cliente IS NOT NULL
-         AND (ca.socio_id = ?1 OR ca.cliente_id = ?2 OR EXISTS (SELECT 1 FROM hold_socios hs WHERE hs.id = ca.socio_id AND hs.cliente_id = ?2))
+         AND (ca.socio_id = ?1 OR ca.cliente_id = ?2)
        ORDER BY CASE WHEN ca.socio_id = ?1 THEN 0 WHEN ca.cliente_id = ?2 THEN 1 ELSE 2 END
        LIMIT 1`
   const cotistaStatement = portalDb(c).prepare(cotistaQuery)
@@ -3733,7 +3731,7 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
   const aeronaveId = c.req.query('aeronave_id') || ''
   const [clientes, socios, aeronaves, fornecedores, diarios] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
-    db.prepare('SELECT s.id, s.nome, s.cliente_id, c.razao_social AS cliente_nome FROM hold_socios s LEFT JOIN cliente c ON c.id = s.cliente_id ORDER BY s.nome').all(),
+    db.prepare('SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare('SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo), nome_completo').all(),
     aeronaveId
@@ -4218,7 +4216,7 @@ app.post('/api/sharebrasil/socios/:id/documentos', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const db = portalDb(c)
   await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
-  const socio = await db.prepare('SELECT id, cliente_id FROM hold_socios WHERE id = ?1').bind(c.req.param('id')).first<{ id: string; cliente_id: string | null }>()
+  const socio = await db.prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(c.req.param('id')).first<{ id: string; cotista_id: string; holding_id: string | null }>()
   if (!socio) return c.notFound()
   const form = await c.req.formData()
   const fileValue = form.get('arquivo') as unknown
@@ -4226,10 +4224,10 @@ app.post('/api/sharebrasil/socios/:id/documentos', async c => {
   const file = fileValue as File
   try {
     const categoria = categoriaDocumentoCliente(form.get('categoria'))
-    const clientePath = socio.cliente_id || 'sem-cliente'
-    const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_cliente/${categoria}/${clientePath}/socios/${socio.id}`)
+    const holdingPath = socio.holding_id || 'sem-holding'
+    const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_holding/${categoria}/${holdingPath}/socios/${socio.id}`)
     const id = uuid()
-    await db.prepare('INSERT INTO documentos_socio (id, socio_id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, socio.id, socio.cliente_id, file.name, key, file.type || 'application/octet-stream', file.size, user.id, categoria).run()
+    await db.prepare('INSERT INTO documentos_socio (id, socio_id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, socio.id, null, file.name, key, file.type || 'application/octet-stream', file.size, user.id, categoria).run()
     return c.json({ id, arquivo_url: `/api/sharebrasil/socios/documentos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_documento_socio' }, 400)
@@ -4928,7 +4926,7 @@ app.get('/api/interno/emails', async c => {
   await garantirTabelaEmails(c)
   const [clientes, socios, recibos, relatorios, historico] = await Promise.all([
     db.prepare("SELECT id, razao_social, email_principal, emails FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
-    db.prepare("SELECT id, nome, email_principal, cliente_id FROM hold_socios WHERE email_principal IS NOT NULL AND trim(email_principal) <> '' ORDER BY nome").all(),
+    db.prepare("SELECT id, nome, email_principal, cotista_id, holding_id FROM hold_socios WHERE email_principal IS NOT NULL AND trim(email_principal) <> '' ORDER BY nome").all(),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM recibo_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 100").all(),
@@ -4938,7 +4936,7 @@ app.get('/api/interno/emails', async c => {
     const emails = [row.email_principal, ...emailArray(row.emails)]
     for (const email of [...new Set(emails.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))]) contatos.push({ id: `${row.id}:${email}`, nome: row.razao_social, email, tipo: 'cliente', cliente_id: row.id })
   }
-  for (const row of (socios.results as any[])) contatos.push({ id: `socio:${row.id}`, nome: row.nome, email: String(row.email_principal).trim().toLowerCase(), tipo: 'socio', cliente_id: row.cliente_id || null })
+  for (const row of (socios.results as any[])) contatos.push({ id: `socio:${row.id}`, nome: row.nome, email: String(row.email_principal).trim().toLowerCase(), tipo: 'socio', cotista_id: row.cotista_id, holding_id: row.holding_id || null })
   const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` }))]
   return c.json({ contatos, anexos, historico: (historico.results as any[]).map((row) => ({ ...row, destinatarios: emailArray(row.destinatarios), quantidade_anexos: emailArray(row.anexos).length })) })
 })
