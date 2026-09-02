@@ -5413,6 +5413,179 @@ app.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
 
 app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 404))
 
+// ─── Financeiro Share (Caixa Share) ───────────────────────────────────────────
+
+type LinhaGenerica = Record<string, unknown>
+
+function textoOuNulo(valor: unknown): string | null {
+  if (valor === undefined || valor === null) return null
+  const texto = String(valor).trim()
+  return texto ? texto : null
+}
+
+function numeroOuZero(valor: unknown): number {
+  const numero = Number(valor)
+  return Number.isFinite(numero) ? numero : 0
+}
+
+function escolherCampo(linha: LinhaGenerica, chaves: string[]): string | null {
+  for (const chave of chaves) {
+    const valor = textoOuNulo(linha[chave])
+    if (valor) return valor
+  }
+  return null
+}
+
+function normalizarCategoriaShare(linha: LinhaGenerica) {
+  return {
+    id: String(linha.id ?? ''),
+    nome: escolherCampo(linha, ['nome', 'categoria', 'descricao', 'categoria_nome', 'titulo']) ?? 'SEM NOME',
+    tipo: escolherCampo(linha, ['tipo', 'fluxo', 'natureza']),
+    grupo: escolherCampo(linha, ['grupo', 'grupo_categoria', 'subcategoria', 'agrupamento']),
+    classificacao: escolherCampo(linha, ['classificacao', 'frequencia', 'tipo_custo', 'periodicidade']),
+    empresa_id: escolherCampo(linha, ['empresa_id', 'id_empresa']),
+    reembolsavel: numeroOuZero(linha.reembolsavel) === 1,
+  }
+}
+
+const CAMPOS_MOVIMENTACAO_SHARE = [
+  'descricao', 'fluxo', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'valor_total',
+  'data_emissao', 'data_pagamento', 'data_vencimento', 'status', 'forma_pagamento', 'conta_bancaria',
+  'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'observacoes',
+  'periodicidade', 'comprovante_url', 'nf_url', 'boleto_url', 'recibo_url', 'aeronave_registro',
+] as const
+
+app.get('/api/interno/financeiro-share/opcoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const db = portalDb(c)
+  const [categorias, contas, empresas] = await Promise.all([
+    db.prepare('SELECT * FROM categorias_caixa_share').all<LinhaGenerica>().catch(() => ({ results: [] as LinhaGenerica[] })),
+    db.prepare('SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco').all().catch(() => ({ results: [] })),
+    db.prepare('SELECT id, razao_social, cnpj FROM empresa ORDER BY razao_social').all().catch(() => ({ results: [] })),
+  ])
+  return c.json({
+    categorias: (categorias.results || []).map(normalizarCategoriaShare).sort((a, b) => `${a.grupo}${a.nome}`.localeCompare(`${b.grupo}${b.nome}`, 'pt-BR')),
+    contas_bancarias: contas.results || [],
+    empresas: empresas.results || [],
+  })
+})
+
+app.get('/api/interno/financeiro-share/movimentacoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const db = portalDb(c)
+  const mes = textoOuNulo(c.req.query('mes'))
+  const busca = textoOuNulo(c.req.query('busca'))
+  const categoriaId = textoOuNulo(c.req.query('categoria_id'))
+  const status = textoOuNulo(c.req.query('status'))
+
+  const condicoes: string[] = [`COALESCE(tipo_caixa, 'share') = 'share'`, 'cliente_id IS NULL']
+  const parametros: unknown[] = []
+  if (mes) {
+    parametros.push(mes)
+    condicoes.push(`substr(COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em), 1, 7) = ?${parametros.length}`)
+  }
+  if (categoriaId) { parametros.push(categoriaId); condicoes.push(`categoria_id = ?${parametros.length}`) }
+  if (status) { parametros.push(status.toLowerCase()); condicoes.push(`lower(COALESCE(status, 'pendente')) = ?${parametros.length}`) }
+  if (busca) {
+    parametros.push(`%${busca.toLowerCase()}%`)
+    const indice = parametros.length
+    condicoes.push(`(lower(COALESCE(descricao, '')) LIKE ?${indice} OR lower(COALESCE(categoria_nome, '')) LIKE ?${indice} OR lower(COALESCE(fornecedor_nome, '')) LIKE ?${indice} OR lower(COALESCE(numero_doc, '')) LIKE ?${indice})`)
+  }
+
+  const consulta = `SELECT id, descricao, fluxo, categoria_id, categoria_nome, grupo_categoria, valor_total, valor_pago_real,
+      data_emissao, data_pagamento, data_vencimento, status, forma_pagamento, conta_bancaria, fornecedor_nome,
+      numero_doc, numero_nf, numero_recibo, numero_boleto, observacoes, periodicidade, comprovante_url, nf_url,
+      boleto_url, recibo_url, tipo_caixa, criado_em
+    FROM movimentacoes
+    WHERE ${condicoes.join(' AND ')}
+    ORDER BY COALESCE(data_pagamento, data_emissao, data_vencimento, criado_em) DESC, criado_em DESC
+    LIMIT 500`
+
+  const { results } = await db.prepare(consulta).bind(...parametros).all<LinhaGenerica>()
+  const lancamentos = results || []
+
+  const valorDe = (linha: LinhaGenerica) => numeroOuZero(linha.valor_pago_real ?? linha.valor_total)
+  const ehEntrada = (linha: LinhaGenerica) => String(linha.fluxo || '').toLowerCase() === 'entrada'
+  const ehPago = (linha: LinhaGenerica) => ['pago', 'quitado', 'conciliado'].includes(String(linha.status || '').toLowerCase()) || Boolean(linha.data_pagamento)
+
+  const entradas = lancamentos.filter(ehEntrada).reduce((total, linha) => total + valorDe(linha), 0)
+  const saidas = lancamentos.filter(linha => !ehEntrada(linha)).reduce((total, linha) => total + valorDe(linha), 0)
+  const pendentes = lancamentos.filter(linha => !ehPago(linha))
+
+  const porGrupo = new Map<string, number>()
+  for (const linha of lancamentos) {
+    if (ehEntrada(linha)) continue
+    const grupo = textoOuNulo(linha.grupo_categoria) || 'SEM GRUPO'
+    porGrupo.set(grupo, (porGrupo.get(grupo) || 0) + valorDe(linha))
+  }
+
+  return c.json({
+    lancamentos,
+    resumo: {
+      entradas,
+      saidas,
+      saldo: entradas - saidas,
+      total_lancamentos: lancamentos.length,
+      pendentes: pendentes.length,
+      valor_pendente: pendentes.reduce((total, linha) => total + valorDe(linha), 0),
+    },
+    grupos: [...porGrupo.entries()].map(([grupo, valor]) => ({ grupo, valor })).sort((a, b) => b.valor - a.valor),
+  })
+})
+
+async function corpoMovimentacaoShare(c: Context<{ Bindings: Bindings }>) {
+  const corpo = await c.req.json<LinhaGenerica>().catch(() => ({} as LinhaGenerica))
+  const dados: LinhaGenerica = {}
+  for (const campo of CAMPOS_MOVIMENTACAO_SHARE) {
+    if (!(campo in corpo)) continue
+    dados[campo] = campo === 'valor_total' ? numeroOuZero(corpo[campo]) : textoOuNulo(corpo[campo])
+  }
+  return dados
+}
+
+app.post('/api/interno/financeiro-share/movimentacoes', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const dados = await corpoMovimentacaoShare(c)
+  if (!textoOuNulo(dados.descricao)) return c.json({ error: 'descricao_obrigatoria' }, 400)
+  if (!textoOuNulo(dados.categoria_id)) return c.json({ error: 'categoria_obrigatoria' }, 400)
+  if (numeroOuZero(dados.valor_total) <= 0) return c.json({ error: 'valor_invalido' }, 400)
+
+  const id = crypto.randomUUID()
+  const registro: LinhaGenerica = {
+    id,
+    tipo_caixa: 'share',
+    fluxo: textoOuNulo(dados.fluxo) || 'saida',
+    status: textoOuNulo(dados.status) || (textoOuNulo(dados.data_pagamento) ? 'pago' : 'pendente'),
+    ...dados,
+  }
+  const colunas = Object.keys(registro)
+  await portalDb(c).prepare(
+    `INSERT INTO movimentacoes (${colunas.join(', ')}) VALUES (${colunas.map((_, indice) => `?${indice + 1}`).join(', ')})`,
+  ).bind(...colunas.map(coluna => registro[coluna] ?? null)).run()
+
+  const criado = await portalDb(c).prepare('SELECT * FROM movimentacoes WHERE id = ?1').bind(id).first()
+  return c.json({ lancamento: criado }, 201)
+})
+
+app.patch('/api/interno/financeiro-share/movimentacoes/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const id = c.req.param('id')
+  const dados = await corpoMovimentacaoShare(c)
+  const colunas = Object.keys(dados)
+  if (colunas.length === 0) return c.json({ error: 'nada_para_atualizar' }, 400)
+  await portalDb(c).prepare(
+    `UPDATE movimentacoes SET ${colunas.map((coluna, indice) => `${coluna} = ?${indice + 1}`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?${colunas.length + 1}`,
+  ).bind(...colunas.map(coluna => dados[coluna] ?? null), id).run()
+  const atualizado = await portalDb(c).prepare('SELECT * FROM movimentacoes WHERE id = ?1').bind(id).first()
+  return c.json({ lancamento: atualizado })
+})
+
+app.delete('/api/interno/financeiro-share/movimentacoes/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await portalDb(c).prepare('DELETE FROM movimentacoes WHERE id = ?1').bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
