@@ -26,12 +26,6 @@ bucket_name = "nf-boletos-clients"
 binding = "SHARE_FILES"
 bucket_name = "share"
 
-# ── D1 para templates de email, log de envios, short links e mensageria ────
-[[d1_databases]]
-binding = "DB"
-database_name = "share-brasil-aux"
-database_id = "b7048c06-cc46-4832-bac5-641a24ce245c"
-
 # ── D1 principal do Portal Cliente e das reservas de voo ────────────────────
 [[d1_databases]]
 binding = "SHARE_DB"

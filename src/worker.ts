@@ -14,7 +14,6 @@ type Bindings = {
   CACHE_KV: KVNamespace
   FILES: R2Bucket
   SHARE_FILES?: R2Bucket
-  DB: D1Database
   SHARE_DB: D1Database
   RESEND_API_KEY: string
   INTERNAL_TOKEN: string
@@ -1823,6 +1822,7 @@ app.get('/api/flightplan', async (c) => {
 // ─── Routes: Upload de arquivos (R2 + short link) ────────────────────────────
 
 app.post('/api/upload', async (c) => {
+  await garantirTabelasAuxiliares(c)
   if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
 
   try {
@@ -1843,7 +1843,7 @@ app.post('/api/upload', async (c) => {
     })
 
     const code = shortCode()
-    await c.env.DB.prepare('INSERT INTO short_links (code, r2_key) VALUES (?, ?)')
+    await portalDb(c).prepare('INSERT INTO short_links (code, r2_key) VALUES (?, ?)')
       .bind(code, key)
       .run()
 
@@ -1860,9 +1860,10 @@ app.post('/api/upload', async (c) => {
 // ─── Route: Servir arquivo via short link (público, sem auth) ───────────────
 
 app.get('/r/:code', async (c) => {
+  await garantirTabelasAuxiliares(c)
   const code = c.req.param('code')
   try {
-    const row = await c.env.DB.prepare('SELECT r2_key FROM short_links WHERE code = ?')
+    const row = await portalDb(c).prepare('SELECT r2_key FROM short_links WHERE code = ?')
       .bind(code)
       .first<{ r2_key: string }>()
 
@@ -1886,10 +1887,11 @@ app.get('/r/:code', async (c) => {
 // ─── Routes: Templates de email (D1) ─────────────────────────────────────────
 
 app.get('/api/templates', async (c) => {
+  await garantirTabelasAuxiliares(c)
   const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
   if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
   try {
-    const { results } = await c.env.DB.prepare(
+    const { results } = await portalDb(c).prepare(
       'SELECT id, tipo, assunto, corpo_html, created_at FROM email_templates ORDER BY tipo'
     ).all()
     return c.json(results)
@@ -1899,11 +1901,12 @@ app.get('/api/templates', async (c) => {
 })
 
 app.get('/api/template/:tipo', async (c) => {
+  await garantirTabelasAuxiliares(c)
   const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
   if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
   const tipo = c.req.param('tipo')
   try {
-    const row = await c.env.DB.prepare(
+    const row = await portalDb(c).prepare(
       'SELECT id, tipo, assunto, corpo_html FROM email_templates WHERE tipo = ? LIMIT 1'
     ).bind(tipo).first()
     return c.json(row || null)
@@ -1913,13 +1916,14 @@ app.get('/api/template/:tipo', async (c) => {
 })
 
 app.post('/api/templates', async (c) => {
+  await garantirTabelasAuxiliares(c)
   if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   try {
     const { tipo, assunto, corpo_html } = await c.req.json()
     if (!tipo || !assunto || !corpo_html) return c.json({ error: 'Campos obrigatórios faltando' }, 400)
 
     const id = uuid()
-    await c.env.DB.prepare(
+    await portalDb(c).prepare(
       'INSERT INTO email_templates (id, tipo, assunto, corpo_html) VALUES (?, ?, ?, ?)'
     ).bind(id, tipo, assunto, corpo_html).run()
 
@@ -1930,11 +1934,12 @@ app.post('/api/templates', async (c) => {
 })
 
 app.put('/api/templates/:id', async (c) => {
+  await garantirTabelasAuxiliares(c)
   if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   try {
     const id = c.req.param('id')
     const { assunto, corpo_html } = await c.req.json()
-    await c.env.DB.prepare(
+    await portalDb(c).prepare(
       'UPDATE email_templates SET assunto = ?, corpo_html = ? WHERE id = ?'
     ).bind(assunto, corpo_html, id).run()
     return c.json({ ok: true })
@@ -1950,6 +1955,7 @@ app.put('/api/templates/:id', async (c) => {
 //   2. Envio do email via POST /api/send-email → passa attachments: [{ filename, r2_key: key }]
 
 app.post('/api/send-email', async (c) => {
+  await garantirTabelasAuxiliares(c)
   const viaSupabase = await requireAuthenticatedUser(c)
   const viaInternal = !viaSupabase && (await checkInternalAuth(c))
   if (!viaSupabase && !viaInternal) return c.json({ error: 'Unauthorized' }, 401)
@@ -2012,7 +2018,7 @@ app.post('/api/send-email', async (c) => {
     const data = await resp.json()
     const status = resp.ok ? 'enviado' : 'erro'
 
-    await c.env.DB.prepare(
+    await portalDb(c).prepare(
       `INSERT INTO email_envios
          (id, tipo, reference_type, reference_id, destinatario, assunto, status, erro_mensagem, enviado_por)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -2041,12 +2047,13 @@ app.post('/api/send-email', async (c) => {
 })
 
 app.get('/api/email-envios', async (c) => {
+  await garantirTabelasAuxiliares(c)
   if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   const referenceId = c.req.query('reference_id')
   try {
     const query = referenceId
-      ? c.env.DB.prepare('SELECT * FROM email_envios WHERE reference_id = ? ORDER BY created_at DESC').bind(referenceId)
-      : c.env.DB.prepare('SELECT * FROM email_envios ORDER BY created_at DESC LIMIT 100')
+      ? portalDb(c).prepare('SELECT * FROM email_envios WHERE reference_id = ? ORDER BY created_at DESC').bind(referenceId)
+      : portalDb(c).prepare('SELECT * FROM email_envios ORDER BY created_at DESC LIMIT 100')
     const { results } = await query.all()
     return c.json(results)
   } catch (e: any) {
@@ -2057,6 +2064,8 @@ app.get('/api/email-envios', async (c) => {
 // ─── Routes: Mensageria Interna (Inbox / D1) ──────────────────────────────────
 
 // 📩 1. Enviar nova mensagem
+app.use('/api/mensagens', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
+app.use('/api/mensagens/*', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
 app.post('/api/mensagens', async (c) => {
   if (!(await requireAuthenticatedUser(c))) {
     return c.json({ error: 'Não autorizado' }, 401)
@@ -2080,7 +2089,7 @@ app.post('/api/mensagens', async (c) => {
 
     const id = uuid()
 
-    await c.env.DB.prepare(
+    await portalDb(c).prepare(
       `INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo) 
        VALUES (?, ?, ?, ?, ?)`
     )
@@ -2104,7 +2113,7 @@ app.get('/api/mensagens/inbox', async (c) => {
   if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
 
   try {
-    const { results } = await c.env.DB.prepare(
+    const { results } = await portalDb(c).prepare(
       `SELECT id, remetente_id, assunto, conteudo, lida, criado_em 
        FROM mensagens 
        WHERE destinatario_id = ? 
@@ -2130,7 +2139,7 @@ app.get('/api/mensagens/outbox', async (c) => {
   if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
 
   try {
-    const { results } = await c.env.DB.prepare(
+    const { results } = await portalDb(c).prepare(
       `SELECT id, destinatario_id, assunto, conteudo, lida, criado_em 
        FROM mensagens 
        WHERE remetente_id = ? 
@@ -2156,7 +2165,7 @@ app.get('/api/mensagens/unread-count', async (c) => {
   if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
 
   try {
-    const result = await c.env.DB.prepare(
+    const result = await portalDb(c).prepare(
       `SELECT COUNT(*) as unread FROM mensagens WHERE destinatario_id = ? AND lida = 0`
     )
       .bind(usuarioId)
@@ -2179,7 +2188,7 @@ app.get('/api/mensagens/:id', async (c) => {
   const id = c.req.param('id')
 
   try {
-    const msg = await c.env.DB.prepare(
+    const msg = await portalDb(c).prepare(
       `SELECT * FROM mensagens WHERE id = ? AND (destinatario_id = ? OR remetente_id = ?)`
     )
       .bind(id, usuarioId, usuarioId)
@@ -2190,7 +2199,7 @@ app.get('/api/mensagens/:id', async (c) => {
     // Se o usuário atual for o destinatário e a mensagem ainda não foi lida, marca como lida
     if (msg.destinatario_id === usuarioId && msg.lida === 0) {
       c.executionCtx.waitUntil(
-        c.env.DB.prepare(`UPDATE mensagens SET lida = 1 WHERE id = ?`).bind(id).run()
+        portalDb(c).prepare(`UPDATE mensagens SET lida = 1 WHERE id = ?`).bind(id).run()
       )
       msg.lida = 1
     }
@@ -2212,7 +2221,7 @@ app.delete('/api/mensagens/:id', async (c) => {
   const id = c.req.param('id')
 
   try {
-    const res = await c.env.DB.prepare(
+    const res = await portalDb(c).prepare(
       `DELETE FROM mensagens WHERE id = ? AND (destinatario_id = ? OR remetente_id = ?)`
     )
       .bind(id, usuarioId, usuarioId)
@@ -2504,7 +2513,17 @@ const PORTAL_SESSION_TTL = 8 * 60 * 60
 const PORTAL_PBKDF2_ITERATIONS = 100_000
 
 function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
-  return c.env.SHARE_DB ?? c.env.DB
+  return c.env.SHARE_DB
+}
+
+async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
+  const db = portalDb(c)
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS short_links (code TEXT PRIMARY KEY NOT NULL, r2_key TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS email_templates (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL, assunto TEXT NOT NULL, corpo_html TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS mensagens (id TEXT PRIMARY KEY NOT NULL, remetente_id TEXT NOT NULL, destinatario_id TEXT NOT NULL, assunto TEXT, conteudo TEXT NOT NULL, lida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+  ])
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
