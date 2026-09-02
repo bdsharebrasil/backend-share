@@ -5671,7 +5671,7 @@ function normalizarCategoriaShare(linha: LinhaGenerica) {
 }
 
 const CAMPOS_LANCAMENTO_SHARE = [
-  'descricao', 'fluxo', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'cotista_id', 'valor_total',
+  'descricao', 'fluxo', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'tipo', 'cotista_id', 'valor_total',
   'data_emissao', 'data_pagamento', 'data_vencimento', 'status', 'forma_pagamento', 'conta_bancaria',
   'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'observacoes',
   'periodicidade', 'comprovante_url', 'nf_url', 'boleto_url', 'recibo_url', 'aeronave_registro',
@@ -5725,7 +5725,7 @@ app.get('/api/interno/financeiro-share/lancamentos', async c => {
 
   const consulta = `SELECT id, descricao, fluxo, categoria_id, categoria_nome, grupo_categoria, cotista_id, valor_total, valor_pago_real,
       data_emissao, data_pagamento, data_vencimento, status, forma_pagamento, conta_bancaria, fornecedor_nome,
-      numero_doc, numero_nf, numero_recibo, numero_boleto, observacoes, periodicidade, comprovante_url, nf_url,
+      numero_doc, numero_nf, numero_recibo, numero_boleto, tipo, observacoes, periodicidade, comprovante_url, nf_url,
       boleto_url, recibo_url, tipo_caixa, criado_em
     FROM lancamentos
     WHERE ${condicoes.join(' AND ')}
