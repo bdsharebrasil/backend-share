@@ -3181,7 +3181,7 @@ app.get('/api/interno/dashboard/financeiro', async c => {
       ORDER BY date(data) DESC, criado_em DESC
       LIMIT 20`).all(),
   ])
-  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, lancamentos: lancamentos.results })
+  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, movimentacoes: lancamentos.results })
 })
 
 type TripulanteDisponivel = {
