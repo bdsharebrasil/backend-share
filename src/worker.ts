@@ -4282,7 +4282,7 @@ app.delete('/api/interno/aerodromos/:id', async c => {
 })
 
 async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Colaborador): Promise<boolean> {
-  const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'financeiro_master', 'gestor_master') LIMIT 1").bind(user.id).first()
+  const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'financeiro_master', 'gestor_master', 'rh_master', 'rh') LIMIT 1").bind(user.id).first()
   return Boolean(result)
 }
 
@@ -4308,9 +4308,13 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   const id = String(authData.id)
   try {
     await portalDb(c).prepare(`INSERT INTO user_profiles (id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
+    const funcao = String(body.funcao || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')
+    await portalDb(c).prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, funcao).run()
   } catch (error) {
+    await portalDb(c).prepare('DELETE FROM usuarios_funcoes WHERE user_id = ?1').bind(id).run().catch(() => undefined)
+    await portalDb(c).prepare('DELETE FROM user_profiles WHERE id = ?1').bind(id).run().catch(() => undefined)
     await fetch(`${c.env.SUPABASE_URL}/auth/v1/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}` } }).catch(() => undefined)
-    log.error('[gestao-colaborador] falha ao inserir perfil D1:', error)
+    log.error('[gestao-colaborador] falha ao inserir perfil ou função D1:', error)
     return c.json({ error: 'usuario_criado_no_supabase_mas_falha_ao_salvar_perfil_d1' }, 500)
   }
   return c.json(await portalDb(c).prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
@@ -4327,6 +4331,37 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   await portalDb(c).prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
   return c.json(await portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
+})
+
+app.get('/api/gestor/gestao-colaborador/:id/ficha', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const id = c.req.param('id')
+  const db = portalDb(c)
+  const perfil = await db.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, endereco, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
+  if (!perfil) return c.notFound()
+  const [documentos, funcoes, ferias, recebimentos, lancamentos] = await Promise.all([
+    db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(id).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT id, funcao, criado_em FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY funcao').bind(id).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(id).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, tipo, descricao, valor, data_despesa, vencimento, status, observacoes, pago_por, criado_em FROM envio_despesas WHERE tipo IN ('share', 'reembolso') AND (pago_por = ?1 OR fornecedor = ?1) ORDER BY COALESCE(data_despesa, criado_em) DESC LIMIT 200").bind(id).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, descricao, ROUND(valor_centavos / 100.0, 2) AS valor, data, status, observacoes, pago_por, criado_em FROM lancamentos WHERE pago_por = ?1 ORDER BY date(data) DESC, criado_em DESC LIMIT 200").bind(id).all().catch(() => ({ results: [] })),
+  ])
+  return c.json({ perfil, documentos: documentos.results, funcoes: funcoes.results, ferias: ferias.results, recebimentos: [...recebimentos.results, ...lancamentos.results] })
+})
+
+app.get('/api/gestor/ferias', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const inicio = c.req.query('inicio') || new Date().toISOString().slice(0, 10)
+  const db = portalDb(c)
+  const registros = await db.prepare(`SELECT f.id, f.colaborador_id, f.data_inicio, f.data_fim, f.quantidade_dias, f.status, f.observacoes, f.motivo_reprovacao, f.aprovado_em, f.criado_em, p.nome_completo, p.nome_exibicao, p.email, p.departamento, p.data_admissao
+    FROM solicitacoes_ferias f LEFT JOIN user_profiles p ON p.id = f.colaborador_id
+    ORDER BY CASE f.status WHEN 'solicitada' THEN 1 WHEN 'aprovada' THEN 2 ELSE 3 END, date(f.data_inicio), p.nome_completo`).all().catch(() => ({ results: [] }))
+  const vencidas = await db.prepare("SELECT COUNT(*) AS total FROM solicitacoes_ferias WHERE status = 'aprovada' AND date(data_fim) < date(?1)").bind(inicio).first<{ total: number }>().catch(() => ({ total: 0 }))
+  const ativas = await db.prepare("SELECT COUNT(*) AS total FROM solicitacoes_ferias WHERE status = 'aprovada' AND date(data_inicio) <= date(?1) AND date(data_fim) >= date(?1)").bind(inicio).first<{ total: number }>().catch(() => ({ total: 0 }))
+  const solicitadas = await db.prepare("SELECT COUNT(*) AS total FROM solicitacoes_ferias WHERE status = 'solicitada'").first<{ total: number }>().catch(() => ({ total: 0 }))
+  return c.json({ inicio, registros: registros.results, resumo: { ativas: Number(ativas?.total || 0), solicitadas: Number(solicitadas?.total || 0), vencidas: Number(vencidas?.total || 0) } })
 })
 
 function jsonArray(value: unknown): string {
