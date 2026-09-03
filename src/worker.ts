@@ -4423,13 +4423,13 @@ app.get('/api/sharebrasil/clientes', async c => {
   await garantirForeignKeyCotistas(c)
   await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
   const [clientes, holdings, socios, vinculos, documentos, documentosSocios, aeronaves] = await Promise.all([
-    db.prepare('SELECT * FROM cliente ORDER BY razao_social').all(),
+    db.prepare('SELECT * FROM cliente ORDER BY razao_social').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM holdings WHERE ativo = 1 ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
-    db.prepare('SELECT * FROM hold_socios ORDER BY nome').all(),
-    db.prepare('SELECT ca.*, a.matricula_registro, a.fabricante, a.modelo FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente').all(),
+    db.prepare('SELECT * FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
+    db.prepare('SELECT ca.*, a.matricula_registro, a.fabricante, a.modelo FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.aeronave_id').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM documentos_cliente ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM documentos_socio ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
-    db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
+    db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
   ])
   return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
 })
@@ -5675,18 +5675,18 @@ async function buscarCategoriasRecibo(c: Context<{ Bindings: Bindings }>) {
 app.get('/api/financeiro/recibos/opcoes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  await garantirTabelasRecibos(c)
+  await garantirTabelasRecibos(c).catch((error) => log.error('[recibos/opcoes] falha ao garantir tabelas', error))
   const db = portalDb(c)
   const [clientes, colaboradores, aeronaves, cotistas, categorias] = await Promise.all([
-    db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
-    db.prepare("SELECT id, nome_completo, nome_exibicao, nome_banco, tipo_conta, conta_numero, agencia_numero, pix FROM user_profiles WHERE lower(COALESCE(tipo_user, '')) = 'colaborador' AND lower(COALESCE(status, '')) = 'ativo' ORDER BY COALESCE(nome_exibicao, nome_completo)").all(),
-    db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
+    db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) IN ('ativo', 'active', '') ORDER BY razao_social").all().catch(() => ({ results: [] as any[] })),
+    db.prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, status FROM user_profiles WHERE lower(trim(COALESCE(tipo_user, ''))) = 'colaborador' AND (status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active')) ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
+    db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
     db.prepare(`SELECT ca.id AS cotista_id, ca.aeronave_id, ca.percentual_sociedade,
                        COALESCE(cl.razao_social, hs.nome) AS nome
                 FROM cotista_aeronave ca
                 LEFT JOIN cliente cl ON cl.id = ca.cliente_id
                 LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
-                ORDER BY ca.aeronave_id, nome`).all(),
+                ORDER BY ca.aeronave_id, nome`).all().catch(() => ({ results: [] as any[] })),
     buscarCategoriasRecibo(c),
   ])
   return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronaves.results, cotistas: cotistas.results, categorias })
@@ -5695,7 +5695,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
 app.get('/api/financeiro/recibos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  await garantirTabelasRecibos(c)
+  await garantirTabelasRecibos(c).catch((error) => log.error('[recibos] falha ao garantir tabelas', error))
   const status = c.req.query('status')
   const beneficiarioTipo = c.req.query('beneficiario_tipo')
   const clauses: string[] = []
@@ -5703,9 +5703,14 @@ app.get('/api/financeiro/recibos', async c => {
   if (status) { clauses.push('status = ?'); params.push(status) }
   if (beneficiarioTipo) { clauses.push('beneficiario_tipo = ?'); params.push(beneficiarioTipo) }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-  const stmt = portalDb(c).prepare(`SELECT * FROM recibos ${where} ORDER BY criado_em DESC LIMIT 200`)
-  const rows = params.length ? await stmt.bind(...params).all() : await stmt.all()
-  return c.json({ recibos: rows.results })
+  try {
+    const stmt = portalDb(c).prepare(`SELECT * FROM recibos ${where} ORDER BY criado_em DESC LIMIT 200`)
+    const rows = params.length ? await stmt.bind(...params).all() : await stmt.all()
+    return c.json({ recibos: rows.results })
+  } catch (error) {
+    log.error('[recibos] falha ao listar recibos', error)
+    return c.json({ recibos: [] })
+  }
 })
 
 app.get('/api/financeiro/recibos/:id', async c => {
