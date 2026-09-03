@@ -1975,7 +1975,7 @@ async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, no
 }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))
-  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}<br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
+  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(assinatura.nome || ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}<br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
 }
 
 // ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
@@ -5264,7 +5264,7 @@ async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: a
   const rows = await portalDb(c).prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
   const departamento = String(user.departamento || '').trim().toLowerCase()
   const row = (rows.results || []).find((item: any) => campoDepartamento(item, ['chave', 'key', 'codigo', 'departamento']).toLowerCase() === departamento) || (rows.results || [])[0]
-  return { nome: ASSINATURA_EMPRESA_OPERACIONAL, cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: '', logo_url: null }
+  return { nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL), cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: '', logo_url: null }
 }
 app.get('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
@@ -5279,9 +5279,10 @@ app.patch('/api/minha-assinatura', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaEmails(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const assinatura = await assinaturaOperacional(c, user)
-  await portalDb(c).prepare(`INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email, logo_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(usuario_id) DO UPDATE SET nome=excluded.nome, cargo=excluded.cargo, telefone=excluded.telefone, endereco=excluded.endereco, email=excluded.email, atualizado_em=CURRENT_TIMESTAMP`).bind(uuid(), user.id, assinatura.nome, assinatura.cargo || null, String(body.telefone || '').trim() || assinatura.telefone || null, String(body.endereco || '').trim() || assinatura.endereco || null, '', null).run()
-  return c.json(await assinaturaOperacional(c, user))
+  const nome = String(body.nome || '').trim()
+  if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
+  await portalDb(c).prepare('UPDATE user_profiles SET email_envio = ? WHERE id = ?').bind(nome, user.id).run()
+  return c.json(await assinaturaOperacional(c, { ...user, email_envio: nome }))
 })
 app.get('/api/interno/emails/contas-bancarias', async c => {
   const user = await shareBrasilUser(c)
@@ -5301,6 +5302,20 @@ app.get('/api/interno/emails/contas-bancarias', async c => {
 ${linhas.join('\n\n')}` }
   })
   return c.json({ contas })
+})
+app.patch('/api/interno/emails/contas-bancarias/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = portalDb(c); const id = c.req.param('id')
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const columns = await db.prepare("SELECT name FROM pragma_table_info('contas_bancarias')").all<any>().catch(() => ({ results: [] as any[] }))
+  const existentes = new Set((columns.results || []).map((row: any) => String(row.name)))
+  const mapeamentos: Record<string, string[]> = { banco: ['banco', 'nome_banco', 'instituicao'], agencia: ['agencia', 'agencia_numero', 'numero_agencia'], numero_conta: ['numero_conta', 'conta_numero', 'conta'], tipo_conta: ['tipo_conta', 'tipo'], cnpj: ['cnpj', 'documento'], razao_social: ['razao_social', 'empresa', 'titular'], pix: ['pix', 'chave_pix', 'pix_email'] }
+  const atualizacoes: Array<[string, any]> = []
+  for (const [campo, candidatos] of Object.entries(mapeamentos)) { if (body[campo] === undefined) continue; const coluna = candidatos.find((item) => existentes.has(item)); if (coluna) atualizacoes.push([coluna, String(body[campo] || '').trim() || null]) }
+  if (!atualizacoes.length) return c.json({ error: 'nenhum_campo_atualizavel' }, 400)
+  for (const [coluna, valor] of atualizacoes) await db.prepare(`UPDATE contas_bancarias SET ${coluna} = ? WHERE id = ?`).bind(valor, id).run()
+  return c.json({ ok: true })
 })
 app.post('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
@@ -5337,7 +5352,8 @@ app.post('/api/interno/emails', async c => {
   const arquivosLocais = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : []).filter((file): file is File => file instanceof File && !!file.size)
   for (const file of arquivosLocais.slice(0, 10)) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
   const id = uuid(); let status = 'enviado'; let erro: string | null = null
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: `${user.nome_completo} <${user.email_envio || c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(await portalDb(c).prepare('SELECT * FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first() || { nome: user.nome_completo, email: user.email_envio || user.email })}`, attachments: anexos }) })
+  const assinaturaAtual = await assinaturaOperacional(c, user)
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: anexos }) })
   if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), ids.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
