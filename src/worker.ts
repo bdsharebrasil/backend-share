@@ -5775,9 +5775,9 @@ app.post('/api/financeiro/recibos', async c => {
   const ehPagamento = body.tipo_recibo === 'pagamento' || body.beneficiario_tipo === 'fornecedor'
   const beneficiarioTipo: 'cliente' | 'colaborador' | 'fornecedor' = ehPagamento ? 'fornecedor' : body.beneficiario_tipo === 'colaborador' ? 'colaborador' : 'cliente'
   const reembolsavel = Boolean(body.reembolsavel) && beneficiarioTipo === 'cliente'
-  const rateado = Boolean(body.rateado) && beneficiarioTipo === 'cliente'
-  let descricao = String(body.descricao_servico || '').trim()
   const pagadorTipo = ehPagamento && body.pagador_tipo === 'cotista' ? 'cotista' : 'share'
+  const rateado = Boolean(body.rateado) && (beneficiarioTipo === 'cliente' || (ehPagamento && pagadorTipo === 'cotista'))
+  let descricao = String(body.descricao_servico || '').trim()
   const pagadorCotistaId = String(body.pagador_cotista_id || '').trim()
   let pagadorCotista: Record<string, any> | null = null
   if (pagadorTipo === 'cotista') {
@@ -5791,9 +5791,10 @@ app.post('/api/financeiro/recibos', async c => {
   const enderecoPagador = pagadorCotista?.endereco || PAGADOR_PADRAO_RECIBO.endereco
   const cidadePagador = pagadorCotista?.cidade || PAGADOR_PADRAO_RECIBO.cidade
   const ufPagador = pagadorCotista?.uf || PAGADOR_PADRAO_RECIBO.uf
-  const recebedorNome = String(body.recebedor_nome || '').trim()
+  let recebedorNome = String(body.recebedor_nome || '').trim()
   if (beneficiarioTipo === 'colaborador') {
     const colaborador = await db.prepare('SELECT COALESCE(NULLIF(trim(nome_exibicao), \'\'), nome_completo) AS nome, pix FROM user_profiles WHERE id = ?1').bind(String(body.colaborador_id || '').trim()).first<{ nome: string; pix: string | null }>().catch(() => null)
+    recebedorNome = colaborador?.nome || recebedorNome
     if (colaborador?.pix && !descricao.toLowerCase().includes('pix')) descricao = `${descricao} · PIX para pagamento: ${colaborador.pix}`
   }
   const clienteId = String(body.cliente_id || body.cotista_id || '').trim()
@@ -5852,9 +5853,16 @@ app.post('/api/financeiro/recibos', async c => {
     ? regraFinanceira('share', 'DESPESAS EMPRESA')
     : regraFinanceiraRecibo('cliente', reembolsavel, grupoCategoria)
 
+  const reciboId = uuid()
+  const lancamentoId = uuid()
+  const contaPagarId = beneficiarioTipo === 'cliente' || beneficiarioTipo === 'colaborador' ? uuid() : null
+  const numeroRecibo = await proximoNumeroRecibo(c, beneficiarioTipo === 'colaborador' || pagadorTipo === 'share' ? 'SHE' : String(pagadorCotista?.codigo_cliente || 'SHE'))
+  const reciboUrl = `/api/financeiro/recibos/${reciboId}/visualizacao`
+  const observacoes = body.observacoes ? String(body.observacoes) : null
+
   // Linhas de rateio: usa as informadas no formulário (permite editar % ou marcar quem pagou
   // diretamente); se não vierem, usa todos os cotistas da aeronave com o percentual_sociedade.
-  let linhasRateio: Array<{ cotista_id: string; nome: string; percentual: number; valor: number; pago_por: string | null }> = []
+  let linhasRateio: Array<{ cotista_id: string; cliente_id: string | null; socio_id: string | null; nome: string; percentual: number; valor: number; pago_por: string | null }> = []
   if (rateado) {
     const cotistas = await db.prepare(`SELECT ca.id AS cotista_id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
                                                COALESCE(cl.razao_social, hs.nome) AS nome
@@ -5881,20 +5889,17 @@ app.post('/api/financeiro/recibos', async c => {
         : Number(((valor * percentual) / 100).toFixed(2))
       return {
         cotista_id: cotista.cotista_id,
+        cliente_id: cotista.cliente_id,
+        socio_id: cotista.socio_id,
         nome: cotista.nome || 'Cotista',
         percentual,
         valor: valorLinha,
         pago_por: override?.pago_por || (reembolsavel ? 'share' : (cotista.cliente_id || cotista.socio_id)),
       }
     })
+    const totalPercentualRateio = linhasRateio.reduce((total, linha) => total + linha.percentual, 0)
+    if (Math.abs(totalPercentualRateio - 100) > 0.01) return c.json({ error: 'rateio_deve_totalizar_100' }, 400)
   }
-
-  const reciboId = uuid()
-  const lancamentoId = uuid()
-  const contaPagarId = beneficiarioTipo === 'cliente' || beneficiarioTipo === 'colaborador' ? uuid() : null
-  const numeroRecibo = await proximoNumeroRecibo(c, beneficiarioTipo === 'colaborador' || pagadorTipo === 'share' ? 'SHE' : String(pagadorCotista?.codigo_cliente || 'SHE'))
-  const reciboUrl = `/api/financeiro/recibos/${reciboId}/visualizacao`
-  const observacoes = body.observacoes ? String(body.observacoes) : null
 
   try {
     // 1. lancamentos: usa somente colunas presentes para suportar bases legadas.
@@ -5921,8 +5926,34 @@ app.post('/api/financeiro/recibos', async c => {
     // 2. rateio_despesas: sempre gerado para despesa de cliente (direta ou reembolsável),
     //    nunca para colaborador/caixa Share. Agnóstico a quem desembolsou.
     const rateioIdsGerados: string[] = []
-    if (ehPagamento && pagadorCotista) {
-      const tipoRateio = String(body.tipo_rateio || 'FIXO')
+    const tipoRateio = String(body.tipo_rateio || 'FIXO')
+    if (rateado) {
+      for (const linha of linhasRateio) {
+        const rateioId = uuid()
+        if (linha.socio_id) {
+          await db.prepare(`INSERT INTO rateio_hold (
+              id, categoria_nome, cotista_id, cotista_nome, aeronave_id, tipo_rateio, data_emissao_nf,
+              descricao_despesa, pago_por, pago_diretamente, percentual_sociedade, percentual_uso,
+              valor_total, valor_rateado, status, observacoes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
+            .bind(rateioId, categoriaNome, linha.socio_id, linha.nome, body.aeronave_id || null, tipoRateio,
+              dataEmissao, descricao, linha.pago_por, ehPagamento ? 1 : regra.pagoDiretamente, linha.percentual, linha.percentual,
+              valor, linha.valor, observacoes).run()
+        } else {
+          await db.prepare(`INSERT INTO rateio_despesas (
+              id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
+              cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
+              valor_total, valor_rateado, status, observacoes
+            ) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
+            .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, categoriaNome,
+              linha.cotista_id, linha.pago_por, ehPagamento ? 1 : regra.pagoDiretamente, body.aeronave_id || null,
+              descricao, valor, linha.valor, `Rateio ${linha.percentual}% — ${linha.nome}`).run()
+        }
+        await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, cotista_id, nome, percentual, valor) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .bind(uuid(), reciboId, rateioId, linha.cotista_id, linha.nome, linha.percentual, linha.valor).run()
+        rateioIdsGerados.push(rateioId)
+      }
+    } else if (ehPagamento && pagadorCotista) {
       const subcategorias = [body.subcategoria_1, body.subcategoria_2, body.subcategoria_3, body.subcategoria_4].map((item) => item ? String(item) : null)
       if (pagadorCotista.cliente_id) {
         const rateioId = uuid()
@@ -5937,25 +5968,7 @@ app.post('/api/financeiro/recibos', async c => {
         ).run()
         rateioIdsGerados.push(rateioId)
       }
-    }
-    if (regra.rateio) {
-      if (rateado) {
-        for (const linha of linhasRateio) {
-          const rateioId = uuid()
-          await db.prepare(`INSERT INTO rateio_despesas (
-              id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
-              cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
-              valor_total, valor_rateado, status, observacoes
-            ) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
-            .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, regra.grupo,
-              linha.cotista_id, linha.pago_por, regra.pagoDiretamente, body.aeronave_id || null,
-              descricao, valor, linha.valor,
-              `Rateio ${linha.percentual}% — ${linha.nome}`).run()
-          await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, cotista_id, nome, percentual, valor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-            .bind(uuid(), reciboId, rateioId, linha.cotista_id, linha.nome, linha.percentual, linha.valor).run()
-          rateioIdsGerados.push(rateioId)
-        }
-      } else {
+    } else if (regra.rateio) {
         const rateioId = uuid()
         const pagoPor = regra.reembolsavel ? 'share' : body.cotista_id
         await db.prepare(`INSERT INTO rateio_despesas (
@@ -5967,7 +5980,6 @@ app.post('/api/financeiro/recibos', async c => {
             body.cotista_id, pagoPor, regra.pagoDiretamente, body.aeronave_id || null, descricao,
             valor, valor, body.observacoes || null).run()
         rateioIdsGerados.push(rateioId)
-      }
     }
 
     // 3. recibo em si — snapshot para PDF/histórico, referenciando a lançamento de origem.
@@ -5983,7 +5995,7 @@ app.post('/api/financeiro/recibos', async c => {
       .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
         beneficiarioTipo === 'cliente' && !rateado ? body.cliente_id : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
-        ehPagamento ? recebedorNome : null, body.aeronave_id || null, rateado ? 1 : 0,
+        (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, body.aeronave_id || null, rateado ? 1 : 0,
         nomePagador, documentoPagador, enderecoPagador, cidadePagador, ufPagador,
         valor, descricao, dataEmissao, body.data_vencimento || null, ehPagamento ? body.forma_pagamento || null : null,
         body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
@@ -6020,7 +6032,7 @@ app.get('/api/financeiro/recibos/:id/visualizacao', async c => {
   if (!recibo) return c.notFound()
   const dinheiro = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(recibo.valor || 0))
   const esc = (value: unknown) => escapeHtml(String(value || '—'))
-  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:120px;height:auto}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">Emissor</p><b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06<br>Av. Presidente Arthur Bernardes, 1457<br>Várzea Grande - 78125-100</div><div><p class="label">Pagador</p><b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div><div class="details"><p class="label">Dados do recibo</p>Categoria: ${esc(recibo.grupo_categoria)}<br>Periodicidade: ${esc(recibo.periodicidade)} · Tipo de rateio: ${esc(recibo.tipo_rateio)}<br>${[recibo.subcategoria_1, recibo.subcategoria_2, recibo.subcategoria_3, recibo.subcategoria_4].filter(Boolean).map(esc).join(' · ') || 'Sem subcategoria'}</div></body></html>`)
+  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Emissor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>Destinatário do pagamento` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06<br>Av. Presidente Arthur Bernardes, 1457<br>Várzea Grande - 78125-100`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : `<b>${esc(recibo.recebedor_nome || recibo.nome_pagador)}</b>`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div></body></html>`)
 })
 
 // Cliente reembolsa a Share pelo valor que ela antecipou: fecha o ciclo de
