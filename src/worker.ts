@@ -6039,6 +6039,137 @@ app.delete('/api/interno/financeiro-share/lancamentos/:id', async c => {
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
+// ─── Contas a pagar / a receber ──────────────────────────────────────────────
+
+async function garantirTabelaContas(c: Context<{ Bindings: Bindings }>): Promise<void> {
+  const db = portalDb(c)
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS contas_apagar (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, data_pagamento TEXT, banco_pagamento TEXT, comprovante_pagamento_url TEXT, lancamento_id TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS contas_areceber (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, nf_saida_id TEXT, data_recebimento TEXT, banco_recebimento TEXT, comprovante_recebimento_url TEXT, lancamento_id TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+  ])
+}
+
+function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {
+  return {
+    id: linha.id,
+    dataVencimento: linha.data_vencimento,
+    valor: linha.valor,
+    categoriaId: linha.categoria_id,
+    categoriaNome: linha.categoria_nome,
+    descricao: linha.descricao,
+    criadoPor: linha.criado_por,
+    aeronaveId: linha.aeronave_id,
+    fornecedorId: linha.fornecedor_id,
+    cotistaId: linha.cotista_id,
+    boletoUrl: linha.boleto_url,
+    nfUrl: linha.nf_url,
+    dataPagamento: linha.data_pagamento,
+    bancoPagamento: linha.banco_pagamento,
+    comprovantePagamentoUrl: linha.comprovante_pagamento_url,
+    lancamentoId: linha.lancamento_id,
+    status: linha.status,
+    criadoEm: linha.criado_em,
+    atualizadoEm: linha.atualizado_em,
+  }
+}
+
+function mapearContaAReceber(linha: LinhaGenerica): LinhaGenerica {
+  return {
+    id: linha.id,
+    dataVencimento: linha.data_vencimento,
+    valor: linha.valor,
+    categoriaId: linha.categoria_id,
+    categoriaNome: linha.categoria_nome,
+    descricao: linha.descricao,
+    criadoPor: linha.criado_por,
+    aeronaveId: linha.aeronave_id,
+    fornecedorId: linha.fornecedor_id,
+    cotistaId: linha.cotista_id,
+    boletoUrl: linha.boleto_url,
+    nfUrl: linha.nf_url,
+    nfSaidaId: linha.nf_saida_id,
+    dataRecebimento: linha.data_recebimento,
+    bancoRecebimento: linha.banco_recebimento,
+    comprovanteRecebimentoUrl: linha.comprovante_recebimento_url,
+    lancamentoId: linha.lancamento_id,
+    status: linha.status,
+    criadoEm: linha.criado_em,
+    atualizadoEm: linha.atualizado_em,
+  }
+}
+
+app.get('/api/contas-apagar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaContas(c)
+  const db = portalDb(c)
+  const status = textoOuNulo(c.req.query('status'))
+  const vencidasAte = textoOuNulo(c.req.query('vencidasAte'))
+  const fornecedorId = textoOuNulo(c.req.query('fornecedorId'))
+  const condicoes: string[] = []
+  const valores: unknown[] = []
+  if (status) { condicoes.push('UPPER(status) = ?'); valores.push(status.toUpperCase()) }
+  if (fornecedorId) { condicoes.push('fornecedor_id = ?'); valores.push(fornecedorId) }
+  if (vencidasAte) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(vencidasAte)) return c.json({ error: 'filtro_de_data_invalido' }, 400)
+    condicoes.push("UPPER(status) NOT IN ('PAGO','CANCELADO') AND date(data_vencimento) <= date(?)")
+    valores.push(vencidasAte)
+  }
+  const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : ''
+  const rows = await db.prepare(`SELECT * FROM contas_apagar ${where} ORDER BY data_vencimento ASC LIMIT 500`).bind(...valores).all<LinhaGenerica>()
+  return c.json((rows.results || []).map(mapearContaAPagar))
+})
+
+app.post('/api/contas-apagar/:id/dar-baixa', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaContas(c)
+  const id = c.req.param('id')
+  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+  const dataPagamento = textoOuNulo(body.dataPagamento)
+  const bancoPagamento = textoOuNulo(body.bancoPagamento)
+  const comprovanteUrl = textoOuNulo(body.comprovantePagamentoUrl)
+  if (!dataPagamento) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
+  const db = portalDb(c)
+  await db.prepare(`UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataPagamento, bancoPagamento, comprovanteUrl, id).run()
+  const row = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?1').bind(id).first<LinhaGenerica>()
+  return row ? c.json(mapearContaAPagar(row)) : c.json({ error: 'nao_encontrado' }, 404)
+})
+
+app.get('/api/contas-areceber', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaContas(c)
+  const db = portalDb(c)
+  const status = textoOuNulo(c.req.query('status'))
+  const vencidasAte = textoOuNulo(c.req.query('vencidasAte'))
+  const cotistaId = textoOuNulo(c.req.query('cotistaId'))
+  const condicoes: string[] = []
+  const valores: unknown[] = []
+  if (status) { condicoes.push('UPPER(status) = ?'); valores.push(status.toUpperCase()) }
+  if (cotistaId) { condicoes.push('cotista_id = ?'); valores.push(cotistaId) }
+  if (vencidasAte) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(vencidasAte)) return c.json({ error: 'filtro_de_data_invalido' }, 400)
+    condicoes.push("UPPER(status) NOT IN ('PAGO','CANCELADO') AND date(data_vencimento) <= date(?)")
+    valores.push(vencidasAte)
+  }
+  const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : ''
+  const rows = await db.prepare(`SELECT * FROM contas_areceber ${where} ORDER BY data_vencimento ASC LIMIT 500`).bind(...valores).all<LinhaGenerica>()
+  return c.json((rows.results || []).map(mapearContaAReceber))
+})
+
+app.post('/api/contas-areceber/:id/dar-baixa', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaContas(c)
+  const id = c.req.param('id')
+  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+  const dataRecebimento = textoOuNulo(body.dataRecebimento)
+  const bancoRecebimento = textoOuNulo(body.bancoRecebimento)
+  const comprovanteUrl = textoOuNulo(body.comprovanteRecebimentoUrl)
+  if (!dataRecebimento) return c.json({ error: 'data_recebimento_obrigatoria' }, 400)
+  const db = portalDb(c)
+  await db.prepare(`UPDATE contas_areceber SET status = 'PAGO', data_recebimento = ?, banco_recebimento = ?, comprovante_recebimento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, bancoRecebimento, comprovanteUrl, id).run()
+  const row = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?1').bind(id).first<LinhaGenerica>()
+  return row ? c.json(mapearContaAReceber(row)) : c.json({ error: 'nao_encontrado' }, 404)
+})
+
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
 const WORKER_URL = 'https://api-workers.sharebrasil.workers.dev'
 
