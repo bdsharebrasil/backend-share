@@ -5843,19 +5843,23 @@ app.post('/api/financeiro/recibos', async c => {
   const observacoes = body.observacoes ? String(body.observacoes) : null
 
   try {
-    // 1. lancamentos: ponto de entrada único do caixa (Share ou cliente conforme tipo_caixa).
-    await db.prepare(`INSERT INTO lancamentos (
-        id, aeronave_id, data, descricao, documento, fornecedor, categoria, grupo_categoria, tipo,
-        prazo, fluxo, valor_centavos, pago_por, caixa, pago_diretamente, reembolsavel,
-        reembolso_quitado, status, observacoes, criado_por
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SAIDA', ?, ?, ?, ?, ?, 0, 'PENDENTE', ?, ?)`)
-      .bind(
-        lancamentoId, body.aeronave_id || null, dataEmissao, descricao,
-        body.numero_documento_anexo || null, ehPagamento ? recebedorNome : null, categoriaNome,
-        regra.grupo, tipoDespesa || (ehPagamento ? 'PAGAMENTO' : 'DESPESA'), body.data_vencimento || null,
-        valorCentavos, rateado ? null : (beneficiarioTipo === 'cliente' ? (reembolsavel ? 'SHARE' : clienteId) : 'SHARE'),
-        regra.caixa, regra.pagoDiretamente, regra.reembolsavel, observacoes, user.id,
-      ).run()
+    // 1. lancamentos: usa somente colunas presentes para suportar bases legadas.
+    const lancamentosColunas = await db.prepare("SELECT name FROM pragma_table_info('lancamentos')").all<{ name: string }>()
+    const lancamentoDados: Record<string, unknown> = {
+      id: lancamentoId, aeronave_id: body.aeronave_id || null, data: dataEmissao, data_emissao: dataEmissao,
+      descricao, documento: body.numero_documento_anexo || null, numero_doc: body.numero_documento_anexo || null,
+      fornecedor: ehPagamento ? recebedorNome : null, fornecedor_nome: ehPagamento ? recebedorNome : null,
+      categoria: categoriaNome, categoria_nome: categoriaNome, grupo_categoria: regra.grupo,
+      tipo: tipoDespesa || (ehPagamento ? 'PAGAMENTO' : 'DESPESA'), prazo: body.data_vencimento || null,
+      data_vencimento: body.data_vencimento || null, fluxo: 'SAIDA', valor_centavos: valorCentavos,
+      valor_total: valor, pago_por: rateado ? null : (beneficiarioTipo === 'cliente' ? (reembolsavel ? 'SHARE' : clienteId) : 'SHARE'),
+      caixa: regra.caixa, tipo_caixa: regra.caixa, pago_diretamente: regra.pagoDiretamente,
+      reembolsavel: regra.reembolsavel, reembolso_quitado: 0, status: 'PENDENTE', observacoes, criado_por: user.id,
+    }
+    const colunasLancamento = new Set((lancamentosColunas.results || []).map((row) => String(row.name)))
+    const nomesLancamento = Object.keys(lancamentoDados).filter((coluna) => colunasLancamento.has(coluna))
+    if (!colunasLancamento.has('id') || !nomesLancamento.length) throw new Error('schema_lancamentos_incompativel')
+    await db.prepare(`INSERT INTO lancamentos (${nomesLancamento.join(',')}) VALUES (${nomesLancamento.map(() => '?').join(',')})`).bind(...nomesLancamento.map((coluna) => lancamentoDados[coluna])).run()
 
     // 2. rateio_despesas: sempre gerado para despesa de cliente (direta ou reembolsável),
     //    nunca para colaborador/caixa Share. Agnóstico a quem desembolsou.
@@ -5923,6 +5927,7 @@ app.post('/api/financeiro/recibos', async c => {
     const recibo = await db.prepare('SELECT * FROM recibos WHERE id = ?1').bind(reciboId).first()
     return c.json({ recibo, lancamento_id: lancamentoId, rateio_ids: rateioIdsGerados, rateio_linhas: linhasRateio }, 201)
   } catch (error: any) {
+    log.error('[recibos] falha ao emitir recibo', { beneficiario_tipo: beneficiarioTipo, error: error?.message || String(error) })
     if (contaPagarId) await db.prepare('DELETE FROM contas_apagar WHERE id = ?1').bind(contaPagarId).run().catch(() => undefined)
     await db.prepare('DELETE FROM rateio_despesas WHERE lancamentos_id = ?1').bind(lancamentoId).run().catch(() => undefined)
     await db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(lancamentoId).run().catch(() => undefined)
