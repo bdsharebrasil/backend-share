@@ -5,6 +5,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
 import { prepararFinanceiro, normalizarLancamentoInput, FinanceValidationError } from './financeiro/LancamentoService'
+import logoShareBytes from './assets/share-signature-logo.png'
+
+const SIGNATURE_LOGO_CID = 'share-brasil-signature-logo'
+const SIGNATURE_LOGO_BASE64 = arrayBufferBase64(logoShareBytes)
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1975,9 +1979,11 @@ async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, no
 }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))
-  const telefone = assinatura.telefone ? `<tr><td style="padding:1px 6px 1px 0;width:16px;font-size:14px;line-height:16px">&#9742;</td><td style="padding:1px 0;line-height:16px">${esc(assinatura.telefone)}</td></tr>` : ''
+  const logoUrl = String(assinatura.logo_url || '').trim()
+  const logoSrc = /^https?:\/\//i.test(logoUrl) ? esc(logoUrl) : `cid:${SIGNATURE_LOGO_CID}`
+  const telefone = assinatura.telefone ? `<tr><td aria-hidden="true" style="padding:1px 6px 1px 0;width:14px;font-size:12px;line-height:14px;text-align:center">&#128241;&#65038;</td><td style="padding:1px 0;line-height:14px">${esc(assinatura.telefone)}</td></tr>` : ''
   const endereco = assinatura.endereco ? `<tr><td style="padding:1px 6px 1px 0;width:16px;font-size:14px;line-height:16px">&#8962;</td><td style="padding:1px 0;color:#333;font-size:11px;line-height:14px">${esc(assinatura.endereco)}</td></tr>` : ''
-  const logo = assinatura.logo_url ? `<td style="padding:0 12px 0 0;vertical-align:middle"><img src="${esc(assinatura.logo_url)}" alt="Share Brasil" width="116" style="display:block;width:116px;height:auto;border:0"></td>` : ''
+  const logo = `<td style="padding:0 12px 0 0;vertical-align:middle"><img src="${logoSrc}" alt="Share Brasil" width="116" style="display:block;width:116px;height:auto;border:0"></td>`
   return `<br><br><table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;color:#333"><tr>${logo}<td style="padding:0;vertical-align:middle;font-size:13px;line-height:16px"><strong style="display:block;font-size:16px;line-height:19px;color:#111">${esc(assinatura.nome || ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? `<span style="display:block;font-size:10px;line-height:13px;color:#333">${esc(assinatura.cargo)}</span>` : ''}<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12px;color:#333;line-height:16px">${telefone}${endereco}</table></td></tr></table>`
 }
 
@@ -4658,10 +4664,10 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   if (!creator || !await isColaboradorManager(c, creator)) return c.json({ error: 'permissao_necessaria' }, 403)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const email = String(body.email || '').trim().toLowerCase()
-  const emailEnvio = await gerarEmailEnvioColaborador(c, nome)
   const senha = String(body.senha || '')
   const nome = String(body.nome_completo || '').trim()
   if (!email || !/^\S+@\S+\.\S+$/.test(email) || senha.length < 6 || !nome) return c.json({ error: 'nome_email_e_senha_validos_sao_obrigatorios' }, 400)
+  const emailEnvio = await gerarEmailEnvioColaborador(c, nome)
   if (!c.env.SUPABASE_URL || !c.env.SUPABASE_SERVICE_ROLE_KEY) return c.json({ error: 'supabase_admin_nao_configurado' }, 503)
   const authResponse = await fetch(`${c.env.SUPABASE_URL}/auth/v1/admin/users`, { method: 'POST', headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: senha, email_confirm: true, user_metadata: { nome_completo: nome, tipo_user: 'colaborador' } }) })
   const authData = await authResponse.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
@@ -5554,7 +5560,9 @@ app.post('/api/interno/emails', async c => {
   for (const file of arquivosLocais.slice(0, 10)) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
   const id = uuid(); let status = 'enviado'; let erro: string | null = null
   const assinaturaAtual = await assinaturaOperacional(c, user)
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: anexos }) })
+  const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
+  const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
   if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), ids.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
