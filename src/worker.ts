@@ -4406,7 +4406,7 @@ app.delete('/api/sharebrasil/contatos/:id', async c => {
 
 async function garantirForeignKeyCotistas(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
-  const foreignKeys = await db.prepare("SELECT column_name, foreign_table_name FROM pragma_foreign_key_list('hold_socios')").all<any>().catch(() => ({ results: [] as any[] }))
+  const foreignKeys = await db.prepare("SELECT \"from\" AS column_name, \"table\" AS foreign_table_name FROM pragma_foreign_key_list('hold_socios')").all<any>().catch(() => ({ results: [] as any[] }))
   if (!(foreignKeys.results || []).some((row: any) => row.column_name === 'cotista_id' && row.foreign_table_name === 'cotista_aeronave')) return
   await db.prepare(`CREATE TABLE IF NOT EXISTS hold_socios_corrigida (id TEXT PRIMARY KEY NOT NULL, cotista_id TEXT, nome TEXT NOT NULL, cpf TEXT NOT NULL, email_principal TEXT, emails TEXT NOT NULL DEFAULT '[]', endereco TEXT, cidade TEXT, uf TEXT, contato_financeiro TEXT, telefone_financeiro TEXT, telefone TEXT, observacoes TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, holding_id TEXT NOT NULL REFERENCES holdings(id))`).run()
   await db.prepare(`INSERT OR IGNORE INTO hold_socios_corrigida SELECT id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, criado_em, atualizado_em, holding_id FROM hold_socios`).run()
@@ -4419,17 +4419,51 @@ app.get('/api/sharebrasil/clientes', async c => {
   const db = portalDb(c)
   await garantirForeignKeyCotistas(c)
   await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
-  const [clientes, socios, vinculos, documentos, documentosSocios, aeronaves] = await Promise.all([
+  const [clientes, holdings, socios, vinculos, documentos, documentosSocios, aeronaves] = await Promise.all([
     db.prepare('SELECT * FROM cliente ORDER BY razao_social').all(),
+    db.prepare('SELECT * FROM holdings WHERE ativo = 1 ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT ca.*, a.matricula_registro, a.fabricante, a.modelo FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente').all(),
     db.prepare('SELECT * FROM documentos_cliente ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM documentos_socio ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
+  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
 })
 
+app.post('/api/sharebrasil/holdings', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const nome = String(body.nome || '').trim()
+  if (!nome) return c.json({ error: 'nome_holding_obrigatorio' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO holdings (id, nome, conta_bancaria, ativo) VALUES (?, ?, ?, 1)').bind(id, nome, body.conta_bancaria || null).run()
+  return c.json({ id, nome }, 201)
+})
+app.post('/api/sharebrasil/holdings/:id/socios', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const nome = String(body.nome || '').trim(); const cpf = String(body.cpf || '').trim()
+  if (!nome || !cpf) return c.json({ error: 'nome_e_cpf_obrigatorios' }, 400)
+  const holding = await portalDb(c).prepare('SELECT id FROM holdings WHERE id = ?1 AND ativo = 1').bind(c.req.param('id')).first()
+  if (!holding) return c.notFound()
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO hold_socios (id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, holding_id) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, nome, cpf, body.email_principal || null, JSON.stringify(body.emails || []), body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone || null, body.observacoes || null, c.req.param('id')).run()
+  return c.json({ id, holding_id: c.req.param('id'), nome }, 201)
+})
+app.post('/api/sharebrasil/socios/:id/aeronaves', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<{ aeronave_id?: string; percentual_sociedade?: number }>().catch(() => ({} as any))
+  const percentual = Number(body.percentual_sociedade)
+  if (!body.aeronave_id) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+  if (!Number.isFinite(percentual) || percentual < 0 || percentual > 100) return c.json({ error: 'percentual_invalido' }, 400)
+  const id = uuid()
+  await portalDb(c).prepare('INSERT INTO cotista_aeronave (id, socio_id, aeronave_id, percentual_sociedade) VALUES (?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, percentual).run()
+  return c.json({ id }, 201)
+})
 app.post('/api/sharebrasil/clientes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
