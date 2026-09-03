@@ -5880,12 +5880,13 @@ app.get('/api/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const inicio = c.req.query('inicio')
   const fim = c.req.query('fim')
+  const caixa = c.req.query('caixa')
   if ((inicio && !/^\d{4}-\d{2}-\d{2}$/.test(inicio)) || (fim && !/^\d{4}-\d{2}-\d{2}$/.test(fim))) {
     return c.json({ error: 'filtro_de_data_invalido' }, 400)
   }
   try {
     const service = await servicoFinanceiro(c)
-    return c.json({ lancamentos: await service.listarLancamentos(inicio, fim) })
+    return c.json({ lancamentos: await service.listarLancamentos(inicio, fim, caixa || undefined) })
   } catch (error) {
     return respostaErroFinanceiro(c, error)
   }
