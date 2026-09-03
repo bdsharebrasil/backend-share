@@ -5708,6 +5708,7 @@ const CATEGORIA_SHARE_NF_DIARIAS = 'b5143aad-88ed-4649-9f17-3ff15904bda2'
 const CATEGORIA_SHARE_NF_ADM_PILOTAGEM = '643fd58f-ae2f-4269-9d5a-93345d613fb9'
 const CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM = '2874b45b-a3bb-4bec-8f7e-74b328f8693c'
 const CATEGORIA_SHARE_NF_ADM = '352095f3-a97a-4539-ad1a-b1471e577583'
+const CATEGORIA_CLIENTE_NF_SAIDA_NOME = 'ADM SHARE BRASIL ADM SHARE - RECIBO ADM SHARE - N.F'
 async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
   const db=portalDb(c)
   await db.prepare(`CREATE TABLE IF NOT EXISTS notas_fiscais_saida (id TEXT PRIMARY KEY NOT NULL, numero TEXT NOT NULL, cotista_aeronave_id TEXT NOT NULL, aeronave_id TEXT, cliente_id TEXT, socio_id TEXT, categoria_id TEXT, categoria TEXT, data_criacao TEXT NOT NULL, data_vencimento TEXT, valor REAL NOT NULL, descricao TEXT, status TEXT NOT NULL DEFAULT 'pendente', arquivo_pdf_url TEXT, contas_areceber_id TEXT, lancamento_id TEXT, criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
@@ -5726,16 +5727,24 @@ async function contextoNfSaida(c: Context<{ Bindings: Bindings }>, cotistaId: st
 }
 async function gerarFinanceiroNfSaida(c: Context<{ Bindings: Bindings }>, ctx:any, body:any, origem:'nf_saida'|'recibo_saida', documentoId:string) {
   const db=portalDb(c); const valor=Number(body.valor ?? body.valor_total); if (!(valor>0)) throw new Error('valor_invalido')
-  const isRecibo=origem==='recibo_saida'; const nomeCategoria=String(body.categoria_receita_nome||body.nome_categoria|| (isRecibo?'ADM SHARE - RECIBO':'ADM SHARE - N.F'))
-  const categoriaShare=isRecibo?CATEGORIA_SHARE_RECIBO:(nomeCategoria.toUpperCase().includes('DIARIA')?CATEGORIA_SHARE_NF_DIARIAS:nomeCategoria.toUpperCase().includes('PILOTAGEM')?CATEGORIA_SHARE_NF_ADM_PILOTAGEM:CATEGORIA_SHARE_NF_ADM)
+  const isRecibo=origem==='recibo_saida'; const categoriaInformada=String(body.categoria_receita_nome||body.nome_categoria||'').trim()
+  const categoriaNormalizada=categoriaInformada.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+  const categoriaShare=isRecibo
+    ? (categoriaNormalizada.includes('PILOTAGEM') ? CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM : CATEGORIA_SHARE_RECIBO)
+    : (categoriaNormalizada.includes('DIARIA') ? CATEGORIA_SHARE_NF_DIARIAS : categoriaNormalizada.includes('PILOTAGEM') ? CATEGORIA_SHARE_NF_ADM_PILOTAGEM : CATEGORIA_SHARE_NF_ADM)
+  const nomeCategoria=isRecibo
+    ? (categoriaShare===CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM ? 'ADM E PILOTAGEM - RECIBO' : 'ADM SHARE - RECIBO')
+    : (categoriaShare===CATEGORIA_SHARE_NF_DIARIAS ? 'N.F DIARIAS DE VOO' : categoriaShare===CATEGORIA_SHARE_NF_ADM_PILOTAGEM ? 'ADM E PILOTAGEM - N.F' : 'N.F ADM SHARE')
+  const categoriaCliente=CATEGORIA_CLIENTE_NF_SAIDA
+  const nomeCategoriaCliente=CATEGORIA_CLIENTE_NF_SAIDA_NOME
   const lancamentoId=uuid(); const contaId=uuid(); const descricao=String(body.descricao||body.descricao_servico||`${isRecibo?'Recibo':'Nota fiscal'} de saída ${body.numero||''}`).trim()
   await inserirLinhaDinamica(db,'lancamentos',{id:lancamentoId,fluxo:'entrada',tipo:'receita',tipo_caixa:'share',status:'pendente',categoria_id:categoriaShare,categoria_nome:nomeCategoria,grupo_categoria:'RECEITAS OPERACIONAIS',descricao,valor_total:valor,data_emissao:body.data_criacao||body.data_emissao,data_vencimento:body.data_vencimento||body.data_criacao||body.data_emissao,cotista_id:ctx.cotista_id,numero_nf:isRecibo?null:body.numero,numero_recibo:isRecibo?body.numero:null,criado_por:(await shareBrasilUser(c))?.id})
   await inserirLinhaDinamica(db,'contas_areceber',{id:contaId,data_vencimento:body.data_vencimento||body.data_criacao||body.data_emissao,valor,categoria_id:categoriaShare,categoria_nome:nomeCategoria,descricao,criado_por:(await shareBrasilUser(c))?.id,aeronave_id:ctx.aeronave_id,cotista_id:ctx.cotista_id,nf_saida_id:origem==='nf_saida'?documentoId:null,lancamento_id:lancamentoId,status:'PENDENTE'})
   if (ctx.socio_id) {
-    const movimentoId=uuid(); await inserirLinhaDinamica(db,'movimentos_holding',{id:movimentoId,aeronave_id:ctx.aeronave_id,data:body.data_criacao||body.data_emissao,descricao,fornecedor:'SHARE BRASIL',categoria:nomeCategoria,grupo_categoria:'RECEITAS OPERACIONAIS',tipo:'SAIDA',fluxo:'SAIDA',valor_centavos:Math.round(valor*100),pago_por:ctx.cotista_id,pago_diretamente:0,status:'PENDENTE',criado_por:(await shareBrasilUser(c))?.id})
-    await inserirLinhaDinamica(db,'rateio_hold',{id:uuid(),movimentos_holding_id:movimentoId,categoria_nome:nomeCategoria,cotista_id:ctx.cotista_id,cotista_nome:ctx.nome,aeronave_id:ctx.aeronave_id,tipo_rateio:'FIXO',data_vencimento:body.data_vencimento||body.data_emissao,descricao_despesa:descricao,pago_por:ctx.cotista_id,pago_diretamente:1,percentual_sociedade:100,percentual_uso:100,valor_total:valor,valor_rateado:valor,status:'pendente',numero_recibo:isRecibo?body.numero:null,recibo_url:body.pdf_url||null})
+    const movimentoId=uuid(); await inserirLinhaDinamica(db,'movimentos_holding',{id:movimentoId,aeronave_id:ctx.aeronave_id,data:body.data_criacao||body.data_emissao,descricao,fornecedor:'SHARE BRASIL',categoria:nomeCategoriaCliente,categoria_id:categoriaCliente,grupo_categoria:'RECEITAS OPERACIONAIS',tipo:'SAIDA',fluxo:'SAIDA',valor_centavos:Math.round(valor*100),pago_por:ctx.cotista_id,pago_diretamente:0,status:'PENDENTE',criado_por:(await shareBrasilUser(c))?.id})
+    await inserirLinhaDinamica(db,'rateio_hold',{id:uuid(),movimentos_holding_id:movimentoId,categoria_nome:nomeCategoriaCliente,categoria_custo_id:categoriaCliente,fornecedor_id:'SHARE BRASIL',cotista_id:ctx.cotista_id,cotista_nome:ctx.nome,aeronave_id:ctx.aeronave_id,tipo_rateio:'FIXO',data_vencimento:body.data_vencimento||body.data_emissao,descricao_despesa:descricao,pago_por:ctx.cotista_id,pago_diretamente:1,percentual_sociedade:100,percentual_uso:100,valor_total:valor,valor_rateado:valor,status:'pendente',numero_recibo:isRecibo?body.numero:null,recibo_url:body.pdf_url||null})
   } else {
-    await inserirLinhaDinamica(db,'rateio_despesas',{id:uuid(),lancamentos_id:lancamentoId,cotista_id:ctx.cotista_id,categoria_nome:body.categoria_despesa_subcategoria||nomeCategoria,data_emissao_nf:body.data_criacao||body.data_emissao,descricao_despesa:descricao,pago_por:ctx.cotista_id,pago_diretamente:1,valor_total:valor,valor_rateado:valor,status:'pendente',numero_recibo:isRecibo?body.numero:null,recibo_url:body.pdf_url||null})
+    await inserirLinhaDinamica(db,'rateio_despesas',{id:uuid(),lancamentos_id:lancamentoId,cotista_id:ctx.cotista_id,categoria_custo_id:categoriaShare,categoria_nome:nomeCategoria,tipo_rateio:'FIXO',fluxo:'ENTRADA',data_emissao_nf:body.data_criacao||body.data_emissao,descricao_despesa:descricao,fornecedor:'SHARE BRASIL',fornecedor_id:'SHARE BRASIL',pago_por:ctx.cotista_id,pago_diretamente:1,percentual_uso:100,valor_total:valor,valor_rateado:valor,status:'pendente',numero_recibo:isRecibo?body.numero:null,recibo_url:body.pdf_url||null})
   }
   return {lancamentoId,contaId}
 }
