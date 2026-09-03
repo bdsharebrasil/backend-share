@@ -1,206 +1,160 @@
-import { garantirTabelasFinanceiras } from "./schema"
-import { LancamentoRepository } from "./LancamentoRepository"
-import type {
-  ConsolidadoBalanco,
-  LancamentoConsolidado,
-  LancamentoApiInput,
-  RegistrarLancamentoInput,
-  SaldoCotista,
-} from "./types"
-
 export class FinanceValidationError extends Error {
-  public readonly code = "VALIDATION"
-
-  public constructor(message: string) {
+  constructor(message: string, public readonly code: string) {
     super(message)
-    this.name = "FinanceValidationError"
+    this.name = 'FinanceValidationError'
   }
 }
 
-function validationError(message: string): FinanceValidationError {
-  return new FinanceValidationError(message)
+type Database = D1Database
+
+type Row = Record<string, any>
+
+export interface RateioFinanceiro {
+  id: string
+  cotista: string
+  valorCentavos: number
 }
 
-function stringOrEmpty(value: unknown): string {
-  return value == null ? "" : String(value).trim()
+export interface LancamentoFinanceiro {
+  id: string
+  descricao: string
+  fluxo: 'ENTRADA' | 'SAIDA'
+  categoria: string
+  grupoCategoria: string
+  valorCentavos: number
+  data: string
+  prazo: string | null
+  status: string
+  caixa: string
+  tipo: string | null
+  fornecedor: string | null
+  documento: string | null
+  observacoes: string | null
+  rateios: RateioFinanceiro[]
 }
 
-function optionalString(value: unknown): string | undefined {
-  const normalized = stringOrEmpty(value)
-  return normalized || undefined
+export interface BalancoFinanceiro {
+  lancamentos: LancamentoFinanceiro[]
+  saldos: Array<Record<string, any>>
+  matrizCompensacao: Record<string, any>
+  holdings: Array<Record<string, any> & { socios: Array<Record<string, any>> }>
 }
 
-function numberOrUndefined(value: unknown): number | undefined {
-  if (value === null || value === undefined || value === "") return undefined
+function texto(value: unknown): string {
+  return value == null ? '' : String(value)
+}
+
+function centavos(value: unknown): number {
   const number = Number(value)
-  return Number.isFinite(number) ? number : undefined
+  if (!Number.isFinite(number)) return 0
+  return Math.round(number * 100)
 }
 
-function booleanOrFalse(value: unknown): boolean {
-  return value === true || value === 1 || value === "1" || value === "true"
+function fluxo(value: unknown): 'ENTRADA' | 'SAIDA' {
+  return texto(value).toUpperCase() === 'ENTRADA' ? 'ENTRADA' : 'SAIDA'
 }
 
-function normalizarFluxo(value: unknown): RegistrarLancamentoInput["fluxo"] {
-  const fluxo = stringOrEmpty(value).toUpperCase()
-  if (fluxo === "ENTRADA" || fluxo === "SAIDA") return fluxo
-  throw validationError("fluxo deve ser ENTRADA ou SAIDA")
-}
-
-function normalizarRateios(raw: unknown): RegistrarLancamentoInput["rateios"] {
-  if (!Array.isArray(raw)) return []
-  return raw.map((item) => {
-    const rateio = item as Record<string, unknown>
-    const percentual = numberOrUndefined(rateio.percentual)
-    return {
-      cotista: stringOrEmpty(rateio.cotista ?? rateio.cotista_id),
-      percentual: percentual ?? Number.NaN,
-    }
-  })
-}
-
-export function normalizarLancamentoInput(body: LancamentoApiInput, criadoPor?: string): RegistrarLancamentoInput {
-  const valorCentavosInformado = numberOrUndefined(body.valorCentavos ?? body.valor_centavos)
-  const valorEmReais = numberOrUndefined(body.valor)
-  const valorCentavos = valorCentavosInformado ?? (valorEmReais === undefined ? Number.NaN : Math.round(valorEmReais * 100))
-  const rawRateios = body.rateios ?? body.rateio_linhas
-
+function normalizarRateio(row: Row): RateioFinanceiro {
   return {
-    data: stringOrEmpty(body.data ?? body.data_emissao),
-    descricao: stringOrEmpty(body.descricao),
-    documento: optionalString(body.documento ?? body.numero_doc),
-    fornecedor: optionalString(body.fornecedor ?? body.fornecedor_nome),
-    categoria: stringOrEmpty(body.categoria ?? body.categoria_nome ?? body.categoria_id),
-    grupoCategoria: optionalString(body.grupoCategoria ?? body.grupo_categoria),
-    tipo: optionalString(body.tipo),
-    prazo: optionalString(body.prazo ?? body.data_vencimento),
-    fluxo: normalizarFluxo(body.fluxo),
-    valorCentavos,
-    pagoPor: stringOrEmpty(body.pagoPor ?? body.pago_por),
-    caixa: optionalString(body.caixa ?? body.tipo_caixa) || "SHARE",
-    pagoDiretamente: booleanOrFalse(body.pagoDiretamente ?? body.pago_diretamente),
-    reembolsavel: booleanOrFalse(body.reembolsavel),
-    reembolsoQuitado: booleanOrFalse(body.reembolsoQuitado ?? body.reembolso_quitado),
-    status: optionalString(body.status),
-    observacoes: optionalString(body.observacoes),
-    criadoPor,
-    aeronaveId: optionalString(body.aeronaveId ?? body.aeronave_id),
-    rateios: normalizarRateios(rawRateios),
+    id: texto(row.id),
+    cotista: texto(row.cotista_nome ?? row.nome ?? row.cotista_id ?? 'Cotista não identificado'),
+    valorCentavos: centavos(row.valor_rateado ?? row.valor ?? 0),
   }
 }
 
-function saldoVazio(cotista: string): SaldoCotista {
-  return { cotista, totalPagoCentavos: 0, totalDevidoCentavos: 0, saldoCentavos: 0 }
-}
-
-function ehPagadorCotista(pagador: string): boolean {
-  return !["DGA_ADM", "SHARE", "ADMIN", "ADMINISTRACAO", "HOLDING"].includes(pagador.trim().toUpperCase())
-}
-
-export class LancamentoService {
-  public constructor(private readonly repository: LancamentoRepository) {}
-
-  public async registrarLancamento(input: RegistrarLancamentoInput): Promise<{ id: string }> {
-    if (!input.data || !/^\d{4}-\d{2}-\d{2}$/.test(input.data)) {
-      throw validationError("data deve estar no formato YYYY-MM-DD")
-    }
-    if (!input.descricao.trim()) {
-      throw validationError("descricao é obrigatória")
-    }
-    if (!Number.isInteger(input.valorCentavos) || input.valorCentavos < 0) {
-      throw validationError("valorCentavos deve ser inteiro não negativo em centavos")
-    }
-    if (!input.pagoPor.trim()) {
-      throw validationError("pagoPor é obrigatório")
-    }
-    if (input.rateios.length === 0) {
-      throw validationError("informe ao menos um rateio")
-    }
-    if (input.rateios.some((rateio) => !rateio.cotista.trim())) {
-      throw validationError("cotista é obrigatório em cada rateio")
-    }
-    if (input.rateios.some((rateio) => !Number.isFinite(rateio.percentual) || rateio.percentual < 0)) {
-      throw validationError("percentual de rateio deve ser não negativo")
-    }
-
-    const totalPercentual = input.rateios.reduce((total, rateio) => total + rateio.percentual, 0)
-    if (Math.abs(totalPercentual - 100) > 0.0001) {
-      throw validationError("a soma dos percentuais deve ser exatamente 100")
-    }
-
-    const id = crypto.randomUUID()
-    await this.repository.inserirComRateios(input, id)
-    return { id }
-  }
-
-  public async listarLancamentos(inicio?: string, fim?: string): Promise<LancamentoConsolidado[]> {
-    return this.repository.listarConsolidado(inicio, fim)
-  }
-
-  public async obterConsolidadoBalanco(inicio?: string, fim?: string): Promise<ConsolidadoBalanco> {
-    const lancamentos = await this.repository.listarConsolidado(inicio, fim)
-    const saldos = this.calcularSaldos(lancamentos)
-    const matrizCompensacao = this.calcularMatriz(lancamentos)
-    const holdings = await this.repository.listarSaldosHolding(inicio, fim)
-
-    return { lancamentos, saldos, matrizCompensacao, holdings }
-  }
-
-  private calcularSaldos(lancamentos: LancamentoConsolidado[]): SaldoCotista[] {
-    const saldos = new Map<string, SaldoCotista>()
-    for (const lancamento of lancamentos) {
-      for (const rateio of lancamento.rateios) {
-        const saldo = saldos.get(rateio.cotista) ?? saldoVazio(rateio.cotista)
-        if (lancamento.fluxo === "SAIDA") saldo.totalDevidoCentavos += rateio.valorCentavos
-        saldos.set(rateio.cotista, saldo)
-      }
-
-      if (lancamento.fluxo === "SAIDA" && ehPagadorCotista(lancamento.pagoPor)) {
-        const pagador = saldos.get(lancamento.pagoPor) ?? saldoVazio(lancamento.pagoPor)
-        pagador.totalPagoCentavos += lancamento.valorCentavos
-        saldos.set(lancamento.pagoPor, pagador)
-      }
-    }
-
-    for (const saldo of saldos.values()) saldo.saldoCentavos = saldo.totalPagoCentavos - saldo.totalDevidoCentavos
-    return [...saldos.values()].sort((a, b) => a.cotista.localeCompare(b.cotista, "pt-BR"))
-  }
-
-  private calcularMatriz(lancamentos: LancamentoConsolidado[]): Record<string, Record<string, number>> {
-    const matriz: Record<string, Record<string, number>> = {}
-    const garantir = (cotista: string) => {
-      matriz[cotista] ??= {}
-      for (const existente of Object.keys(matriz)) {
-        matriz[existente][cotista] ??= 0
-        matriz[cotista][existente] ??= 0
-      }
-    }
-
-    for (const lancamento of lancamentos) {
-      if (lancamento.fluxo !== "SAIDA" || !ehPagadorCotista(lancamento.pagoPor)) continue
-      garantir(lancamento.pagoPor)
-      for (const rateio of lancamento.rateios) {
-        garantir(rateio.cotista)
-        if (rateio.cotista === lancamento.pagoPor) continue
-        matriz[lancamento.pagoPor][rateio.cotista] += rateio.valorCentavos
-      }
-    }
-
-    const cotistas = Object.keys(matriz)
-    for (const credor of cotistas) {
-      for (const devedor of cotistas) {
-        if (credor >= devedor) continue
-        const credorParaDevedor = matriz[credor][devedor] ?? 0
-        const devedorParaCredor = matriz[devedor][credor] ?? 0
-        const liquido = credorParaDevedor - devedorParaCredor
-        matriz[credor][devedor] = liquido > 0 ? liquido : 0
-        matriz[devedor][credor] = liquido < 0 ? Math.abs(liquido) : 0
-      }
-    }
-    return matriz
+function normalizarLancamento(row: Row, rateios: RateioFinanceiro[] = []): LancamentoFinanceiro {
+  return {
+    id: texto(row.id),
+    descricao: texto(row.descricao),
+    fluxo: fluxo(row.fluxo),
+    categoria: texto(row.categoria_nome ?? row.categoria ?? 'SEM CATEGORIA'),
+    grupoCategoria: texto(row.grupo_categoria ?? row.grupo ?? ''),
+    valorCentavos: centavos(row.valor_total ?? row.valor_centavos / 100),
+    data: texto(row.data_emissao ?? row.data ?? row.criado_em ?? '').slice(0, 10),
+    prazo: row.data_vencimento ?? row.vencimento ?? null,
+    status: texto(row.status || 'PENDENTE').toUpperCase(),
+    caixa: texto(row.tipo_caixa ?? row.caixa ?? 'SHARE').toUpperCase(),
+    tipo: row.tipo ?? row.tipo_despesa ?? null,
+    fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
+    documento: row.numero_doc ?? row.documento ?? null,
+    observacoes: row.observacoes ?? null,
+    rateios,
   }
 }
 
-export async function prepararFinanceiro(db: ConstructorParameters<typeof LancamentoRepository>[0]): Promise<LancamentoService> {
-  await garantirTabelasFinanceiras(db)
-  return new LancamentoService(new LancamentoRepository(db))
+export function normalizarLancamentoInput(body: Row, criadoPor?: string): Row {
+  const descricao = texto(body.descricao).trim()
+  if (!descricao) throw new FinanceValidationError('Descrição é obrigatória', 'descricao_obrigatoria')
+
+  const valor = Number(body.valor_total ?? body.valor ?? 0)
+  if (!Number.isFinite(valor) || valor <= 0) {
+    throw new FinanceValidationError('Valor deve ser maior que zero', 'valor_invalido')
+  }
+
+  const lancamento = {
+    id: crypto.randomUUID(),
+    descricao,
+    fluxo: fluxo(body.fluxo).toLowerCase(),
+    categoria_nome: texto(body.categoria_nome ?? body.categoria ?? 'SEM CATEGORIA'),
+    grupo_categoria: texto(body.grupo_categoria),
+    valor_total: valor,
+    valor_rateado: Number(body.valor_rateado ?? valor),
+    data_emissao: texto(body.data_emissao ?? body.data ?? new Date().toISOString().slice(0, 10)),
+    data_vencimento: body.data_vencimento ?? body.vencimento ?? null,
+    aeronave_id: body.aeronave_id ?? null,
+    cotista_id: body.cotista_id ?? null,
+    colaborador_id: body.colaborador_id ?? null,
+    reembolsavel: body.reembolsavel ? 1 : 0,
+    reembolso_quitado: body.reembolso_quitado ? 1 : 0,
+    status: texto(body.status || 'pendente').toLowerCase(),
+    fornecedor_nome: body.fornecedor_nome ?? body.fornecedor ?? null,
+    numero_doc: body.numero_doc ?? body.documento ?? null,
+    observacoes: body.observacoes ?? null,
+    criado_por: criadoPor ?? body.criado_por ?? null,
+    pago_diretamente: body.pago_diretamente ? 1 : 0,
+    tipo_caixa: texto(body.tipo_caixa ?? body.caixa ?? 'share').toLowerCase(),
+    pago_por: body.pago_por ?? null,
+    reference_type: body.reference_type ?? null,
+    reference_id: body.reference_id ?? null,
+  }
+  return lancamento
+}
+
+export async function prepararFinanceiro(_db: Database): Promise<FinanceiroService> {
+  return new FinanceiroService(_db)
+}
+
+export class FinanceiroService {
+  constructor(private readonly db: Database) {}
+
+  async registrarLancamento(input: Row): Promise<{ lancamento: LancamentoFinanceiro }> {
+    const columns = Object.keys(input).filter((column) => column !== 'id')
+    await this.db.prepare(
+      `INSERT INTO lancamentos (id, ${columns.join(', ')}) VALUES (?1, ${columns.map((_, index) => `?${index + 2}`).join(', ')})`,
+    ).bind(input.id, ...columns.map((column) => input[column])).run()
+    const row = await this.db.prepare('SELECT * FROM lancamentos WHERE id = ?1').bind(input.id).first<Row>()
+    if (!row) throw new Error('lancamento_nao_criado')
+    return { lancamento: normalizarLancamento(row) }
+  }
+
+  async listarLancamentos(inicio?: string, fim?: string): Promise<LancamentoFinanceiro[]> {
+    const conditions: string[] = []
+    const values: unknown[] = []
+    if (inicio) { conditions.push('date(COALESCE(data_emissao, data)) >= ?'); values.push(inicio) }
+    if (fim) { conditions.push('date(COALESCE(data_emissao, data)) <= ?'); values.push(fim) }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    const rows = await this.db.prepare(`SELECT * FROM lancamentos ${where} ORDER BY date(COALESCE(data_emissao, data)) DESC, criado_em DESC`).bind(...values).all<Row>()
+    const result: LancamentoFinanceiro[] = []
+    for (const row of rows.results) {
+      const rateios = await this.db.prepare('SELECT * FROM rateio_despesas WHERE lancamentos_id = ?1 OR lancamento_id = ?1').bind(row.id).all<Row>().catch(() => ({ results: [] as Row[] }))
+      result.push(normalizarLancamento(row, rateios.results.map(normalizarRateio)))
+    }
+    return result
+  }
+
+  async obterConsolidadoBalanco(inicio?: string, fim?: string): Promise<BalancoFinanceiro> {
+    const lancamentos = await this.listarLancamentos(inicio, fim)
+    const saldos = [{ caixa: 'SHARE', saldoCentavos: lancamentos.filter((item) => item.caixa === 'SHARE').reduce((total, item) => total + (item.fluxo === 'ENTRADA' ? item.valorCentavos : -item.valorCentavos), 0) }]
+    return { lancamentos, saldos, matrizCompensacao: {}, holdings: [] }
+  }
 }
