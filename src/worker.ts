@@ -5702,69 +5702,358 @@ async function buscarCategoriasRecibo(c: Context<{ Bindings: Bindings }>) {
   return []
 }
 // ─── Financeiro: notas fiscais e recibos de saída ───
-const CATEGORIA_CLIENTE_NF_SAIDA = '928cc6be-cb78-4b83-ac63-bd386686a8c9'
-const CATEGORIA_SHARE_RECIBO = '73355581-c479-4a5d-b90b-90b3332f198e'
-const CATEGORIA_SHARE_NF_DIARIAS = 'b5143aad-88ed-4649-9f17-3ff15904bda2'
-const CATEGORIA_SHARE_NF_ADM_PILOTAGEM = '643fd58f-ae2f-4269-9d5a-93345d613fb9'
-const CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM = '2874b45b-a3bb-4bec-8f7e-74b328f8693c'
-const CATEGORIA_SHARE_NF_ADM = '352095f3-a97a-4539-ad1a-b1471e577583'
-const CATEGORIA_CLIENTE_NF_SAIDA_NOME = 'ADM SHARE BRASIL ADM SHARE - RECIBO ADM SHARE - N.F'
+const CATEGORIA_CLIENTE_NF_SAIDA = '928cc6be-cb78-4b83-ac63-bd386686a8c9' // categoria_movimentacao_cliente "ADM SHARE BRASIL"
+const CATEGORIA_CLIENTE_NF_SAIDA_NOME = 'ADM SHARE BRASIL'
+const CATEGORIA_CLIENTE_NF_SAIDA_SUB_RECIBO = 'ADM SHARE - RECIBO' // subcategoria_1 dessa categoria
+const CATEGORIA_CLIENTE_NF_SAIDA_SUB_NF = 'ADM SHARE - N.F'        // subcategoria_2 dessa categoria
+const FORNECEDOR_SHARE_BRASIL_NOME = 'SHARE BRASIL'
+
+const CATEGORIA_SHARE_RECIBO = '73355581-c479-4a5d-b90b-90b3332f198e'               // ADM SHARE - RECIBO
+const CATEGORIA_SHARE_NF_DIARIAS = 'b5143aad-88ed-4649-9f17-3ff15904bda2'           // N.F DIARIAS DE VOO
+const CATEGORIA_SHARE_NF_ADM_PILOTAGEM = '643fd58f-ae2f-4269-9d5a-93345d613fb9'     // ADM E PILOTAGEM - N.F
+const CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM = '2874b45b-a3bb-4bec-8f7e-74b328f8693c' // ADM E PILOTAGEM - RECIBO
+const CATEGORIA_SHARE_NF_ADM = '352095f3-a97a-4539-ad1a-b1471e577583'               // N.F ADM SHARE
+
+const CATEGORIAS_RECEITA_SHARE: Record<string, string> = {
+  [CATEGORIA_SHARE_RECIBO]: 'ADM SHARE - RECIBO',
+  [CATEGORIA_SHARE_NF_DIARIAS]: 'N.F DIARIAS DE VOO',
+  [CATEGORIA_SHARE_NF_ADM_PILOTAGEM]: 'ADM E PILOTAGEM - N.F',
+  [CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM]: 'ADM E PILOTAGEM - RECIBO',
+  [CATEGORIA_SHARE_NF_ADM]: 'N.F ADM SHARE',
+}
+
+/** Resolve a categoria de receita do Caixa Share. Prioriza o id vindo do front
+ *  (dropdown de /notas-saida/opcoes); só cai pra heurística por nome se não vier id.
+ *  Diferente da versão anterior, agora respeita "ADM E PILOTAGEM - RECIBO" quando
+ *  é recibo de pilotagem (antes caía sempre em "ADM SHARE - RECIBO"). */
+function resolverCategoriaReceitaShare(body: Record<string, any>, isRecibo: boolean): string {
+  const idInformado = String(body.categoria_receita_id || '').trim()
+  if (idInformado && CATEGORIAS_RECEITA_SHARE[idInformado]) return idInformado
+  const nomeInformado = String(body.categoria_receita_nome || body.nome_categoria || '').toUpperCase()
+  if (isRecibo) return nomeInformado.includes('PILOTAGEM') ? CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM : CATEGORIA_SHARE_RECIBO
+  if (nomeInformado.includes('DIARIA')) return CATEGORIA_SHARE_NF_DIARIAS
+  if (nomeInformado.includes('PILOTAGEM')) return CATEGORIA_SHARE_NF_ADM_PILOTAGEM
+  return CATEGORIA_SHARE_NF_ADM
+}
+
 async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
-  const db=portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS notas_fiscais_saida (id TEXT PRIMARY KEY NOT NULL, numero TEXT NOT NULL, cotista_aeronave_id TEXT NOT NULL, aeronave_id TEXT, cliente_id TEXT, socio_id TEXT, categoria_id TEXT, categoria TEXT, data_criacao TEXT NOT NULL, data_vencimento TEXT, valor REAL NOT NULL, descricao TEXT, status TEXT NOT NULL DEFAULT 'pendente', arquivo_pdf_url TEXT, contas_areceber_id TEXT, lancamento_id TEXT, criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
-  await db.prepare(`CREATE TABLE IF NOT EXISTS recibos_saida (id TEXT PRIMARY KEY NOT NULL, numero_recibo TEXT NOT NULL UNIQUE, cotista_id TEXT NOT NULL, aeronave_id TEXT, cliente_id TEXT, socio_id TEXT, categoria_id TEXT, nome_categoria TEXT, data_emissao TEXT NOT NULL, data_vencimento TEXT, valor_total REAL NOT NULL, descricao_servico TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pendente', pdf_url TEXT, contas_areceber_id TEXT, lancamento_id TEXT, criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+  const db = portalDb(c)
+  // Os CREATE TABLE abaixo espelham exatamente o schema real (recibos_saida /
+  // notas_fiscais_saida) — IF NOT EXISTS só entra em ação em ambiente novo.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS notas_fiscais_saida (
+    id TEXT PRIMARY KEY NOT NULL,
+    numero TEXT NOT NULL,
+    cotista_aeronave_id TEXT NOT NULL,
+    data_criacao TEXT NOT NULL,
+    data_vencimento TEXT NOT NULL,
+    valor REAL NOT NULL,
+    categoria TEXT NOT NULL,
+    descricao TEXT NULL,
+    status TEXT NOT NULL,
+    arquivo_pdf_url TEXT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    criado_por TEXT NULL,
+    aeronave_id TEXT NULL,
+    lancamentos_id TEXT NULL
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS recibos_saida (
+    id TEXT PRIMARY KEY NOT NULL,
+    numero_recibo TEXT NOT NULL,
+    tipo_recibo TEXT NULL,
+    cotista_id TEXT NULL,
+    aeronave_id TEXT NULL,
+    valor_total REAL NULL,
+    percentual REAL NULL,
+    descricao_servico TEXT NOT NULL,
+    nome_categoria TEXT NULL,
+    categoria_id TEXT NULL,
+    subcategoria_1 TEXT NULL,
+    subcategoria_2 TEXT NULL,
+    subcategoria_3 TEXT NULL,
+    subcategoria_4 TEXT NULL,
+    data_emissao TEXT NOT NULL,
+    data_vencimento TEXT NULL,
+    data_max_pagamento TEXT NULL,
+    status TEXT NULL DEFAULT 'pendente',
+    pdf_url TEXT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    contas_areceber_id TEXT NULL,
+    lancamentos_id TEXT NULL,
+    criado_por TEXT NULL
+  )`).run()
+  // Mesma tabela de anexos usada pelos recibos "internos" — passa a receber
+  // também os anexos de NF/recibo de saída.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_anexos (
+    id TEXT PRIMARY KEY NOT NULL,
+    recibo_id TEXT,
+    finalidade TEXT,
+    nome_arquivo TEXT NOT NULL,
+    caminho_arquivo TEXT NOT NULL,
+    tipo_arquivo TEXT NOT NULL,
+    tamanho_arquivo INTEGER NOT NULL DEFAULT 0,
+    enviado_por TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).run()
+  // Instalações antigas usam lancamento_id; as novas usam lancamentos_id.
+  await db.prepare('ALTER TABLE notas_fiscais_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE recibos_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
 }
+
 async function inserirLinhaDinamica(db: any, table: string, row: Record<string, any>) {
-  const info=await db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as any
-  const cols=new Set((info.results||[]).map((x:any)=>x.name))
-  const entries=Object.entries(row).filter(([k])=>cols.has(k))
+  const info = await db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as any
+  const cols = new Set((info.results || []).map((x: any) => x.name))
+  const entries = Object.entries(row).filter(([k]) => cols.has(k))
   if (!entries.length) throw new Error(`tabela_${table}_sem_colunas`)
-  const names=entries.map(([k])=>k); const vals=entries.map(([,v])=>v??null)
-  await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_,i)=>`?${i+1}`).join(',')})`).bind(...vals).run()
+  const names = entries.map(([k]) => k); const vals = entries.map(([, v]) => v ?? null)
+  await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_, i) => `?${i + 1}`).join(',')})`).bind(...vals).run()
 }
+
 async function contextoNfSaida(c: Context<{ Bindings: Bindings }>, cotistaId: string) {
   return portalDb(c).prepare(`SELECT ca.id cotista_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente,'CLI') codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?1`).bind(cotistaId).first<any>()
 }
-async function gerarFinanceiroNfSaida(c: Context<{ Bindings: Bindings }>, ctx:any, body:any, origem:'nf_saida'|'recibo_saida', documentoId:string) {
-  const db=portalDb(c); const valor=Number(body.valor ?? body.valor_total); if (!(valor>0)) throw new Error('valor_invalido')
-  const isRecibo=origem==='recibo_saida'; const categoriaInformada=String(body.categoria_receita_nome||body.nome_categoria||'').trim()
-  const categoriaNormalizada=categoriaInformada.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-  const categoriaShare=isRecibo
-    ? (categoriaNormalizada.includes('PILOTAGEM') ? CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM : CATEGORIA_SHARE_RECIBO)
-    : (categoriaNormalizada.includes('DIARIA') ? CATEGORIA_SHARE_NF_DIARIAS : categoriaNormalizada.includes('PILOTAGEM') ? CATEGORIA_SHARE_NF_ADM_PILOTAGEM : CATEGORIA_SHARE_NF_ADM)
-  const nomeCategoria=isRecibo
-    ? (categoriaShare===CATEGORIA_SHARE_RECIBO_ADM_PILOTAGEM ? 'ADM E PILOTAGEM - RECIBO' : 'ADM SHARE - RECIBO')
-    : (categoriaShare===CATEGORIA_SHARE_NF_DIARIAS ? 'N.F DIARIAS DE VOO' : categoriaShare===CATEGORIA_SHARE_NF_ADM_PILOTAGEM ? 'ADM E PILOTAGEM - N.F' : 'N.F ADM SHARE')
-  const categoriaCliente=CATEGORIA_CLIENTE_NF_SAIDA
-  const nomeCategoriaCliente=CATEGORIA_CLIENTE_NF_SAIDA_NOME
-  const lancamentoId=uuid(); const contaId=uuid(); const descricao=String(body.descricao||body.descricao_servico||`${isRecibo?'Recibo':'Nota fiscal'} de saída ${body.numero||''}`).trim()
-  await inserirLinhaDinamica(db,'lancamentos',{id:lancamentoId,fluxo:'entrada',tipo:'receita',tipo_caixa:'share',status:'pendente',categoria_id:categoriaShare,categoria_nome:nomeCategoria,grupo_categoria:'RECEITAS OPERACIONAIS',descricao,valor_total:valor,data_emissao:body.data_criacao||body.data_emissao,data_vencimento:body.data_vencimento||body.data_criacao||body.data_emissao,cotista_id:ctx.cotista_id,numero_nf:isRecibo?null:body.numero,numero_recibo:isRecibo?body.numero:null,criado_por:(await shareBrasilUser(c))?.id})
-  await inserirLinhaDinamica(db,'contas_areceber',{id:contaId,data_vencimento:body.data_vencimento||body.data_criacao||body.data_emissao,valor,categoria_id:categoriaShare,categoria_nome:nomeCategoria,descricao,criado_por:(await shareBrasilUser(c))?.id,aeronave_id:ctx.aeronave_id,cotista_id:ctx.cotista_id,nf_saida_id:origem==='nf_saida'?documentoId:null,lancamento_id:lancamentoId,status:'PENDENTE'})
+
+async function gerarFinanceiroNfSaida(
+  c: Context<{ Bindings: Bindings }>,
+  ctx: any,
+  body: any,
+  origem: 'nf_saida' | 'recibo_saida',
+  documentoId: string,
+) {
+  const db = portalDb(c)
+  const valor = Number(body.valor ?? body.valor_total)
+  if (!(valor > 0)) throw new Error('valor_invalido')
+
+  const isRecibo = origem === 'recibo_saida'
+  const categoriaShareId = resolverCategoriaReceitaShare(body, isRecibo)
+  const nomeCategoriaShare = CATEGORIAS_RECEITA_SHARE[categoriaShareId]
+  const descricao = String(body.descricao || body.descricao_servico || `${isRecibo ? 'Recibo' : 'Nota fiscal'} de saída ${body.numero || ''}`).trim()
+  const usuario = await shareBrasilUser(c)
+  const dataEmissao = String(body.data_criacao || body.data_emissao || '').trim()
+  const dataVencimento = String(body.data_vencimento || dataEmissao || '').trim()
+
+  // 1) Entrada pendente no Caixa Share — sempre uma das 5 categorias de receita.
+  //    fluxo/status/caixa têm CHECK em maiúsculas em `lancamentos`; minúsculo quebra o insert.
+  const lancamentoId = uuid()
+  await inserirLinhaDinamica(db, 'lancamentos', {
+    id: lancamentoId,
+    aeronave_id: ctx.aeronave_id || null,
+    data: dataEmissao,
+    data_emissao: dataEmissao,
+    descricao,
+    categoria: nomeCategoriaShare,
+    categoria_nome: nomeCategoriaShare,
+    categoria_id: categoriaShareId,
+    grupo_categoria: 'RECEITAS OPERACIONAIS',
+    tipo: 'receita',
+    prazo: dataVencimento,
+    data_vencimento: dataVencimento,
+    fluxo: 'ENTRADA',
+    valor_centavos: Math.round(valor * 100),
+    valor_total: valor,
+    pago_por: ctx.cotista_id,     // NOT NULL — antes não era enviado e quebrava o insert
+    caixa: 'SHARE',               // coluna real é "caixa" (o código antigo mandava "tipo_caixa", que não existe)
+    tipo_caixa: 'SHARE',
+    pago_diretamente: 0,
+    reembolsavel: 0,
+    reembolso_quitado: 0,
+    status: 'PENDENTE',
+    criado_por: usuario?.id,
+    numero_nf: isRecibo ? null : body.numero,
+    numero_recibo: isRecibo ? body.numero : null,
+  })
+
+  // 2) Contas a receber do cotista dono do recibo/NF.
+  const contaId = uuid()
+  await inserirLinhaDinamica(db, 'contas_areceber', {
+    id: contaId,
+    data_vencimento: dataVencimento,
+    valor,
+    categoria_id: categoriaShareId,
+    categoria_nome: nomeCategoriaShare,
+    descricao,
+    criado_por: usuario?.id,
+    aeronave_id: ctx.aeronave_id,
+    cotista_id: ctx.cotista_id,
+    nf_saida_id: origem === 'nf_saida' ? documentoId : null,
+    lancamento_id: lancamentoId, // aqui SIM é "lancamento_id" (singular) — confirmado no schema real de contas_areceber
+    status: 'PENDENTE',
+  })
+
+  // 3) Espelho na tabela de rateio — SEMPRE categoria_movimentacao_cliente
+  //    "ADM SHARE BRASIL" (928cc6be-...), tipo_rateio FIXO, fornecedor/pagador
+  //    "SHARE BRASIL", percentual_uso 100%. Antes só existia pra holding
+  //    (rateio_hold); agora existe também pro cliente direto (rateio_despesas).
+  const subcategoriaRateio = isRecibo ? CATEGORIA_CLIENTE_NF_SAIDA_SUB_RECIBO : CATEGORIA_CLIENTE_NF_SAIDA_SUB_NF
+  const rateioId = uuid()
+
   if (ctx.socio_id) {
-    const movimentoId=uuid(); await inserirLinhaDinamica(db,'movimentos_holding',{id:movimentoId,aeronave_id:ctx.aeronave_id,data:body.data_criacao||body.data_emissao,descricao,fornecedor:'SHARE BRASIL',categoria:nomeCategoriaCliente,categoria_id:categoriaCliente,grupo_categoria:'RECEITAS OPERACIONAIS',tipo:'SAIDA',fluxo:'SAIDA',valor_centavos:Math.round(valor*100),pago_por:ctx.cotista_id,pago_diretamente:0,status:'PENDENTE',criado_por:(await shareBrasilUser(c))?.id})
-    await inserirLinhaDinamica(db,'rateio_hold',{id:uuid(),movimentos_holding_id:movimentoId,categoria_nome:nomeCategoriaCliente,categoria_custo_id:categoriaCliente,fornecedor_id:'SHARE BRASIL',cotista_id:ctx.cotista_id,cotista_nome:ctx.nome,aeronave_id:ctx.aeronave_id,tipo_rateio:'FIXO',data_vencimento:body.data_vencimento||body.data_emissao,descricao_despesa:descricao,pago_por:ctx.cotista_id,pago_diretamente:1,percentual_sociedade:100,percentual_uso:100,valor_total:valor,valor_rateado:valor,status:'pendente',numero_recibo:isRecibo?body.numero:null,recibo_url:body.pdf_url||null})
+    // Cotista é sócio de holding → movimentos_holding + rateio_hold
+    const movimentoId = uuid()
+    await inserirLinhaDinamica(db, 'movimentos_holding', {
+      id: movimentoId,
+      aeronave_id: ctx.aeronave_id,
+      data: dataEmissao,
+      descricao,
+      fornecedor: FORNECEDOR_SHARE_BRASIL_NOME,
+      categoria: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
+      grupo_categoria: 'RECEITAS OPERACIONAIS',
+      tipo: 'SAIDA',
+      fluxo: 'SAIDA',
+      valor_centavos: Math.round(valor * 100),
+      pago_por: ctx.cotista_id,
+      pago_diretamente: 0,
+      status: 'PENDENTE',
+      criado_por: usuario?.id,
+    })
+    await inserirLinhaDinamica(db, 'rateio_hold', {
+      id: rateioId,
+      movimentos_holding_id: movimentoId,
+      categoria_custo_id: CATEGORIA_CLIENTE_NF_SAIDA,
+      categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
+      subcategoria_1: subcategoriaRateio,
+      cotista_id: ctx.cotista_id,
+      cotista_nome: ctx.nome,
+      aeronave_id: ctx.aeronave_id,
+      tipo_rateio: 'FIXO',
+      data_vencimento: dataVencimento,
+      data_emissao_nf: dataEmissao,
+      descricao_despesa: descricao,
+      pago_por: ctx.cotista_id,
+      pago_diretamente: 1,
+      percentual_sociedade: 100,
+      percentual_uso: 100,
+      valor_total: valor,
+      valor_rateado: valor,
+      status: 'pendente',
+      numero_recibo: isRecibo ? body.numero : null,
+      recibo_url: body.pdf_url || null,
+    })
   } else {
-    await inserirLinhaDinamica(db,'rateio_despesas',{id:uuid(),lancamentos_id:lancamentoId,cotista_id:ctx.cotista_id,categoria_custo_id:categoriaShare,categoria_nome:nomeCategoria,tipo_rateio:'FIXO',fluxo:'ENTRADA',data_emissao_nf:body.data_criacao||body.data_emissao,descricao_despesa:descricao,fornecedor:'SHARE BRASIL',fornecedor_id:'SHARE BRASIL',pago_por:ctx.cotista_id,pago_diretamente:1,percentual_uso:100,valor_total:valor,valor_rateado:valor,status:'pendente',numero_recibo:isRecibo?body.numero:null,recibo_url:body.pdf_url||null})
+    // Cliente direto (sem holding) → rateio_despesas ligado ao próprio lançamento.
+    await inserirLinhaDinamica(db, 'rateio_despesas', {
+      id: rateioId,
+      lancamentos_id: lancamentoId,
+      categoria_custo_id: CATEGORIA_CLIENTE_NF_SAIDA,
+      categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
+      subcategoria_1: subcategoriaRateio,
+      cotista_id: ctx.cotista_id,
+      cotista_nome: ctx.nome,
+      aeronave_id: ctx.aeronave_id,
+      tipo_rateio: 'FIXO',
+      data_vencimento: dataVencimento,
+      data_emissao_nf: dataEmissao,
+      descricao_despesa: descricao,
+      pago_por: ctx.cotista_id,
+      pago_diretamente: 1,
+      percentual_sociedade: 100,
+      percentual_uso: 100,
+      valor_total: valor,
+      valor_rateado: valor,
+      status: 'pendente',
+      numero_recibo: isRecibo ? body.numero : null,
+      recibo_url: body.pdf_url || null,
+    })
   }
-  return {lancamentoId,contaId}
+
+  return { lancamentoId, contaId, rateioId, categoriaId: categoriaShareId, categoriaNome: nomeCategoriaShare }
 }
+
 app.get('/api/financeiro/notas-saida/opcoes', async c => {
   const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); await garantirCategoriasCliente(c); const db=portalDb(c)
   const [cotistas,aeronaves,categoriasReceita,categoriasDespesa,contasBancarias]=await Promise.all([db.prepare(`SELECT ca.id cotista_aeronave_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente) codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id ORDER BY nome`).all(),db.prepare('SELECT id,matricula_registro FROM aeronave ORDER BY matricula_registro').all(),db.prepare("SELECT id,nome,grupo_categoria,tipo FROM categoria_movimentacao_share WHERE lower(COALESCE(tipo,'receita'))='receita' ORDER BY nome").all(),db.prepare('SELECT id,nome,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all(),db.prepare('SELECT id,banco,numero_conta FROM contas_bancarias ORDER BY banco').all().catch(()=>({results:[]}))]); return c.json({cotistas:cotistas.results,aeronaves:aeronaves.results,categoriasReceita:categoriasReceita.results,categoriasDespesa:categoriasDespesa.results,contasBancarias:contasBancarias.results})
 })
 app.get('/api/financeiro/notas-saida', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); const db=portalDb(c); const [notas,recibos]=await Promise.all([db.prepare(`SELECT n.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id=n.cotista_aeronave_id LEFT JOIN cliente cl ON cl.id=n.cliente_id LEFT JOIN hold_socios hs ON hs.id=n.socio_id LEFT JOIN aeronave a ON a.id=n.aeronave_id ORDER BY n.data_criacao DESC`).all(),db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=r.cliente_id LEFT JOIN hold_socios hs ON hs.id=r.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all()]); return c.json({notas:notas.results,recibos:recibos.results}) })
-app.post('/api/financeiro/notas-saida', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); const body=await c.req.json<any>(); const ctx=await contextoNfSaida(c,String(body.cotista_aeronave_id||'')); if(!ctx) return c.json({error:'cotista_invalido'},400); const id=uuid(); const fin=await gerarFinanceiroNfSaida(c,ctx,body,'nf_saida',id); const db=portalDb(c); await inserirLinhaDinamica(db,'notas_fiscais_saida',{id,numero:String(body.numero||''),cotista_aeronave_id:ctx.cotista_id,aeronave_id:ctx.aeronave_id,cliente_id:ctx.cliente_id,socio_id:ctx.socio_id,categoria_id:body.categoria_receita_id,categoria:body.categoria_receita_nome||body.categoria,data_criacao:body.data_criacao,data_vencimento:body.data_vencimento,valor:Number(body.valor),descricao:body.descricao,status:body.status||'pendente',arquivo_pdf_url:body.arquivo_pdf_url,contas_areceber_id:fin.contaId,lancamento_id:fin.lancamentoId,criado_por:user.id}); return c.json({nota:await db.prepare('SELECT * FROM notas_fiscais_saida WHERE id=?1').bind(id).first()},201) })
-app.post('/api/financeiro/recibos-saida', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); const body=await c.req.json<any>(); const ctx=await contextoNfSaida(c,String(body.cotista_aeronave_id||'')); if(!ctx) return c.json({error:'cotista_invalido'},400); const numero=`REC-${String(ctx.codigo_cliente||'CLI').slice(0,3).toUpperCase()}-${new Date(body.data_emissao||Date.now()).getFullYear()}`; const id=uuid(); const fin=await gerarFinanceiroNfSaida(c,ctx,{...body,numero},'recibo_saida',id); const db=portalDb(c); await inserirLinhaDinamica(db,'recibos_saida',{id,numero_recibo:numero,cotista_id:ctx.cotista_id,aeronave_id:ctx.aeronave_id,cliente_id:ctx.cliente_id,socio_id:ctx.socio_id,categoria_id:body.categoria_receita_id,nome_categoria:body.categoria_receita_nome,data_emissao:body.data_emissao,data_vencimento:body.data_vencimento,valor_total:Number(body.valor),descricao_servico:body.descricao_servico,status:body.status||'pendente',pdf_url:body.pdf_url,contas_areceber_id:fin.contaId,lancamento_id:fin.lancamentoId,criado_por:user.id}); return c.json({recibo:await db.prepare('SELECT * FROM recibos_saida WHERE id=?1').bind(id).first()},201) })
-app.patch('/api/financeiro/notas-saida/:id', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); const body=await c.req.json<any>(); const db=portalDb(c); const id=c.req.param('id'); const allowed=['numero','cotista_aeronave_id','aeronave_id','data_criacao','data_vencimento','valor','categoria','descricao','status','arquivo_pdf_url']; const pairs=allowed.filter(k=>body[k]!==undefined); if(!pairs.length) return c.json({error:'nada_para_atualizar'},400); await db.prepare(`UPDATE notas_fiscais_saida SET ${pairs.map((k,i)=>`${k}=?${i+1}`).join(',')},atualizado_em=CURRENT_TIMESTAMP WHERE id=?${pairs.length+1}`).bind(...pairs.map(k=>body[k]),id).run(); return c.json({nota:await db.prepare('SELECT * FROM notas_fiscais_saida WHERE id=?1').bind(id).first()}) })
-app.delete('/api/financeiro/notas-saida/:id', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); const db=portalDb(c); await db.prepare('DELETE FROM notas_fiscais_saida WHERE id=?1').bind(c.req.param('id')).run(); return c.json({ok:true}) })
-app.delete('/api/financeiro/recibos-saida/:id', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); const db=portalDb(c); await db.prepare('DELETE FROM recibos_saida WHERE id=?1').bind(c.req.param('id')).run(); return c.json({ok:true}) })
-app.post('/api/financeiro/notas-saida/:id/dar-baixa', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); const body=await c.req.json<any>(); const db=portalDb(c); const row=await db.prepare('SELECT contas_areceber_id,lancamento_id FROM notas_fiscais_saida WHERE id=?1').bind(c.req.param('id')).first<any>(); if(!row) return c.notFound(); await db.prepare("UPDATE contas_areceber SET status='PAGO',data_recebimento=?,banco_recebimento=?,comprovante_recebimento_url=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(body.data_pagamento,body.conta_bancaria||null,body.comprovante_url||null,row.contas_areceber_id).run(); await db.prepare("UPDATE lancamentos SET status='pago',data_pagamento=?,forma_pagamento=?,conta_bancaria=?,comprovante_url=? WHERE id=?").bind(body.data_pagamento,body.forma_pagamento||null,body.conta_bancaria||null,body.comprovante_url||null,row.lancamento_id).run(); return c.json({ok:true}) })
-app.post('/api/financeiro/recibos-saida/:id/dar-baixa', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); const body=await c.req.json<any>(); const db=portalDb(c); const row=await db.prepare('SELECT contas_areceber_id,lancamento_id FROM recibos_saida WHERE id=?1').bind(c.req.param('id')).first<any>(); if(!row) return c.notFound(); await db.prepare("UPDATE contas_areceber SET status='PAGO',data_recebimento=?,banco_recebimento=?,comprovante_recebimento_url=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(body.data_pagamento,body.conta_bancaria||null,body.comprovante_url||null,row.contas_areceber_id).run(); await db.prepare("UPDATE lancamentos SET status='pago',data_pagamento=?,forma_pagamento=?,conta_bancaria=?,comprovante_url=? WHERE id=?").bind(body.data_pagamento,body.forma_pagamento||null,body.conta_bancaria||null,body.comprovante_url||null,row.lancamento_id).run(); return c.json({ok:true}) })
+app.post('/api/financeiro/notas-saida', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelasNfSaida(c)
+  const body = await c.req.json<any>()
+  if (!body.data_criacao || !body.data_vencimento) return c.json({ error: 'data_criacao_e_vencimento_obrigatorias' }, 400)
+  const ctx = await contextoNfSaida(c, String(body.cotista_aeronave_id || ''))
+  if (!ctx) return c.json({ error: 'cotista_invalido' }, 400)
+  const id = uuid()
+  const fin = await gerarFinanceiroNfSaida(c, ctx, body, 'nf_saida', id)
+  const db = portalDb(c)
+  await inserirLinhaDinamica(db, 'notas_fiscais_saida', {
+    id,
+    numero: String(body.numero || ''),
+    cotista_aeronave_id: ctx.cotista_id,
+    aeronave_id: ctx.aeronave_id,
+    data_criacao: body.data_criacao,
+    data_vencimento: body.data_vencimento,
+    valor: Number(body.valor),
+    categoria: fin.categoriaNome,
+    descricao: body.descricao,
+    status: body.status || 'pendente',
+    arquivo_pdf_url: body.arquivo_pdf_url,
+    lancamento_id: fin.lancamentoId,
+    lancamentos_id: fin.lancamentoId, // coluna real "lancamentos_id" (antes ia "lancamento_id" e era descartado)
+    criado_por: user.id,
+  })
+  if (body.anexo_id) {
+    await db.prepare('UPDATE recibo_anexos SET recibo_id = ?1, finalidade = ?2 WHERE id = ?3')
+      .bind(id, 'nf_saida', body.anexo_id).run().catch(() => undefined)
+  }
+  return c.json({ nota: await db.prepare('SELECT * FROM notas_fiscais_saida WHERE id=?1').bind(id).first() }, 201)
+})
+
+app.post('/api/financeiro/recibos-saida', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelasNfSaida(c)
+  const body = await c.req.json<any>()
+  if (!body.data_emissao) return c.json({ error: 'data_emissao_obrigatoria' }, 400)
+  if (!body.descricao_servico) return c.json({ error: 'descricao_servico_obrigatoria' }, 400)
+  const ctx = await contextoNfSaida(c, String(body.cotista_aeronave_id || ''))
+  if (!ctx) return c.json({ error: 'cotista_invalido' }, 400)
+  const numero = `REC-${String(ctx.codigo_cliente || 'CLI').slice(0, 3).toUpperCase()}-${new Date(body.data_emissao || Date.now()).getFullYear()}`
+  const id = uuid()
+  const fin = await gerarFinanceiroNfSaida(c, ctx, { ...body, numero }, 'recibo_saida', id)
+  const db = portalDb(c)
+  await inserirLinhaDinamica(db, 'recibos_saida', {
+    id,
+    numero_recibo: numero,
+    tipo_recibo: ctx.socio_id ? 'holding' : 'cliente',
+    cotista_id: ctx.cotista_id,
+    aeronave_id: ctx.aeronave_id,
+    valor_total: Number(body.valor),
+    percentual: 100,
+    descricao_servico: body.descricao_servico,
+    nome_categoria: fin.categoriaNome,
+    categoria_id: fin.categoriaId,
+    data_emissao: body.data_emissao,
+    data_vencimento: body.data_vencimento,
+    status: body.status || 'pendente',
+    pdf_url: body.pdf_url,
+    contas_areceber_id: fin.contaId,
+    lancamento_id: fin.lancamentoId,
+    lancamentos_id: fin.lancamentoId, // coluna real "lancamentos_id"
+    criado_por: user.id,
+  })
+  if (body.anexo_id) {
+    await db.prepare('UPDATE recibo_anexos SET recibo_id = ?1, finalidade = ?2 WHERE id = ?3')
+      .bind(id, 'recibo_saida', body.anexo_id).run().catch(() => undefined)
+  }
+  return c.json({ recibo: await db.prepare('SELECT * FROM recibos_saida WHERE id=?1').bind(id).first() }, 201)
+})
+
 app.post('/api/financeiro/notas-saida/anexos', async c => {
-  const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401)
-  const body=await c.req.parseBody(); const file=body.arquivo; if(!(file instanceof File)||!file.size) return c.json({error:'arquivo_obrigatorio'},400)
-  const id=uuid(); const key=await salvarArquivoShareBrasil(c,user.id,file,'notas-saida/anexos');
-  return c.json({id,url:`/api/financeiro/recibos/anexos/${id}/arquivo`},201)
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelasNfSaida(c) // garante a recibo_anexos também
+  const body = await c.req.parseBody()
+  const file = body.arquivo
+  if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const key = await salvarArquivoShareBrasil(c, user.id, file, 'notas-saida/anexos')
+  const id = uuid()
+  // Antes o arquivo era salvo no R2 mas nunca gravado em recibo_anexos: a URL
+  // retornada sempre dava 404 quando o front tentava reabrir o anexo.
+  await portalDb(c).prepare(
+    'INSERT INTO recibo_anexos (id, recibo_id, finalidade, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(id, null, 'nf_saida_recibo_saida', file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
+  return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo` }, 201)
 })
 app.get('/api/financeiro/recibos/opcoes', async c => {
   const user = await shareBrasilUser(c)
