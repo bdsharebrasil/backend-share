@@ -5335,6 +5335,16 @@ app.get('/api/financeiro/envios-pagamento/opcoes', async c => {
   const categoriasShare = (categorias.results as any[]).filter((item) => String(item.grupo_categoria ?? item.grupo ?? item.agrupamento ?? '').toUpperCase() === 'DESPESAS EMPRESA').map((item) => ({ id: String(item.id), nome: String(item.nome ?? item.categoria ?? item.descricao ?? item.titulo ?? '') })).filter((item) => item.nome)
   return c.json({ fornecedores: fornecedores.results, aeronaves: aeronaves.results, categorias: categoriasShare, categorias_cliente: categoriasCliente.results, voos: voos.results })
 })
+app.get('/api/financeiro/envios-pagamento/anexos-opcoes', async c => {
+  const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = portalDb(c)
+  const [recibos, relatorios, abastecimentos] = await Promise.all([
+    db.prepare(`SELECT r.id, r.numero_recibo, r.descricao_servico, r.data_emissao, a.id AS anexo_id, a.nome_arquivo, a.tipo_arquivo, '/api/financeiro/recibos/anexos/' || a.id || '/arquivo' AS arquivo_url FROM recibos r LEFT JOIN recibo_anexos a ON a.id = r.anexo_id ORDER BY r.criado_em DESC LIMIT 300`).all().catch(() => ({ results: [] as any[] })),
+    db.prepare(`SELECT r.id, r.numero_voo, r.numero_relatorio, r.aeronave_id, ar.matricula_registro, a.id AS anexo_id, a.nome_arquivo, a.tipo_arquivo, '/api/financeiro/relatorios-despesa-viagem/' || r.id || '/pdf/arquivo' AS arquivo_url FROM relatorios_despesa_viagem r LEFT JOIN aeronave ar ON ar.id = r.aeronave_id LEFT JOIN relatorio_despesa_viagem_anexos a ON a.relatorio_despesa_viagem_id = r.id AND a.indice_despesa = -1 ORDER BY r.criado_em DESC LIMIT 300`).all().catch(() => ({ results: [] as any[] })),
+    db.prepare(`SELECT a.id, a.numero_voo, a.trecho, a.data, a.numero_comanda, a.numero_nf, a.local, ar.matricula_registro, COALESCE(s.nome, cl.razao_social, 'Cotista não informado') AS cotista_nome, a.comanda_url, a.nota_url, a.boleto_url FROM abastecimentos a LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN cliente cl ON cl.id = a.cliente_id WHERE a.comanda_url IS NOT NULL OR a.nota_url IS NOT NULL OR a.boleto_url IS NOT NULL ORDER BY a.data DESC LIMIT 300`).all().catch(() => ({ results: [] as any[] })),
+  ])
+  return c.json({ recibos: recibos.results, relatorios: relatorios.results, abastecimentos: abastecimentos.results })
+})
 app.get('/api/financeiro/envios-pagamento/aeronaves/:id/cotistas', async c => {
   const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const rows = await portalDb(c).prepare(`SELECT ca.id,ca.cliente_id,ca.socio_id,ca.percentual_sociedade,COALESCE(cl.razao_social,hs.nome) nome,hs.holding_id,CASE WHEN hs.id IS NOT NULL THEN 1 ELSE 0 END eh_holding FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.aeronave_id=? ORDER BY nome`).bind(c.req.param('id')).all()
