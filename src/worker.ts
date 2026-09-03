@@ -1975,7 +1975,7 @@ async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, no
 }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))
-  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(assinatura.nome || ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}<br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
+  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(assinatura.nome || ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}${assinatura.email ? `<br>EMAIL: <a href=\"mailto:${esc(assinatura.email)}\" style=\"color:#1a3c6e\">${esc(assinatura.email)}</a>` : ''}<br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
 }
 
 // ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
@@ -5264,7 +5264,7 @@ async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: a
   const rows = await portalDb(c).prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
   const departamento = String(user.departamento || '').trim().toLowerCase()
   const row = (rows.results || []).find((item: any) => campoDepartamento(item, ['chave', 'key', 'codigo', 'departamento']).toLowerCase() === departamento) || (rows.results || [])[0]
-  return { nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL), cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: '', logo_url: null }
+  return { nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL), cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: campoDepartamento(row, ['email_assinatura', 'email', 'email_departamento']), logo_url: null }
 }
 app.get('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
