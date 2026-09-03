@@ -5877,7 +5877,7 @@ async function gerarFinanceiroNfSaida(
     aeronave_id: ctx.aeronave_id,
     cotista_id: ctx.cotista_id,
     nf_saida_id: origem === 'nf_saida' ? documentoId : null,
-    lancamento_id: lancamentoId, // aqui SIM é "lancamento_id" (singular) — confirmado no schema real de contas_areceber
+    lancamentos_id: lancamentoId,
     status: 'PENDENTE',
   })
 
@@ -6955,9 +6955,12 @@ async function garantirTabelaContas(c: Context<{ Bindings: Bindings }>): Promise
   const db = portalDb(c)
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS contas_apagar (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, data_pagamento TEXT, banco_pagamento TEXT, comprovante_pagamento_url TEXT, lancamento_id TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS contas_areceber (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, nf_saida_id TEXT, data_recebimento TEXT, banco_recebimento TEXT, comprovante_recebimento_url TEXT, lancamento_id TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS contas_areceber (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL CHECK (valor >= 0), categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, nf_saida_id TEXT, lancamentos_id TEXT, data_recebimento TEXT, banco_recebimento TEXT, comprovante_recebimento_url TEXT, data_pagamento TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE' CHECK (status IN ('PENDENTE','RECEBIDO','CANCELADO','ATRASADO')), criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
   ])
   await db.prepare('ALTER TABLE contas_apagar ADD COLUMN colaborador_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE contas_areceber ADD COLUMN lancamentos_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE contas_areceber ADD COLUMN data_pagamento TEXT').run().catch(() => undefined)
+  await db.prepare('UPDATE contas_areceber SET lancamentos_id = lancamento_id WHERE lancamentos_id IS NULL AND lancamento_id IS NOT NULL').run().catch(() => undefined)
 }
 
 function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {
@@ -7002,7 +7005,7 @@ function mapearContaAReceber(linha: LinhaGenerica): LinhaGenerica {
     dataRecebimento: linha.data_recebimento,
     bancoRecebimento: linha.banco_recebimento,
     comprovanteRecebimentoUrl: linha.comprovante_recebimento_url,
-    lancamentoId: linha.lancamento_id,
+    lancamentoId: linha.lancamentos_id,
     status: linha.status,
     criadoEm: linha.criado_em,
     atualizadoEm: linha.atualizado_em,
@@ -7058,7 +7061,7 @@ app.get('/api/contas-areceber', async c => {
   if (cotistaId) { condicoes.push('cotista_id = ?'); valores.push(cotistaId) }
   if (vencidasAte) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(vencidasAte)) return c.json({ error: 'filtro_de_data_invalido' }, 400)
-    condicoes.push("UPPER(status) NOT IN ('PAGO','CANCELADO') AND date(data_vencimento) <= date(?)")
+    condicoes.push("UPPER(status) NOT IN ('RECEBIDO','CANCELADO') AND date(data_vencimento) <= date(?)")
     valores.push(vencidasAte)
   }
   const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : ''
@@ -7076,7 +7079,7 @@ app.post('/api/contas-areceber/:id/dar-baixa', async c => {
   const comprovanteUrl = textoOuNulo(body.comprovanteRecebimentoUrl)
   if (!dataRecebimento) return c.json({ error: 'data_recebimento_obrigatoria' }, 400)
   const db = portalDb(c)
-  await db.prepare(`UPDATE contas_areceber SET status = 'PAGO', data_recebimento = ?, banco_recebimento = ?, comprovante_recebimento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, bancoRecebimento, comprovanteUrl, id).run()
+  await db.prepare(`UPDATE contas_areceber SET status = 'RECEBIDO', data_recebimento = ?, data_pagamento = ?, banco_recebimento = ?, comprovante_recebimento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, dataRecebimento, bancoRecebimento, comprovanteUrl, id).run()
   const row = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?1').bind(id).first<LinhaGenerica>()
   return row ? c.json(mapearContaAReceber(row)) : c.json({ error: 'nao_encontrado' }, 404)
 })
