@@ -6160,8 +6160,10 @@ app.post('/api/financeiro/recibos/anexos', async c => {
     await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_anexos (id TEXT PRIMARY KEY NOT NULL, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
     const key = await salvarArquivoShareBrasil(c, user.id, file, 'recibos/anexos')
     const id = uuid()
-    await db.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(id, file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
+    const reciboId = typeof body.recibo_id === 'string' && body.recibo_id.trim() ? body.recibo_id.trim() : null
+    await db.prepare('INSERT INTO recibo_anexos (id, recibo_id, finalidade, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, reciboId, reciboId ? 'anexo_recibo' : 'anexo_avulso', file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
+    if (reciboId) await db.prepare('UPDATE recibos SET anexo_id = ?1 WHERE id = ?2').bind(id, reciboId).run()
     return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_anexo' }, 400)
