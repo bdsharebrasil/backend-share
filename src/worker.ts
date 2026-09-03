@@ -5352,7 +5352,7 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     percentual REAL NOT NULL,
     valor REAL NOT NULL
   )`).run()
-  for (const coluna of ['recebedor_nome TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'observacoes TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  for (const coluna of ['recebedor_nome TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'observacoes TEXT', 'natureza_despesa TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
   const schema = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recibos'").first<{ sql: string }>()
   if (schema?.sql && !schema.sql.includes("'pagamento'")) {
     await db.prepare('ALTER TABLE recibos RENAME TO recibos_legacy').run()
@@ -5374,6 +5374,7 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
       SELECT id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, aeronave_id, rateado, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status, boleto_url, nf_url, lancamento_id, lancamento_reembolso_id, criado_por, criado_em FROM recibos_legacy`).run()
     await db.prepare('DROP TABLE recibos_legacy').run()
   }
+  await db.prepare('ALTER TABLE recibos ADD COLUMN natureza_despesa TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE recibo_rateio ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE rateio_despesas ADD COLUMN lancamentos_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE rateio_despesas ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
@@ -5400,8 +5401,9 @@ async function buscarCategoriasRecibo(c: Context<{ Bindings: Bindings }>) {
   for (const tabela of ['categoria_movimentacao_share', 'categorias_caixa_share']) {
     const rows = await db.prepare(`SELECT * FROM ${tabela}`).all<any>().catch(() => ({ results: [] as any[] }))
     const categorias = rows.results
-      .filter((row) => String(row.grupo_categoria ?? row.grupo ?? '').toUpperCase() === 'DESPESAS EMPRESA')
-      .map((row) => ({ id: String(row.id), nome: String(row.nome ?? row.categoria ?? row.descricao ?? ''), grupo_categoria: 'DESPESAS EMPRESA', tipo_despesa: row.tipo_despesa ?? row.tipo ?? null }))
+      .map((row) => ({ ...row, grupo_normalizado: String(row.grupo_categoria ?? row.grupo ?? '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '') }))
+      .filter((row) => ['DESPESAS EMPRESA', 'DESPESAS REEMBOLSAVEIS'].includes(row.grupo_normalizado))
+      .map((row) => ({ id: String(row.id), nome: String(row.nome ?? row.categoria ?? row.descricao ?? ''), grupo_categoria: row.grupo_normalizado === 'DESPESAS REEMBOLSAVEIS' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', tipo_despesa: row.tipo_despesa ?? row.tipo ?? null }))
       .filter((row) => row.id && row.nome)
       .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'))
     if (categorias.length) return categorias
@@ -5482,7 +5484,19 @@ app.post('/api/financeiro/recibos', async c => {
   if (rateado && !String(body.aeronave_id || '').trim()) return c.json({ error: 'aeronave_obrigatoria_para_rateio' }, 400)
   if (ehPagamento && !String(body.forma_pagamento || '').trim()) return c.json({ error: 'forma_pagamento_obrigatoria' }, 400)
 
+  const naturezaDespesa = beneficiarioTipo === 'colaborador' ? String(body.natureza_despesa || '').trim().toLowerCase() : ''
+  if (beneficiarioTipo === 'colaborador' && !['aeronave', 'empresa'].includes(naturezaDespesa)) return c.json({ error: 'natureza_despesa_obrigatoria' }, 400)
+  if (beneficiarioTipo === 'colaborador' && naturezaDespesa === 'aeronave' && !String(body.aeronave_id || '').trim()) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+
   const categoriaId = String(body.categoria_movimentacao_id || body.categoria_lancamento_id || '').trim()
+  const categoriaNomeManual = String(body.categoria_nome_manual || '').trim()
+  const categoriaOutroId = '111124d9-6111-4e11-a1f7-c7477e0fdb89'
+  const categoriasEmpresaPermitidas = new Set([
+    '88980acf-465f-4a16-8111-d8efaf28365b', '482a2993-28e9-417e-98f5-d00d03ada423',
+    '28a599f4-d8de-4969-98aa-58452d49c92e', '0293e29f-526e-4be0-af2e-0e10e73e8a8f',
+    'a4d8ed56-9bb2-47e1-93fa-2b786ff280b7', '09defc15-dced-408d-a975-092928374907',
+    '82e24a46-a773-4b6e-b2ae-bfd41c04bc5d', categoriaOutroId,
+  ])
   let categoriaRecibo: Record<string, any> | null = null
   if (beneficiarioTipo === 'colaborador') {
     if (!categoriaId) return c.json({ error: 'categoria_obrigatoria' }, 400)
@@ -5490,11 +5504,15 @@ app.post('/api/financeiro/recibos', async c => {
       categoriaRecibo = await db.prepare(`SELECT * FROM ${tabela} WHERE id = ?1`).bind(categoriaId).first<Record<string, any>>().catch(() => null)
       if (categoriaRecibo) break
     }
-    if (!categoriaRecibo || String(categoriaRecibo.grupo_categoria ?? categoriaRecibo.grupo ?? '').toUpperCase() !== 'DESPESAS EMPRESA') return c.json({ error: 'categoria_invalida' }, 400)
+    if (!categoriaRecibo) return c.json({ error: 'categoria_invalida' }, 400)
+    const grupoCategoriaRecibo = String(categoriaRecibo.grupo_categoria ?? categoriaRecibo.grupo ?? '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    if (naturezaDespesa === 'aeronave' && grupoCategoriaRecibo !== 'DESPESAS REEMBOLSAVEIS') return c.json({ error: 'categoria_aeronave_invalida' }, 400)
+    if (naturezaDespesa === 'empresa' && (!categoriasEmpresaPermitidas.has(categoriaId) || grupoCategoriaRecibo !== 'DESPESAS EMPRESA')) return c.json({ error: 'categoria_empresa_invalida' }, 400)
+    if (categoriaId === categoriaOutroId && !categoriaNomeManual) return c.json({ error: 'descricao_categoria_obrigatoria' }, 400)
   }
-  const grupoCategoria = beneficiarioTipo === 'colaborador' ? 'DESPESAS EMPRESA' : ehPagamento ? 'DESPESAS EMPRESA' : body.grupo_categoria
+  const grupoCategoria = beneficiarioTipo === 'colaborador' ? (naturezaDespesa === 'aeronave' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA') : ehPagamento ? 'DESPESAS EMPRESA' : body.grupo_categoria
   const tipoDespesa = beneficiarioTipo === 'colaborador' ? (categoriaRecibo?.tipo_despesa ?? categoriaRecibo?.tipo ?? null) : null
-  const categoriaNome = beneficiarioTipo === 'colaborador' ? String(categoriaRecibo?.nome || categoriaRecibo?.categoria || categoriaRecibo?.descricao || grupoCategoria) : grupoCategoria || (ehPagamento ? 'PAGAMENTO' : reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'CAIXA CLIENTE')
+  const categoriaNome = beneficiarioTipo === 'colaborador' ? (categoriaId === categoriaOutroId ? categoriaNomeManual : String(categoriaRecibo?.nome || categoriaRecibo?.categoria || categoriaRecibo?.descricao || grupoCategoria)) : grupoCategoria || (ehPagamento ? 'PAGAMENTO' : reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'CAIXA CLIENTE')
   const regra = ehPagamento || beneficiarioTipo === 'colaborador'
     ? regraFinanceira('share', 'DESPESAS EMPRESA')
     : regraFinanceiraRecibo('cliente', reembolsavel, grupoCategoria)
@@ -5609,6 +5627,7 @@ app.post('/api/financeiro/recibos', async c => {
         valor, descricao, dataEmissao, body.data_vencimento || null, ehPagamento ? body.forma_pagamento || null : null,
         body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
         body.boleto_url || null, body.nf_url || null, lancamentoId, user.id).run()
+    await db.prepare('UPDATE recibos SET natureza_despesa = ?1 WHERE id = ?2').bind(naturezaDespesa || null, reciboId).run()
 
     const recibo = await db.prepare('SELECT * FROM recibos WHERE id = ?1').bind(reciboId).first()
     return c.json({ recibo, lancamento_id: lancamentoId, rateio_ids: rateioIdsGerados, rateio_linhas: linhasRateio }, 201)
