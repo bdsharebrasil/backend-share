@@ -2096,6 +2096,20 @@ app.get('/api/email-envios', async (c) => {
 // 📩 1. Enviar nova mensagem
 app.use('/api/mensagens', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
 app.use('/api/mensagens/*', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
+app.get('/api/mensagens/usuarios', async (c) => {
+  if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = extractSupabaseUserId(c)
+  try {
+    const { results } = await portalDb(c).prepare(
+      "SELECT id, COALESCE(NULLIF(trim(nome_exibicao),''), NULLIF(trim(nome_completo),''), email) AS nome, email, departamento FROM user_profiles WHERE id <> ?1 AND lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY nome"
+    ).bind(usuarioId).all()
+    return c.json({ usuarios: results })
+  } catch (e: any) {
+    log.error('[mensagens:usuarios]', e.message)
+    return c.json({ error: 'Não foi possível carregar os usuários' }, 500)
+  }
+})
+
 app.post('/api/mensagens', async (c) => {
   if (!(await requireAuthenticatedUser(c))) {
     return c.json({ error: 'Não autorizado' }, 401)
@@ -2204,7 +2218,9 @@ app.get('/api/mensagens/unread-count', async (c) => {
     return c.json({ unread: result?.unread ?? 0 })
   } catch (e: any) {
     log.error('[mensagens:unread-count]', e.message)
-    return c.json({ error: e.message }, 500)
+    // Bases legadas podem ter a tabela sem a coluna lida; corrige sem derrubar o badge.
+    await portalDb(c).prepare('ALTER TABLE mensagens ADD COLUMN lida INTEGER NOT NULL DEFAULT 0').run().catch(() => undefined)
+    return c.json({ unread: 0, degraded: true })
   }
 })
 
