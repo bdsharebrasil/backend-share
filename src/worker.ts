@@ -5134,7 +5134,7 @@ async function inserirLancamentoFinanceira(c: Context<{ Bindings: Bindings }>, b
   const db = portalDb(c)
   const id = uuid()
   const observacoes = [body.observacoes, body.tipo_despesa && `Tipo da despesa: ${body.tipo_despesa}`].filter(Boolean).join(' | ') || null
-  await db.prepare(`INSERT INTO lancamentos (id, descricao, fluxo, categoria_nome, grupo_categoria, tipo_rateio, valor_total, valor_rateado, data_emissao, data_vencimento, aeronave_id, cotista_id, reembolsavel, reembolso_quitado, status, fornecedor_nome, numero_voo, observacoes, criado_por, pago_diretamente, tipo_caixa, pago_por, reference_id) VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, body.descricao, regra.grupo, regra.grupo, regra.rateio ? 'cliente' : null, Number.parseFloat(String(body.valor)), Number.parseFloat(String(body.valor)), body.data_despesa || null, body.vencimento || null, body.aeronave_id || null, body.cotista_id || null, regra.reembolsavel, body.fornecedor || null, body.numero_voo || null, observacoes, user.id, regra.pagoDiretamente, regra.caixa, body.pago_por || (body.tipo === 'cliente' ? body.cotista_id : 'share'), envioId).run()
+  await db.prepare(`INSERT INTO lancamentos (id, descricao, fluxo, categoria_nome, grupo_categoria, valor_total, valor_rateado, data_emissao, data_vencimento, aeronave_id, cotista_id, reembolsavel, reembolso_quitado, status, fornecedor_nome, numero_voo, observacoes, criado_por, pago_diretamente, tipo_caixa, pago_por, reference_id) VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', ?, ?, ?, ?, ?, ?, ?)`).bind(id, body.descricao, regra.grupo, regra.grupo, Number.parseFloat(String(body.valor)), Number.parseFloat(String(body.valor)), body.data_despesa || null, body.vencimento || null, body.aeronave_id || null, body.cotista_id || null, regra.reembolsavel, body.fornecedor || null, body.numero_voo || null, observacoes, user.id, regra.pagoDiretamente, regra.caixa, body.pago_por || (body.tipo === 'cliente' ? body.cotista_id : 'share'), envioId).run()
   return id
 }
 async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, lancamentoId: string, regra: ReturnType<typeof regraFinanceira>) {
@@ -5444,13 +5444,13 @@ app.post('/api/financeiro/recibos', async c => {
   try {
     // 1. lancamentos: ponto de entrada único do caixa (Share ou cliente conforme tipo_caixa).
     await db.prepare(`INSERT INTO lancamentos (
-        id, descricao, fluxo, categoria_nome, grupo_categoria, tipo_rateio, valor_total, valor_rateado,
+        id, descricao, fluxo, categoria_nome, grupo_categoria, valor_total, valor_rateado,
         data_emissao, data_vencimento, aeronave_id, cotista_id, colaborador_id,
         reembolsavel, reembolso_quitado, status, fornecedor_nome, observacoes, criado_por,
         pago_diretamente, tipo_caixa, pago_por, reference_type, reference_id
       ) VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', ?, ?, ?, ?, ?, ?, 'recibo', ?)`)
       .bind(
-        lancamentoId, descricao, regra.grupo, regra.grupo, regra.rateio ? 'cliente' : null, valor, valor,
+        lancamentoId, descricao, regra.grupo, regra.grupo, valor, valor,
         dataEmissao, body.data_vencimento || null, body.aeronave_id || null,
         rateado ? null : (beneficiarioTipo === 'cliente' ? body.cotista_id : null), null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
