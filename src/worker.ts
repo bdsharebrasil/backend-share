@@ -5728,13 +5728,23 @@ app.get('/api/financeiro/recibos', async c => {
   await garantirTabelasRecibos(c).catch((error) => log.error('[recibos] falha ao garantir tabelas', error))
   const status = c.req.query('status')
   const beneficiarioTipo = c.req.query('beneficiario_tipo')
+  const busca = c.req.query('q')?.trim()
+  const dataInicial = c.req.query('data_inicial')?.trim()
+  const dataFinal = c.req.query('data_final')?.trim()
   const clauses: string[] = []
   const params: unknown[] = []
   if (status) { clauses.push('status = ?'); params.push(status) }
   if (beneficiarioTipo) { clauses.push('beneficiario_tipo = ?'); params.push(beneficiarioTipo) }
+  if (busca) {
+    clauses.push(`(numero_recibo LIKE ? OR nome_pagador LIKE ? OR recebedor_nome LIKE ? OR descricao_servico LIKE ? OR numero_documento_anexo LIKE ? OR observacoes LIKE ?)`)
+    const termo = `%${busca}%`
+    params.push(termo, termo, termo, termo, termo, termo)
+  }
+  if (dataInicial) { clauses.push('data_emissao >= ?'); params.push(dataInicial) }
+  if (dataFinal) { clauses.push('data_emissao <= ?'); params.push(dataFinal) }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   try {
-    const stmt = portalDb(c).prepare(`SELECT * FROM recibos ${where} ORDER BY criado_em DESC LIMIT 200`)
+    const stmt = portalDb(c).prepare(`SELECT * FROM recibos ${where} ORDER BY data_emissao DESC, criado_em DESC`)
     const rows = params.length ? await stmt.bind(...params).all() : await stmt.all()
     return c.json({ recibos: rows.results })
   } catch (error) {
@@ -6714,7 +6724,7 @@ app.get('/api/ctm/dashboard', async c => {
     ctmRead(c, 'ctm_carregamentos', `${filtro} ORDER BY data_voo DESC`, id ? [id] : []),
   ])
   const totalOrcamento = (orcamentos.results || []).reduce((total: number, item: any) => total + Number(item.total || item.valor_total || 0), 0)
-  return c.json({ data: { aeronave: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
+  return c.json({ data: { aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
 })
 for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
   app.get(`/api/ctm/${slug}`, async c => {
