@@ -2096,9 +2096,50 @@ app.get('/api/email-envios', async (c) => {
 // 📩 1. Enviar nova mensagem
 app.use('/api/mensagens', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
 app.use('/api/mensagens/*', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
+
+type PastaMensagem = 'inbox' | 'nao-lidas' | 'favoritas' | 'enviadas' | 'arquivo'
+
+function assinaturaTexto(assinatura: { nome?: string; cargo?: string; telefone?: string; endereco?: string; email?: string }) {
+  return ['Atenciosamente,', assinatura.nome, assinatura.cargo, assinatura.telefone, assinatura.endereco, assinatura.email].filter((item) => item && String(item).trim()).join('\n')
+}
+
+async function prepararEstadosMensagens(c: Context<{ Bindings: Bindings }>, usuarioId: string) {
+  await portalDb(c).prepare(`
+    INSERT OR IGNORE INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida)
+    SELECT id, ?, CASE WHEN remetente_id = ? THEN 'remetente' ELSE 'destinatario' END,
+      CASE WHEN remetente_id = ? THEN 1 ELSE lida END
+    FROM mensagens WHERE remetente_id = ? OR destinatario_id = ?
+  `).bind(usuarioId, usuarioId, usuarioId, usuarioId, usuarioId).run()
+}
+
+async function listarMensagensPasta(c: Context<{ Bindings: Bindings }>, usuarioId: string, pasta: PastaMensagem) {
+  await prepararEstadosMensagens(c, usuarioId)
+  const filtros: Record<PastaMensagem, string> = {
+    inbox: "e.papel = 'destinatario' AND e.arquivada = 0 AND e.excluida = 0",
+    'nao-lidas': "e.papel = 'destinatario' AND e.lida = 0 AND e.arquivada = 0 AND e.excluida = 0",
+    favoritas: 'e.favorita = 1 AND e.excluida = 0',
+    enviadas: "e.papel = 'remetente' AND e.excluida = 0",
+    arquivo: 'e.arquivada = 1 AND e.excluida = 0',
+  }
+  const result = await portalDb(c).prepare(`
+    SELECT m.id, m.remetente_id, m.destinatario_id, m.assunto, m.conteudo, m.criado_em,
+      e.papel, e.lida, e.favorita, e.arquivada, e.excluida,
+      COALESCE(NULLIF(trim(rem.nome_exibicao), ''), NULLIF(trim(rem.nome_completo), ''), rem.email, m.remetente_id) AS remetente_nome,
+      COALESCE(NULLIF(trim(dest.nome_exibicao), ''), NULLIF(trim(dest.nome_completo), ''), dest.email, m.destinatario_id) AS destinatario_nome
+    FROM mensagens m
+    INNER JOIN mensagens_usuario e ON e.mensagem_id = m.id AND e.usuario_id = ?
+    LEFT JOIN user_profiles rem ON rem.id = m.remetente_id
+    LEFT JOIN user_profiles dest ON dest.id = m.destinatario_id
+    WHERE ${filtros[pasta]}
+    ORDER BY datetime(m.criado_em) DESC, m.id DESC
+  `).bind(usuarioId).all()
+  return result.results
+}
+
 app.get('/api/mensagens/usuarios', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'Não autorizado' }, 401)
-  const usuarioId = extractSupabaseUserId(c)
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
   try {
     const { results } = await portalDb(c).prepare(
       "SELECT id, COALESCE(NULLIF(trim(nome_exibicao),''), NULLIF(trim(nome_completo),''), email) AS nome, email, departamento FROM user_profiles WHERE id <> ?1 AND lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY nome"
@@ -2111,36 +2152,30 @@ app.get('/api/mensagens/usuarios', async (c) => {
 })
 
 app.post('/api/mensagens', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) {
-    return c.json({ error: 'Não autorizado' }, 401)
-  }
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
 
-  const remetenteId = extractSupabaseUserId(c)
-  if (!remetenteId) return c.json({ error: 'Sessão inválida' }, 401)
-
+  const remetenteId = user.id
   try {
-    const body = await c.req.json<{
-      destinatario_id: string
-      assunto?: string
-      conteudo: string
-    }>()
+    const body = await c.req.json<{ destinatario_id?: string; assunto?: string; conteudo?: string }>()
+    const destinatarioId = String(body.destinatario_id || '').trim()
+    const conteudo = String(body.conteudo || '').trim()
+    if (!destinatarioId || !conteudo) return c.json({ error: 'destinatario_id e conteudo são obrigatórios' }, 400)
+    if (destinatarioId === remetenteId) return c.json({ error: 'destinatario_invalido' }, 400)
 
-    const { destinatario_id, assunto, conteudo } = body
-
-    if (!destinatario_id || !conteudo?.trim()) {
-      return c.json({ error: 'destinatario_id e conteudo são obrigatórios' }, 400)
-    }
+    const destinatario = await portalDb(c).prepare("SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(destinatarioId).first<{ id: string }>()
+    if (!destinatario) return c.json({ error: 'destinatario_nao_encontrado' }, 404)
 
     const id = uuid()
+    const assinatura = await assinaturaOperacional(c, user)
+    const conteudoFinal = `${conteudo}\n\n${assinaturaTexto(assinatura)}`
+    await portalDb(c).batch([
+      portalDb(c).prepare('INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo) VALUES (?, ?, ?, ?, ?)').bind(id, remetenteId, destinatarioId, String(body.assunto || '').trim() || null, conteudoFinal),
+      portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'remetente', 1)").bind(id, remetenteId),
+      portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'destinatario', 0)").bind(id, destinatarioId),
+    ])
 
-    await portalDb(c).prepare(
-      `INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo) 
-       VALUES (?, ?, ?, ?, ?)`
-    )
-      .bind(id, remetenteId, destinatario_id, assunto?.trim() ?? null, conteudo.trim())
-      .run()
-
-    return c.json({ success: true, id, message: 'Mensagem enviada com sucesso' }, 201)
+    return c.json({ success: true, id, destinatario_id: destinatarioId, message: 'Mensagem enviada com sucesso' }, 201)
   } catch (e: any) {
     log.error('[mensagens:send]', e.message)
     return c.json({ error: e.message }, 500)
@@ -2149,107 +2184,91 @@ app.post('/api/mensagens', async (c) => {
 
 // 📬 2. Listar Caixa de Entrada (Inbox)
 app.get('/api/mensagens/inbox', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) {
-    return c.json({ error: 'Não autorizado' }, 401)
-  }
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
+  try { return c.json(await listarMensagensPasta(c, usuarioId, 'inbox')) }
+  catch (e: any) { log.error('[mensagens:inbox]', e.message); return c.json({ error: e.message }, 500) }
+})
 
-  const usuarioId = extractSupabaseUserId(c)
+app.get('/api/mensagens/pasta/:pasta', async (c) => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
+  const pasta = c.req.param('pasta') as PastaMensagem
   if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
-
-  try {
-    const { results } = await portalDb(c).prepare(
-      `SELECT id, remetente_id, assunto, conteudo, lida, criado_em 
-       FROM mensagens 
-       WHERE destinatario_id = ? 
-       ORDER BY criado_em DESC`
-    )
-      .bind(usuarioId)
-      .all()
-
-    return c.json(results)
-  } catch (e: any) {
-    log.error('[mensagens:inbox]', e.message)
-    return c.json({ error: e.message }, 500)
-  }
+  if (!['inbox', 'nao-lidas', 'favoritas', 'enviadas', 'arquivo'].includes(pasta)) return c.json({ error: 'pasta_invalida' }, 400)
+  try { return c.json(await listarMensagensPasta(c, usuarioId, pasta)) }
+  catch (e: any) { log.error('[mensagens:pasta]', e.message); return c.json({ error: e.message }, 500) }
 })
 
 // 📤 3. Listar Caixa de Saída (Enviados)
 app.get('/api/mensagens/outbox', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) {
-    return c.json({ error: 'Não autorizado' }, 401)
-  }
-
-  const usuarioId = extractSupabaseUserId(c)
-  if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
-
-  try {
-    const { results } = await portalDb(c).prepare(
-      `SELECT id, destinatario_id, assunto, conteudo, lida, criado_em 
-       FROM mensagens 
-       WHERE remetente_id = ? 
-       ORDER BY criado_em DESC`
-    )
-      .bind(usuarioId)
-      .all()
-
-    return c.json(results)
-  } catch (e: any) {
-    log.error('[mensagens:outbox]', e.message)
-    return c.json({ error: e.message }, 500)
-  }
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
+  try { return c.json(await listarMensagensPasta(c, usuarioId, 'enviadas')) }
+  catch (e: any) { log.error('[mensagens:outbox]', e.message); return c.json({ error: e.message }, 500) }
 })
 
 // 🔔 4. Obter contagem de mensagens NÃO LIDAS (para badges de notificação)
 app.get('/api/mensagens/unread-count', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) {
-    return c.json({ error: 'Não autorizado' }, 401)
-  }
-
-  const usuarioId = extractSupabaseUserId(c)
-  if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
-
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
   try {
-    const result = await portalDb(c).prepare(
-      `SELECT COUNT(*) as unread FROM mensagens WHERE destinatario_id = ? AND lida = 0`
-    )
-      .bind(usuarioId)
-      .first<{ unread: number }>()
-
-    return c.json({ unread: result?.unread ?? 0 })
+    await prepararEstadosMensagens(c, usuarioId)
+    const result = await portalDb(c).prepare("SELECT COUNT(*) AS unread FROM mensagens_usuario WHERE usuario_id = ?1 AND papel = 'destinatario' AND lida = 0 AND excluida = 0 AND arquivada = 0").bind(usuarioId).first<{ unread: number }>()
+    return c.json({ unread: Number(result?.unread || 0) })
   } catch (e: any) {
     log.error('[mensagens:unread-count]', e.message)
-    // Bases legadas podem ter a tabela sem a coluna lida; corrige sem derrubar o badge.
-    await portalDb(c).prepare('ALTER TABLE mensagens ADD COLUMN lida INTEGER NOT NULL DEFAULT 0').run().catch(() => undefined)
-    return c.json({ unread: 0, degraded: true })
+    return c.json({ error: 'Não foi possível contar as mensagens não lidas' }, 500)
+  }
+})
+
+app.patch('/api/mensagens/:id/estado', async (c) => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
+  const mensagemId = c.req.param('id')
+  try {
+    await prepararEstadosMensagens(c, usuarioId)
+    const estado = await portalDb(c).prepare('SELECT mensagem_id FROM mensagens_usuario WHERE mensagem_id = ?1 AND usuario_id = ?2').bind(mensagemId, usuarioId).first()
+    if (!estado) return c.json({ error: 'Mensagem não encontrada ou sem permissão' }, 404)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const campos: string[] = []
+    const valores: unknown[] = []
+    for (const campo of ['lida', 'favorita', 'arquivada', 'excluida'] as const) {
+      if (body[campo] !== undefined) { campos.push(`${campo} = ?`); valores.push(body[campo] ? 1 : 0) }
+    }
+    if (!campos.length) return c.json({ error: 'nenhuma_atualizacao' }, 400)
+    campos.push('atualizado_em = CURRENT_TIMESTAMP')
+    await portalDb(c).prepare(`UPDATE mensagens_usuario SET ${campos.join(', ')} WHERE mensagem_id = ? AND usuario_id = ?`).bind(...valores, mensagemId, usuarioId).run()
+    return c.json({ success: true, mensagem_id: mensagemId })
+  } catch (e: any) {
+    log.error('[mensagens:estado]', e.message)
+    return c.json({ error: e.message }, 500)
   }
 })
 
 // 🔍 5. Obter uma mensagem específica e marcar como LIDA
 app.get('/api/mensagens/:id', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) {
-    return c.json({ error: 'Não autorizado' }, 401)
-  }
-
-  const usuarioId = extractSupabaseUserId(c)
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
   const id = c.req.param('id')
-
   try {
-    const msg = await portalDb(c).prepare(
-      `SELECT * FROM mensagens WHERE id = ? AND (destinatario_id = ? OR remetente_id = ?)`
-    )
-      .bind(id, usuarioId, usuarioId)
-      .first<any>()
-
+    await prepararEstadosMensagens(c, usuarioId)
+    const msg = await portalDb(c).prepare(`
+      SELECT m.*, e.papel, e.lida, e.favorita, e.arquivada, e.excluida
+      FROM mensagens m INNER JOIN mensagens_usuario e ON e.mensagem_id = m.id AND e.usuario_id = ?
+      WHERE m.id = ? AND e.excluida = 0
+    `).bind(usuarioId, id).first<any>()
     if (!msg) return c.json({ error: 'Mensagem não encontrada' }, 404)
-
-    // Se o usuário atual for o destinatário e a mensagem ainda não foi lida, marca como lida
-    if (msg.destinatario_id === usuarioId && msg.lida === 0) {
-      c.executionCtx.waitUntil(
-        portalDb(c).prepare(`UPDATE mensagens SET lida = 1 WHERE id = ?`).bind(id).run()
-      )
+    if (msg.papel === 'destinatario' && !msg.lida) {
+      await portalDb(c).prepare('UPDATE mensagens_usuario SET lida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ?').bind(id, usuarioId).run()
       msg.lida = 1
     }
-
     return c.json(msg)
   } catch (e: any) {
     log.error('[mensagens:get]', e.message)
@@ -2259,25 +2278,15 @@ app.get('/api/mensagens/:id', async (c) => {
 
 // 🗑️ 6. Deletar mensagem
 app.delete('/api/mensagens/:id', async (c) => {
-  if (!(await requireAuthenticatedUser(c))) {
-    return c.json({ error: 'Não autorizado' }, 401)
-  }
-
-  const usuarioId = extractSupabaseUserId(c)
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const usuarioId = user.id
   const id = c.req.param('id')
-
   try {
-    const res = await portalDb(c).prepare(
-      `DELETE FROM mensagens WHERE id = ? AND (destinatario_id = ? OR remetente_id = ?)`
-    )
-      .bind(id, usuarioId, usuarioId)
-      .run()
-
-    if (res.meta.changes === 0) {
-      return c.json({ error: 'Mensagem não encontrada ou sem permissão' }, 404)
-    }
-
-    return c.json({ success: true, message: 'Mensagem removida' })
+    await prepararEstadosMensagens(c, usuarioId)
+    const res = await portalDb(c).prepare('UPDATE mensagens_usuario SET excluida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ? AND excluida = 0').bind(id, usuarioId).run()
+    if (!res.meta.changes) return c.json({ error: 'Mensagem não encontrada ou sem permissão' }, 404)
+    return c.json({ success: true, message: 'Mensagem movida para a lixeira' })
   } catch (e: any) {
     log.error('[mensagens:delete]', e.message)
     return c.json({ error: e.message }, 500)
@@ -2570,9 +2579,12 @@ async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Pr
     db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS mensagens (id TEXT PRIMARY KEY NOT NULL, remetente_id TEXT NOT NULL, destinatario_id TEXT NOT NULL, assunto TEXT, conteudo TEXT NOT NULL, lida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS mensagens_usuario (mensagem_id TEXT NOT NULL, usuario_id TEXT NOT NULL, papel TEXT NOT NULL CHECK (papel IN ('remetente', 'destinatario')), lida INTEGER NOT NULL DEFAULT 0, favorita INTEGER NOT NULL DEFAULT 0, arquivada INTEGER NOT NULL DEFAULT 0, excluida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (mensagem_id, usuario_id))`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_mensagens_usuario_pasta ON mensagens_usuario (usuario_id, papel, excluida, arquivada, favorita, lida)`),
   ])
   // Migração legada: o D1 não aceita múltiplas instruções em um único prepare.
   await db.prepare('ALTER TABLE user_profiles ADD COLUMN email_envio TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE mensagens ADD COLUMN lida INTEGER NOT NULL DEFAULT 0').run().catch(() => undefined)
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
@@ -5339,7 +5351,7 @@ app.get('/api/interno/emails', async c => {
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM recibo_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, local, numero_comanda, numero_nf, comanda_url, nota_url, boleto_url FROM abastecimentos WHERE comanda_url IS NOT NULL OR nota_url IS NOT NULL OR boleto_url IS NOT NULL ORDER BY data DESC LIMIT 200").all().catch(() => ({ results: [] })),
-    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 100").all(),
+    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados WHERE enviado_por = ?1 ORDER BY criado_em DESC LIMIT 100").bind(user.id).all(),
   ])
   const contatos: any[] = []
   for (const row of (clientes.results as any[])) {
