@@ -5260,11 +5260,14 @@ function campoDepartamento(row: any, nomes: string[]) {
   for (const nome of nomes) if (row?.[nome] !== undefined && row[nome] !== null && String(row[nome]).trim()) return String(row[nome]).trim()
   return ''
 }
+function normalizarChaveDepartamento(valor: unknown) {
+  return String(valor || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+}
 async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: any) {
   const rows = await portalDb(c).prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
-  const departamento = String(user.departamento || '').trim().toLowerCase()
-  const row = (rows.results || []).find((item: any) => campoDepartamento(item, ['chave', 'key', 'codigo', 'departamento']).toLowerCase() === departamento) || (rows.results || [])[0]
-  return { nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL), cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: campoDepartamento(row, ['email_assinatura', 'email', 'email_departamento']), logo_url: null }
+  const departamento = normalizarChaveDepartamento(user.departamento)
+  const row = (rows.results || []).find((item: any) => ['chave', 'key', 'codigo', 'departamento', 'nome_exibicao', 'nome', 'titulo'].some((campo) => normalizarChaveDepartamento(item?.[campo]) === departamento)) || {}
+  return { nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL), cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']) || String(user.departamento || ''), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: campoDepartamento(row, ['email_assinatura', 'email', 'email_departamento']), logo_url: campoDepartamento(row, ['logo_url', 'logo', 'url_logo']) || null }
 }
 app.get('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
