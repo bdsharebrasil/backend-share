@@ -5039,7 +5039,7 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes/:id/ws', async c => {
   const user = await authenticatedColaboradorToken(c, token)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await ensureTrainingTables(c)
-  const room = await portalDb(c).prepare("SELECT id FROM centro_reunioes WHERE id = ?1 AND status = 'ATIVA'").bind(c.req.param('id')).first()
+  const room = await portalDb(c).prepare("SELECT id, criado_por FROM centro_reunioes WHERE id = ?1 AND status = 'ATIVA'").bind(c.req.param('id')).first<{ id: string; criado_por: string }>()
   if (!room) return c.notFound()
   const roomId = c.env.MEETING_ROOMS.idFromName(c.req.param('id'))
   const stub = c.env.MEETING_ROOMS.get(roomId)
@@ -5047,6 +5047,7 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes/:id/ws', async c => {
   target.searchParams.set('user_id', user.id)
   target.searchParams.set('name', user.nome_exibicao || user.nome_completo || user.email)
   target.searchParams.set('participant_id', c.req.query('participant_id') || uuid())
+  target.searchParams.set('host_user_id', room.criado_por)
   return stub.fetch(new Request(target, { headers: { Upgrade: 'websocket' } }))
 })
 
@@ -5101,7 +5102,8 @@ export class MeetingRoom {
     const url = new URL(request.url)
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
-    const attachment = { id: url.searchParams.get('participant_id') || crypto.randomUUID(), userId: url.searchParams.get('user_id') || '', name: url.searchParams.get('name') || 'Participante' }
+    const userId = url.searchParams.get('user_id') || ''
+    const attachment = { id: url.searchParams.get('participant_id') || crypto.randomUUID(), userId, isHost: userId !== '' && userId === (url.searchParams.get('host_user_id') || ''), name: url.searchParams.get('name') || 'Participante' }
     this.state.acceptWebSocket(server)
     server.serializeAttachment(attachment)
     server.send(JSON.stringify({ type: 'room_state', participants: this.participants(), whiteboard: await this.state.storage.get<unknown[]>('whiteboard') || [] }))
@@ -5113,8 +5115,9 @@ export class MeetingRoom {
     const raw = typeof message === 'string' ? message : new TextDecoder().decode(message)
     let data: Record<string, any>
     try { data = JSON.parse(raw) } catch { return }
-    const senderAttachment = sender.deserializeAttachment() as { id: string; userId: string; name: string } | null
+    const senderAttachment = sender.deserializeAttachment() as { id: string; userId: string; isHost?: boolean; name: string } | null
     if (!senderAttachment) return
+    if (data.type === 'whiteboard' && data.action && !senderAttachment.isHost) return
     if (data.type === 'whiteboard' && data.action) {
       const board = await this.state.storage.get<any[]>('whiteboard') || []
       board.push({ ...data.action, author: senderAttachment.name, createdAt: Date.now() })
