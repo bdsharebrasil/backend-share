@@ -5618,6 +5618,9 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run()
   await db.prepare(`CREATE INDEX IF NOT EXISTS recibos_criado_idx ON recibos(criado_em DESC)`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_anexos (id TEXT PRIMARY KEY NOT NULL, recibo_id TEXT, finalidade TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run().catch(() => undefined)
+  await db.prepare('ALTER TABLE recibo_anexos ADD COLUMN recibo_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE recibo_anexos ADD COLUMN finalidade TEXT').run().catch(() => undefined)
   await db.prepare(`CREATE INDEX IF NOT EXISTS recibos_numero_idx ON recibos(numero_recibo)`).run()
   await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_rateio (
     id TEXT PRIMARY KEY NOT NULL,
@@ -5636,7 +5639,7 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     percentual_sociedade REAL, percentual_uso REAL, valor_total REAL, valor_rateado REAL, status TEXT,
     observacoes TEXT, conferido_por TEXT, anexos_json TEXT DEFAULT '[]'
   )`).run().catch((error) => log.error('[recibos] rateio_hold indisponível:', error?.message || error))
-  for (const coluna of ['recebedor_nome TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'observacoes TEXT', 'natureza_despesa TEXT', 'categoria_lancamento_id TEXT', 'lancamento_id TEXT', 'lancamento_reembolso_id TEXT', 'periodicidade TEXT', 'tipo_rateio TEXT', 'subcategoria_1 TEXT', 'subcategoria_2 TEXT', 'subcategoria_3 TEXT', 'subcategoria_4 TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  for (const coluna of ['recebedor_nome TEXT', 'recebedor_cpf TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'pdf_anexo_id TEXT', 'pdf_url TEXT', 'observacoes TEXT', 'natureza_despesa TEXT', 'categoria_lancamento_id TEXT', 'lancamento_id TEXT', 'lancamento_reembolso_id TEXT', 'periodicidade TEXT', 'tipo_rateio TEXT', 'subcategoria_1 TEXT', 'subcategoria_2 TEXT', 'subcategoria_3 TEXT', 'subcategoria_4 TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
   const schema = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recibos'").first<{ sql: string }>()
   if (schema?.sql && !schema.sql.includes("'pagamento'")) {
     await db.prepare('ALTER TABLE recibos RENAME TO recibos_legacy').run()
@@ -5706,7 +5709,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
   const db = portalDb(c)
   const [clientes, colaboradores, aeronave, cotistas, categorias, categoriasCliente] = await Promise.all([
     db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) IN ('ativo', 'active', '') ORDER BY razao_social").all().catch(() => ({ results: [] as any[] })),
-    db.prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, status FROM user_profiles WHERE lower(trim(COALESCE(tipo_user, ''))) = 'colaborador' AND (status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active')) ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
+    db.prepare("SELECT id, nome_completo, nome_exibicao, cpf, pix, nome_banco, tipo_conta, conta_numero, agencia_numero, email, tipo_user, status FROM user_profiles WHERE lower(trim(COALESCE(tipo_user, ''))) = 'colaborador' AND (status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active')) ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
     db.prepare(`SELECT ca.id AS id, ca.id AS cotista_id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
                        COALESCE(ca.codigo_cliente, cl.codigo_cliente) AS codigo_cliente,
@@ -5792,9 +5795,11 @@ app.post('/api/financeiro/recibos', async c => {
   const cidadePagador = pagadorCotista?.cidade || PAGADOR_PADRAO_RECIBO.cidade
   const ufPagador = pagadorCotista?.uf || PAGADOR_PADRAO_RECIBO.uf
   let recebedorNome = String(body.recebedor_nome || '').trim()
+  let recebedorCpf = String(body.recebedor_cpf || '').trim()
   if (beneficiarioTipo === 'colaborador') {
-    const colaborador = await db.prepare('SELECT COALESCE(NULLIF(trim(nome_exibicao), \'\'), nome_completo) AS nome, pix FROM user_profiles WHERE id = ?1').bind(String(body.colaborador_id || '').trim()).first<{ nome: string; pix: string | null }>().catch(() => null)
+    const colaborador = await db.prepare('SELECT nome_completo AS nome, cpf, pix FROM user_profiles WHERE id = ?1').bind(String(body.colaborador_id || '').trim()).first<{ nome: string; cpf: string | null; pix: string | null }>().catch(() => null)
     recebedorNome = colaborador?.nome || recebedorNome
+    recebedorCpf = colaborador?.cpf || recebedorCpf
     if (colaborador?.pix && !descricao.toLowerCase().includes('pix')) descricao = `${descricao} · PIX para pagamento: ${colaborador.pix}`
   }
   const clienteId = String(body.cliente_id || body.cotista_id || '').trim()
@@ -5986,16 +5991,16 @@ app.post('/api/financeiro/recibos', async c => {
     const tipoRecibo = ehPagamento ? 'pagamento' : beneficiarioTipo === 'colaborador' ? 'colaborador' : (reembolsavel ? 'cliente_reembolsavel' : 'cliente_direto')
     const statusRecibo = reembolsavel ? 'aguardando_reembolso' : 'emitido'
     await db.prepare(`INSERT INTO recibos (
-        id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, recebedor_nome, aeronave_id, rateado,
+        id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado,
         nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
         valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento,
         numero_documento_anexo, anexo_id, observacoes, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
         boleto_url, nf_url, lancamento_id, criado_por
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
         beneficiarioTipo === 'cliente' && !rateado ? body.cliente_id : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
-        (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, body.aeronave_id || null, rateado ? 1 : 0,
+        (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, beneficiarioTipo === 'colaborador' ? recebedorCpf : null, body.aeronave_id || null, rateado ? 1 : 0,
         nomePagador, documentoPagador, enderecoPagador, cidadePagador, ufPagador,
         valor, descricao, dataEmissao, body.data_vencimento || null, ehPagamento ? body.forma_pagamento || null : null,
         body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
@@ -6032,7 +6037,7 @@ app.get('/api/financeiro/recibos/:id/visualizacao', async c => {
   if (!recibo) return c.notFound()
   const dinheiro = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(recibo.valor || 0))
   const esc = (value: unknown) => escapeHtml(String(value || '—'))
-  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Emissor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>Destinatário do pagamento` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06<br>Av. Presidente Arthur Bernardes, 1457<br>Várzea Grande - 78125-100`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : `<b>${esc(recibo.recebedor_nome || recibo.nome_pagador)}</b>`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div></body></html>`)
+  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>Destinatário do pagamento` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div></body></html>`)
 })
 
 // Cliente reembolsa a Share pelo valor que ela antecipou: fecha o ciclo de
@@ -6104,6 +6109,31 @@ app.post('/api/financeiro/recibos/anexos', async c => {
     return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_anexo' }, 400)
+  }
+})
+app.post('/api/financeiro/recibos/:id/pdf', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelasRecibos(c)
+  const db = portalDb(c)
+  const reciboId = c.req.param('id')
+  const recibo = await db.prepare('SELECT id, numero_recibo FROM recibos WHERE id = ?1').bind(reciboId).first<{ id: string; numero_recibo: string }>()
+  if (!recibo) return c.notFound()
+  const form = await c.req.formData()
+  const fileValue = form.get('arquivo') as unknown
+  if (!fileValue || typeof fileValue !== 'object' || !('size' in fileValue)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const file = fileValue as File
+  if (file.type !== 'application/pdf') return c.json({ error: 'pdf_obrigatorio' }, 400)
+  try {
+    const key = await salvarArquivoShareBrasil(c, user.id, file, 'recibos/pdf')
+    const anexoId = `pdf:${reciboId}`
+    await db.prepare('INSERT OR REPLACE INTO recibo_anexos (id, recibo_id, finalidade, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(anexoId, reciboId, 'pdf_gerado', file.name, key, file.type, file.size, user.id).run()
+    const pdfUrl = new URL(`/api/financeiro/recibos/anexos/${encodeURIComponent(anexoId)}/arquivo`, c.req.url).toString()
+    await db.prepare('UPDATE recibos SET pdf_anexo_id = ?1, pdf_url = ?2 WHERE id = ?3').bind(anexoId, pdfUrl, reciboId).run()
+    return c.json({ anexo_id: anexoId, pdf_url: pdfUrl }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_pdf' }, 400)
   }
 })
 app.get('/api/financeiro/recibos/anexos/:id/arquivo', async c => {
