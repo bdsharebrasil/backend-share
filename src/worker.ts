@@ -6,9 +6,11 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod'
 import { prepararFinanceiro, normalizarLancamentoInput, FinanceValidationError } from './financeiro/LancamentoService'
 import logoShareBytes from './assets/share-signature-logo.png'
+import signatureBytes from './assets/assinatura-para-recibo.png'
 
 const SIGNATURE_LOGO_CID = 'share-brasil-signature-logo'
 const SIGNATURE_LOGO_BASE64 = arrayBufferBase64(logoShareBytes)
+const SIGNATURE_BASE64 = arrayBufferBase64(signatureBytes)
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -5432,6 +5434,29 @@ function arrayBufferBase64(buffer: ArrayBuffer): string {
   for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, Math.min(index + 0x8000, bytes.length)))
   return btoa(binary)
 }
+
+function carimboAssinaturaHtml(dataEmissaoISO: string): string {
+  const dataExtenso = new Date(`${dataEmissaoISO}T00:00:00`).toLocaleDateString('pt-BR', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  })
+
+  return `
+    <div style="text-align:center; font-family:Arial,sans-serif; width:280px; margin:50px auto 0;">
+      <div style="font-size:13px; margin-bottom:8px; color:#222;">
+        Várzea Grande-MT, ${dataExtenso}
+      </div>
+      <img src="data:image/png;base64,${SIGNATURE_BASE64}" alt="Assinatura" style="width:170px; height:auto; display:block; margin:0 auto;">
+      <div style="border-top:1px solid #333; width:220px; margin:2px auto 8px;"></div>
+      <div style="font-size:13px; font-weight:bold; color:#111;">Rolffe de Lima Erbe</div>
+      <div style="font-size:12px; color:#555; margin-bottom:16px;">Gestor Responsável</div>
+      <img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil" style="width:110px; height:auto; display:block; margin:0 auto 6px;">
+      <div style="font-size:11px; color:#444;">Financeiro - SHARE BRASIL SERVICOS AEROPORTUARIOS</div>
+    </div>
+  `
+}
+
 app.get('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -5799,6 +5824,7 @@ async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
   // Instalações antigas usam lancamento_id; as novas usam lancamentos_id.
   await db.prepare('ALTER TABLE notas_fiscais_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE recibos_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
+  await db.prepare('ALTER TABLE recibos_saida ADD COLUMN contas_areceber_id TEXT').run().catch(() => undefined)
 }
 
 async function inserirLinhaDinamica(db: any, table: string, row: Record<string, any>) {
@@ -5964,7 +5990,24 @@ app.get('/api/financeiro/notas-saida/opcoes', async c => {
   const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); await garantirCategoriasCliente(c); const db=portalDb(c)
   const [cotistas,aeronaves,categoriasReceita,categoriasDespesa,contasBancarias]=await Promise.all([db.prepare(`SELECT ca.id cotista_aeronave_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente) codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id ORDER BY nome`).all(),db.prepare('SELECT id,matricula_registro FROM aeronave ORDER BY matricula_registro').all(),db.prepare("SELECT id,nome,grupo_categoria,tipo FROM categoria_movimentacao_share WHERE lower(COALESCE(tipo,'receita'))='receita' ORDER BY nome").all(),db.prepare('SELECT id,nome,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all(),db.prepare('SELECT id,banco,numero_conta FROM contas_bancarias ORDER BY banco').all().catch(()=>({results:[]}))]); return c.json({cotistas:cotistas.results,aeronaves:aeronaves.results,categoriasReceita:categoriasReceita.results,categoriasDespesa:categoriasDespesa.results,contasBancarias:contasBancarias.results})
 })
-app.get('/api/financeiro/notas-saida', async c => { const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); const db=portalDb(c); const [notas,recibos]=await Promise.all([db.prepare(`SELECT n.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id=n.cotista_aeronave_id LEFT JOIN cliente cl ON cl.id=n.cliente_id LEFT JOIN hold_socios hs ON hs.id=n.socio_id LEFT JOIN aeronave a ON a.id=n.aeronave_id ORDER BY n.data_criacao DESC`).all(),db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=r.cliente_id LEFT JOIN hold_socios hs ON hs.id=r.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all()]); return c.json({notas:notas.results,recibos:recibos.results}) })
+app.get('/api/financeiro/notas-saida', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+
+  try {
+    await garantirTabelasNfSaida(c)
+    await garantirTabelaContas(c)
+    const db = portalDb(c)
+    const [notas, recibos] = await Promise.all([
+      db.prepare(`SELECT n.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id=n.cotista_aeronave_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=n.aeronave_id ORDER BY n.data_criacao DESC`).all(),
+      db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all(),
+    ])
+    return c.json({ notas: notas.results, recibos: recibos.results })
+  } catch (error: any) {
+    log.error('[financeiro/notas-saida] falha ao listar notas e recibos:', error?.message ?? error)
+    return c.json({ error: 'erro_ao_listar_notas_saida' }, 500)
+  }
+})
 app.post('/api/financeiro/notas-saida', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -6391,7 +6434,7 @@ app.get('/api/financeiro/recibos/:id/visualizacao', async c => {
   if (!recibo) return c.notFound()
   const dinheiro = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(recibo.valor || 0))
   const esc = (value: unknown) => escapeHtml(String(value || '—'))
-  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div></body></html>`)
+  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div>${carimboAssinaturaHtml(recibo.data_emissao)}</body></html>`)
 })
 
 // Cliente reembolsa a Share pelo valor que ela antecipou: fecha o ciclo de
