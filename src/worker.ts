@@ -5232,11 +5232,12 @@ app.get('/api/interno/emails', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const db = portalDb(c)
   await garantirTabelaEmails(c)
-  const [clientes, socios, recibos, relatorios, historico] = await Promise.all([
+  const [clientes, socios, recibos, relatorios, abastecimentos, historico] = await Promise.all([
     db.prepare("SELECT id, razao_social, email_principal, emails FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, email_principal, cotista_id, holding_id FROM hold_socios WHERE email_principal IS NOT NULL AND trim(email_principal) <> '' ORDER BY nome").all(),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM recibo_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, local, numero_comanda, numero_nf, comanda_url, nota_url, boleto_url FROM abastecimentos WHERE comanda_url IS NOT NULL OR nota_url IS NOT NULL OR boleto_url IS NOT NULL ORDER BY data DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 100").all(),
   ])
   const contatos: any[] = []
@@ -5245,7 +5246,8 @@ app.get('/api/interno/emails', async c => {
     for (const email of [...new Set(emails.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))]) contatos.push({ id: `${row.id}:${email}`, nome: row.razao_social, email, tipo: 'cliente', cliente_id: row.id })
   }
   for (const row of (socios.results as any[])) contatos.push({ id: `socio:${row.id}`, nome: row.nome, email: String(row.email_principal).trim().toLowerCase(), tipo: 'socio', cotista_id: row.cotista_id, holding_id: row.holding_id || null })
-  const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` }))]
+  const anexosAbastecimento = (abastecimentos.results as any[]).flatMap((row) => ([['comanda_url', 'Comanda'], ['nota_url', 'Nota fiscal'], ['boleto_url', 'Boleto']] as const).filter(([campo]) => row[campo]).map(([campo, titulo]) => ({ id: `abastecimento:${row.id}:${campo.replace('_url', '')}`, nome: `${titulo} · ${row.numero_comanda || row.numero_nf || row.local || 'Abastecimento'}`, origem: 'abastecimento', tipo_arquivo: null, tamanho_arquivo: null, arquivo_url: row[campo] })))
+  const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` })), ...anexosAbastecimento]
   return c.json({ contatos, anexos, historico: (historico.results as any[]).map((row) => ({ ...row, destinatarios: emailArray(row.destinatarios), quantidade_anexos: emailArray(row.anexos).length })) })
 })
 app.get('/api/minha-assinatura', async c => {
@@ -5268,16 +5270,28 @@ app.patch('/api/minha-assinatura', async c => {
 app.post('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const multipart = c.req.header('content-type')?.includes('multipart/form-data')
+  const body = multipart ? await c.req.parseBody() : await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const destinatarios = emailArray(body.destinatarios)
-  const assunto = String(body.assunto || '').trim(); const mensagem = String(body.mensagem || '').trim(); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : []
+  const assunto = String(body.assunto || '').trim(); const mensagem = String(body.mensagem || '').trim(); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (destinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c)
   const db = portalDb(c); const anexos: any[] = []
   for (const id of ids.slice(0, 10)) {
-    const [prefix, rawId] = id.includes(':') ? id.split(':', 2) : ['', id]
+    const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
+    if (prefix === 'abastecimento') {
+      const column = tipoAbastecimento === 'nota' ? 'nota_url' : tipoAbastecimento === 'boleto' ? 'boleto_url' : 'comanda_url'
+      const row = await db.prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
+      if (row?.caminho) {
+        let key = row.caminho
+        try { key = new URL(row.caminho).searchParams.get('key') || key } catch { /* chave legada */ }
+        const object = await shareBrasilBucket(c).get(key)
+        if (object) anexos.push({ filename: key.split('/').pop() || `abastecimento-${tipoAbastecimento}`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/octet-stream' })
+      }
+      continue
+    }
     const table = prefix === 'recibo' ? 'recibo_anexos' : prefix === 'relatorio' ? 'relatorio_despesa_viagem_anexos' : ''
     if (!table) continue
     const row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
@@ -5285,6 +5299,8 @@ app.post('/api/interno/emails', async c => {
     const object = await shareBrasilBucket(c).get(row.caminho_arquivo); if (!object) continue
     anexos.push({ filename: row.nome_arquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: row.tipo_arquivo || 'application/octet-stream' })
   }
+  const arquivosLocais = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : []).filter((file): file is File => file instanceof File && !!file.size)
+  for (const file of arquivosLocais.slice(0, 10)) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
   const id = uuid(); let status = 'enviado'; let erro: string | null = null
   const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: `${user.nome_completo} <${user.email_envio || c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(await portalDb(c).prepare('SELECT * FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first() || { nome: user.nome_completo, email: user.email_envio || user.email })}`, attachments: anexos }) })
   if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
