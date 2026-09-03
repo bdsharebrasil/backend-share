@@ -6379,6 +6379,59 @@ app.post('/api/contas-areceber/:id/dar-baixa', async c => {
   return row ? c.json(mapearContaAReceber(row)) : c.json({ error: 'nao_encontrado' }, 404)
 })
 
+
+// ─── CTM: Controle de Troca e Manutenção ─────────────────────────────────────
+const CTM_READ_TABLES: Record<string, { table: string; order?: string }> = {
+  programa: { table: 'ctm_programa_manutencao', order: 'categoria, item' },
+  oas: { table: 'ctm_ordem_acompanhamento_servico', order: 'data_entrada DESC' },
+  orcamentos: { table: 'ctm_orcamentos', order: 'criado_em DESC' },
+  componentes: { table: 'ctm_mapa_componente', order: 'nome' },
+  diretrizes: { table: 'ctm_diretrizes', order: 'data_vencimento' },
+  ras: { table: 'ctm_ras', order: 'data_entrada DESC' },
+  carregamentos: { table: 'ctm_carregamentos', order: 'data_voo DESC, criado_em DESC' },
+}
+async function ctmRead(c: Context<{ Bindings: Bindings }>, table: string, where = '', params: unknown[] = []) {
+  try {
+    return await portalDb(c).prepare(`SELECT * FROM ${table}${where}`).bind(...params).all<any>()
+  } catch (error) {
+    log.error(`[ctm] leitura falhou em ${table}`, error)
+    return { results: [] as any[] }
+  }
+}
+app.get('/api/ctm/aeronaves', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const rows = await ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro")
+  return c.json({ data: rows.results })
+})
+app.get('/api/ctm/dashboard', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = String(c.req.query('aeronave_id') || '').trim()
+  const aeronaves = await ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro")
+  const selecionada = (aeronaves.results || []).find((item: any) => String(item.id) === aeronaveId) || (aeronaves.results || [])[0] || null
+  const id = selecionada?.id
+  const filtro = id ? ' WHERE aeronave_id = ?' : ' WHERE 1 = 0'
+  const [programa, diretrizes, componentes, oas, orcamentos, ras, carregamentos] = await Promise.all([
+    ctmRead(c, 'ctm_programa_manutencao', `${filtro} ORDER BY categoria, item`, id ? [id] : []),
+    ctmRead(c, 'ctm_diretrizes', `${filtro} ORDER BY data_vencimento`, id ? [id] : []),
+    ctmRead(c, 'ctm_mapa_componente', `${filtro} ORDER BY nome`, id ? [id] : []),
+    ctmRead(c, 'ctm_ordem_acompanhamento_servico', `${filtro} ORDER BY data_entrada DESC`, id ? [id] : []),
+    ctmRead(c, 'ctm_orcamentos', `${filtro} ORDER BY criado_em DESC`, id ? [id] : []),
+    ctmRead(c, 'ctm_ras', `${filtro} ORDER BY data_entrada DESC`, id ? [id] : []),
+    ctmRead(c, 'ctm_carregamentos', `${filtro} ORDER BY data_voo DESC`, id ? [id] : []),
+  ])
+  const totalOrcamento = (orcamentos.results || []).reduce((total: number, item: any) => total + Number(item.total || item.valor_total || 0), 0)
+  return c.json({ data: { aeronaves: aeronaves.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
+})
+for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
+  app.get(`/api/ctm/${slug}`, async c => {
+    if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+    const aeronaveId = String(c.req.query('aeronave_id') || '').trim()
+    const where = aeronaveId ? ` WHERE aeronave_id = ? ORDER BY ${config.order || 'id'}` : ` ORDER BY ${config.order || 'id'}`
+    const rows = await ctmRead(c, config.table, where, aeronaveId ? [aeronaveId] : [])
+    return c.json({ data: rows.results })
+  })
+}
+
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
 const WORKER_URL = 'https://api-workers.sharebrasil.workers.dev'
 
