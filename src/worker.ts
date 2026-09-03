@@ -4456,7 +4456,7 @@ app.post('/api/sharebrasil/holdings/:id/socios', async c => {
   await portalDb(c).prepare('INSERT INTO hold_socios (id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, holding_id) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, nome, cpf, body.email_principal || null, JSON.stringify(body.emails || []), body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone || null, body.observacoes || null, c.req.param('id')).run()
   return c.json({ id, holding_id: c.req.param('id'), nome }, 201)
 })
-app.post('/api/sharebrasil/socios/:id/aeronaves', async c => {
+app.post('/api/sharebrasil/socios/:id/aeronave', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<{ aeronave_id?: string; percentual_sociedade?: number }>().catch(() => ({} as any))
@@ -4500,7 +4500,7 @@ app.patch('/api/sharebrasil/socios/:id', async c => {
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
-app.post('/api/sharebrasil/clientes/:id/aeronaves', async c => {
+app.post('/api/sharebrasil/clientes/:id/aeronave', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<{ aeronave_id?: string; percentual_sociedade?: number; codigo_cliente?: string }>().catch(() => ({} as any))
@@ -5345,7 +5345,7 @@ app.get('/api/financeiro/envios-pagamento/anexos-opcoes', async c => {
   ])
   return c.json({ recibos: recibos.results, relatorios: relatorios.results, abastecimentos: abastecimentos.results })
 })
-app.get('/api/financeiro/envios-pagamento/aeronaves/:id/cotistas', async c => {
+app.get('/api/financeiro/envios-pagamento/aeronave/:id/cotistas', async c => {
   const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const rows = await portalDb(c).prepare(`SELECT ca.id,ca.cliente_id,ca.socio_id,ca.percentual_sociedade,COALESCE(cl.razao_social,hs.nome) nome,hs.holding_id,CASE WHEN hs.id IS NOT NULL THEN 1 ELSE 0 END eh_holding FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.aeronave_id=? ORDER BY nome`).bind(c.req.param('id')).all()
   return c.json({ cotistas: rows.results })
@@ -6595,7 +6595,7 @@ async function ctmRead(c: Context<{ Bindings: Bindings }>, table: string, where 
     return { results: [] as any[] }
   }
 }
-app.get('/api/ctm/aeronaves', async c => {
+app.get('/api/ctm/aeronave', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const rows = await ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro")
   return c.json({ data: rows.results })
