@@ -1975,7 +1975,10 @@ async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, no
 }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))
-  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(assinatura.nome || ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}${assinatura.email ? `<br>EMAIL: <a href=\"mailto:${esc(assinatura.email)}\" style=\"color:#1a3c6e\">${esc(assinatura.email)}</a>` : ''}<br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
+  const telefone = assinatura.telefone ? `<tr><td style="padding:1px 6px 1px 0;width:16px;font-size:14px;line-height:16px">&#9742;</td><td style="padding:1px 0;line-height:16px">${esc(assinatura.telefone)}</td></tr>` : ''
+  const endereco = assinatura.endereco ? `<tr><td style="padding:1px 6px 1px 0;width:16px;font-size:14px;line-height:16px">&#8962;</td><td style="padding:1px 0;color:#333;font-size:11px;line-height:14px">${esc(assinatura.endereco)}</td></tr>` : ''
+  const logo = assinatura.logo_url ? `<td style="padding:0 12px 0 0;vertical-align:middle"><img src="${esc(assinatura.logo_url)}" alt="Share Brasil" width="116" style="display:block;width:116px;height:auto;border:0"></td>` : ''
+  return `<br><br><table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;color:#333"><tr>${logo}<td style="padding:0;vertical-align:middle;font-size:13px;line-height:16px"><strong style="display:block;font-size:16px;line-height:19px;color:#111">${esc(assinatura.nome || ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? `<span style="display:block;font-size:10px;line-height:13px;color:#333">${esc(assinatura.cargo)}</span>` : ''}<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12px;color:#333;line-height:16px">${telefone}${endereco}</table></td></tr></table>`
 }
 
 // ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
@@ -5440,17 +5443,21 @@ function normalizarChaveDepartamento(valor: unknown) {
 }
 async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: any) {
   const rows = await portalDb(c).prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
-  const departamento = normalizarChaveDepartamento(user.departamento)
-  const row = (rows.results || []).find((item: any) => ['chave', 'key', 'codigo', 'departamento', 'nome_exibicao', 'nome', 'titulo'].some((campo) => normalizarChaveDepartamento(item?.[campo]) === departamento)) || {}
-  return { nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL), cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']) || String(user.departamento || ''), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: campoDepartamento(row, ['email_assinatura', 'email', 'email_departamento']), logo_url: campoDepartamento(row, ['logo_url', 'logo', 'url_logo']) || null }
+  const departamento = normalizarChaveDepartamento(user.departamentos_email)
+  const row = (rows.results || []).find((item: any) => normalizarChaveDepartamento(item?.nome) === departamento) || {}
+  return {
+    nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL),
+    cargo: campoDepartamento(row, ['nome']),
+    telefone: campoDepartamento(row, ['telefone_padrao']),
+    endereco: campoDepartamento(row, ['endereco_padrao']),
+    logo_url: campoDepartamento(row, ['logo_url', 'logo', 'url_logo']) || null,
+  }
 }
 app.get('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaEmails(c)
-  const assinatura = await assinaturaOperacional(c, user)
-  const salva = await portalDb(c).prepare('SELECT telefone, endereco FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first<any>().catch(() => null)
-  return c.json({ ...assinatura, telefone: salva?.telefone || assinatura.telefone, endereco: salva?.endereco || assinatura.endereco })
+  return c.json(await assinaturaOperacional(c, user))
 })
 app.patch('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
