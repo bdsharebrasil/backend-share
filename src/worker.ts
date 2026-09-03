@@ -5708,7 +5708,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
     db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) IN ('ativo', 'active', '') ORDER BY razao_social").all().catch(() => ({ results: [] as any[] })),
     db.prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, status FROM user_profiles WHERE lower(trim(COALESCE(tipo_user, ''))) = 'colaborador' AND (status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active')) ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
-    db.prepare(`SELECT ca.id AS cotista_id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
+    db.prepare(`SELECT ca.id AS id, ca.id AS cotista_id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.percentual_sociedade,
                        COALESCE(ca.codigo_cliente, cl.codigo_cliente) AS codigo_cliente,
                        cl.cnpj, cl.endereco, cl.cidade, cl.uf, hs.cpf,
                        COALESCE(cl.razao_social, hs.nome) AS nome
