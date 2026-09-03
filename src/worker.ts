@@ -2897,7 +2897,7 @@ app.get('/api/portal/disponibilidade', async c => {
     portalDb(c).prepare("SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, status FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
     portalDb(c).prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
   ])
-  return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
+  return c.json({ from, to, aeronave: aircraft.results, reservas: reservations.results })
 })
 
 app.get('/api/portal/solicitacoes', async c => {
@@ -2962,7 +2962,7 @@ app.get('/api/interno/dashboard/operacoes', async c => {
       LIMIT 50`).bind(dataReferencia).all(),
   ])
   const aeronavesAtivas = await portalDb(c).prepare("SELECT COUNT(*) AS total FROM aeronave WHERE lower(status) = 'ativa'").first<{ total: number }>()
-  return c.json({ data_referencia: dataReferencia, resumo: { voos_hoje: Number(resumo?.voos_hoje || 0), pendencias: Number(resumo?.pendencias || 0), reservas_abertas: Number(resumo?.reservas_abertas || 0), aeronaves_ativas: Number(aeronavesAtivas?.total || 0) }, solicitacoes: solicitacoes.results })
+  return c.json({ data_referencia: dataReferencia, resumo: { voos_hoje: Number(resumo?.voos_hoje || 0), pendencias: Number(resumo?.pendencias || 0), reservas_abertas: Number(resumo?.reservas_abertas || 0), aeronave_ativas: Number(aeronavesAtivas?.total || 0) }, solicitacoes: solicitacoes.results })
 })
 
 // ─── Operações: diário de bordo (D1) ─────────────────────────────────────────
@@ -3029,7 +3029,7 @@ app.get('/api/interno/diario-bordo/resumo', async c => {
     LEFT JOIN diario_mes dm ON dm.id = (SELECT dm2.id FROM diario_mes dm2 WHERE dm2.aeronave_id = a.id AND dm2.ano = ?1 ORDER BY dm2.mes DESC LIMIT 1)
     WHERE lower(COALESCE(a.status, 'ativa')) LIKE 'ativ%'
     ORDER BY a.matricula_registro`).bind(String(ano)).all<any>()
-  return c.json({ ano, aeronaves: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), fechado: Number(row.fechado || 0) })) })
+  return c.json({ ano, aeronave: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), fechado: Number(row.fechado || 0) })) })
 })
 
 app.get('/api/interno/diario-bordo/detalhes', async c => {
@@ -3327,13 +3327,13 @@ app.get('/api/interno/tripulacao/gestao', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirComplianceTripulacao(c)
   const db = portalDb(c)
-  const [tripulantes, habilitacoes, freelancers, aeronaves] = await Promise.all([
+  const [tripulantes, habilitacoes, freelancers, aeronave] = await Promise.all([
     db.prepare(`SELECT t.id, t.user_id, t.canac, t.nome_completo, t.status, t.tipo_licenca, up.email, up.telefone, up.url_avatar, up.departamento FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id ORDER BY t.nome_completo`).all(),
     db.prepare('SELECT * FROM habilitacoes_tripulante ORDER BY data_validade, validade_cma').all(),
     db.prepare('SELECT f.*, a.matricula_registro, a.fabricante, a.modelo FROM tripulacao_freelancer f LEFT JOIN aeronave a ON a.id = f.aeronave_id ORDER BY f.nome_completo').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, numero_motores, status FROM aeronave ORDER BY matricula_registro').all(),
   ])
-  return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronaves: aeronaves.results })
+  return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronave: aeronave.results })
 })
 
 app.patch('/api/interno/tripulacao/:id', async c => {
@@ -3422,7 +3422,7 @@ app.post('/api/interno/planos-voo', async c => {
 app.get('/api/interno/agendamento/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = portalDb(c)
-  const [clientes, socios, aeronaves, vinculos] = await Promise.all([
+  const [clientes, socios, aeronave, vinculos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome").all(),
     db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
@@ -3432,7 +3432,7 @@ app.get('/api/interno/agendamento/opcoes', async c => {
     db.prepare(`SELECT ca.id, ca.cliente_id, ca.socio_id, ca.aeronave_id, ca.codigo_cliente, a.matricula_registro, a.modelo
       FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente, a.matricula_registro`).all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, vinculos: vinculos.results })
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronave: aeronave.results, vinculos: vinculos.results })
 })
 
 app.get('/api/interno/agendamento', async c => {
@@ -3441,7 +3441,7 @@ app.get('/api/interno/agendamento', async c => {
   const fim = c.req.query('fim') || inicio.slice(0, 7) + '-31'
   const db = portalDb(c)
   await garantirTabelaDisponibilidadeTripulacao(c)
-  const [agendamentos, aeronaves, tripulacao, freelancers, disponibilidades] = await Promise.all([
+  const [agendamentos, aeronave, tripulacao, freelancers, disponibilidades] = await Promise.all([
     db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id, c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status
       FROM solicitacoes_reserva_voo s
       LEFT JOIN cliente c ON c.id = s.cliente_id
@@ -3483,7 +3483,7 @@ app.get('/api/interno/agendamento', async c => {
       copiloto_nome: item.copiloto_id ? nomes.get(item.copiloto_id) || 'Copiloto não localizado' : null,
       status: item.status,
     }))
-  return c.json({ inicio, fim, agendamentos: agendamentos.results, aeronaves: aeronaves.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
+  return c.json({ inicio, fim, agendamentos: agendamentos.results, aeronave: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
 })
 
 app.post('/api/interno/agendamento/disponibilidade', async c => {
@@ -3893,7 +3893,7 @@ async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>,
 app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = portalDb(c)
-  const [clientes, aeronaves, tripulacao, freelancers, voos, socios] = await Promise.all([
+  const [clientes, aeronave, tripulacao, freelancers, voos, socios] = await Promise.all([
     db.prepare("SELECT id, razao_social, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativa', 'cancelada') ORDER BY matricula_registro").all(),
     db.prepare("SELECT id, nome_completo, canac, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
@@ -3901,7 +3901,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
     db.prepare('SELECT numero_voo, MAX(data_registro) AS data_agendada FROM lancamentos_diario_bordo WHERE numero_voo IS NOT NULL AND trim(numero_voo) <> \'\' GROUP BY numero_voo ORDER BY data_agendada DESC LIMIT 200').all(),
     db.prepare('SELECT id, nome FROM hold_socios ORDER BY nome').all(),
   ])
-  return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: [...tripulacao.results, ...freelancers.results], voos: voos.results, socios: socios.results })
+  return c.json({ clientes: clientes.results, aeronave: aeronave.results, tripulantes: [...tripulacao.results, ...freelancers.results], voos: voos.results, socios: socios.results })
 })
 
 app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
@@ -4053,7 +4053,7 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
   await garantirTabelaAbastecimentos(c)
   const db = portalDb(c)
   const aeronaveId = c.req.query('aeronave_id') || ''
-  const [clientes, socios, aeronaves, fornecedores, diarios] = await Promise.all([
+  const [clientes, socios, aeronave, fornecedores, diarios] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare('SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
@@ -4062,7 +4062,7 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
       ? db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.socio_id, l.aerodromo_partida, l.aerodromo_chegada, c.razao_social AS cliente_nome, s.nome AS socio_nome FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.aeronave_id = ?1 ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 1').bind(aeronaveId).all()
       : db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, cliente_id, socio_id, aerodromo_partida, aerodromo_chegada FROM lancamentos_diario_bordo ORDER BY date(data_registro) DESC LIMIT 100').all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, diarios: diarios.results })
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronave: aeronave.results, fornecedores: fornecedores.results, diarios: diarios.results })
 })
 
 app.post('/api/interno/abastecimentos/fornecedores', async c => {
@@ -4434,7 +4434,7 @@ app.get('/api/sharebrasil/clientes', async c => {
   const db = portalDb(c)
   await garantirForeignKeyCotistas(c).catch((error) => log.error('[clientes] migração de cotistas ignorada:', error?.message || error))
   await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run().catch((error) => log.error('[clientes] tabela documentos_socio indisponível:', error?.message || error))
-  const [clientes, holdings, socios, vinculos, documentos, documentosSocios, aeronaves] = await Promise.all([
+  const [clientes, holdings, socios, vinculos, documentos, documentosSocios, aeronave] = await Promise.all([
     db.prepare('SELECT * FROM cliente ORDER BY razao_social').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM holdings WHERE ativo = 1 ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
@@ -4443,7 +4443,7 @@ app.get('/api/sharebrasil/clientes', async c => {
     db.prepare('SELECT * FROM documentos_socio ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
   ])
-  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronaves.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
+  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronave: aeronave.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
 })
 
 app.post('/api/sharebrasil/holdings', async c => {
@@ -5343,9 +5343,9 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
 }
 app.get('/api/financeiro/envios-pagamento/opcoes', async c => {
   const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c); await garantirCategoriasCliente(c); const [fornecedores,aeronaves,categorias,categoriasCliente,voos] = await Promise.all([db.prepare('SELECT id, COALESCE(apelido,nome_completo) label FROM fornecedores_favoritos ORDER BY label').all(), db.prepare("SELECT id, matricula_registro, fabricante, modelo FROM aeronave WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro").all(), db.prepare('SELECT * FROM categoria_movimentacao_share ORDER BY nome').all(), db.prepare('SELECT * FROM categoria_movimentacao_cliente ORDER BY nome').all(), db.prepare("SELECT numero_voo, MAX(data_agendada) AS ultima_data, MAX(aeronave_id) AS aeronave_id FROM solicitacoes_reserva_voo WHERE numero_voo IS NOT NULL AND trim(numero_voo) <> '' GROUP BY numero_voo ORDER BY ultima_data DESC LIMIT 200").all().catch(() => ({ results: [] as any[] }))])
+  const db = portalDb(c); await garantirCategoriasCliente(c); const [fornecedores,aeronave,categorias,categoriasCliente,voos] = await Promise.all([db.prepare('SELECT id, COALESCE(apelido,nome_completo) label FROM fornecedores_favoritos ORDER BY label').all(), db.prepare("SELECT id, matricula_registro, fabricante, modelo FROM aeronave WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro").all(), db.prepare('SELECT * FROM categoria_movimentacao_share ORDER BY nome').all(), db.prepare('SELECT * FROM categoria_movimentacao_cliente ORDER BY nome').all(), db.prepare("SELECT numero_voo, MAX(data_agendada) AS ultima_data, MAX(aeronave_id) AS aeronave_id FROM solicitacoes_reserva_voo WHERE numero_voo IS NOT NULL AND trim(numero_voo) <> '' GROUP BY numero_voo ORDER BY ultima_data DESC LIMIT 200").all().catch(() => ({ results: [] as any[] }))])
   const categoriasShare = (categorias.results as any[]).filter((item) => String(item.grupo_categoria ?? item.grupo ?? item.agrupamento ?? '').toUpperCase() === 'DESPESAS EMPRESA').map((item) => ({ id: String(item.id), nome: String(item.nome ?? item.categoria ?? item.descricao ?? item.titulo ?? '') })).filter((item) => item.nome)
-  return c.json({ fornecedores: fornecedores.results, aeronaves: aeronaves.results, categorias: categoriasShare, categorias_cliente: categoriasCliente.results, voos: voos.results })
+  return c.json({ fornecedores: fornecedores.results, aeronave: aeronave.results, categorias: categoriasShare, categorias_cliente: categoriasCliente.results, voos: voos.results })
 })
 app.get('/api/financeiro/envios-pagamento/anexos-opcoes', async c => {
   const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -5704,7 +5704,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
   await garantirTabelasRecibos(c).catch((error) => log.error('[recibos/opcoes] falha ao garantir tabelas', error))
   await garantirCategoriasCliente(c).catch((error) => log.error('[recibos/opcoes] falha nas categorias de cliente', error))
   const db = portalDb(c)
-  const [clientes, colaboradores, aeronaves, cotistas, categorias, categoriasCliente] = await Promise.all([
+  const [clientes, colaboradores, aeronave, cotistas, categorias, categoriasCliente] = await Promise.all([
     db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) IN ('ativo', 'active', '') ORDER BY razao_social").all().catch(() => ({ results: [] as any[] })),
     db.prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, status FROM user_profiles WHERE lower(trim(COALESCE(tipo_user, ''))) = 'colaborador' AND (status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active')) ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
@@ -5719,7 +5719,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
     buscarCategoriasRecibo(c),
     db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
   ])
-  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronaves.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results })
+  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronave: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results })
 })
 
 app.get('/api/financeiro/recibos', async c => {
@@ -6697,8 +6697,8 @@ app.get('/api/ctm/aeronave', async c => {
 app.get('/api/ctm/dashboard', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const aeronaveId = String(c.req.query('aeronave_id') || '').trim()
-  const aeronaves = await ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro")
-  const selecionada = (aeronaves.results || []).find((item: any) => String(item.id) === aeronaveId) || (aeronaves.results || [])[0] || null
+  const aeronave= await ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro")
+  const selecionada = (aeronave.results || []).find((item: any) => String(item.id) === aeronaveId) || (aeronave.results || [])[0] || null
   const id = selecionada?.id
   const filtro = id ? ' WHERE aeronave_id = ?' : ' WHERE 1 = 0'
   const [programa, diretrizes, componentes, oas, orcamentos, ras, carregamentos] = await Promise.all([
@@ -6711,7 +6711,7 @@ app.get('/api/ctm/dashboard', async c => {
     ctmRead(c, 'ctm_carregamentos', `${filtro} ORDER BY data_voo DESC`, id ? [id] : []),
   ])
   const totalOrcamento = (orcamentos.results || []).reduce((total: number, item: any) => total + Number(item.total || item.valor_total || 0), 0)
-  return c.json({ data: { aeronaves: aeronaves.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
+  return c.json({ data: { aeronave: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
 })
 for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
   app.get(`/api/ctm/${slug}`, async c => {
