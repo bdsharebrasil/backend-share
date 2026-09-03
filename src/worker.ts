@@ -4404,10 +4404,20 @@ app.delete('/api/sharebrasil/contatos/:id', async c => {
   return c.json({ success: true })
 })
 
+async function garantirForeignKeyCotistas(c: Context<{ Bindings: Bindings }>) {
+  const db = portalDb(c)
+  const foreignKeys = await db.prepare("SELECT column_name, foreign_table_name FROM pragma_foreign_key_list('hold_socios')").all<any>().catch(() => ({ results: [] as any[] }))
+  if (!(foreignKeys.results || []).some((row: any) => row.column_name === 'cotista_id' && row.foreign_table_name === 'cotista_aeronave')) return
+  await db.prepare(`CREATE TABLE IF NOT EXISTS hold_socios_corrigida (id TEXT PRIMARY KEY NOT NULL, cotista_id TEXT, nome TEXT NOT NULL, cpf TEXT NOT NULL, email_principal TEXT, emails TEXT NOT NULL DEFAULT '[]', endereco TEXT, cidade TEXT, uf TEXT, contato_financeiro TEXT, telefone_financeiro TEXT, telefone TEXT, observacoes TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, holding_id TEXT NOT NULL REFERENCES holdings(id))`).run()
+  await db.prepare(`INSERT OR IGNORE INTO hold_socios_corrigida SELECT id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, criado_em, atualizado_em, holding_id FROM hold_socios`).run()
+  await db.prepare('DROP TABLE hold_socios').run()
+  await db.prepare('ALTER TABLE hold_socios_corrigida RENAME TO hold_socios').run()
+}
 app.get('/api/sharebrasil/clientes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const db = portalDb(c)
+  await garantirForeignKeyCotistas(c)
   await db.prepare(`CREATE TABLE IF NOT EXISTS documentos_socio (id TEXT PRIMARY KEY NOT NULL, socio_id TEXT NOT NULL, cliente_id TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, categoria TEXT NOT NULL DEFAULT 'documentos-pessoais', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
   const [clientes, socios, vinculos, documentos, documentosSocios, aeronaves] = await Promise.all([
     db.prepare('SELECT * FROM cliente ORDER BY razao_social').all(),
