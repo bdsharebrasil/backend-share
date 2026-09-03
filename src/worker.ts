@@ -5757,7 +5757,7 @@ app.get('/api/financeiro/recibos/:id', async c => {
 app.post('/api/financeiro/recibos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  await garantirTabelasRecibos(c)
+  await garantirTabelasRecibos(c).catch((error) => log.error('[recibos] migração inicial ignorada:', error?.message || error))
   const db = portalDb(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   if (body.tipo_recibo === 'cliente_direto') return c.json({ error: 'tipo_recibo_nao_disponivel' }, 400)
@@ -5829,7 +5829,10 @@ app.post('/api/financeiro/recibos', async c => {
   if (ehPagamento) {
     await garantirCategoriasCliente(c).catch(() => undefined)
     const categoriaPagamentoId = String(body.categoria_movimentacao_id || '').trim()
-    if (categoriaPagamentoId) categoriaPagamento = await db.prepare('SELECT * FROM categoria_movimentacao_cliente WHERE id = ?1').bind(categoriaPagamentoId).first<Record<string, any>>()
+    if (categoriaPagamentoId) {
+      categoriaPagamento = await db.prepare('SELECT * FROM categoria_movimentacao_cliente WHERE id = ?1').bind(categoriaPagamentoId).first<Record<string, any>>().catch(() => null)
+      if (!categoriaPagamento) categoriaPagamento = await db.prepare('SELECT * FROM categoria_movimentacao_share WHERE id = ?1').bind(categoriaPagamentoId).first<Record<string, any>>().catch(() => null)
+    }
     if (!categoriaPagamento) return c.json({ error: 'categoria_pagamento_obrigatoria' }, 400)
   }
   const grupoCategoria = beneficiarioTipo === 'colaborador' ? (naturezaDespesa === 'aeronave' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA') : ehPagamento ? String(categoriaPagamento?.nome || 'DESPESAS EMPRESA') : body.grupo_categoria
