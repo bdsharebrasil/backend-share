@@ -5463,6 +5463,7 @@ app.post('/api/financeiro/recibos', async c => {
   await garantirTabelasRecibos(c)
   const db = portalDb(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  if (body.tipo_recibo === 'cliente_direto') return c.json({ error: 'tipo_recibo_nao_disponivel' }, 400)
 
   const ehPagamento = body.tipo_recibo === 'pagamento' || body.beneficiario_tipo === 'fornecedor'
   const beneficiarioTipo: 'cliente' | 'colaborador' | 'fornecedor' = ehPagamento ? 'fornecedor' : body.beneficiario_tipo === 'colaborador' ? 'colaborador' : 'cliente'
@@ -5556,6 +5557,7 @@ app.post('/api/financeiro/recibos', async c => {
 
   const reciboId = uuid()
   const lancamentoId = uuid()
+  const contaPagarId = beneficiarioTipo === 'cliente' || beneficiarioTipo === 'colaborador' ? uuid() : null
   const numeroRecibo = await proximoNumeroRecibo(c, ehPagamento ? 'PAG' : beneficiarioTipo === 'colaborador' ? 'SHE' : 'REC')
   const observacoes = body.observacoes ? String(body.observacoes) : null
 
@@ -5628,10 +5630,19 @@ app.post('/api/financeiro/recibos', async c => {
         body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
         body.boleto_url || null, body.nf_url || null, lancamentoId, user.id).run()
     await db.prepare('UPDATE recibos SET natureza_despesa = ?1 WHERE id = ?2').bind(naturezaDespesa || null, reciboId).run()
+    if (contaPagarId) {
+      await garantirTabelaContas(c)
+      await db.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor, categoria_id, categoria_nome, descricao, criado_por, aeronave_id, fornecedor_id, cotista_id, colaborador_id, boleto_url, nf_url, lancamento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`).bind(
+        contaPagarId, body.data_vencimento || dataEmissao, valor, categoriaId || null, categoriaNome, descricao, user.id,
+        body.aeronave_id || null, null, beneficiarioTipo === 'cliente' ? clienteId : null,
+        beneficiarioTipo === 'colaborador' ? body.colaborador_id : null, body.boleto_url || null, body.nf_url || null, lancamentoId,
+      ).run()
+    }
 
     const recibo = await db.prepare('SELECT * FROM recibos WHERE id = ?1').bind(reciboId).first()
     return c.json({ recibo, lancamento_id: lancamentoId, rateio_ids: rateioIdsGerados, rateio_linhas: linhasRateio }, 201)
   } catch (error: any) {
+    if (contaPagarId) await db.prepare('DELETE FROM contas_apagar WHERE id = ?1').bind(contaPagarId).run().catch(() => undefined)
     await db.prepare('DELETE FROM rateio_despesas WHERE lancamentos_id = ?1').bind(lancamentoId).run().catch(() => undefined)
     await db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(lancamentoId).run().catch(() => undefined)
     return c.json({ error: error?.message || 'falha_ao_emitir_recibo' }, 500)
@@ -6174,6 +6185,7 @@ async function garantirTabelaContas(c: Context<{ Bindings: Bindings }>): Promise
     db.prepare(`CREATE TABLE IF NOT EXISTS contas_apagar (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, data_pagamento TEXT, banco_pagamento TEXT, comprovante_pagamento_url TEXT, lancamento_id TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS contas_areceber (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL DEFAULT 0, categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, nf_saida_id TEXT, data_recebimento TEXT, banco_recebimento TEXT, comprovante_recebimento_url TEXT, lancamento_id TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE', criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
   ])
+  await db.prepare('ALTER TABLE contas_apagar ADD COLUMN colaborador_id TEXT').run().catch(() => undefined)
 }
 
 function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {
