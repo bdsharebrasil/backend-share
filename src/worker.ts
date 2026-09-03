@@ -1975,7 +1975,7 @@ async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, no
 }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))
-  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(assinatura.nome)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}<br>EMAIL: <a href="mailto:${esc(assinatura.email)}" style="color:#1a3c6e">${esc(assinatura.email)}</a><br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
+  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(ASSINATURA_EMPRESA_OPERACIONAL)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}<br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
 }
 
 // ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
@@ -5255,22 +5255,52 @@ app.get('/api/interno/emails', async c => {
   const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` })), ...anexosAbastecimento]
   return c.json({ contatos, anexos, historico: (historico.results as any[]).map((row) => ({ ...row, destinatarios: emailArray(row.destinatarios), quantidade_anexos: emailArray(row.anexos).length })) })
 })
+const ASSINATURA_EMPRESA_OPERACIONAL = 'SHARE BRASIL SERVICOS AEROPORTUARIOS LTDA'
+function campoDepartamento(row: any, nomes: string[]) {
+  for (const nome of nomes) if (row?.[nome] !== undefined && row[nome] !== null && String(row[nome]).trim()) return String(row[nome]).trim()
+  return ''
+}
+async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: any) {
+  const rows = await portalDb(c).prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
+  const departamento = String(user.departamento || '').trim().toLowerCase()
+  const row = (rows.results || []).find((item: any) => campoDepartamento(item, ['chave', 'key', 'codigo', 'departamento']).toLowerCase() === departamento) || (rows.results || [])[0]
+  return { nome: ASSINATURA_EMPRESA_OPERACIONAL, cargo: campoDepartamento(row, ['nome_exibicao', 'nome', 'titulo', 'departamento']), telefone: campoDepartamento(row, ['telefone', 'phone']), endereco: campoDepartamento(row, ['endereco', 'address']), email: '', logo_url: null }
+}
 app.get('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaEmails(c)
-  const assinatura = await portalDb(c).prepare('SELECT nome, cargo, telefone, endereco, email, logo_url FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first()
-  return c.json(assinatura || { nome: user.nome_completo, cargo: user.departamento || '', telefone: user.telefone || '', endereco: '', email: user.email_envio || user.email, logo_url: null })
+  const assinatura = await assinaturaOperacional(c, user)
+  const salva = await portalDb(c).prepare('SELECT telefone, endereco FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first<any>().catch(() => null)
+  return c.json({ ...assinatura, telefone: salva?.telefone || assinatura.telefone, endereco: salva?.endereco || assinatura.endereco })
 })
 app.patch('/api/minha-assinatura', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaEmails(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const nome = String(body.nome || '').trim(); const email = String(body.email || user.email_envio || user.email).trim().toLowerCase()
-  if (!nome || !/^\S+@\S+\.\S+$/.test(email)) return c.json({ error: 'nome_e_email_validos_sao_obrigatorios' }, 400)
-  await portalDb(c).prepare(`INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email, logo_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(usuario_id) DO UPDATE SET nome=excluded.nome, cargo=excluded.cargo, telefone=excluded.telefone, endereco=excluded.endereco, email=excluded.email, atualizado_em=CURRENT_TIMESTAMP`).bind(uuid(), user.id, nome, String(body.cargo || '').trim() || null, String(body.telefone || '').trim() || null, String(body.endereco || '').trim() || null, email, null).run()
-  return c.json(await portalDb(c).prepare('SELECT nome, cargo, telefone, endereco, email, logo_url FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first())
+  const assinatura = await assinaturaOperacional(c, user)
+  await portalDb(c).prepare(`INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email, logo_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(usuario_id) DO UPDATE SET nome=excluded.nome, cargo=excluded.cargo, telefone=excluded.telefone, endereco=excluded.endereco, email=excluded.email, atualizado_em=CURRENT_TIMESTAMP`).bind(uuid(), user.id, assinatura.nome, assinatura.cargo || null, String(body.telefone || '').trim() || assinatura.telefone || null, String(body.endereco || '').trim() || assinatura.endereco || null, '', null).run()
+  return c.json(await assinaturaOperacional(c, user))
+})
+app.get('/api/interno/emails/contas-bancarias', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const rows = await portalDb(c).prepare('SELECT * FROM contas_bancarias ORDER BY banco').all<any>().catch(() => ({ results: [] as any[] }))
+  const contas = (rows.results || []).map((row: any) => {
+    const banco = campoDepartamento(row, ['banco', 'nome_banco', 'instituicao'])
+    const agencia = campoDepartamento(row, ['agencia', 'agencia_numero', 'numero_agencia']) || null
+    const numero = campoDepartamento(row, ['numero_conta', 'conta_numero', 'conta']) || null
+    const tipo = campoDepartamento(row, ['tipo_conta', 'tipo']) || null
+    const cnpj = campoDepartamento(row, ['cnpj', 'documento']) || '30.898.549/0001-06'
+    const razao = campoDepartamento(row, ['razao_social', 'empresa', 'titular']) || 'Share Brasil Serviços Aeroportuários'
+    const pix = campoDepartamento(row, ['pix', 'chave_pix', 'pix_email']) || null
+    const linhas = [`Banco ${banco || 'não informado'}`, agencia ? `Agência: ${agencia}` : '', numero ? `${tipo || 'Conta'}: ${numero}` : '', `CNPJ: ${cnpj}`, `Razão: ${razao}`, pix ? `PIX ${pix}` : ''].filter(Boolean)
+    return { id: String(row.id), banco: banco || 'Conta bancária', agencia, numero_conta: numero, tipo_conta: tipo, cnpj, razao_social: razao, pix, texto: `Segue abaixo os dados bancários para pagamento:
+
+${linhas.join('\n\n')}` }
+  })
+  return c.json({ contas })
 })
 app.post('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
@@ -5278,7 +5308,7 @@ app.post('/api/interno/emails', async c => {
   const multipart = c.req.header('content-type')?.includes('multipart/form-data')
   const body = multipart ? await c.req.parseBody() : await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const destinatarios = emailArray(body.destinatarios)
-  const assunto = String(body.assunto || '').trim(); const mensagem = String(body.mensagem || '').trim(); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
+  const assunto = String(body.assunto || '').trim(); const mensagem = [String(body.mensagem || '').trim(), String(body.dados_bancarios || '').trim()].filter(Boolean).join('\n\n'); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (destinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
