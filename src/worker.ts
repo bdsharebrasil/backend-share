@@ -932,6 +932,7 @@ function extractSupabaseUserId(c: Context<{ Bindings: Bindings }>): string | nul
 type Colaborador = {
   id: string
   email: string
+  email_envio?: string | null
   nome_completo: string
   nome_exibicao: string | null
   url_avatar: string | null
@@ -1948,6 +1949,35 @@ app.put('/api/templates/:id', async (c) => {
   }
 })
 
+
+function normalizarEmailLocal(nome: string): string {
+  return nome.trim().split(/\s+/)[0].normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '') || 'colaborador'
+}
+function gerarEmailColaborador(nome: string, sobrenome?: string): string {
+  const primeiro = normalizarEmailLocal(nome)
+  const ultimo = sobrenome ? sobrenome.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '') : ''
+  return `${primeiro}${ultimo ? `.${ultimo}` : ''}@sharebrasil.com.br`
+}
+async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, nome: string): Promise<string> {
+  const db = portalDb(c)
+  const partes = nome.trim().split(/\s+/)
+  const candidatoBase = gerarEmailColaborador(nome)
+  const existe = await db.prepare('SELECT id FROM user_profiles WHERE lower(email_envio) = lower(?1) OR lower(email) = lower(?1) LIMIT 1').bind(candidatoBase).first()
+  if (!existe) return candidatoBase
+  const sobrenome = partes.length > 1 ? partes[partes.length - 1] : ''
+  const candidatoSobrenome = gerarEmailColaborador(nome, sobrenome)
+  if (!(await db.prepare('SELECT id FROM user_profiles WHERE lower(email_envio) = lower(?1) OR lower(email) = lower(?1) LIMIT 1').bind(candidatoSobrenome).first())) return candidatoSobrenome
+  for (let indice = 2; indice < 100; indice++) {
+    const candidato = `${normalizarEmailLocal(nome)}.${indice}@sharebrasil.com.br`
+    if (!(await db.prepare('SELECT id FROM user_profiles WHERE lower(email_envio) = lower(?1) OR lower(email) = lower(?1) LIMIT 1').bind(candidato).first())) return candidato
+  }
+  throw new Error('nao_foi_possivel_gerar_email_unico')
+}
+function assinaturaHtml(assinatura: any): string {
+  const esc = (valor: unknown) => escapeHtml(String(valor || ''))
+  return `<br><br><table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333"><tr><td style="border-left:2px solid #1a3c6e;padding-left:12px"><strong>${esc(assinatura.nome)}</strong>${assinatura.cargo ? ` <span style="color:#666">— ${esc(assinatura.cargo)}</span>` : ''}${assinatura.telefone ? `<br>TEL: ${esc(assinatura.telefone)}` : ''}<br>EMAIL: <a href="mailto:${esc(assinatura.email)}" style="color:#1a3c6e">${esc(assinatura.email)}</a><br>www.sharebrasil.com.br${assinatura.endereco ? `<br><span style="color:#666;font-size:11px">${esc(assinatura.endereco)}</span>` : ''}</td></tr></table>`
+}
+
 // ─── Routes: Envio de email (Resend) + log em D1 ─────────────────────────────
 // Suporta anexos: attachments?: { filename: string; r2_key: string }[]
 // Fluxo esperado do frontend:
@@ -2521,7 +2551,7 @@ async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Pr
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS short_links (code TEXT PRIMARY KEY NOT NULL, r2_key TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS email_templates (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL, assunto TEXT NOT NULL, corpo_html TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); ALTER TABLE user_profiles ADD COLUMN email_envio TEXT`),
     db.prepare(`CREATE TABLE IF NOT EXISTS mensagens (id TEXT PRIMARY KEY NOT NULL, remetente_id TEXT NOT NULL, destinatario_id TEXT NOT NULL, assunto TEXT, conteudo TEXT NOT NULL, lida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
   ])
 }
@@ -4544,6 +4574,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   if (!creator || !await isColaboradorManager(c, creator)) return c.json({ error: 'permissao_necessaria' }, 403)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const email = String(body.email || '').trim().toLowerCase()
+  const emailEnvio = await gerarEmailEnvioColaborador(c, nome)
   const senha = String(body.senha || '')
   const nome = String(body.nome_completo || '').trim()
   if (!email || !/^\S+@\S+\.\S+$/.test(email) || senha.length < 6 || !nome) return c.json({ error: 'nome_email_e_senha_validos_sao_obrigatorios' }, 400)
@@ -4553,9 +4584,10 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   if (!authResponse.ok || !authData.id) return c.json({ error: authData.msg || authData.message || 'nao_foi_possivel_criar_usuario_supabase' }, authResponse.status === 422 ? 409 : 502)
   const id = String(authData.id)
   try {
-    await portalDb(c).prepare(`INSERT INTO user_profiles (id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
+    await portalDb(c).prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
     const funcao = String(body.funcao || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')
     await portalDb(c).prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, funcao).run()
+    await portalDb(c).prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || body.departamento || null, body.telefone || null, null, emailEnvio).run()
   } catch (error) {
     await portalDb(c).prepare('DELETE FROM usuarios_funcoes WHERE user_id = ?1').bind(id).run().catch(() => undefined)
     await portalDb(c).prepare('DELETE FROM user_profiles WHERE id = ?1').bind(id).run().catch(() => undefined)
@@ -5172,6 +5204,8 @@ app.patch('/api/financeiro/envios-pagamento/:id', async c => { const user=await 
 
 // ─── Financeiro: central de e-mail ───────────────────────────────────────────
 async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
+  await portalDb(c).prepare('ALTER TABLE user_profiles ADD COLUMN email_envio TEXT').run().catch(() => undefined)
+  await portalDb(c).prepare('CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)').run()
   await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS emails_enviados (
     id TEXT PRIMARY KEY NOT NULL,
     destinatarios TEXT NOT NULL,
@@ -5214,6 +5248,23 @@ app.get('/api/interno/emails', async c => {
   const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` }))]
   return c.json({ contatos, anexos, historico: (historico.results as any[]).map((row) => ({ ...row, destinatarios: emailArray(row.destinatarios), quantidade_anexos: emailArray(row.anexos).length })) })
 })
+app.get('/api/minha-assinatura', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaEmails(c)
+  const assinatura = await portalDb(c).prepare('SELECT nome, cargo, telefone, endereco, email, logo_url FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first()
+  return c.json(assinatura || { nome: user.nome_completo, cargo: user.departamento || '', telefone: user.telefone || '', endereco: '', email: user.email_envio || user.email, logo_url: null })
+})
+app.patch('/api/minha-assinatura', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaEmails(c)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const nome = String(body.nome || '').trim(); const email = String(body.email || user.email_envio || user.email).trim().toLowerCase()
+  if (!nome || !/^\S+@\S+\.\S+$/.test(email)) return c.json({ error: 'nome_e_email_validos_sao_obrigatorios' }, 400)
+  await portalDb(c).prepare(`INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email, logo_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(usuario_id) DO UPDATE SET nome=excluded.nome, cargo=excluded.cargo, telefone=excluded.telefone, endereco=excluded.endereco, email=excluded.email, atualizado_em=CURRENT_TIMESTAMP`).bind(uuid(), user.id, nome, String(body.cargo || '').trim() || null, String(body.telefone || '').trim() || null, String(body.endereco || '').trim() || null, email, null).run()
+  return c.json(await portalDb(c).prepare('SELECT nome, cargo, telefone, endereco, email, logo_url FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first())
+})
 app.post('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -5235,7 +5286,7 @@ app.post('/api/interno/emails', async c => {
     anexos.push({ filename: row.nome_arquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: row.tipo_arquivo || 'application/octet-stream' })
   }
   const id = uuid(); let status = 'enviado'; let erro: string | null = null
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>`, attachments: anexos }) })
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: `${user.nome_completo} <${user.email_envio || c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(await portalDb(c).prepare('SELECT * FROM assinaturas_email WHERE usuario_id = ?1').bind(user.id).first() || { nome: user.nome_completo, email: user.email_envio || user.email })}`, attachments: anexos }) })
   if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), ids.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
