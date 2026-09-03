@@ -5778,7 +5778,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
     buscarCategoriasRecibo(c),
     db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
   ])
-  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronave: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results })
+  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results })
 })
 
 app.get('/api/financeiro/recibos', async c => {
