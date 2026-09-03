@@ -2567,9 +2567,12 @@ async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Pr
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS short_links (code TEXT PRIMARY KEY NOT NULL, r2_key TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS email_templates (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL, assunto TEXT NOT NULL, corpo_html TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); ALTER TABLE user_profiles ADD COLUMN email_envio TEXT`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS mensagens (id TEXT PRIMARY KEY NOT NULL, remetente_id TEXT NOT NULL, destinatario_id TEXT NOT NULL, assunto TEXT, conteudo TEXT NOT NULL, lida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
   ])
+  // Migração legada: o D1 não aceita múltiplas instruções em um único prepare.
+  await db.prepare('ALTER TABLE user_profiles ADD COLUMN email_envio TEXT').run().catch(() => undefined)
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
