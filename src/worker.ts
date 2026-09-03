@@ -5415,7 +5415,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
   const db = portalDb(c)
   const [clientes, colaboradores, aeronaves, cotistas, categorias] = await Promise.all([
     db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
-    db.prepare("SELECT id, nome_completo, nome_exibicao, nome_banco, tipo_conta, conta_numero, agencia_numero, pix FROM user_profiles WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY COALESCE(nome_exibicao, nome_completo)").all(),
+    db.prepare("SELECT id, nome_completo, nome_exibicao, nome_banco, tipo_conta, conta_numero, agencia_numero, pix FROM user_profiles WHERE lower(COALESCE(tipo_user, '')) = 'colaborador' AND lower(COALESCE(status, '')) = 'ativo' ORDER BY COALESCE(nome_exibicao, nome_completo)").all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare(`SELECT ca.id AS cotista_id, ca.aeronave_id, ca.percentual_sociedade,
                        COALESCE(cl.razao_social, hs.nome) AS nome
