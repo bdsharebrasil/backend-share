@@ -6411,16 +6411,16 @@ app.post('/api/financeiro/recibos', async c => {
               valor, linha.valor, observacoes).run()
         } else {
           await db.prepare(`INSERT INTO rateio_despesas (
-              id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
+              id, lancamentos_id, tipo_rateio, data_vencimento, data_emissao_nf, categoria_nome,
               cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
               valor_total, valor_rateado, status, observacoes
-            ) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
+            ) VALUES (?, ?, 'cliente', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
             .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, categoriaNome,
               linha.cotista_id, linha.pago_por, ehPagamento ? 1 : regra.pagoDiretamente, body.aeronave_id || null,
               descricao, valor, linha.valor, `Rateio ${linha.percentual}% — ${linha.nome}`).run()
         }
-        await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, cotista_id, nome, percentual, valor) VALUES (?, ?, ?, ?, ?, ?, ?)')
-          .bind(uuid(), reciboId, rateioId, linha.cotista_id, linha.nome, linha.percentual, linha.valor).run()
+        await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, nome, percentual, valor, cotista_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .bind(uuid(), reciboId, rateioId, linha.nome, linha.percentual, linha.valor, linha.cotista_id).run()
         rateioIdsGerados.push(rateioId)
       }
     } else if (ehPagamento && pagadorCotista) {
