@@ -7001,9 +7001,13 @@ async function garantirTabelaContas(c: Context<{ Bindings: Bindings }>): Promise
     db.prepare(`CREATE TABLE IF NOT EXISTS contas_areceber (id TEXT PRIMARY KEY NOT NULL, data_vencimento TEXT NOT NULL, valor REAL NOT NULL CHECK (valor >= 0), categoria_id TEXT, categoria_nome TEXT, descricao TEXT, criado_por TEXT, aeronave_id TEXT, fornecedor_id TEXT, cotista_id TEXT, boleto_url TEXT, nf_url TEXT, nf_saida_id TEXT, lancamentos_id TEXT, data_recebimento TEXT, banco_recebimento TEXT, comprovante_recebimento_url TEXT, data_pagamento TEXT, status TEXT NOT NULL DEFAULT 'PENDENTE' CHECK (status IN ('PENDENTE','RECEBIDO','CANCELADO','ATRASADO')), criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
   ])
   await db.prepare('ALTER TABLE contas_apagar ADD COLUMN colaborador_id TEXT').run().catch(() => undefined)
+  // Bases antigas usavam lancamento_id; o contrato atual usa lancamentos_id.
+  // Mantemos ambos durante a transição e sincronizamos os valores para não perder vínculos.
+  await db.prepare('ALTER TABLE contas_areceber ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE contas_areceber ADD COLUMN lancamentos_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE contas_areceber ADD COLUMN data_pagamento TEXT').run().catch(() => undefined)
-  await db.prepare('UPDATE contas_areceber SET lancamentos_id = lancamento_id WHERE lancamentos_id IS NULL AND lancamento_id IS NOT NULL').run().catch(() => undefined)
+  await db.prepare('UPDATE contas_areceber SET lancamentos_id = COALESCE(lancamentos_id, lancamento_id) WHERE lancamentos_id IS NULL OR lancamentos_id = \'\'').run().catch(() => undefined)
+  await db.prepare('UPDATE contas_areceber SET lancamento_id = lancamentos_id WHERE lancamento_id IS NULL AND lancamentos_id IS NOT NULL').run().catch(() => undefined)
 }
 
 function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {
@@ -7048,7 +7052,7 @@ function mapearContaAReceber(linha: LinhaGenerica): LinhaGenerica {
     dataRecebimento: linha.data_recebimento,
     bancoRecebimento: linha.banco_recebimento,
     comprovanteRecebimentoUrl: linha.comprovante_recebimento_url,
-    lancamentoId: linha.lancamentos_id,
+    lancamentoId: linha.lancamentos_id ?? linha.lancamento_id,
     status: linha.status,
     criadoEm: linha.criado_em,
     atualizadoEm: linha.atualizado_em,
@@ -7086,7 +7090,14 @@ app.post('/api/contas-apagar/:id/dar-baixa', async c => {
   const comprovanteUrl = textoOuNulo(body.comprovantePagamentoUrl)
   if (!dataPagamento) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
   const db = portalDb(c)
-  await db.prepare(`UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataPagamento, bancoPagamento, comprovanteUrl, id).run()
+  const existente = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?1').bind(id).first<LinhaGenerica>()
+  if (!existente) return c.json({ error: 'nao_encontrado' }, 404)
+  const lancamentoId = textoOuNulo(existente.lancamento_id)
+  const atualizacoes = [db.prepare(`UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataPagamento, bancoPagamento, comprovanteUrl, id)]
+  if (lancamentoId) {
+    atualizacoes.push(db.prepare(`UPDATE lancamentos SET status = 'pago', data_pagamento = COALESCE(?, data_pagamento), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataPagamento, lancamentoId))
+  }
+  await db.batch(atualizacoes)
   const row = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?1').bind(id).first<LinhaGenerica>()
   return row ? c.json(mapearContaAPagar(row)) : c.json({ error: 'nao_encontrado' }, 404)
 })
@@ -7122,7 +7133,14 @@ app.post('/api/contas-areceber/:id/dar-baixa', async c => {
   const comprovanteUrl = textoOuNulo(body.comprovanteRecebimentoUrl)
   if (!dataRecebimento) return c.json({ error: 'data_recebimento_obrigatoria' }, 400)
   const db = portalDb(c)
-  await db.prepare(`UPDATE contas_areceber SET status = 'RECEBIDO', data_recebimento = ?, data_pagamento = ?, banco_recebimento = ?, comprovante_recebimento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, dataRecebimento, bancoRecebimento, comprovanteUrl, id).run()
+  const existente = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?1').bind(id).first<LinhaGenerica>()
+  if (!existente) return c.json({ error: 'nao_encontrado' }, 404)
+  const lancamentoId = textoOuNulo(existente.lancamentos_id ?? existente.lancamento_id)
+  const atualizacoes = [db.prepare(`UPDATE contas_areceber SET status = 'RECEBIDO', data_recebimento = ?, data_pagamento = ?, banco_recebimento = ?, comprovante_recebimento_url = ?, lancamentos_id = COALESCE(lancamentos_id, ?), lancamento_id = COALESCE(lancamento_id, ?), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, dataRecebimento, bancoRecebimento, comprovanteUrl, lancamentoId, lancamentoId, id)]
+  if (lancamentoId) {
+    atualizacoes.push(db.prepare(`UPDATE lancamentos SET status = 'recebido', data_pagamento = COALESCE(?, data_pagamento), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, lancamentoId))
+  }
+  await db.batch(atualizacoes)
   const row = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?1').bind(id).first<LinhaGenerica>()
   return row ? c.json(mapearContaAReceber(row)) : c.json({ error: 'nao_encontrado' }, 404)
 })
