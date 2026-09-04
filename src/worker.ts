@@ -6867,20 +6867,6 @@ app.get('/api/lancamentos/opcoes', async c => {
   })
 })
 
-app.post('/api/lancamentos', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try {
-    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
-    const userId = extractSupabaseUserId(c) || null
-    const resultado = String(body.fluxo || '').toUpperCase() === 'ENTRADA'
-      ? await issueRevenue(portalDb(c), body, userId)
-      : await createExpense(portalDb(c), body, userId)
-    const lancamento = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?').bind(resultado.id).first()
-    return c.json({ ...resultado, lancamento }, 201)
-  } catch (error) {
-    return erroFinanceiroKernel(c, error)
-  }
-})
 
 app.get('/api/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
@@ -7029,13 +7015,6 @@ function normalizarCategoriaShare(linha: LinhaGenerica) {
   }
 }
 
-const CAMPOS_LANCAMENTO_SHARE = [
-  'descricao', 'fluxo', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'tipo', 'cotista_id', 'valor_total',
-  'data_emissao', 'data_pagamento', 'data_vencimento', 'status', 'forma_pagamento', 'conta_bancaria',
-  'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'observacoes',
-  'periodicidade', 'comprovante_url', 'nf_url', 'boleto_url', 'recibo_url', 'aeronave_registro',
-] as const
-
 app.get('/api/interno/financeiro-share/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = portalDb(c)
@@ -7117,63 +7096,7 @@ app.get('/api/interno/financeiro-share/lancamentos', async c => {
   }
 })
 
-async function corpoLancamentoShare(c: Context<{ Bindings: Bindings }>) {
-  const corpo = await c.req.json<LinhaGenerica>().catch(() => ({} as LinhaGenerica))
-  const dados: LinhaGenerica = {}
-  for (const campo of CAMPOS_LANCAMENTO_SHARE) {
-    if (!(campo in corpo)) continue
-    dados[campo] = campo === 'valor_total' ? numeroOuZero(corpo[campo]) : textoOuNulo(corpo[campo])
-  }
-  return dados
-}
 
-app.post('/api/interno/financeiro-share/lancamentos', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try {
-    const dados = await corpoLancamentoShare(c)
-    if (!textoOuNulo(dados.descricao)) return c.json({ error: 'descricao_obrigatoria' }, 400)
-    if (!textoOuNulo(dados.categoria_id)) return c.json({ error: 'categoria_obrigatoria' }, 400)
-    if (numeroOuZero(dados.valor_total) <= 0) return c.json({ error: 'valor_invalido' }, 400)
-    const body: Record<string, unknown> = {
-      ...dados,
-      fluxo: textoOuNulo(dados.fluxo) || 'saida',
-      valorCentavos: Math.round(numeroOuZero(dados.valor_total) * 100),
-      data: dados.data_emissao,
-      data_vencimento: dados.data_vencimento,
-      fornecedor: dados.fornecedor_nome,
-      documento: dados.numero_doc,
-      pago: Boolean(dados.data_pagamento),
-      tipo_caixa: 'share',
-    }
-    const userId = extractSupabaseUserId(c) || null
-    const resultado = String(body.fluxo).toUpperCase() === 'ENTRADA'
-      ? await issueRevenue(portalDb(c), body, userId)
-      : await createExpense(portalDb(c), body, userId)
-    const lancamento = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?').bind(resultado.id).first()
-    return c.json({ ...resultado, lancamento }, 201)
-  } catch (error) {
-    return erroFinanceiroKernel(c, error)
-  }
-})
-
-app.patch('/api/interno/financeiro-share/lancamentos/:id', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const id = c.req.param('id')
-  const dados = await corpoLancamentoShare(c)
-  const colunas = Object.keys(dados)
-  if (colunas.length === 0) return c.json({ error: 'nada_para_atualizar' }, 400)
-  await portalDb(c).prepare(
-    `UPDATE lancamentos SET ${colunas.map((coluna, indice) => `${coluna} = ?${indice + 1}`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?${colunas.length + 1}`,
-  ).bind(...colunas.map(coluna => dados[coluna] ?? null), id).run()
-  const atualizado = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?1').bind(id).first()
-  return c.json({ lancamento: atualizado })
-})
-
-app.delete('/api/interno/financeiro-share/lancamentos/:id', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await portalDb(c).prepare('DELETE FROM lancamentos WHERE id = ?1').bind(c.req.param('id')).run()
-  return c.json({ ok: true })
-})
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
