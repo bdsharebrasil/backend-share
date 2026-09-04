@@ -5632,6 +5632,7 @@ const PAGADOR_PADRAO_RECIBO = {
 // é agnóstico a quem desembolsou (isso vive só em `lancamentos`/`tipo_caixa`); rateio entre
 // cotistas usa `cotista_aeronave` (cliente_id OU socio_id, cobrindo também clientes com holding).
 async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
+  await garantirCompatibilidadeFornecedores(c)
   const db = portalDb(c)
   const tabelas = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('recibos', 'recibo_rateio', 'recibo_anexos')").all<{ name: string }>()
   const existentes = new Set(tabelas.results.map((item) => item.name))
