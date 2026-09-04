@@ -17,8 +17,8 @@ export class LancamentoRepository {
 
     const lancamentoStatement = this.db.prepare(`
       INSERT INTO lancamentos (
-        id, aeronave_id, data, descricao, documento, fornecedor, categoria,
-        grupo_categoria, tipo, prazo, fluxo, valor_centavos, pago_por, caixa,
+        id, aeronave_id, data_lancamento, descricao, documento, fornecedor_nome, categoria_nome,
+        grupo_categoria, tipo, prazo, fluxo, valor_centavos, pago_por, tipo_caixa,
         pago_diretamente, reembolsavel, reembolso_quitado, status, observacoes,
         criado_por
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -59,19 +59,20 @@ export class LancamentoRepository {
     const conditions: string[] = []
     const binds: string[] = []
     if (inicio) {
-      conditions.push("date(l.data) >= date(?)")
+      conditions.push("date(l.data_lancamento) >= date(?)")
       binds.push(inicio)
     }
     if (fim) {
-      conditions.push("date(l.data) <= date(?)")
+      conditions.push("date(l.data_lancamento) <= date(?)")
       binds.push(fim)
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""
     const result = await this.db.prepare(`
       SELECT
-        l.id, l.data, l.descricao, l.documento, l.fornecedor, l.categoria,
+        l.id, l.data_lancamento AS data, l.descricao, l.documento,
+        l.fornecedor_nome AS fornecedor, l.categoria_nome AS categoria,
         l.grupo_categoria, l.tipo, l.prazo, l.fluxo, l.valor_centavos,
-        l.pago_por, l.caixa, l.pago_diretamente, l.reembolsavel,
+        l.pago_por, l.tipo_caixa AS caixa, l.pago_diretamente, l.reembolsavel,
         l.reembolso_quitado, l.status, l.observacoes,
         r.cotista AS rateio_cotista, r.percentual AS rateio_percentual,
         r.valor_centavos AS rateio_valor_centavos,
@@ -81,9 +82,9 @@ export class LancamentoRepository {
         rd.pago_por AS legado_pago_por
       FROM lancamentos l
       LEFT JOIN rateios_cotistas r ON r.lancamento_id = l.id
-      LEFT JOIN rateio_despesas rd ON r.id IS NULL AND rd.movimentacoes_id = l.id
+      LEFT JOIN rateio_despesas rd ON r.id IS NULL AND rd.lancamentos_id = l.id
       ${where}
-      ORDER BY date(l.data) ASC, l.criado_em ASC, COALESCE(r.cotista, rd.socio_id, rd.socio_nome) ASC
+      ORDER BY date(l.data_lancamento) ASC, l.criado_em ASC, COALESCE(r.cotista, rd.socio_id, rd.socio_nome) ASC
     `).bind(...binds).all<D1Row>()
 
     const grouped = new Map<string, LancamentoConsolidado>()
