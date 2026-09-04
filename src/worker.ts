@@ -5350,9 +5350,9 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
 }
 app.get('/api/financeiro/envios-pagamento/opcoes', async c => {
   const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c); await garantirCategoriasCliente(c); const [fornecedores,aeronave,categorias,categoriasCliente,voos] = await Promise.all([db.prepare('SELECT id, COALESCE(apelido,nome_completo) label FROM fornecedores_favoritos ORDER BY label').all(), db.prepare("SELECT id, matricula_registro, fabricante, modelo FROM aeronave WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro").all(), db.prepare('SELECT * FROM categoria_movimentacao_share ORDER BY nome').all(), db.prepare('SELECT * FROM categoria_movimentacao_cliente ORDER BY nome').all(), db.prepare("SELECT numero_voo, MAX(data_agendada) AS ultima_data, MAX(aeronave_id) AS aeronave_id FROM solicitacoes_reserva_voo WHERE numero_voo IS NOT NULL AND trim(numero_voo) <> '' GROUP BY numero_voo ORDER BY ultima_data DESC LIMIT 200").all().catch(() => ({ results: [] as any[] }))])
+  const db = portalDb(c); await garantirCategoriasCliente(c); const [fornecedores,aeronaves,categorias,categoriasCliente,voos] = await Promise.all([db.prepare('SELECT id, COALESCE(apelido,nome_completo) label FROM fornecedores_favoritos ORDER BY label').all(), db.prepare("SELECT id, matricula_registro, fabricante, modelo FROM aeronave WHERE lower(COALESCE(status,'ativa')) NOT IN ('inativa','cancelada') ORDER BY matricula_registro").all(), db.prepare('SELECT * FROM categoria_movimentacao_share ORDER BY nome').all(), db.prepare('SELECT * FROM categoria_movimentacao_cliente ORDER BY nome').all(), db.prepare("SELECT numero_voo, MAX(data_agendada) AS ultima_data, MAX(aeronave_id) AS aeronave_id FROM solicitacoes_reserva_voo WHERE numero_voo IS NOT NULL AND trim(numero_voo) <> '' GROUP BY numero_voo ORDER BY ultima_data DESC LIMIT 200").all().catch(() => ({ results: [] as any[] }))])
   const categoriasShare = (categorias.results as any[]).filter((item) => String(item.grupo_categoria ?? item.grupo ?? item.agrupamento ?? '').toUpperCase() === 'DESPESAS EMPRESA').map((item) => ({ id: String(item.id), nome: String(item.nome ?? item.categoria ?? item.descricao ?? item.titulo ?? '') })).filter((item) => item.nome)
-  return c.json({ fornecedores: fornecedores.results, aeronave: aeronave.results, categorias: categoriasShare, categorias_cliente: categoriasCliente.results, voos: voos.results })
+  return c.json({ fornecedores: fornecedores.results, aeronaves: aeronaves.results, categorias: categoriasShare, categorias_cliente: categoriasCliente.results, voos: voos.results })
 })
 app.get('/api/financeiro/envios-pagamento/anexos-opcoes', async c => {
   const user = await shareBrasilUser(c); if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -5677,7 +5677,7 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
       id TEXT PRIMARY KEY NOT NULL, numero_recibo TEXT NOT NULL,
       tipo_recibo TEXT NOT NULL CHECK (tipo_recibo IN ('cliente_direto','cliente_reembolsavel','colaborador','pagamento')),
       beneficiario_tipo TEXT NOT NULL CHECK (beneficiario_tipo IN ('cliente','colaborador','fornecedor')),
-      cliente_id TEXT, colaborador_id TEXT, recebedor_nome TEXT, aeronave_id TEXT,
+      cliente_id TEXT, colaborador_id TEXT, recebedor_nome TEXT, recebedor_cpf TEXT, aeronave_id TEXT,
       rateado INTEGER NOT NULL DEFAULT 0, nome_pagador TEXT NOT NULL, documento_pagador TEXT,
       endereco_pagador TEXT, cidade_pagador TEXT, uf_pagador TEXT, valor REAL NOT NULL,
       descricao_servico TEXT NOT NULL, data_emissao TEXT NOT NULL, data_vencimento TEXT,
@@ -5687,8 +5687,8 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
       nf_url TEXT, lancamento_id TEXT NOT NULL, lancamento_reembolso_id TEXT, criado_por TEXT,
       criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`).run()
-    await db.prepare(`INSERT INTO recibos (id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, aeronave_id, rateado, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status, boleto_url, nf_url, lancamento_id, lancamento_reembolso_id, criado_por, criado_em)
-      SELECT id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, aeronave_id, rateado, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status, boleto_url, nf_url, lancamento_id, lancamento_reembolso_id, criado_por, criado_em FROM recibos_legacy`).run()
+    await db.prepare(`INSERT INTO recibos (id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status, boleto_url, nf_url, lancamento_id, lancamento_reembolso_id, criado_por, criado_em)
+      SELECT id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status, boleto_url, nf_url, lancamento_id, lancamento_reembolso_id, criado_por, criado_em FROM recibos_legacy`).run()
     await db.prepare('DROP TABLE recibos_legacy').run()
   }
   await db.prepare('ALTER TABLE recibos ADD COLUMN natureza_despesa TEXT').run().catch(() => undefined)
@@ -6109,7 +6109,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
   await garantirTabelasRecibos(c).catch((error) => log.error('[recibos/opcoes] falha ao garantir tabelas', error))
   await garantirCategoriasCliente(c).catch((error) => log.error('[recibos/opcoes] falha nas categorias de cliente', error))
   const db = portalDb(c)
-  const [clientes, colaboradores, aeronave, cotistas, categorias, categoriasCliente] = await Promise.all([
+  const [clientes, colaboradores, aeronave, cotistas, categorias, categoriasCliente, perfisRecebedores, freelancersRecebedores] = await Promise.all([
     db.prepare("SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente WHERE lower(COALESCE(status,'ativo')) IN ('ativo', 'active', '') ORDER BY razao_social").all().catch(() => ({ results: [] as any[] })),
     db.prepare("SELECT id, nome_completo, nome_exibicao, cpf, pix, nome_banco, tipo_conta, conta_numero, agencia_numero, email, tipo_user, status FROM user_profiles WHERE lower(trim(COALESCE(tipo_user, ''))) = 'colaborador' AND (status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active')) ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
@@ -6123,8 +6123,14 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
                 ORDER BY ca.aeronave_id, nome`).all().catch(() => ({ results: [] as any[] })),
     buscarCategoriasRecibo(c),
     db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
+    db.prepare("SELECT id, nome_completo, nome_exibicao, cpf, email, tipo_user, telefone, status FROM user_profiles WHERE status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active') ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
+    db.prepare("SELECT id, nome_completo, cpf, canac, telefone, status FROM tripulacao_freelancer WHERE status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active') ORDER BY nome_completo").all().catch(() => ({ results: [] as any[] })),
   ])
-  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results })
+  const recebedores = [
+    ...(perfisRecebedores.results as any[]).map((perfil) => ({ id: `perfil:${perfil.id}`, nome: perfil.nome_exibicao || perfil.nome_completo || perfil.email || 'Perfil sem nome', cpf: perfil.cpf || null, email: perfil.email || null, telefone: perfil.telefone || null, tipo_user: perfil.tipo_user || null, origem: 'user_profiles' })),
+    ...(freelancersRecebedores.results as any[]).map((freelancer) => ({ id: `freelancer:${freelancer.id}`, nome: freelancer.nome_completo || 'Freelancer sem nome', cpf: freelancer.cpf || null, email: null, telefone: freelancer.telefone || null, canac: freelancer.canac || null, tipo_user: 'freelancer', origem: 'tripulacao_freelancer' })),
+  ]
+  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results, recebedores })
 })
 
 app.get('/api/financeiro/recibos', async c => {
@@ -6402,7 +6408,7 @@ app.post('/api/financeiro/recibos', async c => {
       .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
         beneficiarioTipo === 'cliente' && !rateado ? body.cliente_id : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
-        (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, beneficiarioTipo === 'colaborador' ? recebedorCpf : null, body.aeronave_id || null, rateado ? 1 : 0,
+        (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorCpf : null, body.aeronave_id || null, rateado ? 1 : 0,
         nomePagador, documentoPagador, enderecoPagador, cidadePagador, ufPagador,
         valor, descricao, dataEmissao, body.data_vencimento || null, ehPagamento ? body.forma_pagamento || null : null,
         body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
