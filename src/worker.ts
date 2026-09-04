@@ -7146,6 +7146,51 @@ app.post('/api/contas-areceber/:id/dar-baixa', async c => {
 })
 
 
+// ─── Aeronaves Share Brasil ───────────────────────────────────────────────────
+app.get('/api/sharebrasil/aeronaves', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const status = String(c.req.query('status') || '').trim().toLowerCase()
+  const filtro = status === 'inativa' ? " WHERE lower(COALESCE(a.status, 'ativa')) IN ('inativa', 'cancelada')" : status === 'todas' ? '' : " WHERE lower(COALESCE(a.status, 'ativa')) NOT IN ('inativa', 'cancelada')"
+  const rows = await portalDb(c).prepare(`SELECT a.*, p.categoria AS performance_categoria, p.teto_servico_ft AS performance_teto_servico_ft, p.nivel_cruzeiro_min_ft AS performance_nivel_cruzeiro_min_ft, p.nivel_cruzeiro_max_ft AS performance_nivel_cruzeiro_max_ft, p.aprovado_rvsm AS performance_aprovado_rvsm, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))${filtro} ORDER BY a.matricula_registro`).all()
+  return c.json({ aeronaves: rows.results || [] })
+})
+app.get('/api/sharebrasil/aeronaves/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare(`SELECT a.*, p.id AS performance_id, p.categoria AS performance_categoria, p.modelo AS performance_modelo, p.teto_servico_ft AS performance_teto_servico_ft, p.nivel_cruzeiro_min_ft AS performance_nivel_cruzeiro_min_ft, p.nivel_cruzeiro_max_ft AS performance_nivel_cruzeiro_max_ft, p.aprovado_rvsm AS performance_aprovado_rvsm, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1)) WHERE a.id = ?`).bind(c.req.param('id')).first()
+  if (!row) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
+  return c.json({ aeronave: row })
+})
+app.post('/api/sharebrasil/aeronaves', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body: Record<string, any> = await c.req.json().catch(() => ({} as Record<string, any>))
+  const matricula = String(body.matricula_registro || '').trim().toUpperCase()
+  const fabricante = String(body.fabricante || '').trim()
+  const modelo = String(body.modelo || '').trim()
+  if (!matricula || !fabricante || !modelo) return c.json({ error: 'matricula_fabricante_modelo_obrigatorios' }, 400)
+  const db = portalDb(c)
+  const existente = await db.prepare('SELECT id FROM aeronave WHERE upper(matricula_registro) = ? LIMIT 1').bind(matricula).first()
+  if (existente) return c.json({ error: 'matricula_ja_cadastrada' }, 409)
+  const aeronaveId = uuid()
+  const performanceFields = ['categoria', 'modelo', 'teto_servico_ft', 'nivel_cruzeiro_min_ft', 'nivel_cruzeiro_max_ft', 'aprovado_rvsm', 'velocidade_cruzeiro_kt', 'taxa_subida_fpm', 'taxa_descida_fpm']
+  const performanceData = Object.fromEntries(performanceFields.filter((key) => body[key] !== undefined && body[key] !== '').map((key) => [key, key === 'aprovado_rvsm' ? (body[key] ? 1 : 0) : body[key]]))
+  let performanceId: string | null = null
+  if (Object.keys(performanceData).length) {
+    performanceId = uuid()
+    const cols = ['id', ...Object.keys(performanceData), 'criado_em', 'atualizado_em']
+    await db.prepare(`INSERT INTO performance_aeronave (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).bind(performanceId, ...Object.keys(performanceData).map((key) => performanceData[key]), new Date().toISOString(), new Date().toISOString()).run()
+  }
+  const aircraftData: Record<string, any> = { id: aeronaveId, matricula_registro: matricula, fabricante, modelo, numero_serie: body.numero_serie || null, nome_proprietario: body.nome_proprietario || null, status: body.status === 'inativa' ? 'inativa' : 'ativa', consumo_combustivel: body.consumo_combustivel || null, ano: body.ano || null, base: body.base || null, preco_hora: body.preco_hora || null, url_imagem: body.url_imagem || null, velocidade_cruzeiro: body.velocidade_cruzeiro || null, tipo_aeronave: body.tipo_aeronave || null, numero_motores: body.numero_motores || null, performance_aeronave_id: performanceId }
+  const schema = await db.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
+  const existentes = new Set((schema.results || []).map((item) => item.name))
+  const colunas = Object.keys(aircraftData).filter((key) => existentes.has(key))
+  await db.prepare(`INSERT INTO aeronave (${colunas.join(',')}) VALUES (${colunas.map(() => '?').join(',')})`).bind(...colunas.map((key) => aircraftData[key])).run()
+  const criado = await db.prepare('SELECT * FROM aeronave WHERE id = ?').bind(aeronaveId).first()
+  return c.json({ aeronave: criado, performance_id: performanceId }, 201)
+})
+
 // ─── CTM: Controle de Troca e Manutenção ─────────────────────────────────────
 const CTM_READ_TABLES: Record<string, { table: string; order?: string }> = {
   programa: { table: 'ctm_programa_manutencao', order: 'categoria, item' },
