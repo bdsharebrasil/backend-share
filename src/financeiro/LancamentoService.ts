@@ -150,14 +150,25 @@ export class FinanceiroService {
   }
 
   async listarLancamentos(inicio?: string, fim?: string, caixa?: string): Promise<LancamentoFinanceiro[]> {
+    const schema = await this.db.prepare("SELECT name FROM pragma_table_info('lancamentos')").all<{ name: string }>()
+    const existentes = new Set((schema.results || []).map((column) => String(column.name)))
+    const dataLancamento = existentes.has('data_emissao')
+      ? 'data_emissao'
+      : existentes.has('data_emissao_nf')
+        ? 'data_emissao_nf'
+        : 'criado_em'
+    const caixaLancamento = existentes.has('tipo_caixa')
+      ? 'tipo_caixa'
+      : existentes.has('caixa')
+        ? 'caixa'
+        : null
     const conditions: string[] = []
     const values: unknown[] = []
-    const dataLancamento = 'COALESCE(data_emissao, data_emissao_nf, criado_em)'
     if (inicio) { conditions.push(`date(${dataLancamento}) >= ?`); values.push(inicio) }
     if (fim) { conditions.push(`date(${dataLancamento}) <= ?`); values.push(fim) }
-    if (caixa) { conditions.push('upper(COALESCE(tipo_caixa, caixa, \'SHARE\')) = upper(?)'); values.push(caixa) }
+    if (caixa && caixaLancamento) { conditions.push(`upper(COALESCE(${caixaLancamento}, 'SHARE')) = upper(?)`); values.push(caixa) }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-    const rows = await this.db.prepare(`SELECT * FROM lancamentos ${where} ORDER BY date(COALESCE(data_emissao, data_emissao_nf, criado_em)) DESC, criado_em DESC`).bind(...values).all<Row>()
+    const rows = await this.db.prepare(`SELECT * FROM lancamentos ${where} ORDER BY date(${dataLancamento}) DESC, criado_em DESC`).bind(...values).all<Row>()
     const result: LancamentoFinanceiro[] = []
     for (const row of rows.results) {
       const rateios = await this.db.prepare('SELECT * FROM rateio_despesas WHERE lancamentos_id = ?1').bind(row.id).all<Row>().catch(() => ({ results: [] as Row[] }))
