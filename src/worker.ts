@@ -5355,8 +5355,25 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
     for (const [index, row] of (rows.results as any[]).entries()) if (row.holding_id && row.socio_id) {
       const movimentoId = uuid();
       const pct = cotistas.length === 1 ? 100 : percentuaisNormalizados[index];
-      await portalDb(c).prepare(`INSERT INTO movimentos_holding (id,aeronave_id,data,descricao,fornecedor,categoria,grupo_categoria,tipo,prazo,fluxo,valor_centavos,pago_por,pago_diretamente,reembolsavel,reembolso_quitado,status,observacoes,criado_por) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(movimentoId, body.aeronave_id || null, body.data_despesa || new Date().toISOString().slice(0, 10), body.descricao, body.fornecedor || null, body.categoria_nome || regra.grupo, regra.grupo, 'DESPESA', body.vencimento || null, 'SAIDA', Math.round(valor * pct / 100 * 100), row.cotista_id || row.id, 1, 0, 0, 'PENDENTE', body.observacoes || null, user.id).run();
-      await portalDb(c).prepare(`INSERT INTO rateio_hold (id,movimentos_holding_id,categoria_nome,categoria_custo_id,fornecedor_id,cotista_id,cotista_nome,aeronave_id,tipo_rateio,data_vencimento,data_emissao_nf,numero_voo,descricao_despesa,pago_por,pago_diretamente,percentual_sociedade,percentual_uso,valor_total,valor_rateado,status,observacoes,conferido_por,anexos_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(uuid(),movimentoId,body.categoria_nome || regra.grupo,body.categoria_id || null,body.fornecedor_id || null,row.cotista_id || row.id,row.nome,body.aeronave_id || null,body.tipo_rateio || 'FIXO',body.vencimento || null,body.data_despesa || null,body.numero_voo || null,body.descricao,row.cotista_id || row.id,1,Number(row.percentual_sociedade || 0),pct,valor,+(valor*pct/100).toFixed(2),'pendente',body.observacoes || null,user.id,JSON.stringify(body.anexos || [])).run();
+      await inserirMovimentoHolding(portalDb(c), {
+        id: movimentoId, holding_id: row.holding_id, socio_id: row.socio_id,
+        cotista_id: row.cotista_id || row.id, aeronave_id: body.aeronave_id || null,
+        data_movimento: body.data_despesa || new Date().toISOString().slice(0, 10),
+        descricao: body.descricao, fornecedor_nome: body.fornecedor || null,
+        categoria_nome: body.categoria_nome || regra.grupo, grupo_categoria: regra.grupo,
+        natureza: 'DESPESA', fluxo: 'SAIDA', valor_centavos: Math.round(valor * pct / 100 * 100),
+        pago_diretamente: 1, status: 'PAGO_DIRETAMENTE', observacoes: body.observacoes || null,
+        criado_por: user.id,
+      })
+      await inserirRateioHolding(portalDb(c), {
+        id: uuid(), movimento_holding_id: movimentoId, holding_id: row.holding_id, socio_id: row.socio_id,
+        cotista_id: row.cotista_id || row.id, categoria_nome: body.categoria_nome || regra.grupo,
+        categoria_id: body.categoria_id || null, aeronave_id: body.aeronave_id || null,
+        tipo_rateio: body.tipo_rateio, pago_por: row.socio_id || row.id, pago_diretamente: 1,
+        percentual_sociedade: Number(row.percentual_sociedade || 0), percentual_uso: pct,
+        valor_total: valor, valor_rateado: +(valor * pct / 100).toFixed(2), status: 'PENDENTE',
+        descricao_despesa: body.descricao, observacoes: body.observacoes || null,
+      })
     }
   }
   return ids[0] || null
@@ -5547,7 +5564,7 @@ app.get('/api/interno/emails/contas-bancarias', async c => {
     const numero = campoDepartamento(row, ['numero_conta', 'conta_numero', 'conta']) || null
     const tipo = campoDepartamento(row, ['tipo_conta', 'tipo']) || null
     const cnpj = campoDepartamento(row, ['cnpj', 'documento']) || '30.898.549/0001-06'
-    const razao = campoDepartamento(row, ['razao_social', 'empresa', 'titular']) || 'Share Brasil Serviços Aeroportuários Ltda'
+    const razao = campoDepartamento(row, ['razao_social', 'empresa', 'titular']) || 'SHARE BRASIL SERVIÇOS AERONÁUTICOS'
     const pix = campoDepartamento(row, ['pix', 'chave_pix', 'pix_email']) || null
     const linhas = [`Banco ${banco || 'não informado'}`, agencia ? `Agência: ${agencia}` : '', numero ? `${tipo || 'Conta'}: ${numero}` : '', `CNPJ: ${cnpj}`, `Razão: ${razao}`, pix ? `PIX ${pix}` : ''].filter(Boolean)
     return { id: String(row.id), banco: banco || 'Conta bancária', agencia, numero_conta: numero, tipo_conta: tipo, cnpj, razao_social: razao, pix, texto: `Segue abaixo os dados bancários para pagamento:
@@ -5616,9 +5633,9 @@ app.post('/api/interno/emails', async c => {
 })
 // ─── Financeiro: emissão de recibos (cliente reembolsável / caixa cliente / colaborador) ──
 const PAGADOR_PADRAO_RECIBO = {
-  nome: 'SHARE BRASIL SERVIÇOS AEROPORTUÁRIOS LTDA',
-  documento: '30.868.504/0001-00',
-  endereco: 'AV. PRESIDENTE ANTÔNIO BERNARDES, 5457',
+  nome: 'SHARE BRASIL SERVIÇOS AERONÁUTICOS',
+  documento: '30.898.549/0001-06',
+  endereco: 'AV. PRES. ARTHUR BERNARDES, 1457',
   cidade: 'VÁRZEA GRANDE',
   uf: 'MT',
 } as const
@@ -5903,6 +5920,79 @@ async function inserirLinhaDinamica(db: any, table: string, row: Record<string, 
   await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_, i) => `?${i + 1}`).join(',')})`).bind(...vals).run()
 }
 
+function tipoRateioHolding(value: unknown): 'SOCIEDADE' | 'USO' | 'IGUALITARIO' | 'MANUAL' {
+  const tipo = String(value || '').trim().toUpperCase()
+  if (tipo === 'SOCIEDADE' || tipo === 'USO' || tipo === 'IGUALITARIO' || tipo === 'MANUAL') return tipo
+  if (tipo.includes('SOCIEDADE')) return 'SOCIEDADE'
+  if (tipo.includes('USO')) return 'USO'
+  return 'MANUAL'
+}
+
+async function inserirRateioHolding(db: any, row: Record<string, any>) {
+  const valorTotalCentavos = row.valor_total_centavos != null ? Number(row.valor_total_centavos) : Math.round(Number(row.valor_total || 0) * 100)
+  const valorRateadoCentavos = row.valor_rateado_centavos != null ? Number(row.valor_rateado_centavos) : Math.round(Number(row.valor_rateado || 0) * 100)
+  await inserirLinhaDinamica(db, 'rateio_hold', {
+    id: row.id,
+    movimento_holding_id: row.movimento_holding_id ?? row.movimentos_holding_id,
+    aeronave_id: row.aeronave_id,
+    holding_id: row.holding_id,
+    socio_id: row.socio_id,
+    cotista_id: row.cotista_id,
+    categoria_id: row.categoria_id ?? row.categoria_custo_id,
+    categoria_nome: row.categoria_nome,
+    tipo_rateio: tipoRateioHolding(row.tipo_rateio),
+    percentual_sociedade: row.percentual_sociedade,
+    percentual_uso: row.percentual_uso,
+    valor_total_centavos: valorTotalCentavos,
+    valor_rateado_centavos: valorRateadoCentavos,
+    valor_pago_real_centavos: row.valor_pago_real_centavos ?? 0,
+    pago_por_socio_id: row.pago_por_socio_id ?? row.pago_por,
+    pago_diretamente: row.pago_diretamente,
+    status: String(row.status || 'PENDENTE').toUpperCase(),
+    data_pagamento: row.data_pagamento,
+    descricao_despesa: row.descricao_despesa,
+    observacoes: row.observacoes,
+  })
+}
+
+function naturezaMovimentoHolding(value: unknown): 'RECEITA' | 'DESPESA' | 'REEMBOLSO' | 'APORTE' | 'RETIRADA' | 'AJUSTE' {
+  const natureza = String(value || '').trim().toUpperCase()
+  if (natureza === 'RECEITA' || natureza === 'DESPESA' || natureza === 'REEMBOLSO' || natureza === 'APORTE' || natureza === 'RETIRADA' || natureza === 'AJUSTE') return natureza
+  if (natureza.includes('REEMBOLSO')) return 'REEMBOLSO'
+  if (natureza.includes('APORTE') || natureza.includes('DEPOSITO')) return 'APORTE'
+  if (natureza.includes('RETIRADA')) return 'RETIRADA'
+  return 'DESPESA'
+}
+
+async function inserirMovimentoHolding(db: any, row: Record<string, any>) {
+  await inserirLinhaDinamica(db, 'movimentos_holding', {
+    id: row.id,
+    holding_id: row.holding_id,
+    socio_id: row.socio_id,
+    cotista_id: row.cotista_id,
+    aeronave_id: row.aeronave_id,
+    data_movimento: row.data_movimento ?? row.data,
+    data_vencimento: row.data_vencimento ?? row.prazo,
+    data_pagamento: row.data_pagamento,
+    descricao: row.descricao,
+    fornecedor_id: row.fornecedor_id,
+    fornecedor_nome: row.fornecedor_nome ?? row.fornecedor,
+    categoria_id: row.categoria_id,
+    categoria_nome: row.categoria_nome ?? row.categoria,
+    grupo_categoria: row.grupo_categoria,
+    fluxo: String(row.fluxo || 'SAIDA').toUpperCase(),
+    natureza: naturezaMovimentoHolding(row.natureza ?? row.tipo),
+    valor_centavos: row.valor_centavos,
+    status: String(row.status || 'EM_ABERTO').toUpperCase(),
+    pago_diretamente: row.pago_diretamente ?? 0,
+    conta_bancaria_id: row.conta_bancaria_id,
+    forma_pagamento: row.forma_pagamento,
+    comprovante_url: row.comprovante_url,
+    observacoes: row.observacoes,
+    criado_por: row.criado_por,
+  })
+}
+
 const TIPOS_RATEIO_D1 = new Set(['FIXO', 'VARIAVEL POR VOO', 'VARIAVEL POR HORA', 'EXTRA'])
 function normalizarTipoRateioD1(value: unknown): string {
   const tipo = String(value || '').trim().toUpperCase()
@@ -5990,45 +6080,42 @@ async function gerarFinanceiroNfSaida(
   if (ctx.socio_id) {
     // Cotista é sócio de holding → movimentos_holding + rateio_hold
     const movimentoId = uuid()
-    await inserirLinhaDinamica(db, 'movimentos_holding', {
+    await inserirMovimentoHolding(db, {
       id: movimentoId,
       holding_id: ctx.holding_id || null,
+      socio_id: ctx.socio_id || null,
+      cotista_id: ctx.cotista_id || null,
       aeronave_id: ctx.aeronave_id,
-      data: dataEmissao,
+      data_movimento: dataEmissao,
       descricao,
-      fornecedor: FORNECEDOR_SHARE_BRASIL_NOME,
-      categoria: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
+      fornecedor_nome: FORNECEDOR_SHARE_BRASIL_NOME,
+      categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
       grupo_categoria: 'RECEITAS OPERACIONAIS',
-      tipo: 'SAIDA',
+      natureza: 'DESPESA',
       fluxo: 'SAIDA',
       valor_centavos: Math.round(valor * 100),
-      pago_por: ctx.cotista_id,
       pago_diretamente: 0,
       status: 'PENDENTE',
       criado_por: usuario?.id,
     })
-    await inserirLinhaDinamica(db, 'rateio_hold', {
+    await inserirRateioHolding(db, {
       id: rateioId,
-      movimentos_holding_id: movimentoId,
-      categoria_custo_id: CATEGORIA_CLIENTE_NF_SAIDA,
-      categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
-      subcategoria_1: subcategoriaRateio,
+      movimento_holding_id: movimentoId,
+      holding_id: ctx.holding_id,
+      socio_id: ctx.socio_id,
       cotista_id: ctx.cotista_id,
-      cotista_nome: ctx.nome,
+      categoria_id: CATEGORIA_CLIENTE_NF_SAIDA,
+      categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
       aeronave_id: ctx.aeronave_id,
-      tipo_rateio: 'FIXO',
-      data_vencimento: dataVencimento,
-      data_emissao_nf: dataEmissao,
-      descricao_despesa: descricao,
-      pago_por: ctx.cotista_id,
+      tipo_rateio: 'SOCIEDADE',
+      pago_por_socio_id: ctx.socio_id,
       pago_diretamente: 1,
       percentual_sociedade: 100,
       percentual_uso: 100,
       valor_total: valor,
       valor_rateado: valor,
-      status: 'pendente',
-      numero_recibo: isRecibo ? body.numero : null,
-      recibo_url: body.pdf_url || null,
+      status: 'PENDENTE',
+      descricao_despesa: descricao,
     })
   } else {
     // Cliente direto (sem holding) → rateio_despesas ligado ao próprio lançamento.
@@ -6485,11 +6572,13 @@ app.post('/api/financeiro/recibos', async c => {
     if (movimentacaoId) {
       const holdingId = pagadorCotista?.holding_id || linhasRateio.find((linha) => linha.socio_id)?.holding_id || null
       if (!holdingId) throw new Error('holding_nao_identificada_para_cotista')
-      await inserirLinhaDinamica(db, 'movimentos_holding', {
+      await inserirMovimentoHolding(db, {
         id: movimentacaoId, holding_id: holdingId, aeronave_id: body.aeronave_id || null,
-        data: dataEmissao, descricao, fornecedor: ehPagamento ? recebedorNome : null,
-        categoria: categoriaNome, grupo_categoria: regra.grupo, tipo: 'PAGAMENTO_DIRETO', fluxo: 'SAIDA',
-        valor_centavos: Math.round(valorHolding * 100), pago_por: pagadorCotista?.socio_id || null, cotista_id: pagadorCotista?.cotista_id || null,
+        socio_id: pagadorCotista?.socio_id || linhasRateio.find((linha) => linha.socio_id)?.socio_id || null,
+        cotista_id: pagadorCotista?.cotista_id || linhasRateio.find((linha) => linha.socio_id)?.cotista_id || null,
+        data_movimento: dataEmissao, descricao, fornecedor_nome: ehPagamento ? recebedorNome : null,
+        categoria_nome: categoriaNome, grupo_categoria: regra.grupo, natureza: 'DESPESA', fluxo: 'SAIDA',
+        valor_centavos: Math.round(valorHolding * 100),
         pago_diretamente: 1, status: 'PENDENTE', observacoes, criado_por: user.id,
       })
     }
@@ -6502,12 +6591,13 @@ app.post('/api/financeiro/recibos', async c => {
       for (const linha of linhasRateio) {
         const rateioId = uuid()
         if (linha.socio_id) {
-          await inserirLinhaDinamica(db, 'rateio_hold', {
-            id: rateioId, movimentos_holding_id: movimentacaoId, categoria_nome: categoriaNome, cotista_id: linha.socio_id, cotista_nome: linha.nome,
-            aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio, data_emissao_nf: dataEmissao,
+          await inserirRateioHolding(db, {
+            id: rateioId, movimento_holding_id: movimentacaoId, holding_id: linha.holding_id,
+            socio_id: linha.socio_id, cotista_id: linha.cotista_id, categoria_nome: categoriaNome,
+            aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio,
             descricao_despesa: descricao, pago_por: linha.pago_por, pago_diretamente: ehPagamento ? 1 : regra.pagoDiretamente,
-            percentual_sociedade: linha.percentual, percentual_uso: linha.percentual, valor_total: valor,
-            valor_rateado: linha.valor, status: 'pendente', observacoes,
+            percentual_sociedade: linha.percentual, percentual_uso: linha.percentual,
+            valor_total: valor, valor_rateado: linha.valor, status: 'PENDENTE', observacoes,
           })
         } else {
           if (!lancamentoId) throw new Error('lancamento_cliente_ausente_para_rateio')
@@ -6539,13 +6629,13 @@ app.post('/api/financeiro/recibos', async c => {
         rateioIdsGerados.push(rateioId)
       } else if (pagadorCotista.socio_id) {
         const rateioId = uuid()
-        await inserirLinhaDinamica(db, 'rateio_hold', {
-          id: rateioId, movimentos_holding_id: movimentacaoId, categoria_nome: categoriaNome, cotista_id: pagadorCotista.socio_id, cotista_nome: pagadorCotista.nome,
-          aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio, data_emissao_nf: dataEmissao,
-          subcategoria_1: subcategorias[0], subcategoria_2: subcategorias[1], subcategoria_3: subcategorias[2],
-          subcategoria_4: subcategorias[3], descricao_despesa: descricao, pago_por: pagadorCotista.socio_id,
-          pago_diretamente: 1, percentual_sociedade: 100, percentual_uso: 100, valor_total: valor,
-          valor_rateado: valor, status: 'pendente', observacoes, numero_recibo: numeroRecibo, recibo_url: reciboUrl,
+        await inserirRateioHolding(db, {
+          id: rateioId, movimento_holding_id: movimentacaoId, holding_id: pagadorCotista.holding_id,
+          socio_id: pagadorCotista.socio_id, cotista_id: pagadorCotista.cotista_id, categoria_nome: categoriaNome,
+          aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio,
+          descricao_despesa: descricao, pago_por_socio_id: pagadorCotista.socio_id,
+          pago_diretamente: 1, percentual_sociedade: 100, percentual_uso: 100,
+          valor_total: valor, valor_rateado: valor, status: 'PENDENTE', observacoes,
         })
         rateioIdsGerados.push(rateioId)
       }
@@ -6589,7 +6679,6 @@ app.post('/api/financeiro/recibos', async c => {
     })
     for (const rateioId of rateioIdsGerados) {
       await db.prepare('UPDATE rateio_despesas SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
-      await db.prepare('UPDATE rateio_hold SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
     }
     if (contaPagarId) {
       await garantirTabelaContas(c)
@@ -6610,7 +6699,7 @@ app.post('/api/financeiro/recibos', async c => {
       await db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(lancamentoId).run().catch(() => undefined)
     }
     if (movimentacaoId) {
-      await db.prepare('DELETE FROM rateio_hold WHERE movimentos_holding_id = ?1').bind(movimentacaoId).run().catch(() => undefined)
+      await db.prepare('DELETE FROM rateio_hold WHERE movimento_holding_id = ?1').bind(movimentacaoId).run().catch(() => undefined)
       await db.prepare('DELETE FROM movimentos_holding WHERE id = ?1').bind(movimentacaoId).run().catch(() => undefined)
     }
     await db.prepare('DELETE FROM recibo_rateio WHERE recibo_id = ?1').bind(reciboId).run().catch(() => undefined)
@@ -6626,7 +6715,7 @@ app.get('/api/financeiro/recibos/:id/visualizacao', async c => {
   if (!recibo) return c.notFound()
   const dinheiro = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(recibo.valor || 0))
   const esc = (value: unknown) => escapeHtml(String(value || '—'))
-  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>` : `<b>SHARE BRASIL SERVIÇOS AEROPORTUÁRIOS LTDA</b><br>CNPJ: 30.898.549/0001-06`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div>${carimboAssinaturaHtml(recibo.data_emissao)}</body></html>`)
+  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06<br>Av. Pres. Arthur Bernardes, 1457`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div>${carimboAssinaturaHtml(recibo.data_emissao)}</body></html>`)
 })
 
 // Cliente reembolsa a Share pelo valor que ela antecipou: fecha o ciclo de
@@ -6681,7 +6770,7 @@ app.post('/api/financeiro/recibos/:id/cancelar', async c => {
   }
   if (recibo.movimentacao_id) {
     await db.prepare("UPDATE movimentos_holding SET status = 'CANCELADO' WHERE id = ?1").bind(recibo.movimentacao_id).run()
-    await db.prepare("UPDATE rateio_hold SET status = 'cancelado' WHERE movimentos_holding_id = ?1").bind(recibo.movimentacao_id).run()
+    await db.prepare("UPDATE rateio_hold SET status = 'CANCELADO' WHERE movimento_holding_id = ?1").bind(recibo.movimentacao_id).run()
   }
   if (recibo.pdf_anexo_id) {
     const pdf = await db.prepare('SELECT caminho_arquivo FROM recibo_anexos WHERE id = ?1').bind(recibo.pdf_anexo_id).first<{ caminho_arquivo: string }>().catch(() => null)
@@ -6704,7 +6793,6 @@ app.post('/api/financeiro/recibos/anexos', async c => {
     const fileValue = body.arquivo
     if (!(fileValue instanceof File) || !fileValue.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const file = fileValue
-    await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_anexos (id TEXT PRIMARY KEY NOT NULL, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
     const key = await salvarArquivoShareBrasil(c, user.id, file, 'recibos/anexos')
     const id = uuid()
     const reciboId = typeof body.recibo_id === 'string' && body.recibo_id.trim() ? body.recibo_id.trim() : null
