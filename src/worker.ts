@@ -6401,23 +6401,21 @@ app.post('/api/financeiro/recibos', async c => {
       for (const linha of linhasRateio) {
         const rateioId = uuid()
         if (linha.socio_id) {
-          await db.prepare(`INSERT INTO rateio_hold (
-              id, categoria_nome, cotista_id, cotista_nome, aeronave_id, tipo_rateio, data_emissao_nf,
-              descricao_despesa, pago_por, pago_diretamente, percentual_sociedade, percentual_uso,
-              valor_total, valor_rateado, status, observacoes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
-            .bind(rateioId, categoriaNome, linha.socio_id, linha.nome, body.aeronave_id || null, tipoRateio,
-              dataEmissao, descricao, linha.pago_por, ehPagamento ? 1 : regra.pagoDiretamente, linha.percentual, linha.percentual,
-              valor, linha.valor, observacoes).run()
+          await inserirLinhaDinamica(db, 'rateio_hold', {
+            id: rateioId, categoria_nome: categoriaNome, cotista_id: linha.socio_id, cotista_nome: linha.nome,
+            aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio, data_emissao_nf: dataEmissao,
+            descricao_despesa: descricao, pago_por: linha.pago_por, pago_diretamente: ehPagamento ? 1 : regra.pagoDiretamente,
+            percentual_sociedade: linha.percentual, percentual_uso: linha.percentual, valor_total: valor,
+            valor_rateado: linha.valor, status: 'pendente', observacoes,
+          })
         } else {
-          await db.prepare(`INSERT INTO rateio_despesas (
-              id, lancamentos_id, tipo_rateio, data_vencimento, data_emissao_nf, categoria_nome,
-              cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
-              valor_total, valor_rateado, status, observacoes
-            ) VALUES (?, ?, 'cliente', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
-            .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, categoriaNome,
-              linha.cotista_id, linha.pago_por, ehPagamento ? 1 : regra.pagoDiretamente, body.aeronave_id || null,
-              descricao, valor, linha.valor, `Rateio ${linha.percentual}% — ${linha.nome}`).run()
+          await inserirLinhaDinamica(db, 'rateio_despesas', {
+            id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: 'cliente', data_vencimento: body.data_vencimento || null,
+            data_emissao_nf: dataEmissao, categoria_nome: categoriaNome, cotista_id: linha.cotista_id, pago_por: linha.pago_por,
+            pago_diretamente: ehPagamento ? 1 : regra.pagoDiretamente, aeronave_id: body.aeronave_id || null,
+            descricao_despesa: descricao, valor_total: valor, valor_rateado: linha.valor, status: 'pendente',
+            observacoes: `Rateio ${linha.percentual}% — ${linha.nome}`,
+          })
         }
         await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, nome, percentual, valor, cotista_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
           .bind(uuid(), reciboId, rateioId, linha.nome, linha.percentual, linha.valor, linha.cotista_id).run()
@@ -6427,28 +6425,36 @@ app.post('/api/financeiro/recibos', async c => {
       const subcategorias = [body.subcategoria_1, body.subcategoria_2, body.subcategoria_3, body.subcategoria_4].map((item) => item ? String(item) : null)
       if (pagadorCotista.cliente_id) {
         const rateioId = uuid()
-        await db.prepare(`INSERT INTO rateio_despesas (id,lancamentos_id,tipo_rateio,data_emissao_nf,categoria_nome,cotista_id,pago_por,pago_diretamente,aeronave_id,descricao_despesa,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4,valor_total,valor_rateado,status,observacoes,numero_recibo,recibo_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
-          rateioId, lancamentoId, tipoRateio, dataEmissao, categoriaNome, pagadorCotista.cotista_id, pagadorCotista.cliente_id, 1, body.aeronave_id || null, descricao, ...subcategorias, valor, valor, 'pendente', observacoes, numeroRecibo, reciboUrl,
-        ).run()
+        await inserirLinhaDinamica(db, 'rateio_despesas', {
+          id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: tipoRateio, data_emissao_nf: dataEmissao,
+          categoria_nome: categoriaNome, cotista_id: pagadorCotista.cotista_id, pago_por: pagadorCotista.cliente_id,
+          pago_diretamente: 1, aeronave_id: body.aeronave_id || null, descricao_despesa: descricao,
+          subcategoria_1: subcategorias[0], subcategoria_2: subcategorias[1], subcategoria_3: subcategorias[2],
+          subcategoria_4: subcategorias[3], valor_total: valor, valor_rateado: valor, status: 'pendente',
+          observacoes, numero_recibo: numeroRecibo, recibo_url: reciboUrl,
+        })
         rateioIdsGerados.push(rateioId)
       } else if (pagadorCotista.socio_id) {
         const rateioId = uuid()
-        await db.prepare(`INSERT INTO rateio_hold (id,categoria_nome,cotista_id,cotista_nome,aeronave_id,tipo_rateio,data_emissao_nf,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4,descricao_despesa,pago_por,pago_diretamente,percentual_sociedade,percentual_uso,valor_total,valor_rateado,status,observacoes,numero_recibo,recibo_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
-          rateioId, categoriaNome, pagadorCotista.socio_id, pagadorCotista.nome, body.aeronave_id || null, tipoRateio, dataEmissao, ...subcategorias, descricao, pagadorCotista.socio_id, 1, 100, 100, valor, valor, 'pendente', observacoes, numeroRecibo, reciboUrl,
-        ).run()
+        await inserirLinhaDinamica(db, 'rateio_hold', {
+          id: rateioId, categoria_nome: categoriaNome, cotista_id: pagadorCotista.socio_id, cotista_nome: pagadorCotista.nome,
+          aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio, data_emissao_nf: dataEmissao,
+          subcategoria_1: subcategorias[0], subcategoria_2: subcategorias[1], subcategoria_3: subcategorias[2],
+          subcategoria_4: subcategorias[3], descricao_despesa: descricao, pago_por: pagadorCotista.socio_id,
+          pago_diretamente: 1, percentual_sociedade: 100, percentual_uso: 100, valor_total: valor,
+          valor_rateado: valor, status: 'pendente', observacoes, numero_recibo: numeroRecibo, recibo_url: reciboUrl,
+        })
         rateioIdsGerados.push(rateioId)
       }
     } else if (regra.rateio) {
         const rateioId = uuid()
         const pagoPor = regra.reembolsavel ? 'share' : body.cotista_id
-        await db.prepare(`INSERT INTO rateio_despesas (
-            id, lancamentos_id, tipo_rateio, fluxo, data_vencimento, data_emissao_nf, categoria_nome,
-            cotista_id, pago_por, pago_diretamente, aeronave_id, descricao_despesa,
-            valor_total, valor_rateado, status, observacoes
-          ) VALUES (?, ?, 'cliente', 'saida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?)`)
-          .bind(rateioId, lancamentoId, body.data_vencimento || null, dataEmissao, regra.grupo,
-            body.cotista_id, pagoPor, regra.pagoDiretamente, body.aeronave_id || null, descricao,
-            valor, valor, body.observacoes || null).run()
+        await inserirLinhaDinamica(db, 'rateio_despesas', {
+          id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: 'cliente', data_vencimento: body.data_vencimento || null,
+          data_emissao_nf: dataEmissao, categoria_nome: regra.grupo, cotista_id: body.cotista_id, pago_por: pagoPor,
+          pago_diretamente: regra.pagoDiretamente, aeronave_id: body.aeronave_id || null, descricao_despesa: descricao,
+          valor_total: valor, valor_rateado: valor, status: 'pendente', observacoes: body.observacoes || null,
+        })
         rateioIdsGerados.push(rateioId)
     }
 
@@ -6470,7 +6476,6 @@ app.post('/api/financeiro/recibos', async c => {
         valor, descricao, dataEmissao, body.data_vencimento || null, ehPagamento ? body.forma_pagamento || null : null,
         body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
         body.boleto_url || null, body.nf_url || null, lancamentoId, user.id).run()
-    await db.prepare('UPDATE recibos SET natureza_despesa = ?1, periodicidade = ?2, tipo_rateio = ?3, subcategoria_1 = ?4, subcategoria_2 = ?5, subcategoria_3 = ?6, subcategoria_4 = ?7, recibo_url = ?8 WHERE id = ?9').bind(naturezaDespesa || null, body.periodicidade || null, body.tipo_rateio || null, body.subcategoria_1 || null, body.subcategoria_2 || null, body.subcategoria_3 || null, body.subcategoria_4 || null, reciboUrl, reciboId).run()
     for (const rateioId of rateioIdsGerados) {
       await db.prepare('UPDATE rateio_despesas SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
       await db.prepare('UPDATE rateio_hold SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
@@ -6597,7 +6602,6 @@ app.post('/api/financeiro/recibos/:id/pdf', async c => {
     await db.prepare('INSERT OR REPLACE INTO recibo_anexos (id, recibo_id, finalidade, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .bind(anexoId, reciboId, 'pdf_gerado', file.name, key, file.type, file.size, user.id).run()
     const pdfUrl = new URL(`/api/financeiro/recibos/anexos/${encodeURIComponent(anexoId)}/arquivo`, c.req.url).toString()
-    await db.prepare('UPDATE recibos SET pdf_anexo_id = ?1, pdf_url = ?2 WHERE id = ?3').bind(anexoId, pdfUrl, reciboId).run()
     return c.json({ anexo_id: anexoId, pdf_url: pdfUrl }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_pdf' }, 400)
