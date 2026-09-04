@@ -5311,47 +5311,26 @@ function regraFinanceira(tipo: string, grupoInformado?: string) {
   return { grupo: gruposShare.includes(String(grupoInformado)) ? String(grupoInformado) : 'DESPESAS EMPRESA', caixa: 'SHARE', rateio: false, pagoDiretamente: 0, reembolsavel: 0 }
 }
 async function inserirLancamentoFinanceira(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, envioId: string, regra: ReturnType<typeof regraFinanceira>) {
-  const id = uuid(); const valor = Math.round(Number(body.valor) * 100)
-  const db = portalDb(c)
-  const columnsResult = await db.prepare("SELECT name FROM pragma_table_info('lancamentos')").all<any>()
-  const existentes = new Set((columnsResult.results || []).map((row: any) => String(row.name)))
-  const dados: Record<string, any> = {
-    id,
-    aeronave_id: body.aeronave_id || null,
-    data: body.data_despesa || new Date().toISOString().slice(0, 10),
-    data_emissao: body.data_despesa || new Date().toISOString().slice(0, 10),
+  const resultado = await createExpense(portalDb(c), {
+    ...body,
     descricao: body.descricao,
-    documento: body.documento || null,
-    numero_doc: body.documento || null,
-    fornecedor: body.fornecedor || null,
-    fornecedor_nome: body.fornecedor || null,
-    categoria: body.categoria_nome || regra.grupo,
-    categoria_nome: body.categoria_nome || regra.grupo,
-    grupo_categoria: regra.grupo,
-    tipo: body.tipo === 'share' ? null : (body.tipo_despesa || null),
-    prazo: body.vencimento || null,
+    valorCentavos: Math.round(Number(body.valor) * 100),
+    data: body.data_despesa || new Date().toISOString().slice(0, 10),
     data_vencimento: body.vencimento || null,
+    fornecedor: body.fornecedor || null,
+    categoria: body.categoria_nome || regra.grupo,
+    grupo_categoria: regra.grupo,
     fluxo: 'SAIDA',
-    valor_centavos: valor,
-    valor_total: Number(body.valor),
-    pago_por: body.pago_por || (body.tipo === 'cliente' ? body.cotista_id : 'SHARE'),
     caixa: regra.caixa,
-    tipo_caixa: regra.caixa,
-    pago_diretamente: regra.pagoDiretamente,
-    reembolsavel: regra.reembolsavel,
-    reembolso_quitado: 0,
-    status: 'PENDENTE',
+    pago_diretamente: regra.pagoDiretamente === 1,
+    pago_por: body.pago_por || (body.tipo === 'cliente' ? body.cotista_id : 'SHARE'),
+    aeronave_id: body.aeronave_id || null,
+    origem_tipo: 'ENVIO_DESPESA',
+    origem_id: envioId,
+    idempotencyKey: `envio-despeza:${envioId}`,
     observacoes: [body.observacoes, `envio_despesa:${envioId}`].filter(Boolean).join(' | ') || null,
-    criado_por: user.id,
-    periodicidade: body.periodicidade || null,
-    anexos_json: JSON.stringify(body.anexos || []),
-  }
-  const colunas: string[] = []
-  const valores: any[] = []
-  for (const coluna of Object.keys(dados)) if (existentes.has(coluna)) { colunas.push(coluna); valores.push(dados[coluna]) }
-  if (!existentes.has('id') || !colunas.length) throw new Error('schema_lancamentos_incompativel')
-  await db.prepare(`INSERT INTO lancamentos (${colunas.join(',')}) VALUES (${colunas.map(() => '?').join(',')})`).bind(...valores).run()
-  return id
+  }, user?.id || null)
+  return resultado.id
 }
 async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, lancamentoId: string, regra: ReturnType<typeof regraFinanceira>) {
   if (!regra.rateio) return null
@@ -5416,6 +5395,7 @@ app.post('/api/financeiro/envios-pagamento', async c => {
   try {
     await garantirColunasLancamentoEnvio(c)
     lancamentoId = await inserirLancamentoFinanceira(c, { ...body, tipo, descricao, valor }, user, envioId, regra)
+    if (!lancamentoId) throw new Error('lancamento_financeiro_nao_criado')
     rateioId = await inserirRateioFinanceiro(c, { ...body, tipo, descricao, valor }, user, lancamentoId, regra)
     const colunasResult = await db.prepare("SELECT name FROM pragma_table_info('envio_despesas')").all<any>()
     const existentes = new Set((colunasResult.results || []).map((row: any) => String(row.name)))
@@ -6636,17 +6616,20 @@ app.post('/api/financeiro/recibos/:id/reembolso', async c => {
 
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const dataReembolso = String(body.data || '').trim() || new Date().toISOString().slice(0, 10)
-  const reembolsoId = uuid()
-
-  const valorReembolsoCentavos = Math.round(Number(recibo.valor || 0) * 100)
-  await db.prepare(`INSERT INTO lancamentos (
-      id, aeronave_id, data, descricao, documento, fornecedor, categoria, grupo_categoria, tipo,
-      prazo, fluxo, valor_centavos, pago_por, caixa, pago_diretamente, reembolsavel,
-      reembolso_quitado, status, observacoes, criado_por
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ENTRADA', ?, ?, 'SHARE', 0, 0, 1, 'PAGO', ?, ?)`)
-    .bind(reembolsoId, recibo.aeronave_id, dataReembolso, `Reembolso recibo ${recibo.numero_recibo}`, null, null,
-      'REEMBOLSOS ENTRADAS', 'REEMBOLSOS ENTRADAS', 'REEMBOLSO', null, valorReembolsoCentavos,
-        recibo.cotista_id || 'SHARE', body.observacoes || null, user.id).run()
+    const valorReembolsoCentavos = Math.round(Number(recibo.valor || 0) * 100)
+  const resultadoReembolso = await issueRevenue(db, {
+    descricao: `Reembolso recibo ${recibo.numero_recibo}`,
+    valorCentavos: valorReembolsoCentavos,
+    data_emissao: dataReembolso,
+    data_vencimento: dataReembolso,
+    cotista_id: recibo.cotista_id || 'SHARE',
+    categoria_nome: 'REEMBOLSOS ENTRADAS',
+    origem_tipo: 'REEMBOLSO_RECIBO',
+    origem_id: recibo.id,
+    idempotencyKey: `recibo-reembolso:${recibo.id}`,
+    observacoes: body.observacoes || null,
+  }, user.id)
+  const reembolsoId = resultadoReembolso.id
 
       await db.prepare('UPDATE lancamentos SET reembolso_quitado = 1 WHERE id = ?1').bind(recibo.lancamento_id || recibo.movimentacao_id).run()
       await db.prepare("UPDATE recibos SET status = 'reembolsado', movimentacao_reembolso_id = ?1 WHERE id = ?2").bind(reembolsoId, recibo.id).run()
@@ -6850,6 +6833,12 @@ function respostaErroFinanceiro(c: Context<{ Bindings: Bindings }>, error: unkno
   return c.json({ error: 'falha_ao_processar_lancamento' }, 500)
 }
 
+function erroFinanceiroKernel(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (error instanceof FinanceKernelError) return c.json({ error: error.message, code: error.code }, error.status as any)
+  log.error('[financeiro-kernel] falha inesperada', error)
+  return c.json({ error: 'falha_ao_processar_financeiro' }, 500)
+}
+
 app.get('/api/lancamentos/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = portalDb(c)
@@ -6881,13 +6870,15 @@ app.get('/api/lancamentos/opcoes', async c => {
 app.post('/api/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   try {
-    const body = await c.req.json().catch(() => ({}))
-    const input = normalizarLancamentoInput(body, extractSupabaseUserId(c) || undefined)
-    const service = await servicoFinanceiro(c)
-    const resultado = await service.registrarLancamento(input)
-    return c.json(resultado, 201)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const userId = extractSupabaseUserId(c) || null
+    const resultado = String(body.fluxo || '').toUpperCase() === 'ENTRADA'
+      ? await issueRevenue(portalDb(c), body, userId)
+      : await createExpense(portalDb(c), body, userId)
+    const lancamento = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?').bind(resultado.id).first()
+    return c.json({ ...resultado, lancamento }, 201)
   } catch (error) {
-    return respostaErroFinanceiro(c, error)
+    return erroFinanceiroKernel(c, error)
   }
 })
 
@@ -7138,26 +7129,31 @@ async function corpoLancamentoShare(c: Context<{ Bindings: Bindings }>) {
 
 app.post('/api/interno/financeiro-share/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const dados = await corpoLancamentoShare(c)
-  if (!textoOuNulo(dados.descricao)) return c.json({ error: 'descricao_obrigatoria' }, 400)
-  if (!textoOuNulo(dados.categoria_id)) return c.json({ error: 'categoria_obrigatoria' }, 400)
-  if (numeroOuZero(dados.valor_total) <= 0) return c.json({ error: 'valor_invalido' }, 400)
-
-  const id = crypto.randomUUID()
-  const registro: LinhaGenerica = {
-    id,
-    tipo_caixa: 'share',
-    fluxo: textoOuNulo(dados.fluxo) || 'saida',
-    status: textoOuNulo(dados.status) || (textoOuNulo(dados.data_pagamento) ? 'pago' : 'pendente'),
-    ...dados,
+  try {
+    const dados = await corpoLancamentoShare(c)
+    if (!textoOuNulo(dados.descricao)) return c.json({ error: 'descricao_obrigatoria' }, 400)
+    if (!textoOuNulo(dados.categoria_id)) return c.json({ error: 'categoria_obrigatoria' }, 400)
+    if (numeroOuZero(dados.valor_total) <= 0) return c.json({ error: 'valor_invalido' }, 400)
+    const body: Record<string, unknown> = {
+      ...dados,
+      fluxo: textoOuNulo(dados.fluxo) || 'saida',
+      valorCentavos: Math.round(numeroOuZero(dados.valor_total) * 100),
+      data: dados.data_emissao,
+      data_vencimento: dados.data_vencimento,
+      fornecedor: dados.fornecedor_nome,
+      documento: dados.numero_doc,
+      pago: Boolean(dados.data_pagamento),
+      tipo_caixa: 'share',
+    }
+    const userId = extractSupabaseUserId(c) || null
+    const resultado = String(body.fluxo).toUpperCase() === 'ENTRADA'
+      ? await issueRevenue(portalDb(c), body, userId)
+      : await createExpense(portalDb(c), body, userId)
+    const lancamento = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?').bind(resultado.id).first()
+    return c.json({ ...resultado, lancamento }, 201)
+  } catch (error) {
+    return erroFinanceiroKernel(c, error)
   }
-  const colunas = Object.keys(registro)
-  await portalDb(c).prepare(
-    `INSERT INTO lancamentos (${colunas.join(', ')}) VALUES (${colunas.map((_, indice) => `?${indice + 1}`).join(', ')})`,
-  ).bind(...colunas.map(coluna => registro[coluna] ?? null)).run()
-
-  const criado = await portalDb(c).prepare('SELECT * FROM lancamentos WHERE id = ?1').bind(id).first()
-  return c.json({ lancamento: criado }, 201)
 })
 
 app.patch('/api/interno/financeiro-share/lancamentos/:id', async c => {
@@ -7271,24 +7267,12 @@ app.get('/api/contas-apagar', async c => {
 
 app.post('/api/contas-apagar/:id/dar-baixa', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaContas(c)
-  const id = c.req.param('id')
-  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
-  const dataPagamento = textoOuNulo(body.dataPagamento)
-  const bancoPagamento = textoOuNulo(body.bancoPagamento)
-  const comprovanteUrl = textoOuNulo(body.comprovantePagamentoUrl)
-  if (!dataPagamento) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
-  const db = portalDb(c)
-  const existente = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?1').bind(id).first<LinhaGenerica>()
-  if (!existente) return c.json({ error: 'nao_encontrado' }, 404)
-  const lancamentoId = textoOuNulo(existente.lancamento_id)
-  const atualizacoes = [db.prepare(`UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataPagamento, bancoPagamento, comprovanteUrl, id)]
-  if (lancamentoId) {
-    atualizacoes.push(db.prepare(`UPDATE lancamentos SET status = 'pago', data_pagamento = COALESCE(?, data_pagamento), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataPagamento, lancamentoId))
+  try {
+    const resultado = await settlePayable(portalDb(c), c.req.param('id'), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null)
+    return c.json(mapearContaAPagar(resultado as LinhaGenerica))
+  } catch (error) {
+    return erroFinanceiroKernel(c, error)
   }
-  await db.batch(atualizacoes)
-  const row = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?1').bind(id).first<LinhaGenerica>()
-  return row ? c.json(mapearContaAPagar(row)) : c.json({ error: 'nao_encontrado' }, 404)
 })
 
 app.get('/api/contas-areceber', async c => {
@@ -7314,33 +7298,12 @@ app.get('/api/contas-areceber', async c => {
 
 app.post('/api/contas-areceber/:id/dar-baixa', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaContas(c)
-  const id = c.req.param('id')
-  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
-  const dataRecebimento = textoOuNulo(body.dataRecebimento)
-  const bancoRecebimento = textoOuNulo(body.bancoRecebimento)
-  const comprovanteUrl = textoOuNulo(body.comprovanteRecebimentoUrl)
-  if (!dataRecebimento) return c.json({ error: 'data_recebimento_obrigatoria' }, 400)
-  const db = portalDb(c)
-  const existente = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?1').bind(id).first<LinhaGenerica>()
-  if (!existente) return c.json({ error: 'nao_encontrado' }, 404)
-  const lancamentoId = textoOuNulo(existente.lancamentos_id ?? existente.lancamento_id)
-  const atualizacoes = [db.prepare(`UPDATE contas_areceber SET status = 'RECEBIDO', data_recebimento = ?, data_pagamento = ?, banco_recebimento = ?, comprovante_recebimento_url = ?, lancamentos_id = COALESCE(lancamentos_id, ?), lancamento_id = COALESCE(lancamento_id, ?), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, dataRecebimento, bancoRecebimento, comprovanteUrl, lancamentoId, lancamentoId, id)]
-  if (lancamentoId) {
-    atualizacoes.push(db.prepare(`UPDATE lancamentos SET status = 'recebido', data_pagamento = COALESCE(?, data_pagamento), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(dataRecebimento, lancamentoId))
+  try {
+    const resultado = await settleReceivable(portalDb(c), c.req.param('id'), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null)
+    return c.json(mapearContaAReceber(resultado as LinhaGenerica))
+  } catch (error) {
+    return erroFinanceiroKernel(c, error)
   }
-  const cotistaHolding = await db.prepare(`SELECT ca.aeronave_id, ca.socio_id FROM cotista_aeronave ca WHERE ca.id = ?1`).bind(existente.cotista_id).first<{ aeronave_id: string | null; socio_id: string | null }>().catch(() => null)
-  if (cotistaHolding?.socio_id) {
-    const rateioHold = await db.prepare(`SELECT id, movimentos_holding_id FROM rateio_hold WHERE cotista_id = ?1 AND aeronave_id = ?2 AND ABS(COALESCE(valor_total, 0) - ?3) < 0.005 AND lower(COALESCE(status, 'pendente')) = 'pendente' ORDER BY data_emissao_nf DESC LIMIT 1`)
-      .bind(cotistaHolding.socio_id, cotistaHolding.aeronave_id, Number(existente.valor || 0)).first<{ id: string; movimentos_holding_id: string | null }>().catch(() => null)
-    if (rateioHold) {
-      atualizacoes.push(db.prepare("UPDATE rateio_hold SET status = 'pago' WHERE id = ?1").bind(rateioHold.id))
-      if (rateioHold.movimentos_holding_id) atualizacoes.push(db.prepare("UPDATE movimentos_holding SET status = 'PAGO' WHERE id = ?1").bind(rateioHold.movimentos_holding_id))
-    }
-  }
-  await db.batch(atualizacoes)
-  const row = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?1').bind(id).first<LinhaGenerica>()
-  return row ? c.json(mapearContaAReceber(row)) : c.json({ error: 'nao_encontrado' }, 404)
 })
 
 
@@ -7440,42 +7403,6 @@ for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
     return c.json({ data: rows.results })
   })
 }
-
-// ─── Financeiro Share v2: núcleo transacional e idempotente ───────────────────
-function erroFinanceiroKernel(c: Context<{ Bindings: Bindings }>, error: unknown) {
-  if (error instanceof FinanceKernelError) return c.json({ error: error.message, code: error.code }, error.status as any)
-  log.error('[financeiro-v2] falha inesperada', error)
-  return c.json({ error: 'falha_ao_processar_financeiro' }, 500)
-}
-
-app.post('/api/financeiro/v2/despesas', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { return c.json(await createExpense(portalDb(c), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null), 201) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
-app.post('/api/financeiro/v2/contas-pagar/:id/baixa', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { return c.json(await settlePayable(portalDb(c), c.req.param('id'), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null)) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
-app.post('/api/financeiro/v2/receitas', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { return c.json(await issueRevenue(portalDb(c), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null), 201) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
-app.post('/api/financeiro/v2/contas-receber/:id/baixa', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { return c.json(await settleReceivable(portalDb(c), c.req.param('id'), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null)) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
-app.post('/api/financeiro/v2/reembolsos', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { return c.json(await createReimbursement(portalDb(c), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null), 201) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
-app.post('/api/financeiro/v2/fila', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { const body = await c.req.json<any>().catch(() => ({})); return c.json(await enqueueFinance(portalDb(c), body.operacao, body.payload || {}), 202) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
-app.post('/api/financeiro/v2/fila/processar', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try { const body = await c.req.json<any>().catch(() => ({})); return c.json({ itens: await processFinanceQueue(portalDb(c), extractSupabaseUserId(c) || null, Number(body.limite || 20)) }) } catch (error) { return erroFinanceiroKernel(c, error) }
-})
 
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
 const WORKER_URL = 'https://api-workers.sharebrasil.workers.dev'

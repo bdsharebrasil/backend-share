@@ -128,7 +128,7 @@ export async function createExpense(db: Database, body: Row, userId: string | nu
   await ensureFinanceKernel(db)
   const key = idempotency(body)
   if (key) { const old = await db.prepare('SELECT id FROM lancamentos WHERE idempotency_key = ?').bind(key).first<Row>(); if (old) return { id: old.id, idempotent: true } }
-  const id = uuid(), amount = moneyCents(body), direct = Boolean(body.pagoDiretamente ?? body.pago_diretamente), collaboratorId = await collaborator(db, body)
+  const id = text(body.id) || uuid(), amount = moneyCents(body), direct = Boolean(body.pagoDiretamente ?? body.pago_diretamente), collaboratorId = await collaborator(db, body)
   const status = direct || Boolean(body.pago ?? body.data_pagamento) ? 'PAGO' : 'PENDENTE'
   await insertDynamic(db, 'lancamentos', { id, descricao: text(body.descricao), fluxo: 'saida', categoria_nome: text(body.categoria_nome ?? body.categoria ?? 'SEM CATEGORIA'), categoria: text(body.categoria_nome ?? body.categoria ?? 'SEM CATEGORIA'), grupo_categoria: text(body.grupo_categoria ?? 'DESPESA'), valor_centavos: amount, valor_total: amount / 100, data_emissao: text(body.data_emissao ?? body.data ?? new Date().toISOString().slice(0, 10)), data: text(body.data ?? body.data_emissao ?? new Date().toISOString().slice(0, 10)), data_vencimento: body.data_vencimento ?? body.vencimento ?? null, prazo: body.prazo ?? body.vencimento ?? null, aeronave_id: body.aeronave_id ?? null, cotista_id: body.cotista_id ?? null, colaborador_ref_id: collaboratorId, idempotency_key: key, origem_tipo: text(body.origem_tipo ?? 'DESPESA'), origem_id: text(body.origem_id) || null, status, criado_por: userId, observacoes: body.observacoes ?? null })
   let contaId: string | null = null
