@@ -5644,17 +5644,19 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
   const tabelas = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('recibos', 'recibo_rateio', 'recibo_anexos')").all<{ name: string }>()
   const existentes = new Set(tabelas.results.map((item) => item.name))
   const ausentes = ['recibos', 'recibo_rateio', 'recibo_anexos'].filter((nome) => !existentes.has(nome))
-  if (ausentes.length) throw new Error(`tabelas_de_recibo_ausentes: ${ausentes.join(', ')}`)
-  return
+  if (ausentes.length) log.warn('[recibos] tabelas ausentes; inicializando schema', { tabelas: ausentes })
 
   await db.prepare(`CREATE TABLE IF NOT EXISTS recibos (
     id TEXT PRIMARY KEY NOT NULL,
     numero_recibo TEXT NOT NULL,
     tipo_recibo TEXT NOT NULL CHECK (tipo_recibo IN ('cliente_direto','cliente_reembolsavel','colaborador','pagamento')),
-    beneficiario_tipo TEXT NOT NULL CHECK (beneficiario_tipo IN ('cliente','colaborador','fornecedor')),
+    beneficiario_tipo TEXT NOT NULL CHECK (beneficiario_tipo IN ('cliente','colaborador','freelancer','fornecedor')),
     cliente_id TEXT,
     colaborador_id TEXT,
+    freelancer_id TEXT,
+    cotista_id TEXT,
     recebedor_nome TEXT,
+    recebedor_cpf TEXT,
     aeronave_id TEXT,
     rateado INTEGER NOT NULL DEFAULT 0,
     nome_pagador TEXT NOT NULL,
@@ -5669,15 +5671,28 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     forma_pagamento TEXT,
     numero_documento_anexo TEXT,
     anexo_id TEXT,
+    pdf_anexo_id TEXT,
+    pdf_url TEXT,
     observacoes TEXT,
     categoria_lancamento_id TEXT,
+    categoria_movimentacao_id TEXT,
+    categoria_id TEXT,
     tipo_despesa TEXT,
     grupo_categoria TEXT NOT NULL,
     tipo_caixa TEXT NOT NULL,
+    natureza_despesa TEXT,
+    periodicidade TEXT,
+    tipo_rateio TEXT,
+    subcategoria_1 TEXT,
+    subcategoria_2 TEXT,
+    subcategoria_3 TEXT,
+    subcategoria_4 TEXT,
     status TEXT NOT NULL DEFAULT 'emitido' CHECK (status IN ('emitido','aguardando_reembolso','reembolsado','cancelado')),
     boleto_url TEXT,
     nf_url TEXT,
-    lancamento_id TEXT NOT NULL,
+    recibo_url TEXT,
+    lancamento_id TEXT,
+    movimentacao_id TEXT,
     lancamento_reembolso_id TEXT,
     criado_por TEXT,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -5704,23 +5719,26 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     percentual_sociedade REAL, percentual_uso REAL, valor_total REAL, valor_rateado REAL, status TEXT,
     observacoes TEXT, conferido_por TEXT, anexos_json TEXT DEFAULT '[]'
   )`).run().catch((error) => log.error('[recibos] rateio_hold indisponível:', error?.message || error))
-  for (const coluna of ['cliente_id TEXT', 'recebedor_nome TEXT', 'recebedor_cpf TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'pdf_anexo_id TEXT', 'pdf_url TEXT', 'observacoes TEXT', 'natureza_despesa TEXT', 'categoria_lancamento_id TEXT', 'lancamento_id TEXT', 'lancamento_reembolso_id TEXT', 'periodicidade TEXT', 'tipo_rateio TEXT', 'subcategoria_1 TEXT', 'subcategoria_2 TEXT', 'subcategoria_3 TEXT', 'subcategoria_4 TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  for (const coluna of ['cliente_id TEXT', 'colaborador_id TEXT', 'freelancer_id TEXT', 'cotista_id TEXT', 'recebedor_nome TEXT', 'recebedor_cpf TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'pdf_anexo_id TEXT', 'pdf_url TEXT', 'observacoes TEXT', 'natureza_despesa TEXT', 'categoria_lancamento_id TEXT', 'categoria_movimentacao_id TEXT', 'categoria_id TEXT', 'lancamento_id TEXT', 'lancamento_reembolso_id TEXT', 'movimentacao_id TEXT', 'periodicidade TEXT', 'tipo_rateio TEXT', 'subcategoria_1 TEXT', 'subcategoria_2 TEXT', 'subcategoria_3 TEXT', 'subcategoria_4 TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
   const schema = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recibos'").first<{ sql: string }>()
   const schemaSql = schema?.sql || ''
-  if (/CHECK\s*\(\s*tipo_recibo/i.test(schemaSql) && !schemaSql.includes("'pagamento'")) {
+  if ((/CHECK\s*\(\s*tipo_recibo/i.test(schemaSql) && !schemaSql.includes("'pagamento'")) || (/CHECK\s*\(\s*beneficiario_tipo/i.test(schemaSql) && !schemaSql.includes("'freelancer'"))) {
     await db.prepare('ALTER TABLE recibos RENAME TO recibos_legacy').run()
     await db.prepare(`CREATE TABLE recibos (
       id TEXT PRIMARY KEY NOT NULL, numero_recibo TEXT NOT NULL,
       tipo_recibo TEXT NOT NULL CHECK (tipo_recibo IN ('cliente_direto','cliente_reembolsavel','colaborador','pagamento')),
-      beneficiario_tipo TEXT NOT NULL CHECK (beneficiario_tipo IN ('cliente','colaborador','fornecedor')),
-      cliente_id TEXT, colaborador_id TEXT, recebedor_nome TEXT, recebedor_cpf TEXT, aeronave_id TEXT,
+      beneficiario_tipo TEXT NOT NULL CHECK (beneficiario_tipo IN ('cliente','colaborador','freelancer','fornecedor')),
+      cliente_id TEXT, colaborador_id TEXT, freelancer_id TEXT, cotista_id TEXT,
+      recebedor_nome TEXT, recebedor_cpf TEXT, aeronave_id TEXT,
       rateado INTEGER NOT NULL DEFAULT 0, nome_pagador TEXT NOT NULL, documento_pagador TEXT,
       endereco_pagador TEXT, cidade_pagador TEXT, uf_pagador TEXT, valor REAL NOT NULL,
       descricao_servico TEXT NOT NULL, data_emissao TEXT NOT NULL, data_vencimento TEXT,
-      forma_pagamento TEXT, numero_documento_anexo TEXT, anexo_id TEXT, observacoes TEXT,
-      categoria_lancamento_id TEXT, tipo_despesa TEXT, grupo_categoria TEXT NOT NULL,
-      tipo_caixa TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'emitido', boleto_url TEXT,
-      nf_url TEXT, lancamento_id TEXT NOT NULL, lancamento_reembolso_id TEXT, criado_por TEXT,
+      forma_pagamento TEXT, numero_documento_anexo TEXT, anexo_id TEXT, pdf_anexo_id TEXT, pdf_url TEXT, observacoes TEXT,
+      categoria_lancamento_id TEXT, categoria_movimentacao_id TEXT, categoria_id TEXT, tipo_despesa TEXT,
+      grupo_categoria TEXT NOT NULL, tipo_caixa TEXT NOT NULL, natureza_despesa TEXT, periodicidade TEXT,
+      tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT,
+      status TEXT NOT NULL DEFAULT 'emitido', boleto_url TEXT, nf_url TEXT, recibo_url TEXT,
+      lancamento_id TEXT, movimentacao_id TEXT, lancamento_reembolso_id TEXT, criado_por TEXT,
       criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`).run()
     await db.prepare(`INSERT INTO recibos (id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status, boleto_url, nf_url, lancamento_id, lancamento_reembolso_id, criado_por, criado_em)
@@ -5731,6 +5749,8 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
   await db.prepare('ALTER TABLE recibo_rateio ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE rateio_despesas ADD COLUMN lancamentos_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE rateio_despesas ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
+  for (const coluna of ['cotista_id TEXT', 'categoria_id TEXT', 'categoria_movimentacao_id TEXT']) await db.prepare(`ALTER TABLE lancamentos ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  await db.prepare('ALTER TABLE movimentos_holding ADD COLUMN cotista_id TEXT').run().catch(() => undefined)
   for (const coluna of ['numero_recibo TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE rateio_despesas ADD COLUMN ${coluna}`).run().catch(() => undefined)
   for (const coluna of ['numero_recibo TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE rateio_hold ADD COLUMN ${coluna}`).run().catch(() => undefined)
   await db.prepare(`CREATE INDEX IF NOT EXISTS recibo_rateio_recibo_idx ON recibo_rateio(recibo_id)`).run()
@@ -6165,7 +6185,7 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
                 LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
                 ORDER BY ca.aeronave_id, nome`).all().catch(() => ({ results: [] as any[] })),
     buscarCategoriasRecibo(c),
-    db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
+    db.prepare('SELECT * FROM categoria_movimentacao_cliente ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM user_profiles').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT * FROM tripulacao_freelancer').all().catch(() => ({ results: [] as any[] })),
   ])
@@ -6208,18 +6228,20 @@ app.get('/api/financeiro/recibos', async c => {
   const dataFinal = c.req.query('data_final')?.trim()
   const clauses: string[] = []
   const params: unknown[] = []
-  if (status) { clauses.push('status = ?'); params.push(status) }
-  if (beneficiarioTipo) { clauses.push('beneficiario_tipo = ?'); params.push(beneficiarioTipo) }
+  if (status) { clauses.push('r.status = ?'); params.push(status) }
+  if (beneficiarioTipo) { clauses.push('r.beneficiario_tipo = ?'); params.push(beneficiarioTipo) }
   if (busca) {
-    clauses.push(`(numero_recibo LIKE ? OR nome_pagador LIKE ? OR recebedor_nome LIKE ? OR descricao_servico LIKE ? OR numero_documento_anexo LIKE ? OR observacoes LIKE ?)`)
+    clauses.push(`(r.numero_recibo LIKE ? OR r.nome_pagador LIKE ? OR r.recebedor_nome LIKE ? OR r.descricao_servico LIKE ? OR r.numero_documento_anexo LIKE ? OR r.observacoes LIKE ?)`)
     const termo = `%${busca}%`
     params.push(termo, termo, termo, termo, termo, termo)
   }
-  if (dataInicial) { clauses.push('data_emissao >= ?'); params.push(dataInicial) }
-  if (dataFinal) { clauses.push('data_emissao <= ?'); params.push(dataFinal) }
+  if (dataInicial) { clauses.push('r.data_emissao >= ?'); params.push(dataInicial) }
+  if (dataFinal) { clauses.push('r.data_emissao <= ?'); params.push(dataFinal) }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   try {
-    const stmt = portalDb(c).prepare(`SELECT * FROM recibos ${where} ORDER BY data_emissao DESC, criado_em DESC`)
+    const stmt = portalDb(c).prepare(`SELECT r.*, COALESCE(r.pdf_anexo_id, pdf.id) AS pdf_anexo_id,
+      COALESCE(r.pdf_url, CASE WHEN pdf.id IS NOT NULL THEN '/api/financeiro/recibos/anexos/' || pdf.id || '/arquivo' END) AS pdf_url
+      FROM recibos r LEFT JOIN recibo_anexos pdf ON pdf.recibo_id = r.id AND pdf.finalidade = 'pdf_gerado' ${where} ORDER BY r.data_emissao DESC, r.criado_em DESC`)
     const rows = params.length ? await stmt.bind(...params).all() : await stmt.all()
     return c.json({ recibos: rows.results })
   } catch (error) {
@@ -6233,7 +6255,10 @@ app.get('/api/financeiro/recibos/:id', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelasRecibos(c)
   const db = portalDb(c)
-  const recibo = await db.prepare('SELECT * FROM recibos WHERE id = ?1').bind(c.req.param('id')).first()
+  const recibo = await db.prepare(`SELECT r.*, COALESCE(r.pdf_anexo_id, pdf.id) AS pdf_anexo_id,
+    COALESCE(r.pdf_url, CASE WHEN pdf.id IS NOT NULL THEN '/api/financeiro/recibos/anexos/' || pdf.id || '/arquivo' END) AS pdf_url
+    FROM recibos r LEFT JOIN recibo_anexos pdf ON pdf.recibo_id = r.id AND pdf.finalidade = 'pdf_gerado'
+    WHERE r.id = ?1`).bind(c.req.param('id')).first()
   if (!recibo) return c.notFound()
   const rateio = await db.prepare('SELECT * FROM recibo_rateio WHERE recibo_id = ?1 ORDER BY nome').bind(c.req.param('id')).all()
   return c.json({ recibo, rateio: rateio.results })
@@ -6247,8 +6272,12 @@ app.post('/api/financeiro/recibos', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   if (body.tipo_recibo === 'cliente_direto') return c.json({ error: 'tipo_recibo_nao_disponivel' }, 400)
 
-  const ehPagamento = body.tipo_recibo === 'pagamento' || body.beneficiario_tipo === 'fornecedor'
-  const beneficiarioTipo: 'cliente' | 'colaborador' | 'fornecedor' = ehPagamento ? 'fornecedor' : body.beneficiario_tipo === 'colaborador' ? 'colaborador' : 'cliente'
+  const ehPagamento = body.tipo_recibo === 'pagamento' || ['fornecedor', 'freelancer'].includes(String(body.beneficiario_tipo || '').toLowerCase())
+  const recebedorId = String(body.recebedor_id || '').trim()
+  const recebedorOrigem = recebedorId.startsWith('freelancer:') ? 'freelancer' : recebedorId.startsWith('perfil:') ? 'colaborador' : ''
+  const beneficiarioTipo: 'cliente' | 'colaborador' | 'freelancer' | 'fornecedor' = ehPagamento
+    ? (recebedorOrigem === 'freelancer' ? 'freelancer' : recebedorOrigem === 'colaborador' ? 'colaborador' : 'fornecedor')
+    : body.beneficiario_tipo === 'colaborador' ? 'colaborador' : 'cliente'
   const reembolsavel = Boolean(body.reembolsavel) && beneficiarioTipo === 'cliente'
   const pagadorTipo = ehPagamento && body.pagador_tipo === 'cotista' ? 'cotista' : 'share'
   const rateado = Boolean(body.rateado) && (beneficiarioTipo === 'cliente' || (ehPagamento && pagadorTipo === 'cotista'))
@@ -6268,11 +6297,19 @@ app.post('/api/financeiro/recibos', async c => {
   const ufPagador = pagadorCotista?.uf || PAGADOR_PADRAO_RECIBO.uf
   let recebedorNome = String(body.recebedor_nome || '').trim()
   let recebedorCpf = String(body.recebedor_cpf || '').trim()
+  let freelancerId: string | null = null
   if (beneficiarioTipo === 'colaborador') {
-    const colaborador = await db.prepare('SELECT nome_completo AS nome, cpf, pix FROM user_profiles WHERE id = ?1').bind(String(body.colaborador_id || '').trim()).first<{ nome: string; cpf: string | null; pix: string | null }>().catch(() => null)
+    const colaboradorId = String(body.colaborador_id || '').trim() || recebedorId.replace(/^perfil:/, '')
+    const colaborador = await db.prepare('SELECT nome_completo AS nome, cpf, pix FROM user_profiles WHERE id = ?1').bind(colaboradorId).first<{ nome: string; cpf: string | null; pix: string | null }>().catch(() => null)
     recebedorNome = colaborador?.nome || recebedorNome
     recebedorCpf = colaborador?.cpf || recebedorCpf
     if (colaborador?.pix && !descricao.toLowerCase().includes('pix')) descricao = `${descricao} · PIX para pagamento: ${colaborador.pix}`
+  } else if (beneficiarioTipo === 'freelancer') {
+    freelancerId = recebedorId.replace(/^freelancer:/, '') || String(body.freelancer_id || '').trim() || null
+    const freelancer = freelancerId ? await db.prepare('SELECT nome_completo AS nome, cpf FROM tripulacao_freelancer WHERE id = ?1').bind(freelancerId).first<{ nome: string; cpf: string | null }>().catch(() => null) : null
+    recebedorNome = freelancer?.nome || recebedorNome
+    recebedorCpf = freelancer?.cpf || recebedorCpf
+    if (freelancerId && !recebedorNome) return c.json({ error: 'freelancer_invalido' }, 400)
   }
   const clienteId = String(body.cliente_id || body.cotista_id || '').trim()
   const valor = Number.parseFloat(String(body.valor).replace(',', '.'))
@@ -6281,8 +6318,9 @@ app.post('/api/financeiro/recibos', async c => {
 
   if (!descricao) return c.json({ error: 'descricao_obrigatoria' }, 400)
   if (!Number.isFinite(valor) || valor <= 0 || !Number.isInteger(valorCentavos) || valorCentavos <= 0) return c.json({ error: 'valor_invalido' }, 400)
-  if (beneficiarioTipo === 'fornecedor' && !recebedorNome) return c.json({ error: 'recebedor_obrigatorio' }, 400)
-  if (beneficiarioTipo === 'colaborador' && !String(body.colaborador_id || '').trim()) return c.json({ error: 'colaborador_obrigatorio' }, 400)
+  if (['fornecedor', 'freelancer', 'colaborador'].includes(beneficiarioTipo) && !recebedorNome) return c.json({ error: 'recebedor_obrigatorio' }, 400)
+  if (beneficiarioTipo === 'colaborador' && !String(body.colaborador_id || '').trim() && !recebedorId.startsWith('perfil:')) return c.json({ error: 'colaborador_obrigatorio' }, 400)
+  if (beneficiarioTipo === 'freelancer' && !freelancerId) return c.json({ error: 'freelancer_obrigatorio' }, 400)
   if (beneficiarioTipo === 'cliente' && !rateado && !clienteId) return c.json({ error: 'cliente_obrigatorio' }, 400)
   if (rateado && !String(body.aeronave_id || '').trim()) return c.json({ error: 'aeronave_obrigatoria_para_rateio' }, 400)
   if (ehPagamento && !String(body.forma_pagamento || '').trim()) return c.json({ error: 'forma_pagamento_obrigatoria' }, 400)
@@ -6323,16 +6361,36 @@ app.post('/api/financeiro/recibos', async c => {
     }
     if (!categoriaPagamento) return c.json({ error: 'categoria_pagamento_obrigatoria' }, 400)
   }
-  const grupoCategoria = beneficiarioTipo === 'colaborador' ? (naturezaDespesa === 'aeronave' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA') : ehPagamento ? String(categoriaPagamento?.nome || 'DESPESAS EMPRESA') : body.grupo_categoria
-  const tipoDespesa = beneficiarioTipo === 'colaborador' ? (categoriaRecibo?.tipo_despesa ?? categoriaRecibo?.tipo ?? null) : null
-  const categoriaNome = beneficiarioTipo === 'colaborador' ? (categoriaId === categoriaOutroId ? categoriaNomeManual : String(categoriaRecibo?.nome || categoriaRecibo?.categoria || categoriaRecibo?.descricao || grupoCategoria)) : grupoCategoria || (ehPagamento ? 'PAGAMENTO' : reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'CAIXA CLIENTE')
-  const regra = ehPagamento || beneficiarioTipo === 'colaborador'
-    ? regraFinanceira('share', 'DESPESAS EMPRESA')
-    : regraFinanceiraRecibo('cliente', reembolsavel, grupoCategoria)
+  const categoriaNomePagamento = String(categoriaPagamento?.nome || categoriaPagamento?.categoria || categoriaPagamento?.descricao || '').trim()
+  const grupoCategoriaInformado = String(categoriaPagamento?.grupo_categoria ?? categoriaPagamento?.grupo ?? categoriaPagamento?.agrupamento ?? '').trim()
+  const categoriaVinculada = !grupoCategoriaInformado && categoriaId
+    ? await db.prepare('SELECT grupo_categoria FROM categoria_movimentacao_share WHERE categoria_cliente_id = ?1 LIMIT 1').bind(categoriaId).first<{ grupo_categoria: string | null }>().catch(() => null)
+    : null
+  const grupoCategoriaPagamento = String(grupoCategoriaInformado || categoriaVinculada?.grupo_categoria || categoriaNomePagamento || 'CAIXA CLIENTE').trim()
+  const grupoCategoria = beneficiarioTipo === 'colaborador' || beneficiarioTipo === 'freelancer'
+    ? (naturezaDespesa === 'aeronave' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA')
+    : ehPagamento ? grupoCategoriaPagamento : String(body.grupo_categoria || '').trim()
+  const tipoDespesa = beneficiarioTipo === 'colaborador' || beneficiarioTipo === 'freelancer' ? (categoriaRecibo?.tipo_despesa ?? categoriaRecibo?.tipo ?? null) : null
+  const categoriaNome = beneficiarioTipo === 'colaborador' || beneficiarioTipo === 'freelancer'
+    ? (categoriaId === categoriaOutroId ? categoriaNomeManual : String(categoriaRecibo?.nome || categoriaRecibo?.categoria || categoriaRecibo?.descricao || grupoCategoria))
+    : ehPagamento ? (categoriaNomePagamento || grupoCategoria) : grupoCategoria || (reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'CAIXA CLIENTE')
+  const pagamentoPorCotistaCliente = ehPagamento && pagadorTipo === 'cotista' && Boolean(pagadorCotista?.cliente_id)
+  const regra = pagamentoPorCotistaCliente
+    ? { ...regraFinanceira('cliente', grupoCategoria), grupo: grupoCategoria }
+    : ehPagamento || beneficiarioTipo === 'colaborador' || beneficiarioTipo === 'freelancer'
+      ? { ...regraFinanceira('share', grupoCategoria), grupo: grupoCategoria }
+      : regraFinanceiraRecibo('cliente', reembolsavel, grupoCategoria)
+  const tipoCaixaRecibo = pagadorCotista?.socio_id ? 'HOLDING' : regra.caixa
 
   const reciboId = uuid()
   const contaPagarId = beneficiarioTipo === 'cliente' || beneficiarioTipo === 'colaborador' ? uuid() : null
-  const numeroRecibo = await proximoNumeroRecibo(c, beneficiarioTipo === 'colaborador' || pagadorTipo === 'share' ? 'SHE' : String(pagadorCotista?.codigo_cliente || 'SHE'))
+  const numeroReciboInformado = String(body.numero_recibo || '').trim()
+  if (numeroReciboInformado && !/^[A-Z0-9][A-Z0-9._/-]{2,40}$/i.test(numeroReciboInformado)) return c.json({ error: 'numero_recibo_invalido' }, 400)
+  if (numeroReciboInformado) {
+    const numeroExistente = await db.prepare('SELECT id FROM recibos WHERE upper(numero_recibo) = upper(?1) LIMIT 1').bind(numeroReciboInformado).first<{ id: string }>()
+    if (numeroExistente) return c.json({ error: 'numero_recibo_ja_existente' }, 409)
+  }
+  const numeroRecibo = numeroReciboInformado || await proximoNumeroRecibo(c, beneficiarioTipo === 'colaborador' || pagadorTipo === 'share' ? 'SHE' : String(pagadorCotista?.codigo_cliente || 'SHE'))
   const reciboUrl = `/api/financeiro/recibos/${reciboId}/visualizacao`
   const observacoes = body.observacoes ? String(body.observacoes) : null
 
@@ -6399,7 +6457,8 @@ app.post('/api/financeiro/recibos', async c => {
         id: lancamentoId, aeronave_id: body.aeronave_id || null, data: dataEmissao, data_emissao: dataEmissao,
         descricao, documento: body.numero_documento_anexo || null, numero_doc: body.numero_documento_anexo || null,
         fornecedor: ehPagamento ? recebedorNome : null, fornecedor_nome: ehPagamento ? recebedorNome : null,
-        categoria: categoriaNome, categoria_nome: categoriaNome, grupo_categoria: regra.grupo,
+        categoria: categoriaNome, categoria_nome: categoriaNome, categoria_id: categoriaId || null, categoria_movimentacao_id: categoriaId || null, grupo_categoria: regra.grupo,
+        cotista_id: pagadorCotista?.cotista_id || (beneficiarioTipo === 'cliente' && !rateado ? clienteId : null),
         tipo: tipoDespesa || (ehPagamento ? 'PAGAMENTO' : 'DESPESA'), prazo: body.data_vencimento || null,
         data_vencimento: body.data_vencimento || null, fluxo: 'SAIDA', valor_centavos: Math.round(valorCliente * 100),
         valor_total: valorCliente, pago_por: rateado ? null : (pagadorCotista?.cliente_id || (beneficiarioTipo === 'cliente' ? (reembolsavel ? 'SHARE' : clienteId) : 'SHARE')),
@@ -6420,7 +6479,7 @@ app.post('/api/financeiro/recibos', async c => {
         id: movimentacaoId, holding_id: holdingId, aeronave_id: body.aeronave_id || null,
         data: dataEmissao, descricao, fornecedor: ehPagamento ? recebedorNome : null,
         categoria: categoriaNome, grupo_categoria: regra.grupo, tipo: 'PAGAMENTO_DIRETO', fluxo: 'SAIDA',
-        valor_centavos: Math.round(valorHolding * 100), pago_por: pagadorCotista?.socio_id || null,
+        valor_centavos: Math.round(valorHolding * 100), pago_por: pagadorCotista?.socio_id || null, cotista_id: pagadorCotista?.cotista_id || null,
         pago_diretamente: 1, status: 'PENDENTE', observacoes, criado_por: user.id,
       })
     }
@@ -6499,17 +6558,19 @@ app.post('/api/financeiro/recibos', async c => {
     await inserirLinhaDinamica(db, 'recibos', {
       id: reciboId, numero_recibo: numeroRecibo, tipo_recibo: tipoRecibo, beneficiario_tipo: beneficiarioTipo,
       cliente_id: beneficiarioTipo === 'cliente' && !rateado ? clienteId : null,
-      colaborador_id: beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
-      recebedor_nome: (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null,
-      recebedor_cpf: (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorCpf : null,
+      colaborador_id: beneficiarioTipo === 'colaborador' ? (String(body.colaborador_id || '').trim() || recebedorId.replace(/^perfil:/, '') || null) : null,
+      freelancer_id: beneficiarioTipo === 'freelancer' ? freelancerId : null,
+      cotista_id: pagadorCotista?.cotista_id || (beneficiarioTipo === 'cliente' && !rateado ? clienteId : null),
+      recebedor_nome: (ehPagamento || beneficiarioTipo === 'colaborador' || beneficiarioTipo === 'freelancer') ? recebedorNome : null,
+      recebedor_cpf: (ehPagamento || beneficiarioTipo === 'colaborador' || beneficiarioTipo === 'freelancer') ? recebedorCpf : null,
       aeronave_id: body.aeronave_id || null, rateado: rateado ? 1 : 0,
       nome_pagador: nomePagador, documento_pagador: documentoPagador, endereco_pagador: enderecoPagador,
       cidade_pagador: cidadePagador, uf_pagador: ufPagador, valor, descricao_servico: descricao,
       data_emissao: dataEmissao, data_vencimento: body.data_vencimento || null,
       forma_pagamento: ehPagamento ? body.forma_pagamento || null : null,
-      numero_documento_anexo: body.numero_documento_anexo || null, anexo_id: body.anexo_id || null,
-      observacoes, categoria_lancamento_id: categoriaId || null, categoria_movimentacao_id: categoriaId || null,
-      tipo_despesa: tipoDespesa, grupo_categoria: regra.grupo, tipo_caixa: regra.caixa, status: statusRecibo,
+      numero_documento_anexo: body.numero_documento_anexo || null, anexo_id: body.anexo_id || null, pdf_anexo_id: null, pdf_url: null,
+      observacoes, categoria_lancamento_id: categoriaId || null, categoria_movimentacao_id: categoriaId || null, categoria_id: categoriaId || null,
+      tipo_despesa: tipoDespesa, grupo_categoria: regra.grupo, tipo_caixa: tipoCaixaRecibo, status: statusRecibo,
       boleto_url: body.boleto_url || null, nf_url: body.nf_url || null,
       lancamento_id: lancamentoId, movimentacao_id: movimentacaoId, criado_por: user.id,
       natureza_despesa: naturezaDespesa || null, periodicidade: body.periodicidade || null,
@@ -6656,6 +6717,7 @@ app.post('/api/financeiro/recibos/:id/pdf', async c => {
     await db.prepare('INSERT OR REPLACE INTO recibo_anexos (id, recibo_id, finalidade, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .bind(anexoId, reciboId, 'pdf_gerado', file.name, key, file.type, file.size, user.id).run()
     const pdfUrl = new URL(`/api/financeiro/recibos/anexos/${encodeURIComponent(anexoId)}/arquivo`, c.req.url).toString()
+    await db.prepare('UPDATE recibos SET pdf_anexo_id = ?1, pdf_url = ?2 WHERE id = ?3').bind(anexoId, pdfUrl, reciboId).run().catch(() => undefined)
     return c.json({ anexo_id: anexoId, pdf_url: pdfUrl }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_pdf' }, 400)
