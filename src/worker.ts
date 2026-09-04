@@ -2579,7 +2579,20 @@ const PORTAL_SESSION_TTL = 8 * 60 * 60
 const PORTAL_PBKDF2_ITERATIONS = 100_000
 
 function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
-  return c.env.SHARE_DB
+  const database = c.env.SHARE_DB
+  const ddl = /^\s*(CREATE|ALTER|DROP|RENAME|VACUUM|REINDEX)\b/i
+  return {
+    ...database,
+    prepare(query: string) {
+      if (ddl.test(query)) throw new Error('mutacao_de_schema_bloqueada_em_runtime')
+      return database.prepare(query)
+    },
+    batch(statements) { return database.batch(statements) },
+    exec(query: string) {
+      if (ddl.test(query)) throw new Error('mutacao_de_schema_bloqueada_em_runtime')
+      return database.exec(query)
+    },
+  } as D1Database
 }
 
 async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
@@ -5531,7 +5544,7 @@ app.get('/api/interno/emails/contas-bancarias', async c => {
     const numero = campoDepartamento(row, ['numero_conta', 'conta_numero', 'conta']) || null
     const tipo = campoDepartamento(row, ['tipo_conta', 'tipo']) || null
     const cnpj = campoDepartamento(row, ['cnpj', 'documento']) || '30.898.549/0001-06'
-    const razao = campoDepartamento(row, ['razao_social', 'empresa', 'titular']) || 'Share Brasil Serviços Aeroportuários'
+    const razao = campoDepartamento(row, ['razao_social', 'empresa', 'titular']) || 'Share Brasil Serviços Aeroportuários Ltda'
     const pix = campoDepartamento(row, ['pix', 'chave_pix', 'pix_email']) || null
     const linhas = [`Banco ${banco || 'não informado'}`, agencia ? `Agência: ${agencia}` : '', numero ? `${tipo || 'Conta'}: ${numero}` : '', `CNPJ: ${cnpj}`, `Razão: ${razao}`, pix ? `PIX ${pix}` : ''].filter(Boolean)
     return { id: String(row.id), banco: banco || 'Conta bancária', agencia, numero_conta: numero, tipo_conta: tipo, cnpj, razao_social: razao, pix, texto: `Segue abaixo os dados bancários para pagamento:
@@ -5600,7 +5613,7 @@ app.post('/api/interno/emails', async c => {
 })
 // ─── Financeiro: emissão de recibos (cliente reembolsável / caixa cliente / colaborador) ──
 const PAGADOR_PADRAO_RECIBO = {
-  nome: 'SHARE BRASIL SERVIÇOS AERONÁUTICOS',
+  nome: 'SHARE BRASIL SERVIÇOS AEROPORTUÁRIOS LTDA',
   documento: '30.868.504/0001-00',
   endereco: 'AV. PRESIDENTE ANTÔNIO BERNARDES, 5457',
   cidade: 'VÁRZEA GRANDE',
@@ -5612,6 +5625,12 @@ const PAGADOR_PADRAO_RECIBO = {
 // cotistas usa `cotista_aeronave` (cliente_id OU socio_id, cobrindo também clientes com holding).
 async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
+  const tabelas = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('recibos', 'recibo_rateio', 'recibo_anexos')").all<{ name: string }>()
+  const existentes = new Set(tabelas.results.map((item) => item.name))
+  const ausentes = ['recibos', 'recibo_rateio', 'recibo_anexos'].filter((nome) => !existentes.has(nome))
+  if (ausentes.length) throw new Error(`tabelas_de_recibo_ausentes: ${ausentes.join(', ')}`)
+  return
+
   await db.prepare(`CREATE TABLE IF NOT EXISTS recibos (
     id TEXT PRIMARY KEY NOT NULL,
     numero_recibo TEXT NOT NULL,
@@ -5669,9 +5688,10 @@ async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
     percentual_sociedade REAL, percentual_uso REAL, valor_total REAL, valor_rateado REAL, status TEXT,
     observacoes TEXT, conferido_por TEXT, anexos_json TEXT DEFAULT '[]'
   )`).run().catch((error) => log.error('[recibos] rateio_hold indisponível:', error?.message || error))
-  for (const coluna of ['recebedor_nome TEXT', 'recebedor_cpf TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'pdf_anexo_id TEXT', 'pdf_url TEXT', 'observacoes TEXT', 'natureza_despesa TEXT', 'categoria_lancamento_id TEXT', 'lancamento_id TEXT', 'lancamento_reembolso_id TEXT', 'periodicidade TEXT', 'tipo_rateio TEXT', 'subcategoria_1 TEXT', 'subcategoria_2 TEXT', 'subcategoria_3 TEXT', 'subcategoria_4 TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  for (const coluna of ['cliente_id TEXT', 'recebedor_nome TEXT', 'recebedor_cpf TEXT', 'numero_documento_anexo TEXT', 'anexo_id TEXT', 'pdf_anexo_id TEXT', 'pdf_url TEXT', 'observacoes TEXT', 'natureza_despesa TEXT', 'categoria_lancamento_id TEXT', 'lancamento_id TEXT', 'lancamento_reembolso_id TEXT', 'periodicidade TEXT', 'tipo_rateio TEXT', 'subcategoria_1 TEXT', 'subcategoria_2 TEXT', 'subcategoria_3 TEXT', 'subcategoria_4 TEXT', 'recibo_url TEXT']) await db.prepare(`ALTER TABLE recibos ADD COLUMN ${coluna}`).run().catch(() => undefined)
   const schema = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recibos'").first<{ sql: string }>()
-  if (schema?.sql && !schema.sql.includes("'pagamento'")) {
+  const schemaSql = schema?.sql || ''
+  if (/CHECK\s*\(\s*tipo_recibo/i.test(schemaSql) && !schemaSql.includes("'pagamento'")) {
     await db.prepare('ALTER TABLE recibos RENAME TO recibos_legacy').run()
     await db.prepare(`CREATE TABLE recibos (
       id TEXT PRIMARY KEY NOT NULL, numero_recibo TEXT NOT NULL,
@@ -6123,14 +6143,35 @@ app.get('/api/financeiro/recibos/opcoes', async c => {
                 ORDER BY ca.aeronave_id, nome`).all().catch(() => ({ results: [] as any[] })),
     buscarCategoriasRecibo(c),
     db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all().catch(() => ({ results: [] as any[] })),
-    db.prepare("SELECT id, nome_completo, nome_exibicao, cpf, email, tipo_user, telefone, status FROM user_profiles WHERE status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active') ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), nome_completo, email)").all().catch(() => ({ results: [] as any[] })),
-    db.prepare("SELECT id, nome_completo, cpf, canac, telefone, status FROM tripulacao_freelancer WHERE status IS NULL OR lower(trim(COALESCE(status, ''))) IN ('', 'ativo', 'active') ORDER BY nome_completo").all().catch(() => ({ results: [] as any[] })),
+    db.prepare('SELECT * FROM user_profiles').all().catch(() => ({ results: [] as any[] })),
+    db.prepare('SELECT * FROM tripulacao_freelancer').all().catch(() => ({ results: [] as any[] })),
   ])
+  const ativo = (item: any) => {
+    const status = String(item.status || '').trim().toLowerCase()
+    return !status || status === 'ativo' || status === 'active'
+  }
+  const usuarios = (perfisRecebedores.results as any[]).filter(ativo).map((perfil) => ({
+    id: perfil.id,
+    nome: perfil.nome_exibicao || perfil.nome_completo || perfil.email || 'Perfil sem nome',
+    cpf: perfil.cpf || null,
+    email: perfil.email || null,
+    telefone: perfil.telefone || null,
+    tipo_user: perfil.tipo_user || null,
+  }))
+  const freelancers = (freelancersRecebedores.results as any[]).filter(ativo).map((freelancer) => ({
+    id: freelancer.id,
+    nome: freelancer.nome_completo || 'Freelancer sem nome',
+    cpf: freelancer.cpf || null,
+    email: freelancer.email || null,
+    telefone: freelancer.telefone || null,
+    canac: freelancer.canac || null,
+    tipo_user: 'freelancer',
+  }))
   const recebedores = [
-    ...(perfisRecebedores.results as any[]).map((perfil) => ({ id: `perfil:${perfil.id}`, nome: perfil.nome_exibicao || perfil.nome_completo || perfil.email || 'Perfil sem nome', cpf: perfil.cpf || null, email: perfil.email || null, telefone: perfil.telefone || null, tipo_user: perfil.tipo_user || null, origem: 'user_profiles' })),
-    ...(freelancersRecebedores.results as any[]).map((freelancer) => ({ id: `freelancer:${freelancer.id}`, nome: freelancer.nome_completo || 'Freelancer sem nome', cpf: freelancer.cpf || null, email: null, telefone: freelancer.telefone || null, canac: freelancer.canac || null, tipo_user: 'freelancer', origem: 'tripulacao_freelancer' })),
+    ...usuarios.map((usuario) => ({ ...usuario, id: `perfil:${usuario.id}`, origem: 'user_profiles' as const })),
+    ...freelancers.map((freelancer) => ({ ...freelancer, id: `freelancer:${freelancer.id}`, origem: 'tripulacao_freelancer' as const })),
   ]
-  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results, recebedores })
+  return c.json({ clientes: clientes.results, colaboradores: colaboradores.results, aeronaves: aeronave.results, cotistas: cotistas.results, categorias, categorias_cliente: categoriasCliente.results, recebedores, usuarios, freelancers })
 })
 
 app.get('/api/financeiro/recibos', async c => {
@@ -6399,14 +6440,14 @@ app.post('/api/financeiro/recibos', async c => {
     const tipoRecibo = ehPagamento ? 'pagamento' : beneficiarioTipo === 'colaborador' ? 'colaborador' : (reembolsavel ? 'cliente_reembolsavel' : 'cliente_direto')
     const statusRecibo = reembolsavel ? 'aguardando_reembolso' : 'emitido'
     await db.prepare(`INSERT INTO recibos (
-        id, numero_recibo, tipo_recibo, beneficiario_tipo, cliente_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado,
+        id, numero_recibo, tipo_recibo, beneficiario_tipo, cotista_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado,
         nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
         valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento,
-        numero_documento_anexo, anexo_id, observacoes, categoria_lancamento_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
-        boleto_url, nf_url, lancamento_id, criado_por
+        numero_documento_anexo, anexo_id, observacoes, categoria_movimentacao_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
+        boleto_url, nf_url, movimentacao_id, criado_por
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
-        beneficiarioTipo === 'cliente' && !rateado ? body.cliente_id : null,
+        beneficiarioTipo === 'cliente' && !rateado ? clienteId : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
         (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorCpf : null, body.aeronave_id || null, rateado ? 1 : 0,
         nomePagador, documentoPagador, enderecoPagador, cidadePagador, ufPagador,
@@ -6445,7 +6486,7 @@ app.get('/api/financeiro/recibos/:id/visualizacao', async c => {
   if (!recibo) return c.notFound()
   const dinheiro = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(recibo.valor || 0))
   const esc = (value: unknown) => escapeHtml(String(value || '—'))
-  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>` : `<b>SHARE BRASIL SERVIÇOS AERONÁUTICOS</b><br>CNPJ: 30.898.549/0001-06`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div>${carimboAssinaturaHtml(recibo.data_emissao)}</body></html>`)
+  return c.html(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(recibo.numero_recibo)}</title><style>body{font-family:Arial,sans-serif;color:#263238;margin:36px;max-width:900px}header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #ccd2d6;padding-bottom:18px}img{width:220px;height:96px;object-fit:contain;object-position:left center}.title{text-align:center}.title h1{font-size:25px;text-decoration:underline}.number{text-align:right;font-size:12px}.value{border:2px solid #263238;font-size:18px;font-weight:700;padding:10px 24px;margin-top:12px}.parties{display:grid;grid-template-columns:1fr 1fr;gap:40px;border-bottom:1px solid #ccd2d6;padding:24px 0;font-size:13px}.label{font-size:10px;font-weight:bold;color:#69757d;text-transform:uppercase}.table{margin-top:22px;border:1px solid #ccd2d6}.row{display:grid;grid-template-columns:1fr 160px 110px;padding:10px}.head{background:#e7eaed;font-weight:bold;font-size:12px}.details{margin-top:22px;border:1px solid #dde2e5;padding:14px;font-size:12px}@media print{body{margin:18mm}}</style></head><body><header><img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil"><div class="title"><h1>RECIBO</h1></div><div class="number"><b>Número do recibo:</b><br>${esc(recibo.numero_recibo)}<div class="value">${dinheiro}</div></div></header><section class="parties"><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Recebedor' : 'Pagador'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.recebedor_nome)}</b><br>` : `<b>SHARE BRASIL SERVIÇOS AEROPORTUÁRIOS LTDA</b><br>CNPJ: 30.898.549/0001-06`}</div><div><p class="label">${recibo.tipo_recibo === 'pagamento' ? 'Pagador' : 'Recebedor'}</p>${recibo.tipo_recibo === 'pagamento' ? `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}` : recibo.tipo_recibo === 'colaborador' ? `<b>${esc(recibo.recebedor_nome)}</b><br>CPF: ${esc(recibo.recebedor_cpf)}` : `<b>${esc(recibo.nome_pagador)}</b><br>${esc(recibo.documento_pagador)}<br>${esc(recibo.endereco_pagador)}<br>${esc([recibo.cidade_pagador, recibo.uf_pagador].filter(Boolean).join(' - '))}`}</div></section><div class="table"><div class="row head"><span>Descrição do Serviço</span><span>Nº Documento</span><span>Valor</span></div><div class="row"><span>${esc(recibo.descricao_servico)}</span><span>${esc(recibo.numero_documento_anexo)}</span><b>${dinheiro}</b></div></div>${carimboAssinaturaHtml(recibo.data_emissao)}</body></html>`)
 })
 
 // Cliente reembolsa a Share pelo valor que ela antecipou: fecha o ciclo de
@@ -6474,10 +6515,10 @@ app.post('/api/financeiro/recibos/:id/reembolso', async c => {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ENTRADA', ?, ?, 'SHARE', 0, 0, 1, 'PAGO', ?, ?)`)
     .bind(reembolsoId, recibo.aeronave_id, dataReembolso, `Reembolso recibo ${recibo.numero_recibo}`, null, null,
       'REEMBOLSOS ENTRADAS', 'REEMBOLSOS ENTRADAS', 'REEMBOLSO', null, valorReembolsoCentavos,
-      recibo.cliente_id || 'SHARE', body.observacoes || null, user.id).run()
+        recibo.cotista_id || 'SHARE', body.observacoes || null, user.id).run()
 
-  await db.prepare('UPDATE lancamentos SET reembolso_quitado = 1 WHERE id = ?1').bind(recibo.lancamento_id).run()
-  await db.prepare("UPDATE recibos SET status = 'reembolsado', lancamento_reembolso_id = ?1 WHERE id = ?2").bind(reembolsoId, recibo.id).run()
+      await db.prepare('UPDATE lancamentos SET reembolso_quitado = 1 WHERE id = ?1').bind(recibo.movimentacao_id).run()
+      await db.prepare("UPDATE recibos SET status = 'reembolsado', movimentacao_reembolso_id = ?1 WHERE id = ?2").bind(reembolsoId, recibo.id).run()
 
   return c.json({ ok: true, lancamento_reembolso_id: reembolsoId })
 })
@@ -6491,8 +6532,8 @@ app.post('/api/financeiro/recibos/:id/cancelar', async c => {
   if (!recibo) return c.notFound()
   if (recibo.status === 'reembolsado') return c.json({ error: 'recibo_ja_reembolsado_nao_pode_cancelar' }, 400)
   if (recibo.status === 'cancelado') return c.json({ ok: true })
-  await db.prepare("UPDATE lancamentos SET status = 'cancelado' WHERE id = ?1").bind(recibo.lancamento_id).run()
-  await db.prepare("UPDATE rateio_despesas SET status = 'cancelado' WHERE lancamentos_id = ?1").bind(recibo.lancamento_id).run()
+  await db.prepare("UPDATE lancamentos SET status = 'cancelado' WHERE id = ?1").bind(recibo.movimentacao_id).run()
+  await db.prepare("UPDATE rateio_despesas SET status = 'cancelado' WHERE lancamentos_id = ?1").bind(recibo.movimentacao_id).run()
   await db.prepare("UPDATE recibos SET status = 'cancelado' WHERE id = ?1").bind(recibo.id).run()
   return c.json({ ok: true })
 })
