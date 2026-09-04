@@ -3240,20 +3240,25 @@ app.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
 
 app.get('/api/interno/dashboard/financeiro', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const db = portalDb(c)
+  const schema = await db.prepare("SELECT name FROM pragma_table_info('lancamentos')").all<{ name: string }>()
+  const colunas = new Set((schema.results || []).map((item) => item.name))
+  const caixaColumn = colunas.has('caixa') ? 'caixa' : 'tipo_caixa'
+  const dataColumn = colunas.has('data') ? 'data' : colunas.has('data_pagamento') ? 'data_pagamento' : 'data_emissao_nf'
   const [resumo, lancamentos] = await Promise.all([
-    portalDb(c).prepare(`SELECT
+    db.prepare(`SELECT
       COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN COALESCE(valor_centavos, 0) ELSE 0 END), 0) / 100.0 AS total_a_receber,
       COALESCE(SUM(CASE WHEN lower(COALESCE(status, '')) IN ('pago', 'quitado', 'conciliado') THEN COALESCE(valor_centavos, 0) ELSE 0 END), 0) / 100.0 AS total_pago,
       SUM(CASE WHEN lower(COALESCE(status, '')) NOT IN ('pago', 'cancelado') THEN 1 ELSE 0 END) AS pendencias,
       SUM(CASE WHEN lower(COALESCE(status, '')) IN ('pago', 'quitado', 'conciliado') THEN 1 ELSE 0 END) AS pagamentos_confirmados
-      FROM lancamentos WHERE lower(COALESCE(caixa, 'share')) = 'share'`).first<Record<string, number>>(),
-    portalDb(c).prepare(`SELECT id, descricao, status, data AS data_pagamento, ROUND(COALESCE(valor_centavos, 0) / 100.0, 2) AS valor, observacoes, criado_em
+      FROM lancamentos WHERE lower(COALESCE(${caixaColumn}, 'share')) = 'share'`).first<Record<string, number>>(),
+    db.prepare(`SELECT id, descricao, status, ${dataColumn} AS data_pagamento, ROUND(COALESCE(valor_centavos, 0) / 100.0, 2) AS valor, observacoes, criado_em
       FROM lancamentos
-      WHERE lower(COALESCE(caixa, 'share')) = 'share'
-      ORDER BY date(data) DESC, criado_em DESC
+      WHERE lower(COALESCE(${caixaColumn}, 'share')) = 'share'
+      ORDER BY date(${dataColumn}) DESC, criado_em DESC
       LIMIT 20`).all(),
   ])
-  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, movimentacoes: lancamentos.results })
+  return c.json({ resumo: { total_a_receber: Number(resumo?.total_a_receber || 0), total_pago: Number(resumo?.total_pago || 0), pendencias: Number(resumo?.pendencias || 0), pagamentos_confirmados: Number(resumo?.pagamentos_confirmados || 0) }, movimentacoes: lancamentos.results || [] })
 })
 
 type TripulanteDisponivel = {
