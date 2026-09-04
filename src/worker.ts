@@ -5877,6 +5877,12 @@ async function inserirLinhaDinamica(db: any, table: string, row: Record<string, 
   await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_, i) => `?${i + 1}`).join(',')})`).bind(...vals).run()
 }
 
+const TIPOS_RATEIO_D1 = new Set(['FIXO', 'VARIAVEL POR VOO', 'VARIAVEL POR HORA', 'EXTRA'])
+function normalizarTipoRateioD1(value: unknown): string {
+  const tipo = String(value || '').trim().toUpperCase()
+  return TIPOS_RATEIO_D1.has(tipo) ? tipo : 'FIXO'
+}
+
 async function contextoNfSaida(c: Context<{ Bindings: Bindings }>, cotistaId: string) {
   return portalDb(c).prepare(`SELECT ca.id cotista_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente,'CLI') codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?1`).bind(cotistaId).first<any>()
 }
@@ -6371,6 +6377,8 @@ app.post('/api/financeiro/recibos', async c => {
     if (Math.abs(totalPercentualRateio - 100) > 0.01) return c.json({ error: 'rateio_deve_totalizar_100' }, 400)
   }
 
+  const tipoRateio = normalizarTipoRateioD1(body.tipo_rateio)
+
   try {
     // 1. lancamentos: usa somente colunas presentes para suportar bases legadas.
     const lancamentosColunas = await db.prepare("SELECT name FROM pragma_table_info('lancamentos')").all<{ name: string }>()
@@ -6384,7 +6392,7 @@ app.post('/api/financeiro/recibos', async c => {
       valor_total: valor, pago_por: rateado ? null : (pagadorCotista ? (pagadorCotista.cliente_id || pagadorCotista.socio_id) : (beneficiarioTipo === 'cliente' ? (reembolsavel ? 'SHARE' : clienteId) : 'SHARE')),
       caixa: regra.caixa, tipo_caixa: regra.caixa, pago_diretamente: regra.pagoDiretamente,
       reembolsavel: regra.reembolsavel, reembolso_quitado: 0, status: 'PENDENTE', observacoes, criado_por: user.id,
-      periodicidade: body.periodicidade || null, tipo_rateio: body.tipo_rateio || null,
+      periodicidade: body.periodicidade || null, tipo_rateio: tipoRateio,
       subcategoria_1: body.subcategoria_1 || null, subcategoria_2: body.subcategoria_2 || null,
       subcategoria_3: body.subcategoria_3 || null, subcategoria_4: body.subcategoria_4 || null,
     }
@@ -6396,7 +6404,8 @@ app.post('/api/financeiro/recibos', async c => {
     // 2. rateio_despesas: sempre gerado para despesa de cliente (direta ou reembolsável),
     //    nunca para colaborador/caixa Share. Agnóstico a quem desembolsou.
     const rateioIdsGerados: string[] = []
-    const tipoRateio = String(body.tipo_rateio || 'FIXO')
+    // O D1 aceita somente os quatro valores definidos no CHECK de rateio_despesas
+    // e rateio_hold; rótulos como "cliente" não podem ser persistidos nessa coluna.
     if (rateado) {
       for (const linha of linhasRateio) {
         const rateioId = uuid()
@@ -6410,7 +6419,7 @@ app.post('/api/financeiro/recibos', async c => {
           })
         } else {
           await inserirLinhaDinamica(db, 'rateio_despesas', {
-            id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: 'cliente', data_vencimento: body.data_vencimento || null,
+            id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: tipoRateio, data_vencimento: body.data_vencimento || null,
             data_emissao_nf: dataEmissao, categoria_nome: categoriaNome, cotista_id: linha.cotista_id, pago_por: linha.pago_por,
             pago_diretamente: ehPagamento ? 1 : regra.pagoDiretamente, aeronave_id: body.aeronave_id || null,
             descricao_despesa: descricao, valor_total: valor, valor_rateado: linha.valor, status: 'pendente',
@@ -6450,7 +6459,7 @@ app.post('/api/financeiro/recibos', async c => {
         const rateioId = uuid()
         const pagoPor = regra.reembolsavel ? 'share' : body.cotista_id
         await inserirLinhaDinamica(db, 'rateio_despesas', {
-          id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: 'cliente', data_vencimento: body.data_vencimento || null,
+          id: rateioId, lancamentos_id: lancamentoId, tipo_rateio: tipoRateio, data_vencimento: body.data_vencimento || null,
           data_emissao_nf: dataEmissao, categoria_nome: regra.grupo, cotista_id: body.cotista_id, pago_por: pagoPor,
           pago_diretamente: regra.pagoDiretamente, aeronave_id: body.aeronave_id || null, descricao_despesa: descricao,
           valor_total: valor, valor_rateado: valor, status: 'pendente', observacoes: body.observacoes || null,
@@ -6461,21 +6470,26 @@ app.post('/api/financeiro/recibos', async c => {
     // 3. recibo em si — snapshot para PDF/histórico, referenciando a lançamento de origem.
     const tipoRecibo = ehPagamento ? 'pagamento' : beneficiarioTipo === 'colaborador' ? 'colaborador' : (reembolsavel ? 'cliente_reembolsavel' : 'cliente_direto')
     const statusRecibo = reembolsavel ? 'aguardando_reembolso' : 'emitido'
-    await db.prepare(`INSERT INTO recibos (
-        id, numero_recibo, tipo_recibo, beneficiario_tipo, cotista_id, colaborador_id, recebedor_nome, recebedor_cpf, aeronave_id, rateado,
-        nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
-        valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento,
-        numero_documento_anexo, anexo_id, observacoes, categoria_movimentacao_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
-        boleto_url, nf_url, movimentacao_id, criado_por
-      ) VALUES (${new Array(32).fill('?').join(', ')})`)
-      .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
-        beneficiarioTipo === 'cliente' && !rateado ? clienteId : null,
-        beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
-        (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null, (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorCpf : null, body.aeronave_id || null, rateado ? 1 : 0,
-        nomePagador, documentoPagador, enderecoPagador, cidadePagador, ufPagador,
-        valor, descricao, dataEmissao, body.data_vencimento || null, ehPagamento ? body.forma_pagamento || null : null,
-        body.numero_documento_anexo || null, body.anexo_id || null, observacoes, categoriaId || null, tipoDespesa, regra.grupo, regra.caixa, statusRecibo,
-        body.boleto_url || null, body.nf_url || null, lancamentoId, user.id).run()
+    await inserirLinhaDinamica(db, 'recibos', {
+      id: reciboId, numero_recibo: numeroRecibo, tipo_recibo: tipoRecibo, beneficiario_tipo: beneficiarioTipo,
+      cliente_id: beneficiarioTipo === 'cliente' && !rateado ? clienteId : null,
+      colaborador_id: beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
+      recebedor_nome: (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorNome : null,
+      recebedor_cpf: (ehPagamento || beneficiarioTipo === 'colaborador') ? recebedorCpf : null,
+      aeronave_id: body.aeronave_id || null, rateado: rateado ? 1 : 0,
+      nome_pagador: nomePagador, documento_pagador: documentoPagador, endereco_pagador: enderecoPagador,
+      cidade_pagador: cidadePagador, uf_pagador: ufPagador, valor, descricao_servico: descricao,
+      data_emissao: dataEmissao, data_vencimento: body.data_vencimento || null,
+      forma_pagamento: ehPagamento ? body.forma_pagamento || null : null,
+      numero_documento_anexo: body.numero_documento_anexo || null, anexo_id: body.anexo_id || null,
+      observacoes, categoria_lancamento_id: categoriaId || null, categoria_movimentacao_id: categoriaId || null,
+      tipo_despesa: tipoDespesa, grupo_categoria: regra.grupo, tipo_caixa: regra.caixa, status: statusRecibo,
+      boleto_url: body.boleto_url || null, nf_url: body.nf_url || null,
+      lancamento_id: lancamentoId, movimentacao_id: lancamentoId, criado_por: user.id,
+      natureza_despesa: naturezaDespesa || null, periodicidade: body.periodicidade || null,
+      tipo_rateio: tipoRateio, subcategoria_1: body.subcategoria_1 || null, subcategoria_2: body.subcategoria_2 || null,
+      subcategoria_3: body.subcategoria_3 || null, subcategoria_4: body.subcategoria_4 || null, recibo_url: reciboUrl,
+    })
     for (const rateioId of rateioIdsGerados) {
       await db.prepare('UPDATE rateio_despesas SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
       await db.prepare('UPDATE rateio_hold SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
@@ -6538,7 +6552,8 @@ app.post('/api/financeiro/recibos/:id/reembolso', async c => {
       'REEMBOLSOS ENTRADAS', 'REEMBOLSOS ENTRADAS', 'REEMBOLSO', null, valorReembolsoCentavos,
         recibo.cotista_id || 'SHARE', body.observacoes || null, user.id).run()
 
-      await db.prepare('UPDATE lancamentos SET reembolso_quitado = 1 WHERE id = ?1').bind(recibo.movimentacao_id).run()
+      const lancamentoOrigemId = recibo.lancamento_id || recibo.movimentacao_id
+      await db.prepare('UPDATE lancamentos SET reembolso_quitado = 1 WHERE id = ?1').bind(lancamentoOrigemId).run()
       await db.prepare("UPDATE recibos SET status = 'reembolsado', movimentacao_reembolso_id = ?1 WHERE id = ?2").bind(reembolsoId, recibo.id).run()
 
   return c.json({ ok: true, lancamento_reembolso_id: reembolsoId })
@@ -6553,8 +6568,9 @@ app.post('/api/financeiro/recibos/:id/cancelar', async c => {
   if (!recibo) return c.notFound()
   if (recibo.status === 'reembolsado') return c.json({ error: 'recibo_ja_reembolsado_nao_pode_cancelar' }, 400)
   if (recibo.status === 'cancelado') return c.json({ ok: true })
-  await db.prepare("UPDATE lancamentos SET status = 'cancelado' WHERE id = ?1").bind(recibo.movimentacao_id).run()
-  await db.prepare("UPDATE rateio_despesas SET status = 'cancelado' WHERE lancamentos_id = ?1").bind(recibo.movimentacao_id).run()
+  const lancamentoOrigemId = recibo.lancamento_id || recibo.movimentacao_id
+  await db.prepare("UPDATE lancamentos SET status = 'cancelado' WHERE id = ?1").bind(lancamentoOrigemId).run()
+  await db.prepare("UPDATE rateio_despesas SET status = 'cancelado' WHERE lancamentos_id = ?1").bind(lancamentoOrigemId).run()
   await db.prepare("UPDATE recibos SET status = 'cancelado' WHERE id = ?1").bind(recibo.id).run()
   return c.json({ ok: true })
 })
