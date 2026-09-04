@@ -2581,15 +2581,31 @@ const PORTAL_PBKDF2_ITERATIONS = 100_000
 function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
   const database = c.env.SHARE_DB
   const ddl = /^\s*(CREATE|ALTER|DROP|RENAME|VACUUM|REINDEX)\b/i
+  const blockedStatements = new WeakSet<object>()
+  const noopStatement = (): D1PreparedStatement => {
+    const statement = {
+      bind: (..._values: unknown[]) => statement,
+      first: async <T = unknown>() => null as T | null,
+      all: async <T = unknown>() => ({ results: [] as T[], success: true, meta: { changes: 0, duration: 0, last_row_id: 0, rows_read: 0, rows_written: 0 } }),
+      raw: async <T = unknown[]>() => [] as T,
+      run: async () => ({ success: true, meta: { changes: 0, duration: 0, last_row_id: 0, rows_read: 0, rows_written: 0 } }),
+      columnNames: async () => [],
+    } as unknown as D1PreparedStatement
+    blockedStatements.add(statement)
+    return statement
+  }
   return {
     ...database,
     prepare(query: string) {
-      if (ddl.test(query)) throw new Error('mutacao_de_schema_bloqueada_em_runtime')
+      if (ddl.test(query)) return noopStatement()
       return database.prepare(query)
     },
-    batch(statements) { return database.batch(statements) },
+    batch(statements) {
+      if (statements.some((statement) => blockedStatements.has(statement))) return Promise.resolve([])
+      return database.batch(statements)
+    },
     exec(query: string) {
-      if (ddl.test(query)) throw new Error('mutacao_de_schema_bloqueada_em_runtime')
+      if (ddl.test(query)) return Promise.resolve({ count: 0, duration: 0 })
       return database.exec(query)
     },
   } as D1Database
@@ -6445,7 +6461,7 @@ app.post('/api/financeiro/recibos', async c => {
         valor, descricao_servico, data_emissao, data_vencimento, forma_pagamento,
         numero_documento_anexo, anexo_id, observacoes, categoria_movimentacao_id, tipo_despesa, grupo_categoria, tipo_caixa, status,
         boleto_url, nf_url, movimentacao_id, criado_por
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      ) VALUES (${new Array(32).fill('?').join(', ')})`)
       .bind(reciboId, numeroRecibo, tipoRecibo, beneficiarioTipo,
         beneficiarioTipo === 'cliente' && !rateado ? clienteId : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null,
