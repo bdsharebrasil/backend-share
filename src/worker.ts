@@ -5863,6 +5863,11 @@ async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
     enviado_por TEXT,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`).run()
+  // Instalações antigas podem já ter a tabela sem as colunas usadas pelo
+  // vínculo do PDF com o recibo. CREATE IF NOT EXISTS não atualiza o schema.
+  for (const coluna of ['recibo_id TEXT', 'finalidade TEXT']) {
+    await db.prepare(`ALTER TABLE recibo_anexos ADD COLUMN ${coluna}`).run().catch(() => undefined)
+  }
   // Instalações antigas usam lancamento_id; as novas usam lancamentos_id.
   await db.prepare('ALTER TABLE notas_fiscais_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
   await db.prepare('ALTER TABLE recibos_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
@@ -6654,6 +6659,11 @@ app.post('/api/financeiro/recibos/:id/cancelar', async c => {
     await db.prepare("UPDATE movimentos_holding SET status = 'CANCELADO' WHERE id = ?1").bind(recibo.movimentacao_id).run()
     await db.prepare("UPDATE rateio_hold SET status = 'cancelado' WHERE movimentos_holding_id = ?1").bind(recibo.movimentacao_id).run()
   }
+  if (recibo.pdf_anexo_id) {
+    const pdf = await db.prepare('SELECT caminho_arquivo FROM recibo_anexos WHERE id = ?1').bind(recibo.pdf_anexo_id).first<{ caminho_arquivo: string }>().catch(() => null)
+    if (pdf?.caminho_arquivo) await shareBrasilBucket(c).delete(pdf.caminho_arquivo).catch(() => undefined)
+  }
+  await db.prepare('DELETE FROM recibo_anexos WHERE recibo_id = ?1').bind(recibo.id).run().catch(() => undefined)
   await db.prepare("UPDATE recibos SET status = 'cancelado' WHERE id = ?1").bind(recibo.id).run()
   return c.json({ ok: true })
 })
@@ -6714,7 +6724,7 @@ app.get('/api/financeiro/recibos/anexos/:id/arquivo', async c => {
   if (!row) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
   if (!object) return c.notFound()
-  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `attachment; filename="${shareBrasilFileName(row.nome_arquivo)}"` } })
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `inline; filename="${shareBrasilFileName(row.nome_arquivo)}"`, 'Cache-Control': 'private, max-age=60' } })
 })
 
 async function garantirTabelaFichaPeso(c: Context<{ Bindings: Bindings }>) {
