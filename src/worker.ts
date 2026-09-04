@@ -3837,7 +3837,18 @@ app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
 
 
 // ─── Operações: abastecimentos ─────────────────────────────────────────────
+// Algumas instalações antigas ainda têm FKs declaradas para `fornecedores`,
+// embora a tabela oficial atual seja `fornecedores_favoritos`. Mantemos uma
+// tabela-pai mínima sincronizada para que essas constraints antigas não
+// interrompam a criação de recibos/lançamentos durante a migração.
+async function garantirCompatibilidadeFornecedores(c: Context<{ Bindings: Bindings }>) {
+  const db = portalDb(c)
+  await db.prepare('CREATE TABLE IF NOT EXISTS fornecedores (id TEXT PRIMARY KEY NOT NULL)').run().catch(() => undefined)
+  await db.prepare('INSERT OR IGNORE INTO fornecedores (id) SELECT id FROM fornecedores_favoritos').run().catch(() => undefined)
+}
+
 async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) {
+  await garantirCompatibilidadeFornecedores(c)
   await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS abastecimentos (
     id TEXT PRIMARY KEY NOT NULL,
     cliente_id TEXT NULL, socio_id TEXT NULL, aeronave_id TEXT NULL,
@@ -5754,6 +5765,16 @@ async function proximoNumeroRecibo(c: Context<{ Bindings: Bindings }>, codigo: s
   return `${prefixo}${String(seq).padStart(3, '0')}/${anoCurto}`
 }
 
+async function proximoNumeroReciboSaida(c: Context<{ Bindings: Bindings }>, codigo: string, dataEmissao: string): Promise<string> {
+  const ano = /^\d{4}-\d{2}-\d{2}/.test(dataEmissao) ? Number(dataEmissao.slice(0, 4)) : new Date().getFullYear()
+  const anoCurto = String(ano).slice(-2)
+  const prefixo = `REC-${codigo.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3) || 'CLI'}`
+  const like = `${prefixo}%/${anoCurto}`
+  const row = await portalDb(c).prepare('SELECT COUNT(*) AS total FROM recibos_saida WHERE numero_recibo LIKE ?1').bind(like).first<{ total: number }>().catch(() => null)
+  const seq = (row?.total || 0) + 1
+  return `${prefixo}${String(seq).padStart(3, '0')}/${anoCurto}`
+}
+
 async function buscarCategoriasRecibo(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
   for (const tabela of ['categoria_movimentacao_share', 'categorias_caixa_share']) {
@@ -5804,6 +5825,7 @@ function resolverCategoriaReceitaShare(body: Record<string, any>, isRecibo: bool
 }
 
 async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
+  await garantirCompatibilidadeFornecedores(c)
   const db = portalDb(c)
   // Os CREATE TABLE abaixo espelham exatamente o schema real (recibos_saida /
   // notas_fiscais_saida) — IF NOT EXISTS só entra em ação em ambiente novo.
@@ -6105,7 +6127,11 @@ app.post('/api/financeiro/recibos-saida', async c => {
   if (!body.descricao_servico) return c.json({ error: 'descricao_servico_obrigatoria' }, 400)
   const ctx = await contextoNfSaida(c, String(body.cotista_aeronave_id || ''))
   if (!ctx) return c.json({ error: 'cotista_invalido' }, 400)
-  const numero = `REC-${String(ctx.codigo_cliente || 'CLI').slice(0, 3).toUpperCase()}-${new Date(body.data_emissao || Date.now()).getFullYear()}`
+  const numeroInformado = String(body.numero_recibo || body.numero || '').trim()
+  if (numeroInformado && !/^[A-Z0-9][A-Z0-9._/-]{2,40}$/i.test(numeroInformado)) return c.json({ error: 'numero_recibo_invalido' }, 400)
+  const numero = numeroInformado || await proximoNumeroReciboSaida(c, String(ctx.codigo_cliente || 'CLI'), String(body.data_emissao || ''))
+  const duplicado = await portalDb(c).prepare('SELECT id FROM recibos_saida WHERE upper(numero_recibo) = upper(?1) LIMIT 1').bind(numero).first<{ id: string }>().catch(() => null)
+  if (duplicado) return c.json({ error: 'numero_recibo_ja_existente' }, 409)
   const id = uuid()
   const fin = await gerarFinanceiroNfSaida(c, ctx, { ...body, numero }, 'recibo_saida', id)
   const db = portalDb(c)
