@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
 import { prepararFinanceiro, normalizarLancamentoInput, FinanceValidationError } from './financeiro/LancamentoService'
+import { createExpense, settlePayable, issueRevenue, settleReceivable, createReimbursement, enqueueFinance, processFinanceQueue, FinanceKernelError } from './financeiro/FinanceiroKernel'
 import logoShareBytes from './assets/share-signature-logo.png'
 import signatureBytes from './assets/assinatura-para-recibo.png'
 
@@ -7439,6 +7440,42 @@ for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
     return c.json({ data: rows.results })
   })
 }
+
+// ─── Financeiro Share v2: núcleo transacional e idempotente ───────────────────
+function erroFinanceiroKernel(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (error instanceof FinanceKernelError) return c.json({ error: error.message, code: error.code }, error.status as any)
+  log.error('[financeiro-v2] falha inesperada', error)
+  return c.json({ error: 'falha_ao_processar_financeiro' }, 500)
+}
+
+app.post('/api/financeiro/v2/despesas', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { return c.json(await createExpense(portalDb(c), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null), 201) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
+app.post('/api/financeiro/v2/contas-pagar/:id/baixa', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { return c.json(await settlePayable(portalDb(c), c.req.param('id'), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null)) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
+app.post('/api/financeiro/v2/receitas', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { return c.json(await issueRevenue(portalDb(c), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null), 201) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
+app.post('/api/financeiro/v2/contas-receber/:id/baixa', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { return c.json(await settleReceivable(portalDb(c), c.req.param('id'), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null)) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
+app.post('/api/financeiro/v2/reembolsos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { return c.json(await createReimbursement(portalDb(c), await c.req.json().catch(() => ({})), extractSupabaseUserId(c) || null), 201) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
+app.post('/api/financeiro/v2/fila', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { const body = await c.req.json<any>().catch(() => ({})); return c.json(await enqueueFinance(portalDb(c), body.operacao, body.payload || {}), 202) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
+app.post('/api/financeiro/v2/fila/processar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try { const body = await c.req.json<any>().catch(() => ({})); return c.json({ itens: await processFinanceQueue(portalDb(c), extractSupabaseUserId(c) || null, Number(body.limite || 20)) }) } catch (error) { return erroFinanceiroKernel(c, error) }
+})
 
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
 const WORKER_URL = 'https://api-workers.sharebrasil.workers.dev'
