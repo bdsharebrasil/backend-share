@@ -70,7 +70,7 @@ function normalizarLancamento(row: Row, rateios: RateioFinanceiro[] = []): Lanca
     categoria: texto(row.categoria_nome ?? row.categoria ?? 'SEM CATEGORIA'),
     grupoCategoria: texto(row.grupo_categoria ?? row.grupo ?? ''),
     valorCentavos: centavos(row.valor_total ?? row.valor_centavos / 100),
-    data: texto(row.data_emissao ?? row.data ?? row.criado_em ?? '').slice(0, 10),
+    data: texto(row.data_emissao ?? row.data_emissao_nf ?? row.data ?? row.criado_em ?? '').slice(0, 10),
     prazo: row.data_vencimento ?? row.vencimento ?? null,
     status: texto(row.status || 'PENDENTE').toUpperCase(),
     caixa: texto(row.tipo_caixa ?? row.caixa ?? 'SHARE').toUpperCase(),
@@ -128,10 +128,22 @@ export class FinanceiroService {
   constructor(private readonly db: Database) {}
 
   async registrarLancamento(input: Row): Promise<{ lancamento: LancamentoFinanceiro }> {
-    const columns = Object.keys(input).filter((column) => column !== 'id')
+    const schema = await this.db.prepare("SELECT name FROM pragma_table_info('lancamentos')").all<{ name: string }>()
+    const existentes = new Set((schema.results || []).map((column) => String(column.name)))
+    const dados = { ...input }
+    if (!existentes.has('data_emissao') && existentes.has('data_emissao_nf') && dados.data_emissao !== undefined) {
+      dados.data_emissao_nf = dados.data_emissao
+      delete dados.data_emissao
+    }
+    if (!existentes.has('tipo_caixa') && existentes.has('caixa') && dados.tipo_caixa !== undefined) {
+      dados.caixa = dados.tipo_caixa
+      delete dados.tipo_caixa
+    }
+    const columns = Object.keys(dados).filter((column) => column !== 'id' && existentes.has(column))
+    if (!existentes.has('id') || columns.length === 0) throw new Error('schema_lancamentos_incompativel')
     await this.db.prepare(
       `INSERT INTO lancamentos (id, ${columns.join(', ')}) VALUES (?1, ${columns.map((_, index) => `?${index + 2}`).join(', ')})`,
-    ).bind(input.id, ...columns.map((column) => input[column])).run()
+    ).bind(dados.id, ...columns.map((column) => dados[column])).run()
     const row = await this.db.prepare('SELECT * FROM lancamentos WHERE id = ?1').bind(input.id).first<Row>()
     if (!row) throw new Error('lancamento_nao_criado')
     return { lancamento: normalizarLancamento(row) }
@@ -140,11 +152,12 @@ export class FinanceiroService {
   async listarLancamentos(inicio?: string, fim?: string, caixa?: string): Promise<LancamentoFinanceiro[]> {
     const conditions: string[] = []
     const values: unknown[] = []
-    if (inicio) { conditions.push('date(data_emissao) >= ?'); values.push(inicio) }
-    if (fim) { conditions.push('date(data_emissao) <= ?'); values.push(fim) }
+    const dataLancamento = 'COALESCE(data_emissao, data_emissao_nf, criado_em)'
+    if (inicio) { conditions.push(`date(${dataLancamento}) >= ?`); values.push(inicio) }
+    if (fim) { conditions.push(`date(${dataLancamento}) <= ?`); values.push(fim) }
     if (caixa) { conditions.push('upper(COALESCE(tipo_caixa, caixa, \'SHARE\')) = upper(?)'); values.push(caixa) }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-    const rows = await this.db.prepare(`SELECT * FROM lancamentos ${where} ORDER BY date(data_emissao) DESC, criado_em DESC`).bind(...values).all<Row>()
+    const rows = await this.db.prepare(`SELECT * FROM lancamentos ${where} ORDER BY date(COALESCE(data_emissao, data_emissao_nf, criado_em)) DESC, criado_em DESC`).bind(...values).all<Row>()
     const result: LancamentoFinanceiro[] = []
     for (const row of rows.results) {
       const rateios = await this.db.prepare('SELECT * FROM rateio_despesas WHERE lancamentos_id = ?1').bind(row.id).all<Row>().catch(() => ({ results: [] as Row[] }))
