@@ -5261,7 +5261,7 @@ app.get('/api/colaborador/recados', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const result = await portalDb(c).prepare("SELECT r.id, r.criado_em, r.atualizado_em, r.autor_id, r.mensagem, r.fixado, r.departamento_id, r.lido_por, COALESCE(a.nome_exibicao, a.nome_completo, a.email) AS autor_nome, uf.funcao AS departamento FROM recados r LEFT JOIN user_profiles a ON a.id = r.autor_id LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?1, '')) ORDER BY r.fixado DESC, r.criado_em DESC LIMIT 100").bind(user.departamento || null).all()
-  return c.json(result.results.map((item: any) => ({ ...item, fixado: Boolean(item.fixado), lido: JSON.parse(item.lido_por || '[]').includes(user.id) })))
+  return c.json(result.results.map((item: any) => ({ ...item, fixado: Boolean(item.fixado), lido: JSON.parse(item.lido_por || '[]').includes(user.id), pode_excluir: item.autor_id === user.id })))
 })
 
 app.post('/api/colaborador/recados', async c => {
@@ -5279,6 +5279,14 @@ app.post('/api/colaborador/recados', async c => {
   const id = uuid()
   await portalDb(c).prepare('INSERT INTO recados (id, autor_id, mensagem, fixado, departamento_id) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, body.mensagem.trim(), body.fixado ? 1 : 0, departamentoId).run()
   return c.json({ id, mensagem: body.mensagem.trim(), departamento: departamento || null, fixado: Boolean(body.fixado) }, 201)
+})
+
+app.delete('/api/colaborador/recados/:id', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await portalDb(c).prepare('DELETE FROM recados WHERE id = ?1 AND autor_id = ?2').bind(c.req.param('id'), user.id).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
 })
 
 app.patch('/api/colaborador/recados/:id/lido', async c => {
