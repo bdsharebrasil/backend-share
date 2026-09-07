@@ -5840,16 +5840,23 @@ async function proximoNumeroRecibo(c: Context<{ Bindings: Bindings }>, codigo: s
   return `${prefixo}${String(seq).padStart(3, '0')}/${anoCurto}`
 }
 
-async function proximoNumeroReciboSaida(c: Context<{ Bindings: Bindings }>, codigo: string, dataEmissao: string): Promise<string> {
+async function proximoNumeroReciboSaida(
+  c: Context<{ Bindings: Bindings }>, cotistaAeronaveId: string, codigo: string, dataEmissao: string,
+): Promise<{ numero: string; sequenciaId: string }> {
   const ano = /^\d{4}-\d{2}-\d{2}/.test(dataEmissao) ? Number(dataEmissao.slice(0, 4)) : new Date().getFullYear()
-  const anoCurto = String(ano).slice(-2)
-  const prefixo = `REC-${codigo.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3) || 'CLI'}`
-  const like = `${prefixo}%/${anoCurto}`
-  const row = await portalDb(c).prepare('SELECT COUNT(*) AS total FROM recibos_saida WHERE numero_recibo LIKE ?1').bind(like).first<{ total: number }>().catch(() => null)
-  const seq = (row?.total || 0) + 1
-  return `${prefixo}${String(seq).padStart(3, '0')}/${anoCurto}`
+  const codigoCliente = String(codigo || 'CLI').trim().toUpperCase()
+  const id = uuid()
+  const row = await portalDb(c).prepare(`
+    INSERT INTO sequencia_numeros_recibo_saida (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
+    VALUES (?1, ?2, ?3, ?4, 2)
+    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET
+      proximo_numero = sequencia_numeros_recibo_saida.proximo_numero + 1,
+      cotista_aeronave_id = excluded.cotista_aeronave_id
+    RETURNING id, proximo_numero - 1 AS numero
+  `).bind(id, cotistaAeronaveId, codigoCliente, String(ano)).first<{ id: string; numero: number }>()
+  if (!row) throw new Error('falha_ao_gerar_sequencia_recibo_saida')
+  return { numero: `${codigoCliente}-${row.numero}/${ano}`, sequenciaId: row.id }
 }
-
 async function buscarCategoriasRecibo(c: Context<{ Bindings: Bindings }>) {
   const db = portalDb(c)
   for (const tabela of ['categoria_movimentacao_share', 'categorias_caixa_share']) {
@@ -5981,9 +5988,9 @@ async function inserirLinhaDinamica(db: any, table: string, row: Record<string, 
   await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_, i) => `?${i + 1}`).join(',')})`).bind(...vals).run()
 }
 
-function tipoRateioHolding(value: unknown): 'SOCIEDADE' | 'USO' | 'IGUALITARIO' | 'MANUAL' {
+function tipoRateioHolding(value: unknown): 'FIXO' | 'SOCIEDADE' | 'USO' | 'IGUALITARIO' | 'MANUAL' {
   const tipo = String(value || '').trim().toUpperCase()
-  if (tipo === 'SOCIEDADE' || tipo === 'USO' || tipo === 'IGUALITARIO' || tipo === 'MANUAL') return tipo
+  if (tipo === 'FIXO' || tipo === 'SOCIEDADE' || tipo === 'USO' || tipo === 'IGUALITARIO' || tipo === 'MANUAL') return tipo
   if (tipo.includes('SOCIEDADE')) return 'SOCIEDADE'
   if (tipo.includes('USO')) return 'USO'
   return 'MANUAL'
@@ -6002,6 +6009,7 @@ async function inserirRateioHolding(db: any, row: Record<string, any>) {
     categoria_id: row.categoria_id ?? row.categoria_custo_id,
     categoria_nome: row.categoria_nome,
     tipo_rateio: tipoRateioHolding(row.tipo_rateio),
+    periodicidade: row.periodicidade ?? 'MENSAL',
     percentual_sociedade: row.percentual_sociedade,
     percentual_uso: row.percentual_uso,
     valor_total_centavos: valorTotalCentavos,
@@ -6083,37 +6091,20 @@ async function gerarFinanceiroNfSaida(
   const dataEmissao = String(body.data_criacao || body.data_emissao || '').trim()
   const dataVencimento = String(body.data_vencimento || dataEmissao || '').trim()
 
-  // 1) Entrada pendente no Caixa Share — sempre uma das 5 categorias de receita.
-  //    fluxo/status/caixa têm CHECK em maiúsculas em `lancamentos`; minúsculo quebra o insert.
-  const lancamentoId = uuid()
-  await inserirLinhaDinamica(db, 'lancamentos', {
-    id: lancamentoId,
-    aeronave_id: ctx.aeronave_id || null,
-    data: dataEmissao,
-    data_emissao: dataEmissao,
-    descricao,
-    categoria: nomeCategoriaShare,
-    categoria_nome: nomeCategoriaShare,
-    categoria_id: categoriaShareId,
-    grupo_categoria: 'RECEITAS OPERACIONAIS',
-    tipo: 'receita',
-    prazo: dataVencimento,
-    data_vencimento: dataVencimento,
-    fluxo: 'ENTRADA',
-    valor_centavos: Math.round(valor * 100),
-    valor_total: valor,
-    pago_por: ctx.cotista_id,     // NOT NULL — antes não era enviado e quebrava o insert
-    caixa: 'SHARE',               // coluna real é "caixa" (o código antigo mandava "tipo_caixa", que não existe)
-    tipo_caixa: 'SHARE',
-    pago_diretamente: 0,
-    reembolsavel: 0,
-    reembolso_quitado: 0,
-    status: 'PENDENTE',
-    criado_por: usuario?.id,
-    numero_nf: isRecibo ? null : body.numero,
-    numero_recibo: isRecibo ? body.numero : null,
-  })
-
+  // Cliente direto gera lancamentos; cotista de holding gera movimentos_holding.
+  let lancamentoId: string | null = null
+  if (!ctx.socio_id) {
+    lancamentoId = uuid()
+    await inserirLinhaDinamica(db, 'lancamentos', {
+      id: lancamentoId, aeronave_id: ctx.aeronave_id || null, data: dataEmissao, data_emissao: dataEmissao,
+      descricao, categoria: nomeCategoriaShare, categoria_nome: nomeCategoriaShare, categoria_id: categoriaShareId,
+      grupo_categoria: 'RECEITAS OPERACIONAIS', tipo: 'receita', prazo: dataVencimento, data_vencimento: dataVencimento,
+      fluxo: 'ENTRADA', valor_centavos: Math.round(valor * 100), valor_total: valor, pago_por: ctx.cotista_id,
+      caixa: 'SHARE', tipo_caixa: 'SHARE', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
+      status: 'PENDENTE', criado_por: usuario?.id, numero_nf: isRecibo ? null : body.numero,
+      numero_recibo: isRecibo ? body.numero : null,
+    })
+  }
   // 2) Contas a receber do cotista dono do recibo/NF.
   const contaId = uuid()
   await inserirLinhaDinamica(db, 'contas_areceber', {
@@ -6127,7 +6118,8 @@ async function gerarFinanceiroNfSaida(
     aeronave_id: ctx.aeronave_id,
     cotista_id: ctx.cotista_id,
     nf_saida_id: origem === 'nf_saida' ? documentoId : null,
-    lancamentos_id: lancamentoId,
+    lancamentos_id: ctx.socio_id ? null : lancamentoId,
+    lancamento_id: ctx.socio_id ? null : lancamentoId,
     status: 'PENDENTE',
   })
 
@@ -6159,6 +6151,7 @@ async function gerarFinanceiroNfSaida(
       status: 'PENDENTE',
       criado_por: usuario?.id,
     })
+    lancamentoId = movimentoId
     await inserirRateioHolding(db, {
       id: rateioId,
       movimento_holding_id: movimentoId,
@@ -6168,7 +6161,8 @@ async function gerarFinanceiroNfSaida(
       categoria_id: CATEGORIA_CLIENTE_NF_SAIDA,
       categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
       aeronave_id: ctx.aeronave_id,
-      tipo_rateio: 'SOCIEDADE',
+      tipo_rateio: 'FIXO',
+      periodicidade: 'MENSAL',
       pago_por_socio_id: ctx.socio_id,
       pago_diretamente: 1,
       percentual_sociedade: 100,
@@ -6190,6 +6184,7 @@ async function gerarFinanceiroNfSaida(
       cotista_nome: ctx.nome,
       aeronave_id: ctx.aeronave_id,
       tipo_rateio: 'FIXO',
+      periodicidade: 'MENSAL',
       data_vencimento: dataVencimento,
       data_emissao_nf: dataEmissao,
       descricao_despesa: descricao,
@@ -6273,11 +6268,8 @@ app.post('/api/financeiro/recibos-saida', async c => {
   if (!body.descricao_servico) return c.json({ error: 'descricao_servico_obrigatoria' }, 400)
   const ctx = await contextoNfSaida(c, String(body.cotista_aeronave_id || ''))
   if (!ctx) return c.json({ error: 'cotista_invalido' }, 400)
-  const numeroInformado = String(body.numero_recibo || body.numero || '').trim()
-  if (numeroInformado && !/^[A-Z0-9][A-Z0-9._/-]{2,40}$/i.test(numeroInformado)) return c.json({ error: 'numero_recibo_invalido' }, 400)
-  const numero = numeroInformado || await proximoNumeroReciboSaida(c, String(ctx.codigo_cliente || 'CLI'), String(body.data_emissao || ''))
-  const duplicado = await portalDb(c).prepare('SELECT id FROM recibos_saida WHERE upper(numero_recibo) = upper(?1) LIMIT 1').bind(numero).first<{ id: string }>().catch(() => null)
-  if (duplicado) return c.json({ error: 'numero_recibo_ja_existente' }, 409)
+  const sequencia = await proximoNumeroReciboSaida(c, String(ctx.cotista_id), String(ctx.codigo_cliente || 'CLI'), String(body.data_emissao || ''))
+  const numero = sequencia.numero
   const id = uuid()
   const fin = await gerarFinanceiroNfSaida(c, ctx, { ...body, numero }, 'recibo_saida', id)
   const db = portalDb(c)
@@ -6285,6 +6277,7 @@ app.post('/api/financeiro/recibos-saida', async c => {
     id,
     numero_recibo: numero,
     tipo_recibo: ctx.socio_id ? 'holding' : 'cliente',
+    sequencia_numeros_recibo_saida_id: sequencia.sequenciaId,
     cotista_id: ctx.cotista_id,
     aeronave_id: ctx.aeronave_id,
     valor_total: Number(body.valor),
@@ -6308,6 +6301,16 @@ app.post('/api/financeiro/recibos-saida', async c => {
   return c.json({ recibo: await db.prepare('SELECT * FROM recibos_saida WHERE id=?1').bind(id).first() }, 201)
 })
 
+app.patch('/api/financeiro/recibos-saida/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<any>().catch(() => ({}))
+  const db = portalDb(c)
+  const recibo = await db.prepare('SELECT id FROM recibos_saida WHERE id = ?1').bind(c.req.param('id')).first()
+  if (!recibo) return c.notFound()
+  if (body.pdf_url !== undefined) await db.prepare('UPDATE recibos_saida SET pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.pdf_url || null, c.req.param('id')).run()
+  return c.json({ recibo: await db.prepare('SELECT * FROM recibos_saida WHERE id = ?1').bind(c.req.param('id')).first() })
+})
 app.post('/api/financeiro/notas-saida/anexos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
