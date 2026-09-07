@@ -5907,76 +5907,9 @@ function resolverCategoriaReceitaShare(body: Record<string, any>, isRecibo: bool
 }
 
 async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
+  // O schema de notas_fiscais_saida, recibos_saida e recibo_anexos é gerenciado
+  // exclusivamente pelas migrações do D1. O Worker apenas utiliza as tabelas.
   void c
-  return
-  const db = portalDb(c)
-  // Os CREATE TABLE abaixo espelham exatamente o schema real (recibos_saida /
-  // notas_fiscais_saida) — IF NOT EXISTS só entra em ação em ambiente novo.
-  await db.prepare(`CREATE TABLE IF NOT EXISTS notas_fiscais_saida (
-    id TEXT PRIMARY KEY NOT NULL,
-    numero TEXT NOT NULL,
-    cotista_aeronave_id TEXT NOT NULL,
-    data_criacao TEXT NOT NULL,
-    data_vencimento TEXT NOT NULL,
-    valor REAL NOT NULL,
-    categoria TEXT NOT NULL,
-    descricao TEXT NULL,
-    status TEXT NOT NULL,
-    arquivo_pdf_url TEXT NULL,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    criado_por TEXT NULL,
-    aeronave_id TEXT NULL,
-    lancamentos_id TEXT NULL
-  )`).run()
-  await db.prepare(`CREATE TABLE IF NOT EXISTS recibos_saida (
-    id TEXT PRIMARY KEY NOT NULL,
-    numero_recibo TEXT NOT NULL,
-    tipo_recibo TEXT NULL,
-    cotista_id TEXT NULL,
-    aeronave_id TEXT NULL,
-    valor_total REAL NULL,
-    percentual REAL NULL,
-    descricao_servico TEXT NOT NULL,
-    nome_categoria TEXT NULL,
-    categoria_id TEXT NULL,
-    subcategoria_1 TEXT NULL,
-    subcategoria_2 TEXT NULL,
-    subcategoria_3 TEXT NULL,
-    subcategoria_4 TEXT NULL,
-    data_emissao TEXT NOT NULL,
-    data_vencimento TEXT NULL,
-    data_max_pagamento TEXT NULL,
-    status TEXT NULL DEFAULT 'pendente',
-    pdf_url TEXT NULL,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    contas_areceber_id TEXT NULL,
-    lancamentos_id TEXT NULL,
-    criado_por TEXT NULL
-  )`).run()
-  // Mesma tabela de anexos usada pelos recibos "internos" — passa a receber
-  // também os anexos de NF/recibo de saída.
-  await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_anexos (
-    id TEXT PRIMARY KEY NOT NULL,
-    recibo_id TEXT,
-    finalidade TEXT,
-    nome_arquivo TEXT NOT NULL,
-    caminho_arquivo TEXT NOT NULL,
-    tipo_arquivo TEXT NOT NULL,
-    tamanho_arquivo INTEGER NOT NULL DEFAULT 0,
-    enviado_por TEXT,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`).run()
-  // Instalações antigas podem já ter a tabela sem as colunas usadas pelo
-  // vínculo do PDF com o recibo. CREATE IF NOT EXISTS não atualiza o schema.
-  for (const coluna of ['recibo_id TEXT', 'finalidade TEXT']) {
-    await db.prepare(`ALTER TABLE recibo_anexos ADD COLUMN ${coluna}`).run().catch(() => undefined)
-  }
-  // Instalações antigas usam lancamento_id; as novas usam lancamentos_id.
-  await db.prepare('ALTER TABLE notas_fiscais_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE recibos_saida ADD COLUMN lancamento_id TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE recibos_saida ADD COLUMN contas_areceber_id TEXT').run().catch(() => undefined)
 }
 
 async function inserirLinhaDinamica(db: any, table: string, row: Record<string, any>) {
@@ -6216,7 +6149,18 @@ app.get('/api/financeiro/notas-saida', async c => {
     await garantirTabelaContas(c)
     const db = portalDb(c)
     const [notas, recibos] = await Promise.all([
-      db.prepare(`SELECT n.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,cl.cnpj cliente_cnpj,a.matricula_registro aeronave_matricula FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id=n.cotista_aeronave_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=n.aeronave_id ORDER BY n.data_criacao DESC`).all(),
+      db.prepare(`SELECT n.*,n.numero AS numero, n.cotista_id AS cotista_aeronave_id,
+        n.data_emissao AS data_criacao, n.valor_total AS valor, n.nome_categoria AS categoria,
+        n.descricao_servico AS descricao, n.arquivo_pdf_url AS arquivo_pdf_url,
+        COALESCE(cl.razao_social,hs.nome) AS cliente_nome, cl.cnpj AS cliente_cnpj,
+        CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END AS tipo_cotista,
+        a.matricula_registro AS aeronave_matricula
+      FROM notas_fiscais_saida n
+      LEFT JOIN cotista_aeronave ca ON ca.id=n.cotista_id
+      LEFT JOIN cliente cl ON cl.id=ca.cliente_id
+      LEFT JOIN hold_socios hs ON hs.id=ca.socio_id
+      LEFT JOIN aeronave a ON a.id=n.aeronave_id
+      ORDER BY n.data_emissao DESC`).all(),
       db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,COALESCE(cl.cnpj,hs.cpf) cliente_cnpj,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all(),
     ])
     return c.json({ notas: notas.results, recibos: recibos.results })
@@ -6230,27 +6174,40 @@ app.post('/api/financeiro/notas-saida', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelasNfSaida(c)
   const body = await c.req.json<any>()
-  if (!body.data_criacao || !body.data_vencimento) return c.json({ error: 'data_criacao_e_vencimento_obrigatorias' }, 400)
-  const ctx = await contextoNfSaida(c, String(body.cotista_aeronave_id || ''))
+  if (!body.data_emissao) return c.json({ error: 'data_emissao_obrigatoria' }, 400)
+  if (!body.descricao_servico) return c.json({ error: 'descricao_servico_obrigatoria' }, 400)
+  if (!(Number(body.valor_total) > 0)) return c.json({ error: 'valor_total_invalido' }, 400)
+  const ctx = await contextoNfSaida(c, String(body.cotista_id || body.cotista_aeronave_id || ''))
   if (!ctx) return c.json({ error: 'cotista_invalido' }, 400)
   const id = uuid()
-  const fin = await gerarFinanceiroNfSaida(c, ctx, body, 'nf_saida', id)
+  const financeiroBody = {
+    ...body,
+    cotista_aeronave_id: ctx.cotista_id,
+    data_criacao: body.data_emissao,
+    valor: Number(body.valor_total),
+    descricao: body.descricao_servico,
+  }
+  const fin = await gerarFinanceiroNfSaida(c, ctx, financeiroBody, 'nf_saida', id)
   const db = portalDb(c)
   await inserirLinhaDinamica(db, 'notas_fiscais_saida', {
     id,
     numero: String(body.numero || ''),
-    cotista_aeronave_id: ctx.cotista_id,
-    aeronave_id: ctx.aeronave_id,
-    data_criacao: body.data_criacao,
-    data_vencimento: body.data_vencimento,
-    valor: Number(body.valor),
-    categoria: fin.categoriaNome,
-    descricao: body.descricao,
-    status: body.status || 'pendente',
-    arquivo_pdf_url: body.arquivo_pdf_url,
-    lancamento_id: fin.lancamentoId,
-    lancamentos_id: fin.lancamentoId, // coluna real "lancamentos_id" (antes ia "lancamento_id" e era descartado)
-    criado_por: user.id,
+    lancamentos_id: fin.lancamentoId,
+    cotista_id: ctx.cotista_id,
+    aeronave_id: body.aeronave_id || ctx.aeronave_id || null,
+    valor_total: Number(body.valor_total),
+    percentual: body.percentual == null ? 100 : Number(body.percentual),
+    descricao_servico: String(body.descricao_servico),
+    nome_categoria: body.nome_categoria ?? body.categoria ?? fin.categoriaNome,
+    categoria_id: body.categoria_id ?? body.categoria_despesa_id ?? null,
+    subcategoria_1: body.subcategoria_1 ?? body.categoria_despesa_subcategoria ?? null,
+    subcategoria_2: body.subcategoria_2 ?? null,
+    subcategoria_3: body.subcategoria_3 ?? null,
+    subcategoria_4: body.subcategoria_4 ?? null,
+    data_emissao: body.data_emissao,
+    data_vencimento: body.data_vencimento || null,
+    status: body.status || 'EM_ABERTO',
+    arquivo_pdf_url: body.arquivo_pdf_url || null,
   })
   if (body.anexo_id) {
     await db.prepare('UPDATE recibo_anexos SET recibo_id = ?1, finalidade = ?2 WHERE id = ?3')
@@ -6259,6 +6216,30 @@ app.post('/api/financeiro/notas-saida', async c => {
   return c.json({ nota: await db.prepare('SELECT * FROM notas_fiscais_saida WHERE id=?1').bind(id).first() }, 201)
 })
 
+app.patch('/api/financeiro/notas-saida/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<any>()
+  if (!body.data_emissao || !body.descricao_servico) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
+  if (!(Number(body.valor_total) > 0)) return c.json({ error: 'valor_total_invalido' }, 400)
+  const db = portalDb(c)
+  const atual = await db.prepare('SELECT id FROM notas_fiscais_saida WHERE id = ?1').bind(c.req.param('id')).first()
+  if (!atual) return c.notFound()
+  await db.prepare(`UPDATE notas_fiscais_saida SET
+    numero = ?, cotista_id = ?, aeronave_id = ?, valor_total = ?, percentual = ?,
+    descricao_servico = ?, nome_categoria = ?, categoria_id = ?, subcategoria_1 = ?,
+    subcategoria_2 = ?, subcategoria_3 = ?, subcategoria_4 = ?, data_emissao = ?,
+    data_vencimento = ?, status = ?, arquivo_pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ?`).bind(
+      String(body.numero || ''), body.cotista_id || null, body.aeronave_id || null,
+      Number(body.valor_total), body.percentual == null ? 100 : Number(body.percentual),
+      String(body.descricao_servico), body.nome_categoria || null, body.categoria_id || null,
+      body.subcategoria_1 || null, body.subcategoria_2 || null, body.subcategoria_3 || null,
+      body.subcategoria_4 || null, body.data_emissao, body.data_vencimento || null,
+      body.status || 'EM_ABERTO', body.arquivo_pdf_url || null, c.req.param('id'),
+    ).run()
+  return c.json({ nota: await db.prepare('SELECT * FROM notas_fiscais_saida WHERE id = ?1').bind(c.req.param('id')).first() })
+})
 app.post('/api/financeiro/recibos-saida', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
