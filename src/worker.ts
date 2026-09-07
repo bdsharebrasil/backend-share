@@ -5673,6 +5673,18 @@ app.post('/api/interno/emails', async c => {
       }
       continue
     }
+    if (prefix === 'nf_saida' || prefix === 'recibo_saida') {
+      const table = prefix === 'nf_saida' ? 'notas_fiscais_saida' : 'recibos_saida'
+      const column = prefix === 'nf_saida' ? 'arquivo_pdf_url' : 'pdf_url'
+      const row = await db.prepare(`SELECT ${column} AS arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
+      if (row?.arquivo) {
+        let key = String(row.arquivo)
+        try { key = new URL(key, c.req.url).searchParams.get('key') || key } catch { /* chave já armazenada */ }
+        const object = await shareBrasilBucket(c).get(key)
+        if (object) anexos.push({ filename: `${prefix}-${rawId}.pdf`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/pdf' })
+      }
+      continue
+    }
     const table = prefix === 'recibo' ? 'recibo_anexos' : prefix === 'relatorio' ? 'relatorio_despesa_viagem_anexos' : ''
     if (!table) continue
     const row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
@@ -6152,7 +6164,7 @@ app.get('/api/financeiro/notas-saida', async c => {
       db.prepare(`SELECT n.*,n.numero AS numero, n.cotista_id AS cotista_aeronave_id,
         n.data_emissao AS data_criacao, n.valor_total AS valor, n.nome_categoria AS categoria,
         n.descricao_servico AS descricao, n.arquivo_pdf_url AS arquivo_pdf_url,
-        COALESCE(cl.razao_social,hs.nome) AS cliente_nome, cl.cnpj AS cliente_cnpj,
+        COALESCE(cl.razao_social,hs.nome) AS cliente_nome, cl.cnpj AS cliente_cnpj, COALESCE(cl.email_principal,hs.email_principal) AS cliente_email,
         CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END AS tipo_cotista,
         a.matricula_registro AS aeronave_matricula
       FROM notas_fiscais_saida n
@@ -6161,7 +6173,7 @@ app.get('/api/financeiro/notas-saida', async c => {
       LEFT JOIN hold_socios hs ON hs.id=ca.socio_id
       LEFT JOIN aeronave a ON a.id=n.aeronave_id
       ORDER BY n.data_emissao DESC`).all(),
-      db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,COALESCE(cl.cnpj,hs.cpf) cliente_cnpj,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all(),
+      db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,COALESCE(cl.cnpj,hs.cpf) cliente_cnpj,COALESCE(cl.email_principal,hs.email_principal) cliente_email,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all(),
     ])
     return c.json({ notas: notas.results, recibos: recibos.results })
   } catch (error: any) {
@@ -6295,18 +6307,52 @@ app.patch('/api/financeiro/recibos-saida/:id', async c => {
 app.post('/api/financeiro/notas-saida/anexos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  await garantirTabelasNfSaida(c) // garante a recibo_anexos também
   const body = await c.req.parseBody()
   const file = body.arquivo
   if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
-  const key = await salvarArquivoShareBrasil(c, user.id, file, 'notas-saida/anexos')
-  const id = uuid()
-  // Antes o arquivo era salvo no R2 mas nunca gravado em recibo_anexos: a URL
-  // retornada sempre dava 404 quando o front tentava reabrir o anexo.
-  await portalDb(c).prepare(
-    'INSERT INTO recibo_anexos (id, recibo_id, finalidade, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).bind(id, null, 'nf_saida_recibo_saida', file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
-  return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo` }, 201)
+  const origem = String(body.origem || 'nota_fiscal_saida') === 'recibo_saida' ? 'recibo_saida' : 'nota_fiscal_saida'
+  const id = String(body.documento_id || '').trim()
+  const folder = `buckets/share/${origem}`
+  const key = await salvarArquivoShareBrasil(c, user.id, file, folder)
+  const resource = origem === 'recibo_saida' ? 'recibos-saida' : 'notas-saida'
+  const url = id
+    ? `/api/financeiro/${resource}/${encodeURIComponent(id)}/pdf?key=${encodeURIComponent(key)}`
+    : `/api/financeiro/arquivos-saida/pdf?key=${encodeURIComponent(key)}&nome=${encodeURIComponent(file.name)}`
+  const db = portalDb(c)
+  if (id && origem === 'recibo_saida') await db.prepare('UPDATE recibos_saida SET pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(url, id).run()
+  if (id && origem === 'nota_fiscal_saida') await db.prepare('UPDATE notas_fiscais_saida SET arquivo_pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(url, id).run()
+  return c.json({ id: id || null, url, key }, 201)
+})
+app.get('/api/financeiro/arquivos-saida/pdf', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const key = c.req.query('key')
+  if (!key) return c.notFound()
+  const object = await shareBrasilBucket(c).get(key)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/pdf', 'Content-Disposition': `inline; filename="${shareBrasilFileName(c.req.query('nome') || 'documento.pdf')}"` } })
+})
+app.get('/api/financeiro/notas-saida/:id/pdf', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT arquivo_pdf_url FROM notas_fiscais_saida WHERE id = ?').bind(c.req.param('id')).first<any>()
+  if (!row?.arquivo_pdf_url) return c.notFound()
+  const key = c.req.query('key') || new URL(row.arquivo_pdf_url, c.req.url).searchParams.get('key')
+  if (!key) return c.notFound()
+  const object = await shareBrasilBucket(c).get(key)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/pdf', 'Content-Disposition': 'inline' } })
+})
+app.get('/api/financeiro/recibos-saida/:id/pdf', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await portalDb(c).prepare('SELECT pdf_url FROM recibos_saida WHERE id = ?').bind(c.req.param('id')).first<any>()
+  if (!row?.pdf_url) return c.notFound()
+  const key = c.req.query('key') || new URL(row.pdf_url, c.req.url).searchParams.get('key')
+  if (!key) return c.notFound()
+  const object = await shareBrasilBucket(c).get(key)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/pdf', 'Content-Disposition': 'inline' } })
 })
 app.get('/api/financeiro/recibos/opcoes', async c => {
   const user = await shareBrasilUser(c)
