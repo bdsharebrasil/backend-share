@@ -3492,7 +3492,7 @@ app.get('/api/interno/agendamento/opcoes', async c => {
     db.prepare(`SELECT ca.id, ca.cliente_id, ca.socio_id, ca.aeronave_id, ca.codigo_cliente, a.matricula_registro, a.modelo
       FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente, a.matricula_registro`).all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, aeronave: aeronave.results, vinculos: vinculos.results })
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronave.results, vinculos: vinculos.results })
 })
 
 app.get('/api/interno/agendamento', async c => {
@@ -3543,7 +3543,7 @@ app.get('/api/interno/agendamento', async c => {
       copiloto_nome: item.copiloto_id ? nomes.get(item.copiloto_id) || 'Copiloto não localizado' : null,
       status: item.status,
     }))
-  return c.json({ inicio, fim, agendamentos: agendamentos.results, aeronave: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
+  return c.json({ inicio, fim, agendamentos: agendamentos.results, aeronaves: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
 })
 
 app.post('/api/interno/agendamento/disponibilidade', async c => {
