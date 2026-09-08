@@ -61,6 +61,34 @@ async function listar(db: D1Database, sql: string, ...params: unknown[]): Promis
   return result.results ?? []
 }
 
+async function enriquecerFornecedores(db: D1Database, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  if (!rows.length) return rows
+  const cotistaIds = [...new Set(rows.map((row) => String(row.cotista_aeronave_id ?? row.cotista_id ?? '').trim()).filter(Boolean))]
+  const fornecedorIds = [...new Set(rows.map((row) => String(row.fornecedor_id ?? row.fornecedores_favoritos_id ?? '').trim()).filter(Boolean))]
+  const porCotista = new Map<string, string>()
+  const porFornecedor = new Map<string, string>()
+  if (cotistaIds.length) {
+    const placeholders = cotistaIds.map(() => '?').join(', ')
+    const cotistas = await listar(db, `SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome
+      FROM cotista_aeronave ca
+      LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+      LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+      WHERE ca.id IN (${placeholders})`, ...cotistaIds)
+    cotistas.forEach((row) => { if (row.id && row.nome) porCotista.set(String(row.id), String(row.nome)) })
+  }
+  if (fornecedorIds.length) {
+    const placeholders = fornecedorIds.map(() => '?').join(', ')
+    const fornecedores = await listar(db, `SELECT id, nome_completo FROM fornecedores_favoritos WHERE id IN (${placeholders})`, ...fornecedorIds)
+    fornecedores.forEach((row) => { if (row.id && row.nome_completo) porFornecedor.set(String(row.id), String(row.nome_completo)) })
+  }
+  return rows.map((row) => {
+    const fornecedorId = String(row.fornecedor_id ?? row.fornecedores_favoritos_id ?? '').trim()
+    const cotistaId = String(row.cotista_aeronave_id ?? row.cotista_id ?? '').trim()
+    const fornecedorNome = row.fornecedor_nome ?? row.fornecedor ?? porFornecedor.get(fornecedorId) ?? porCotista.get(cotistaId) ?? null
+    return { ...row, fornecedor_id: row.fornecedor_id ?? row.fornecedores_favoritos_id ?? null, fornecedor_nome: fornecedorNome }
+  })
+}
+
 function mapConta(row: Record<string, unknown>): Record<string, unknown> {
   return {
     id: row.id,
@@ -71,7 +99,8 @@ function mapConta(row: Record<string, unknown>): Record<string, unknown> {
     descricao: row.descricao ?? null,
     criadoPor: row.criado_por ?? null,
     aeronaveId: row.aeronave_id ?? null,
-    fornecedorId: row.fornecedor_id ?? null,
+    fornecedorId: row.fornecedor_id ?? row.fornecedores_favoritos_id ?? null,
+    fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
     cotistaId: row.cotista_id ?? null,
     boletoUrl: row.boleto_url ?? null,
     nfUrl: row.nf_url ?? null,
@@ -98,7 +127,8 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   if (fornecedorId && table === 'contas_apagar') { filtros.push('fornecedor_id = ?'); params.push(fornecedorId) }
   if (vencidasAte) { filtros.push("date(data_vencimento) <= date(?)"); params.push(vencidasAte) }
   const rows = await listar(c.env.SHARE_DB, `SELECT * FROM ${table}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(data_vencimento) ASC, criado_em DESC LIMIT 500`, ...params)
-  return rows.map(mapConta)
+  const rowsComFornecedor = await enriquecerFornecedores(c.env.SHARE_DB, rows)
+  return rowsComFornecedor.map(mapConta)
 }
 
 /*
@@ -134,12 +164,12 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
     const body = await c.req.json<Record<string, unknown>>()
     const cotistaId = String(body.cotista_aeronave_id ?? body.cotista_id ?? '').trim()
     const aeronaveId = String(body.aeronave_id ?? '').trim()
-    const valor = Number(body.valor ?? 0)
+    const valor = Number(body.valor_total ?? body.valor ?? 0)
     const dataEmissao = String(body.data_emissao ?? '').trim()
     const dataVencimento = String(body.data_vencimento ?? dataEmissao).trim()
     const descricao = String(body.descricao_servico ?? body.descricao ?? '').trim()
     if (!cotistaId || !aeronaveId || !(valor > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao) || !descricao) {
-      return c.json({ error: 'cotista_aeronave_id, aeronave_id, valor, data_emissao e descricao_servico são obrigatórios' }, 400)
+      return c.json({ error: 'cotista_aeronave_id, aeronave_id, valor_total, data_emissao e descricao_servico são obrigatórios' }, 400)
     }
     const id = crypto.randomUUID()
     const numero = String(body.numero_recibo ?? body.numero ?? `REC-${id.slice(0, 8).toUpperCase()}`)
@@ -155,19 +185,53 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
       categoria_id: categoriaExiste ? categoriaInformada : null,
       categoria_nome: body.categoria_receita_nome ?? body.nome_categoria,
       origem_tipo: 'RECIBO_SAIDA', origem_id: id,
+      periodicidade: 'MENSAL',
     }, c.get('userId') || null)
     await c.env.SHARE_DB.prepare(`INSERT INTO recibos_saida
       (id, numero_recibo, cotista_id, aeronave_id, valor_total, percentual, descricao_servico,
-       nome_categoria, categoria_id, categoria_despesa_subcategoria, data_emissao, data_vencimento,
+       nome_categoria, categoria_id, subcategoria_1, data_emissao, data_vencimento,
        status, contas_areceber_id, lancamentos_id, criado_por)
       VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', ?, ?, ?)`)
       .bind(id, numero, cotistaId, aeronaveId, valor, descricao,
         body.categoria_receita_nome ?? body.nome_categoria ?? null,
         categoriaExiste ? categoriaInformada : null,
         body.categoria_despesa_subcategoria ?? null, dataEmissao, dataVencimento,
-        financeiro.contaReceberId ?? null, financeiro.id ?? null, c.get('userId') || null).run()
+        financeiro.contaReceberId ?? null, financeiro.id ?? financeiro.lancamento_id ?? null, c.get('userId') || null).run()
+    if (financeiro.contaReceberId) {
+      await c.env.SHARE_DB.prepare('UPDATE contas_areceber SET recibos_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id, financeiro.contaReceberId).run()
+    }
     const recibo = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(id).first()
     return c.json({ recibo }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.patch('/recibos-saida/:id', async (c) => {
+  try {
+    const body = await c.req.json<Record<string, unknown>>()
+    const pdfUrl = String(body.pdf_url ?? '').trim()
+    if (!pdfUrl) return c.json({ error: 'pdf_url_obrigatorio' }, 400)
+    const result = await c.env.SHARE_DB.prepare('UPDATE recibos_saida SET pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(pdfUrl, c.req.param('id')).run()
+    if (!result.meta.changes) return c.json({ error: 'recibo_saida_nao_encontrado' }, 404)
+    const recibo = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(c.req.param('id')).first()
+    return c.json({ recibo })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/recibos-saida/:id/dar-baixa', async (c) => {
+  try {
+    const reciboId = c.req.param('id')
+    const recibo = await c.env.SHARE_DB.prepare('SELECT contas_areceber_id FROM recibos_saida WHERE id = ?').bind(reciboId).first<{ contas_areceber_id: string | null }>()
+    if (!recibo) return c.json({ error: 'recibo_saida_nao_encontrado' }, 404)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const contaId = String(recibo.contas_areceber_id ?? '').trim()
+    if (!contaId) return c.json({ error: 'conta_a_receber_nao_vinculada' }, 409)
+    const result = await settleReceivable(c.env.SHARE_DB, contaId, {
+      data_recebimento: body.data_pagamento ?? body.dataRecebimento,
+      banco_recebimento: body.conta_bancaria ?? body.bancoRecebimento,
+      forma_pagamento: body.forma_pagamento ?? body.formaPagamento,
+      comprovante_recebimento_url: body.comprovante_url ?? body.comprovanteRecebimentoUrl,
+    }, c.get('userId') || null)
+    return c.json({ ok: true, conta: result })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -208,7 +272,7 @@ financeiroRoutes.get('/lancamentos', async (c) => {
     if (fim) { filtros.push('date(COALESCE(data_emissao, criado_em)) <= date(?)'); params.push(fim) }
     if (caixa) { filtros.push('tipo_caixa = ?'); params.push(caixa.toUpperCase()) }
     const rows = await listar(c.env.SHARE_DB, `SELECT * FROM lancamentos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(data_emissao, criado_em)) DESC, criado_em DESC LIMIT 500`, ...params)
-    return c.json({ lancamentos: rows })
+    return c.json({ lancamentos: await enriquecerFornecedores(c.env.SHARE_DB, rows) })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -235,6 +299,34 @@ financeiroRoutes.get('/notas-saida', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.post('/notas-saida/anexos', async (c) => {
+  try {
+    const bucket = storage(c)
+    if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+    const form = await c.req.parseBody()
+    const arquivo = form.arquivo
+    if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+    const origem = String(form.origem ?? 'nota_fiscal_saida')
+    const documentoId = String(form.documento_id ?? '').trim() || crypto.randomUUID()
+    const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : 'nf_saida'
+    const id = crypto.randomUUID()
+    const key = `documentos_saida/${prefixo}/${documentoId}/${id}-${arquivo.name}`
+    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
+    const url = `/api/financeiro/notas-saida/anexos/${id}/arquivo?key=${encodeURIComponent(key)}`
+    return c.json({ id, url }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/notas-saida/anexos/:id/arquivo', async (c) => {
+  const bucket = storage(c)
+  if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+  const key = c.req.query('key')
+  if (!key) return c.notFound()
+  const object = await bucket.get(key)
+  if (!object) return c.notFound()
+  return c.body(await object.arrayBuffer(), 200, { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' })
+})
+
 financeiroRoutes.get('/dashboard/financeiro', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -252,7 +344,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
 financeiroRoutes.get('/cotista/dashboard', async (c) => {
   try {
     const rows = await listar(c.env.SHARE_DB, 'SELECT id, data_emissao AS data, descricao, numero_doc, fornecedor_nome, categoria_nome, grupo_categoria, data_vencimento, fluxo, valor_centavos, pago_por, tipo_caixa, pago_diretamente, reembolsavel, reembolso_quitado, status, observacoes FROM lancamentos ORDER BY date(data_emissao) DESC, criado_em DESC LIMIT 500')
-    const lancamentos = rows.map((row) => ({ id: row.id, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.tipo ?? null, prazo: row.data_vencimento ?? null, fluxo: row.fluxo === 'ENTRADA' ? 'ENTRADA' : 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
+    const lancamentos = rows.map((row) => ({ id: row.id, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.tipo ?? null, prazo: row.data_vencimento ?? null, fluxo: ['ENTRADA', 'RECEITA'].includes(String(row.fluxo).toUpperCase()) ? 'ENTRADA' : 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
     const entradas = lancamentos.filter((row) => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const saidas = lancamentos.filter((row) => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     return c.json({ lancamentos, saldos: [], matrizCompensacao: {}, holdings: [], resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: saidas, pendentes: lancamentos.filter((row) => row.status === 'EM_ABERTO').length, media_mensal: 0, media_lancamento: lancamentos.length ? (entradas + saidas) / lancamentos.length : 0 }, fechamento_mensal: [], ranking_gastos: [], ranking_cotistas: [] })

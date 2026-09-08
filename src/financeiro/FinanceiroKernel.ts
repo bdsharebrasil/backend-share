@@ -13,9 +13,9 @@ export type FinanceOperation = 'DESPESA' | 'RECEITA' | 'REEMBOLSO'
 export type FinanceFlow = 'ENTRADA' | 'SAIDA'
 export type CotistaKind = 'CLIENTE' | 'HOLDING'
 
-export const STATUS_LANCAMENTO = ['EM_ABERTO', 'PAGO', 'RECEBIDO', 'ATRASADO', 'CANCELADO'] as const
-export const STATUS_CONTA_PAGAR = ['EM_ABERTO', 'PAGO', 'CANCELADO'] as const
-export const STATUS_CONTA_RECEBER = ['EM_ABERTO', 'RECEBIDO', 'ATRASADO', 'CANCELADO'] as const
+export const STATUS_LANCAMENTO = ['EM_ABERTO', 'PAGO', 'RECEBIDO', 'ATRASADO', 'EM_ATRASO', 'CANCELADO'] as const
+export const STATUS_CONTA_PAGAR = ['EM_ABERTO', 'EM_ATRASO', 'PAGO', 'CANCELADO'] as const
+export const STATUS_CONTA_RECEBER = ['EM_ABERTO', 'EM_ATRASO', 'RECEBIDO', 'PAGO', 'CANCELADO'] as const
 export const STATUS_RATEIO = ['EM_ABERTO', 'PAGO', 'CANCELADO'] as const
 export const STATUS_REEMBOLSO = ['PENDENTE', 'AGUARDANDO_REEMBOLSO', 'RECEBIDO', 'REEMBOLSADO', 'CANCELADO'] as const
 export const STATUS_FILA = ['PENDENTE', 'PROCESSANDO', 'PROCESSADO', 'ERRO'] as const
@@ -63,6 +63,17 @@ const dateValue = (value: unknown): string => {
   return date
 }
 
+async function resolveContaBancariaId(db: Database, value: unknown): Promise<string | null> {
+  const informada = nullableText(value)
+  if (!informada) return null
+  const row = await db.prepare(`
+    SELECT id FROM contas_bancarias
+    WHERE id = ? OR banco = ? OR (banco || CASE WHEN numero_conta IS NULL OR numero_conta = '' THEN '' ELSE ' - ' || numero_conta END) = ?
+    LIMIT 1
+  `).bind(informada, informada, informada).first<{ id: string }>()
+  return row?.id ?? null
+}
+
 const id = (): string => crypto.randomUUID()
 
 const upper = (value: unknown): string => text(value).toUpperCase()
@@ -82,6 +93,8 @@ async function loadSchema(db: Database): Promise<SchemaCache> {
     'financeiro_vinculos',
     'financeiro_fila',
     'recibos',
+    'recibos_saida',
+    'notas_fiscais_saida',
     'recibo_rateio',
     'cotista_aeronave',
     'cliente',
@@ -132,7 +145,7 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
   const schema = await loadSchema(db)
 
   requireTable(schema, 'lancamentos', ['id', 'descricao', 'fluxo', 'valor_centavos', 'status'])
-  requireTable(schema, 'contas_apagar', ['id', 'lancamento_id', 'valor_centavos', 'status'])
+  requireTable(schema, 'contas_apagar', ['id', 'lancamentos_id', 'valor_centavos', 'status'])
   requireTable(schema, 'contas_areceber', ['id', 'valor_centavos', 'status'])
   requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id', 'status'])
   requireTable(schema, 'rateio_hold', ['id', 'movimento_holding_id', 'socio_id'])
@@ -147,15 +160,17 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'idempotency_key', 'idempotencyKey', 'reference_id', 'valor_centavos', 'valorCentavos',
   'descricao', 'descricao_servico', 'fluxo', 'data', 'data_emissao', 'data_vencimento',
   'vencimento', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id', 'socio_id', 'holding_id',
-  'categoria_id', 'categoria_nome', 'categoria', 'fornecedor_id', 'fornecedor', 'tipo_caixa',
+  'categoria_id', 'categoria_nome', 'categoria', 'categoria_cliente_id', 'categoria_cliente_nome',
+  'grupo_categoria_cliente', 'fornecedor_id', 'fornecedor', 'fornecedor_nome',
+  'fornecedores_favoritos_id', 'recibos_saida_id', 'origem_tipo', 'origem_id', 'periodicidade', 'tipo_caixa',
   'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'pago_diretamente', 'pagoDiretamente',
   'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
-  'motivo', 'valor', 'operacao', 'payload',
+  'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
 ])
 
 const OPTIONAL_SCHEMA_COLUMNS = new Set([
   'idempotency_key', 'aeronave_id', 'cotista_aeronave_id', 'holding_id', 'socio_id',
-  'cliente_id', 'fornecedor_id', 'fornecedor_nome', 'categoria_id', 'categoria_nome',
+  'cliente_id', 'fornecedor_id', 'fornecedores_favoritos_id', 'fornecedor_nome', 'categoria_id', 'categoria_nome',
   'grupo_categoria', 'data', 'data_lancamento', 'data_emissao', 'data_vencimento',
   'data_pagamento', 'prazo', 'valor', 'valor_total', 'tipo', 'natureza', 'tipo_caixa',
   'caixa', 'pago_por', 'pago_por_cotista_id', 'pago_por_socio_id', 'pago_diretamente',
@@ -340,6 +355,9 @@ function normalizeCommand(body: Row, userId: string | null): Row {
     ),
     socio_id: nullableText(body.socio_id),
     holding_id: nullableText(body.holding_id),
+    fornecedor_id: nullableText(body.fornecedor_id ?? body.fornecedores_favoritos_id),
+    fornecedor_nome: nullableText(body.fornecedor_nome ?? body.fornecedor),
+    periodicidade: nullableText(body.periodicidade),
     criado_por: userId,
   }
 }
@@ -376,6 +394,7 @@ type CotistaContext = {
   clienteId: string | null
   socioId: string | null
   holdingId: string | null
+  nome: string | null
 }
 
 async function resolveCotista(
@@ -391,9 +410,11 @@ async function resolveCotista(
               ca.aeronave_id,
               ca.cliente_id,
               ca.socio_id,
-              hs.holding_id
+              hs.holding_id,
+              COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome
          FROM cotista_aeronave ca
          LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
         WHERE ca.id = ?`,
     )
     .bind(cotistaId)
@@ -415,6 +436,7 @@ async function resolveCotista(
     clienteId: nullableText(row.cliente_id),
     socioId: nullableText(row.socio_id),
     holdingId: nullableText(row.holding_id),
+    nome: nullableText(row.nome),
   }
 }
 
@@ -704,7 +726,8 @@ export async function createExpense(
           data: command.data,
           data_movimento: command.data,
           descricao: command.descricao,
-          fornecedor_nome: nullableText(command.fornecedor_nome),
+          fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+          fornecedores_favoritos_id: nullableText(command.fornecedor_id),
           categoria_id: nullableText(command.categoria_id),
           categoria_nome: nullableText(
             command.categoria_nome ?? command.categoria,
@@ -843,7 +866,8 @@ export async function createExpense(
         aeronave_id: command.aeronave_id,
         cotista_aeronave_id: command.cotista_aeronave_id,
         descricao: command.descricao,
-        fornecedor_nome: nullableText(command.fornecedor_nome),
+        fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+        fornecedores_favoritos_id: nullableText(command.fornecedor_id),
         categoria_id: nullableText(command.categoria_id),
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA',
@@ -881,7 +905,6 @@ export async function createExpense(
         id: contaPagarId,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
-        valor: amount / 100,
         categoria_id: nullableText(command.categoria_id),
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria,
@@ -890,14 +913,13 @@ export async function createExpense(
         aeronave_id: command.aeronave_id,
         fornecedor_id: nullableText(command.fornecedor_id),
         cotista_id: command.cotista_aeronave_id,
-        lancamento_id: lancamentoId,
+        lancamentos_id: lancamentoId,
         criado_por: userId,
         origem_tipo: 'DESPESA',
-        origem_id: lancamentoId,
         idempotency_key: command.idempotency_key,
         status,
       },
-      ['id', 'data_vencimento', 'valor_centavos', 'lancamento_id'],
+      ['id', 'data_vencimento', 'valor_centavos', 'lancamentos_id'],
     ),
     ...clientAllocationStatements(
       db,
@@ -965,7 +987,9 @@ export async function issueRevenue(
         cotista_aeronave_id:
           context?.cotistaAeronaveId || command.cotista_aeronave_id,
         descricao: command.descricao,
-        fluxo: 'ENTRADA',
+        fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+        fornecedores_favoritos_id: nullableText(command.fornecedor_id),
+        fluxo: upper(command.origem_tipo) === 'RECIBO_SAIDA' ? 'RECEITA' : 'ENTRADA',
         natureza: 'RECEITA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
@@ -976,6 +1000,7 @@ export async function issueRevenue(
           command.categoria_nome ?? 'RECEITAS OPERACIONAIS',
         ),
         grupo_categoria: 'RECEITAS OPERACIONAIS',
+        periodicidade: nullableText(command.periodicidade ?? (upper(command.origem_tipo) === 'RECIBO_SAIDA' ? 'MENSAL' : null)),
         data_emissao: command.data,
         data_vencimento: command.data_vencimento || command.data,
         origem_tipo: nullableText(command.origem_tipo) || 'RECEITA',
@@ -993,7 +1018,6 @@ export async function issueRevenue(
         id: contaReceberId,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
-        valor: amount / 100,
         categoria_id: nullableText(command.categoria_id),
         categoria_nome: nullableText(
           command.categoria_nome ?? 'RECEITAS OPERACIONAIS',
@@ -1001,14 +1025,8 @@ export async function issueRevenue(
         descricao: command.descricao,
         aeronave_id: context?.aeronaveId || command.aeronave_id,
         cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
-        holding_id: context?.holdingId,
-        socio_id: context?.socioId,
-        lancamento_receita_id: lancamentoId,
-        lancamento_id: lancamentoId,
         lancamentos_id: lancamentoId,
-        lancamento_cliente_id: clientLancamentoId,
         origem_tipo: nullableText(command.origem_tipo) || 'RECEITA',
-        origem_id: nullableText(command.origem_id) || lancamentoId,
         idempotency_key: command.idempotency_key,
         criado_por: userId,
         status: 'EM_ABERTO',
@@ -1199,17 +1217,12 @@ export async function createReimbursement(
         id: contaReceberId,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
-        valor: amount / 100,
         descricao: command.descricao || 'Reembolso de despesa',
         categoria_nome: 'REEMBOLSOS ENTRADAS',
         aeronave_id: context.aeronaveId,
         cotista_id: context.cotistaAeronaveId,
-        lancamento_receita_id: shareLancamentoId,
-        lancamento_id: shareLancamentoId,
         lancamentos_id: shareLancamentoId,
-        lancamento_cliente_id: clientLancamentoId,
         origem_tipo: 'REEMBOLSO',
-        origem_id: reimbursementId,
         idempotency_key: command.idempotency_key,
         criado_por: userId,
         status: 'EM_ABERTO',
@@ -1266,7 +1279,7 @@ export async function settlePayable(
 
   const paymentDate = dateValue(body.data_pagamento ?? body.dataPagamento)
   const amount = asPositiveCents(row.valor_centavos)
-  const lancamentoId = nullableText(row.lancamento_id)
+  const lancamentoId = nullableText(row.lancamentos_id ?? row.lancamento_id)
   const statements: D1PreparedStatement[] = [
     updateStatement(
       db,
@@ -1275,7 +1288,8 @@ export async function settlePayable(
       {
         status: 'PAGO',
         data_pagamento: paymentDate,
-        banco_pagamento: nullableText(
+        banco_pagamento: await resolveContaBancariaId(
+          db,
           body.banco_pagamento ?? body.bancoPagamento,
         ),
         comprovante_pagamento_url: nullableText(
@@ -1352,12 +1366,11 @@ export async function settlePayable(
             origem_tipo: 'REEMBOLSO', origem_id: reimbursementId, criado_por: userId,
           }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
           insertStatement(db, schema, 'contas_areceber', {
-            id: contaReceberId, data_vencimento: paymentDate, valor_centavos: amount, valor: amount / 100,
+            id: contaReceberId, data_vencimento: paymentDate, valor_centavos: amount,
             descricao: source.descricao || 'Reembolso de despesa', categoria_nome: 'REEMBOLSOS ENTRADAS',
             aeronave_id: context.aeronaveId, cotista_id: context.cotistaAeronaveId,
-            lancamento_receita_id: shareLancamentoId, lancamento_id: shareLancamentoId,
-            lancamentos_id: shareLancamentoId, lancamento_cliente_id: clientLancamentoId,
-            origem_tipo: 'REEMBOLSO', origem_id: reimbursementId, criado_por: userId, status: 'EM_ABERTO',
+            lancamentos_id: shareLancamentoId,
+            origem_tipo: 'REEMBOLSO', criado_por: userId, status: 'EM_ABERTO',
           }, ['id', 'valor_centavos']),
           linkStatement(db, schema, 'DESPESA', lancamentoId, 'CONTA_A_PAGAR', payableId, 'DESPESA_CONTA_A_PAGAR', userId),
           linkStatement(db, schema, 'DESPESA', lancamentoId, 'REEMBOLSO', reimbursementId, 'DESPESA_REEMBOLSO', userId),
@@ -1425,10 +1438,12 @@ export async function settleReceivable(
 
   const receiptDate = dateValue(body.data_recebimento ?? body.dataRecebimento)
   const amount = asPositiveCents(row.valor_centavos)
-  const shareId = nullableText(
-    row.lancamento_receita_id ?? row.lancamento_id ?? row.lancamentos_id,
+  const shareId = nullableText(row.lancamentos_id ?? row.lancamento_id)
+  const clientId = null
+  const bancoRecebimento = await resolveContaBancariaId(
+    db,
+    body.banco_recebimento ?? body.bancoRecebimento ?? body.conta_bancaria ?? body.contaBancaria,
   )
-  const clientId = nullableText(row.lancamento_cliente_id)
 
   const statements: D1PreparedStatement[] = [
     updateStatement(
@@ -1440,7 +1455,7 @@ export async function settleReceivable(
         data_recebimento: receiptDate,
         data_pagamento: receiptDate,
         banco_recebimento: nullableText(
-          body.banco_recebimento ?? body.bancoRecebimento,
+          bancoRecebimento,
         ),
         comprovante_recebimento_url: nullableText(
           body.comprovante_recebimento_url ??
@@ -1462,6 +1477,9 @@ export async function settleReceivable(
         {
           status: 'RECEBIDO',
           data_pagamento: receiptDate,
+          forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento),
+          conta_bancaria_id: nullableText(body.conta_bancaria_id ?? body.contaBancariaId),
+          comprovante_url: nullableText(body.comprovante_url ?? body.comprovanteUrl ?? body.comprovante_recebimento_url ?? body.comprovanteRecebimentoUrl),
           atualizado_em: new Date().toISOString(),
         },
         'id = ?',
@@ -1483,6 +1501,32 @@ export async function settleReceivable(
         },
         'id = ?',
         [clientId],
+      ),
+    )
+  }
+
+  const reciboSaidaId = nullableText(row.recibos_saida_id)
+  if (reciboSaidaId) {
+    statements.push(
+      updateStatement(
+        db,
+        schema,
+        'recibos_saida',
+        { status: 'RECEBIDO', atualizado_em: new Date().toISOString() },
+        'id = ?',
+        [reciboSaidaId],
+      ),
+    )
+  }
+  if (row.nf_saida_id) {
+    statements.push(
+      updateStatement(
+        db,
+        schema,
+        'notas_fiscais_saida',
+        { status: 'RECEBIDO', atualizado_em: new Date().toISOString() },
+        'id = ?',
+        [row.nf_saida_id],
       ),
     )
   }

@@ -5557,7 +5557,7 @@ async function gerarFinanceiroNfSaida(
   await inserirLinhaDinamica(db, 'contas_areceber', {
     id: contaId,
     data_vencimento: dataVencimento,
-    valor,
+    valor_centavos: Math.round(valor * 100),
     categoria_id: categoriaShareId,
     categoria_nome: nomeCategoriaShare,
     descricao,
@@ -5565,12 +5565,10 @@ async function gerarFinanceiroNfSaida(
     aeronave_id: ctx.aeronave_id,
     cotista_id: ctx.cotista_id,
     nf_saida_id: origem === 'nf_saida' ? documentoId : null,
+    recibos_saida_id: origem === 'recibo_saida' ? documentoId : null,
     lancamentos_id: ctx.socio_id ? null : lancamentoId,
-    lancamento_id: ctx.socio_id ? null : lancamentoId,
-    lancamento_cliente_id: lancamentoClienteId,
-    movimentos_holding_id: movimentoHoldingId,
-    movimento_holding_id: movimentoHoldingId,
-    status: 'PENDENTE',
+    movimentos_id: movimentoHoldingId,
+    status: 'EM_ABERTO',
   })
 
   // 3) Espelho na tabela de rateio — SEMPRE categoria_movimentacao_cliente
@@ -5797,7 +5795,7 @@ function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {
   return {
     id: linha.id,
     dataVencimento: linha.data_vencimento,
-    valor: linha.valor,
+    valor: Number(linha.valor_centavos || 0) / 100,
     categoriaId: linha.categoria_id,
     categoriaNome: linha.categoria_nome,
     descricao: linha.descricao,
@@ -5810,7 +5808,7 @@ function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {
     dataPagamento: linha.data_pagamento,
     bancoPagamento: linha.banco_pagamento,
     comprovantePagamentoUrl: linha.comprovante_pagamento_url,
-    lancamentoId: linha.lancamento_id,
+    lancamentoId: linha.lancamentos_id ?? linha.lancamento_id,
     status: linha.status,
     criadoEm: linha.criado_em,
     atualizadoEm: linha.atualizado_em,
@@ -5821,7 +5819,7 @@ function mapearContaAReceber(linha: LinhaGenerica): LinhaGenerica {
   return {
     id: linha.id,
     dataVencimento: linha.data_vencimento,
-    valor: linha.valor,
+    valor: Number(linha.valor_centavos || 0) / 100,
     categoriaId: linha.categoria_id,
     categoriaNome: linha.categoria_nome,
     descricao: linha.descricao,
