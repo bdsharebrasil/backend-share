@@ -101,6 +101,13 @@ app.use('/api/financeiro/*', async (c, next) => {
 })
 app.route('/api/financeiro', financeiroRoutes)
 
+// Compatibilidade para clientes antigos; o endpoint canônico é financeiro/dashboard/financeiro.
+app.get('/api/interno/dashboard/financeiro', async (c) => {
+  const url = new URL(c.req.url)
+  url.pathname = '/dashboard/financeiro'
+  return financeiroRoutes.fetch(new Request(url, c.req.raw), c.env, c.executionCtx)
+})
+
 // ─── MCP transport oficial do SDK (Cloudflare Workers) ───────────────────────
 
 function createMcpServer(db: D1Database): McpServer {
@@ -2605,7 +2612,9 @@ function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
 }
 
 async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
-  await validateWorkerSchema(c, [{table:'short_links',columns:['code']},{table:'email_templates',columns:['id']},{table:'mensagens',columns:['id']},{table:'mensagens_usuario',columns:['id']}])
+  // mensagens_usuario tem chave composta (mensagem_id, usuario_id), não uma
+  // coluna id. email_templates não pertence ao schema atual de mensagens.
+  await validateWorkerSchema(c, [{table:'mensagens',columns:['id']},{table:'mensagens_usuario',columns:['mensagem_id','usuario_id','papel','lida','favorita','arquivada','excluida']}])
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
@@ -3015,7 +3024,6 @@ async function recalcularDiarioMes(c: Context<{ Bindings: Bindings }>, diarioMes
 
 app.get('/api/interno/diario-bordo/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirComplianceTripulacao(c)
   const db = portalDb(c)
   const [clientes, socios, tripulacao, freelancers, aerodromos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente, proprietario FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
@@ -3296,7 +3304,6 @@ async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>
 
 app.get('/api/interno/tripulacao/gestao', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirComplianceTripulacao(c)
   const db = portalDb(c)
   const [tripulantes, habilitacoes, freelancers, aeronave] = await Promise.all([
     db.prepare(`SELECT t.id, t.user_id, t.canac, t.nome_completo, t.status, t.tipo_licenca, up.email, up.telefone, up.url_avatar, up.departamento FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id ORDER BY t.nome_completo`).all(),
@@ -3411,7 +3418,6 @@ app.get('/api/interno/agendamento', async c => {
   const inicio = c.req.query('inicio') || new Date().toISOString().slice(0, 10)
   const fim = c.req.query('fim') || inicio.slice(0, 7) + '-31'
   const db = portalDb(c)
-  await garantirTabelaDisponibilidadeTripulacao(c)
   const [agendamentos, aeronave, tripulacao, freelancers, disponibilidades] = await Promise.all([
     db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id, c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status
       FROM solicitacoes_reserva_voo s
@@ -3818,6 +3824,46 @@ async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>,
     WHERE r.id = ?1`).bind(id).first<Record<string, any>>()
   return row ? { ...row, status: statusRelatorioViagem(row.status), despesas: despesasRelatorioViagem(row.despesas) } : null
 }
+
+app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const db = portalDb(c)
+    const [clientes, aeronaves, tripulantes, categorias] = await Promise.all([
+      db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
+      db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
+      db.prepare("SELECT id, nome_completo AS nome, canac, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
+      db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
+    ])
+    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:opcoes]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_opcoes' }, 500)
+  }
+})
+
+app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const rows = await portalDb(c).prepare('SELECT * FROM relatorio_despesa_viagem ORDER BY date(data_inicio) DESC, criado_em DESC LIMIT 200').all<Record<string, any>>()
+    return c.json({ relatorios: (rows.results || []).map((row) => ({ ...row, status: statusRelatorioViagem(row.status), despesas: despesasRelatorioViagem(row.despesas) })) })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:listar]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_listar_relatorios' }, 500)
+  }
+})
+
+app.get('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const relatorio = await buscarRelatorioViagemComNomes(c, c.req.param('id'))
+    if (!relatorio) return c.notFound()
+    return c.json({ relatorio })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:detalhe]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_relatorio' }, 500)
+  }
+})
 
 
 
