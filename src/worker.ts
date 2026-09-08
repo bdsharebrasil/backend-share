@@ -5250,7 +5250,7 @@ app.post('/api/interno/emails', async c => {
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c)
-  const db = portalDb(c); const anexos: any[] = []
+  const db = portalDb(c); const anexos: any[] = []; let erroAnexo: string | null = null
   for (const id of ids.slice(0, 10)) {
     const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
     if (prefix === 'abastecimento') {
@@ -5268,12 +5268,10 @@ app.post('/api/interno/emails', async c => {
       const table = prefix === 'nf_saida' ? 'notas_fiscais_saida' : 'recibos_saida'
       const column = prefix === 'nf_saida' ? 'arquivo_pdf_url' : 'pdf_url'
       const row = await db.prepare(`SELECT ${column} AS arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
-      if (row?.arquivo) {
-        let key = String(row.arquivo)
-        try { key = new URL(key, c.req.url).searchParams.get('key') || key } catch { /* chave já armazenada */ }
-        const object = await shareBrasilBucket(c).get(key)
-        if (object) anexos.push({ filename: `${prefix}-${rawId}.pdf`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/pdf' })
-      }
+      const key = chaveStorageDeUrl(row?.arquivo)
+      const object = key ? await shareBrasilBucket(c).get(key) : null
+      if (object) anexos.push({ filename: `${prefix}-${rawId}.pdf`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/pdf' })
+      else erroAnexo = `anexo_${prefix}_indisponivel:${rawId}`
       continue
     }
     const table = prefix === 'recibo' ? 'recibo_anexos' : prefix === 'relatorio' ? 'relatorio_despesa_viagem_anexos' : ''
@@ -5285,16 +5283,33 @@ app.post('/api/interno/emails', async c => {
   }
   const arquivosLocais = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : []).filter((file): file is File => file instanceof File && !!file.size)
   for (const file of arquivosLocais.slice(0, 10)) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
-  const id = uuid(); let status = 'enviado'; let erro: string | null = null
+  const id = uuid(); let status = erroAnexo ? 'erro' : 'enviado'; let erro: string | null = erroAnexo
   const assinaturaAtual = await assinaturaOperacional(c, user)
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
   const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
-  if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), ids.length, status, erro, user.id).run()
+  if (!erroAnexo) {
+    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
+    if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
+  }
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
 })
+function chaveStorageDeUrl(valor: unknown): string {
+  const bruto = String(valor ?? '').trim()
+  if (!bruto) return ''
+  try {
+    const url = new URL(bruto)
+    const queryKey = url.searchParams.get('key')
+    if (queryKey) return queryKey
+    const caminho = decodeURIComponent(url.pathname).replace(/^\/+/, '')
+    const marcador = caminho.indexOf('share/')
+    return marcador >= 0 ? caminho.slice(marcador) : caminho
+  } catch {
+    return bruto.replace(/^\/+/, '')
+  }
+}
+
 // ─── Financeiro: emissão de recibos (cliente reembolsável / caixa cliente / colaborador) ──
 const PAGADOR_PADRAO_RECIBO = {
   nome: 'SHARE BRASIL SERVIÇOS AERONÁUTICOS',
