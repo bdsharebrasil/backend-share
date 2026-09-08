@@ -333,11 +333,12 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const [receber, pagar, movimentacoes] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
       listar(db, "SELECT valor_centavos, status FROM contas_apagar WHERE status <> 'CANCELADO'"),
-      listar(db, 'SELECT id, descricao, status, data_pagamento, valor_centavos, observacoes, criado_em FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
+      listar(db, 'SELECT * FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
     ])
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const totalPago = pagar.filter((row) => row.status === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
-    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: pagar.filter((row) => row.status === 'EM_ABERTO').length, pagamentos_confirmados: pagar.filter((row) => row.status === 'PAGO').length }, movimentacoes: movimentacoes.map((row) => ({ ...row, valor: Number(row.valor_centavos || 0) / 100 })) })
+    const movimentacoesComFornecedor = await enriquecerFornecedores(db, movimentacoes)
+    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: pagar.filter((row) => row.status === 'EM_ABERTO').length, pagamentos_confirmados: pagar.filter((row) => row.status === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100 })) })
   } catch (error) { return errorResponse(c, error) }
 })
 
