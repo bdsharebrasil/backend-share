@@ -1,6 +1,14 @@
 type Row = Record<string, unknown>
 type Database = D1Database
 
+import {
+  allocateReceiptNumber,
+  createReceiptAllocations,
+  createReceiptRecord,
+  updateReceiptStatus,
+  validateReceiptCommand,
+} from './reciboAgents'
+
 export type FinanceOperation = 'DESPESA' | 'RECEITA' | 'REEMBOLSO'
 export type FinanceFlow = 'ENTRADA' | 'SAIDA'
 export type CotistaKind = 'CLIENTE' | 'HOLDING'
@@ -1559,6 +1567,18 @@ export async function enqueueFinance(
   payload: Row,
 ): Promise<Row> {
   const schema = await loadSchema(db)
+  requireTable(schema, 'financeiro_fila', [
+    'id',
+    'operacao',
+    'payload_json',
+    'status',
+    'tentativas',
+    'erro',
+    'processado_em',
+  ])
+  if (!['DESPESA', 'RECEITA', 'REEMBOLSO'].includes(operation)) {
+    throw new FinanceError('Operação de fila inválida', 'operacao_fila_invalida')
+  }
   const queueId = id()
   await db.batch([
     insertStatement(
@@ -1583,6 +1603,16 @@ export async function processFinanceQueue(
   userId: string | null,
   limit = 20,
 ): Promise<Row[]> {
+  const schema = await loadSchema(db)
+  requireTable(schema, 'financeiro_fila', [
+    'id',
+    'operacao',
+    'payload_json',
+    'status',
+    'tentativas',
+    'erro',
+    'processado_em',
+  ])
   const rows = await db
     .prepare(
       `SELECT * FROM financeiro_fila
@@ -1669,92 +1699,67 @@ export async function issueReceipt(
   body: Row,
   userId: string | null,
 ): Promise<Row> {
-  const tipo = text(body.tipo_recibo)
-  if (!['recibo_reembolso', 'recibo_colaborador', 'recibo_pagamento'].includes(tipo)) {
-    throw new FinanceError('tipo_recibo inválido', 'tipo_recibo_invalido')
+  let input
+  try {
+    input = validateReceiptCommand(body)
+  } catch (error) {
+    throw new FinanceError(error instanceof Error ? error.message : 'Recibo inválido', 'recibo_invalido')
   }
-  const pagadorTipo = text(body.pagador_tipo)
-  const pagadorId = text(body.pagador_id)
-  if (!['empresa', 'cotista_aeronave'].includes(pagadorTipo) || !pagadorId) {
-    throw new FinanceError('Pagador inválido', 'pagador_invalido')
-  }
-  const categoriaId = nullableText(body.categoria_movimentacao_id)
-  if (!categoriaId) {
-    throw new FinanceError('categoria_movimentacao_id é obrigatória', 'categoria_obrigatoria')
+  if (!input.descricao || !/^\d{4}-\d{2}-\d{2}/.test(input.data_emissao)) {
+    throw new FinanceError('Descrição e data de emissão são obrigatórias', 'recibo_incompleto')
   }
   const schema = await loadSchema(db)
-  requireTable(schema, 'recibos', ['id', 'tipo_recibo', 'pagador_tipo', 'pagador_id', 'valor', 'categoria_movimentacao_id', 'lancamento_id'])
+  requireTable(schema, 'recibos', ['id', 'tipo_recibo', 'pagador_tipo', 'pagador_id', 'valor', 'categoria_movimentacao_id', 'lancamento_id', 'status'])
   requireTable(schema, 'recibo_rateio', ['id', 'recibo_id', 'rateio_id', 'percentual', 'valor', 'cotista_id'])
+  requireTable(schema, 'sequencia_numeros_recibos', ['id', 'cotista_aeronave_id', 'codigo_cliente', 'ano', 'proximo_numero'])
 
   const comando: Row = {
     ...body,
-    descricao: body.descricao ?? body.descricao_servico,
-    valor_centavos: body.valor_centavos,
-    data: body.data_emissao,
-    categoria_id: categoriaId,
-    aeronave_id: body.aeronave_id,
-    cotista_aeronave_id: pagadorTipo === 'cotista_aeronave' ? pagadorId : body.cotista_aeronave_id,
-    tipo_caixa: pagadorTipo === 'cotista_aeronave' ? 'CLIENTE' : 'SHARE',
-    grupo_categoria: tipo === 'recibo_reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
+    descricao: input.descricao,
+    valor_centavos: input.valor_centavos,
+    data: input.data_emissao,
+    categoria_id: input.categoria_movimentacao_id,
+    aeronave_id: input.aeronave_id,
+    cotista_aeronave_id: input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : body.cotista_aeronave_id,
+    tipo_caixa: input.pagador_tipo === 'cotista_aeronave' ? 'CLIENTE' : 'SHARE',
+    grupo_categoria: input.grupo_categoria || (input.tipo_recibo === 'recibo_reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'),
     fluxo: 'SAIDA',
-    pago_diretamente: tipo === 'recibo_pagamento' && pagadorTipo === 'cotista_aeronave',
-    reembolsavel: tipo === 'recibo_reembolso',
+    pago_diretamente: input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave',
+    reembolsavel: input.tipo_recibo === 'recibo_reembolso',
   }
-  const financeiro = await createExpense(db, comando, userId)
   const reciboId = id()
+  const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : ''))
+  if (!cotistaId) throw new FinanceError('cotista_aeronave_id é obrigatório para gerar a sequência do recibo', 'cotista_sequencia_obrigatorio')
+  const codigo = text(body.codigo_cliente) || 'SHARE'
+  const ano = input.data_emissao.slice(0, 4)
+  const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
+  await createReceiptRecord(db, input, reciboId, numero, userId)
+  const financeiro = await createExpense(db, comando, userId)
   const lancamentoId = text(financeiro.lancamento_id ?? financeiro.id)
-  const rateios = await db.prepare('SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(lancamentoId).all<Row>()
-  const numero = `REC-${new Date().getFullYear()}-${reciboId.slice(0, 8).toUpperCase()}`
-  const statements: D1PreparedStatement[] = [
-    insertStatement(db, schema, 'recibos', {
-      id: reciboId,
-      numero_recibo: numero,
-      tipo_recibo: tipo,
-      colaborador_id: nullableText(body.colaborador_id),
-      aeronave_id: nullableText(body.aeronave_id),
-      rateado: rateios.results?.length ? 1 : 0,
-      pagador_tipo: pagadorTipo,
-      pagador_id: pagadorId,
-      nome_pagador: nullableText(body.nome_pagador),
-      valor: Number(body.valor_centavos),
-      descricao: text(body.descricao ?? body.descricao_servico),
-      data_emissao: body.data_emissao,
-      data_vencimento: nullableText(body.data_vencimento),
-      forma_pagamento: nullableText(body.forma_pagamento),
-      tipo_caixa: pagadorTipo === 'cotista_aeronave' ? 'cliente' : 'share',
-      categoria_movimentacao_id: categoriaId,
-      grupo_categoria: comando.grupo_categoria,
-      status: 'EMITIDO',
-      lancamento_id: lancamentoId,
-      recebedor_nome: nullableText(body.recebedor_nome),
-      observacoes: nullableText(body.observacoes),
-      criado_por: userId,
-    }, ['id', 'tipo_recibo', 'pagador_tipo', 'pagador_id', 'valor', 'categoria_movimentacao_id']),
-    ...rateios.results.map((rateio) => insertStatement(db, schema, 'recibo_rateio', {
-      id: id(), recibo_id: reciboId, rateio_id: rateio.id, percentual: Number(rateio.percentual || 0),
-      valor: Number(rateio.valor || 0), cotista_id: rateio.cotista_id,
-    }, ['id', 'recibo_id', 'valor', 'cotista_id'])),
+  await db.prepare('UPDATE recibos SET lancamento_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(lancamentoId, reciboId).run()
+  const rateios = await createReceiptAllocations(db, reciboId, lancamentoId)
+  await db.batch([
     linkStatement(db, schema, 'RECIBO', reciboId, 'LANCAMENTO', lancamentoId, 'RECIBO_LANCAMENTO', userId),
-    ...rateios.results.map((rateio) => linkStatement(db, schema, 'RECIBO', reciboId, 'RATEIO', String(rateio.id), 'RECIBO_RATEIO', userId)),
-    auditStatement(db, schema, 'recibos', reciboId, 'CRIACAO_RECIBO', userId, null, Number(body.valor_centavos), null, null),
-  ]
-  await db.batch(statements)
+    ...rateios.map((rateio) => linkStatement(db, schema, 'RECIBO', reciboId, 'RATEIO', String(rateio.id), 'RECIBO_RATEIO', userId)),
+    auditStatement(db, schema, 'recibos', reciboId, 'CRIACAO_RECIBO', userId, null, input.valor_centavos, null, null),
+  ])
+  await updateReceiptStatus(db, reciboId, 'PDF_PENDENTE')
   const recibo = {
     id: reciboId,
     numero_recibo: numero,
-    tipo_recibo: tipo,
-    pagador_tipo: pagadorTipo,
-    pagador_id: pagadorId,
-    aeronave_id: body.aeronave_id || null,
-    rateado: rateios.results?.length ? 1 : 0,
-    valor: Number(body.valor_centavos),
-    valor_centavos: Number(body.valor_centavos),
-    descricao: text(body.descricao ?? body.descricao_servico),
-    data_emissao: body.data_emissao,
-    categoria_id: categoriaId,
-    categoria_movimentacao_id: categoriaId,
-    status: 'EMITIDO',
+    tipo_recibo: input.tipo_recibo,
+    pagador_tipo: input.pagador_tipo,
+    pagador_id: input.pagador_id,
+    aeronave_id: input.aeronave_id || null,
+    rateado: rateios.length ? 1 : 0,
+    valor: input.valor_centavos,
+    valor_centavos: input.valor_centavos,
+    descricao: input.descricao,
+    data_emissao: input.data_emissao,
+    categoria_id: input.categoria_movimentacao_id,
+    categoria_movimentacao_id: input.categoria_movimentacao_id,
+    status: 'PDF_PENDENTE',
     lancamento_id: lancamentoId,
   }
-  return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, rateio_ids: rateios.results.map((rateio) => rateio.id), rateio_linhas: rateios.results, status: 'EMITIDO', valor_centavos: Number(body.valor_centavos) }
+  return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: 'PDF_PENDENTE', valor_centavos: input.valor_centavos }
 }
