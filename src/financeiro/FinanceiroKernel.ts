@@ -78,6 +78,12 @@ const id = (): string => crypto.randomUUID()
 
 const upper = (value: unknown): string => text(value).toUpperCase()
 
+// Categoria padrão do lançamento de receita e da conta a pagar do recibo.
+// A categoria escolhida no formulário de recibo de pagamento pertence ao
+// Caixa Cliente e não pode ser usada em contas_apagar, cuja FK aponta para
+// categoria_movimentacao_share.
+const CATEGORIA_SHARE_RECIBO = '73355581-c479-4a5d-b90b-90b3332f198e'
+
 type SchemaCache = Map<string, Set<string>>
 
 async function loadSchema(db: Database): Promise<SchemaCache> {
@@ -1823,16 +1829,23 @@ async function createReceiptExitFinance(
   // Caixa Cliente. O rateio só é criado depois do lançamento cliente, pois
   // sua FK deve apontar para esse lançamento (e não para o lançamento Share).
   const categoriaClienteId = nullableText(
-    command.categoria_lancamento_id ?? command.categoria_cliente_id,
+    input.categoria_movimentacao_id ?? command.categoria_lancamento_id ?? command.categoria_cliente_id,
   )
+  const categoriaShare = await db
+    .prepare(`SELECT id FROM categoria_movimentacao_share
+              WHERE id = ? OR lower(nome) = lower(?)
+              LIMIT 1`)
+    .bind(CATEGORIA_SHARE_RECIBO, 'ADM SHARE - RECIBO')
+    .first<{ id: string }>()
+  const categoriaShareId = categoriaShare?.id ?? null
   const statements = [
     insertStatement(db, schema, 'lancamentos', {
       id: shareLancamentoId,
       aeronave_id: cotista.aeronave_id ?? command.aeronave_id,
       cotista_aeronave_id: cotistaId,
       descricao: input.descricao,
-      categoria_id: nullableText(input.categoria_movimentacao_id),
-      categoria_nome: nullableText(command.categoria_nome_manual ?? command.categoria_nome),
+      categoria_id: categoriaShareId,
+      categoria_nome: 'ADM SHARE - RECIBO',
       grupo_categoria: 'RECEITAS OPERACIONAIS',
       fluxo: 'RECEITA',
       tipo_caixa: 'SHARE',
@@ -1880,8 +1893,8 @@ async function createReceiptExitFinance(
       id: contaPagarId,
       data_vencimento: input.data_vencimento || input.data_emissao,
       valor_centavos: amount,
-      categoria_id: nullableText(input.categoria_movimentacao_id),
-      categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome_manual),
+      categoria_id: categoriaShareId,
+      categoria_nome: 'ADM SHARE - RECIBO',
       descricao: input.descricao,
       aeronave_id: cotista.aeronave_id ?? command.aeronave_id,
       cotista_id: cotistaId,
