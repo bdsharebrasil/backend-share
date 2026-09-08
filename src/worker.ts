@@ -5890,6 +5890,10 @@ const CATEGORIA_CLIENTE_NF_SAIDA_SUB_RECIBO = 'ADM SHARE - RECIBO' // subcategor
 const CATEGORIA_CLIENTE_NF_SAIDA_SUB_NF = 'ADM SHARE - N.F'        // subcategoria_2 dessa categoria
 const FORNECEDOR_SHARE_BRASIL_NOME = 'SHARE BRASIL'
 
+function normalizarStatusSaida(value: unknown): 'EM_ABERTO' | 'PAGO' {
+  return ['PAGO', 'RECEBIDO', 'PAID'].includes(String(value || '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO'
+}
+
 const CATEGORIA_SHARE_RECIBO = '73355581-c479-4a5d-b90b-90b3332f198e'               // ADM SHARE - RECIBO
 const CATEGORIA_SHARE_NF_DIARIAS = 'b5143aad-88ed-4649-9f17-3ff15904bda2'           // N.F DIARIAS DE VOO
 const CATEGORIA_SHARE_NF_ADM_PILOTAGEM = '643fd58f-ae2f-4269-9d5a-93345d613fb9'     // ADM E PILOTAGEM - N.F
@@ -6014,7 +6018,7 @@ function normalizarTipoRateioD1(value: unknown): string {
 }
 
 async function contextoNfSaida(c: Context<{ Bindings: Bindings }>, cotistaId: string) {
-  return portalDb(c).prepare(`SELECT ca.id cotista_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,hs.holding_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente,'CLI') codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?1`).bind(cotistaId).first<any>()
+  return portalDb(c).prepare(`SELECT ca.id cotista_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,hs.holding_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente,'CLI') codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,COALESCE(cl.cnpj,hs.cpf) documento,COALESCE(cl.endereco,hs.endereco) endereco,COALESCE(cl.cidade,hs.cidade) cidade,COALESCE(cl.uf,hs.uf) uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?1`).bind(cotistaId).first<any>()
 }
 
 async function gerarFinanceiroNfSaida(
@@ -6038,6 +6042,7 @@ async function gerarFinanceiroNfSaida(
 
   // Cliente direto gera lancamentos; cotista de holding gera movimentos_holding.
   let lancamentoId: string | null = null
+  const movimentoHoldingId = ctx.socio_id ? uuid() : null
   if (!ctx.socio_id) {
     lancamentoId = uuid()
     await inserirLinhaDinamica(db, 'lancamentos', {
@@ -6065,6 +6070,8 @@ async function gerarFinanceiroNfSaida(
     nf_saida_id: origem === 'nf_saida' ? documentoId : null,
     lancamentos_id: ctx.socio_id ? null : lancamentoId,
     lancamento_id: ctx.socio_id ? null : lancamentoId,
+    movimentos_holding_id: movimentoHoldingId,
+    movimento_holding_id: movimentoHoldingId,
     status: 'PENDENTE',
   })
 
@@ -6077,7 +6084,7 @@ async function gerarFinanceiroNfSaida(
 
   if (ctx.socio_id) {
     // Cotista é sócio de holding → movimentos_holding + rateio_hold
-    const movimentoId = uuid()
+    const movimentoId = movimentoHoldingId as string
     await inserirMovimentoHolding(db, {
       id: movimentoId,
       holding_id: ctx.holding_id || null,
@@ -6145,12 +6152,12 @@ async function gerarFinanceiroNfSaida(
     })
   }
 
-  return { lancamentoId, contaId, rateioId, categoriaId: categoriaShareId, categoriaNome: nomeCategoriaShare }
+  return { lancamentoId: ctx.socio_id ? movimentoHoldingId : lancamentoId, contaId, rateioId, categoriaId: categoriaShareId, categoriaNome: nomeCategoriaShare }
 }
 
 app.get('/api/financeiro/notas-saida/opcoes', async c => {
   const user=await shareBrasilUser(c); if(!user) return c.json({error:'nao_autorizado'},401); await garantirTabelasNfSaida(c); await garantirCategoriasCliente(c); const db=portalDb(c)
-  const [cotistas,aeronaves,categoriasReceita,categoriasDespesa,contasBancarias]=await Promise.all([db.prepare(`SELECT ca.id cotista_aeronave_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente) codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj,hs.cpf,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,CASE WHEN ca.cliente_id IS NOT NULL THEN cl.cnpj ELSE hs.cpf END documento FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id ORDER BY nome`).all(),db.prepare('SELECT id,matricula_registro FROM aeronave ORDER BY matricula_registro').all(),db.prepare("SELECT id,nome,grupo_categoria,tipo FROM categoria_movimentacao_share WHERE lower(COALESCE(tipo,'receita'))='receita' ORDER BY nome").all(),db.prepare('SELECT id,nome,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all(),db.prepare('SELECT id,banco,numero_conta FROM contas_bancarias ORDER BY banco').all().catch(()=>({results:[]}))]); return c.json({cotistas:cotistas.results,aeronaves:aeronaves.results,categoriasReceita:categoriasReceita.results,categoriasDespesa:categoriasDespesa.results,contasBancarias:contasBancarias.results})
+  const [cotistas,aeronaves,categoriasReceita,categoriasDespesa,contasBancarias]=await Promise.all([db.prepare(`SELECT ca.id cotista_aeronave_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente) codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,cl.cnpj,hs.cpf,COALESCE(cl.endereco,hs.endereco) endereco,COALESCE(cl.cidade,hs.cidade) cidade,COALESCE(cl.uf,hs.uf) uf,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,CASE WHEN ca.cliente_id IS NOT NULL THEN cl.cnpj ELSE hs.cpf END documento FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id ORDER BY nome`).all(),db.prepare('SELECT id,matricula_registro FROM aeronave ORDER BY matricula_registro').all(),db.prepare("SELECT id,nome,grupo_categoria,tipo FROM categoria_movimentacao_share WHERE lower(COALESCE(tipo,'receita'))='receita' ORDER BY nome").all(),db.prepare('SELECT id,nome,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome').all(),db.prepare('SELECT id,banco,numero_conta FROM contas_bancarias ORDER BY banco').all().catch(()=>({results:[]}))]); return c.json({cotistas:cotistas.results,aeronaves:aeronaves.results,categoriasReceita:categoriasReceita.results,categoriasDespesa:categoriasDespesa.results,contasBancarias:contasBancarias.results})
 })
 app.get('/api/financeiro/notas-saida', async c => {
   const user = await shareBrasilUser(c)
@@ -6164,7 +6171,7 @@ app.get('/api/financeiro/notas-saida', async c => {
       db.prepare(`SELECT n.*,n.numero AS numero, n.cotista_id AS cotista_aeronave_id,
         n.data_emissao AS data_criacao, n.valor_total AS valor, n.nome_categoria AS categoria,
         n.descricao_servico AS descricao, n.arquivo_pdf_url AS arquivo_pdf_url,
-        COALESCE(cl.razao_social,hs.nome) AS cliente_nome, cl.cnpj AS cliente_cnpj, COALESCE(cl.email_principal,hs.email_principal) AS cliente_email,
+        COALESCE(cl.razao_social,hs.nome) AS cliente_nome, cl.cnpj AS cliente_cnpj, COALESCE(cl.email_principal,hs.email_principal) AS cliente_email, COALESCE(cl.endereco,hs.endereco) AS cliente_endereco, COALESCE(cl.cidade,hs.cidade) AS cliente_cidade, COALESCE(cl.uf,hs.uf) AS cliente_uf,
         CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END AS tipo_cotista,
         a.matricula_registro AS aeronave_matricula
       FROM notas_fiscais_saida n
@@ -6173,7 +6180,7 @@ app.get('/api/financeiro/notas-saida', async c => {
       LEFT JOIN hold_socios hs ON hs.id=ca.socio_id
       LEFT JOIN aeronave a ON a.id=n.aeronave_id
       ORDER BY n.data_emissao DESC`).all(),
-      db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,COALESCE(cl.cnpj,hs.cpf) cliente_cnpj,COALESCE(cl.email_principal,hs.email_principal) cliente_email,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all(),
+      db.prepare(`SELECT r.*,COALESCE(cl.razao_social,hs.nome) cliente_nome,COALESCE(cl.cnpj,hs.cpf) cliente_cnpj,COALESCE(cl.email_principal,hs.email_principal) cliente_email,COALESCE(cl.endereco,hs.endereco) cliente_endereco,COALESCE(cl.cidade,hs.cidade) cliente_cidade,COALESCE(cl.uf,hs.uf) cliente_uf,CASE WHEN ca.cliente_id IS NOT NULL THEN 'cliente' ELSE 'socio_hold' END tipo_cotista,a.matricula_registro aeronave_matricula,ca.aeronave_id,ca.cliente_id,ca.socio_id,ar.id contas_areceber_id FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id=r.cotista_id LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id LEFT JOIN aeronave a ON a.id=r.aeronave_id LEFT JOIN contas_areceber ar ON ar.id=r.contas_areceber_id ORDER BY r.data_emissao DESC`).all(),
     ])
     return c.json({ notas: notas.results, recibos: recibos.results })
   } catch (error: any) {
@@ -6218,7 +6225,7 @@ app.post('/api/financeiro/notas-saida', async c => {
     subcategoria_4: body.subcategoria_4 ?? null,
     data_emissao: body.data_emissao,
     data_vencimento: body.data_vencimento || null,
-    status: body.status || 'EM_ABERTO',
+    status: normalizarStatusSaida(body.status),
     arquivo_pdf_url: body.arquivo_pdf_url || null,
   })
   if (body.anexo_id) {
@@ -6248,7 +6255,7 @@ app.patch('/api/financeiro/notas-saida/:id', async c => {
       String(body.descricao_servico), body.nome_categoria || null, body.categoria_id || null,
       body.subcategoria_1 || null, body.subcategoria_2 || null, body.subcategoria_3 || null,
       body.subcategoria_4 || null, body.data_emissao, body.data_vencimento || null,
-      body.status || 'EM_ABERTO', body.arquivo_pdf_url || null, c.req.param('id'),
+      normalizarStatusSaida(body.status), body.arquivo_pdf_url || null, c.req.param('id'),
     ).run()
   return c.json({ nota: await db.prepare('SELECT * FROM notas_fiscais_saida WHERE id = ?1').bind(c.req.param('id')).first() })
 })
@@ -6280,7 +6287,7 @@ app.post('/api/financeiro/recibos-saida', async c => {
     categoria_id: fin.categoriaId,
     data_emissao: body.data_emissao,
     data_vencimento: body.data_vencimento,
-    status: body.status || 'pendente',
+    status: normalizarStatusSaida(body.status),
     pdf_url: body.pdf_url,
     contas_areceber_id: fin.contaId,
     lancamento_id: fin.lancamentoId,
