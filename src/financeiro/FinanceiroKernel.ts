@@ -71,6 +71,7 @@ async function loadSchema(db: Database): Promise<SchemaCache> {
     'movimentos_holding',
     'reembolsos',
     'auditoria_financeira',
+    'financeiro_vinculos',
     'financeiro_fila',
     'cotista_aeronave',
     'cliente',
@@ -128,6 +129,7 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
   requireTable(schema, 'movimentos_holding', ['id'])
   requireTable(schema, 'reembolsos', ['id', 'lancamento_origem_id'])
   requireTable(schema, 'auditoria_financeira', ['id'])
+  requireTable(schema, 'financeiro_vinculos', ['id', 'origem_tipo', 'origem_id', 'destino_tipo', 'destino_id', 'tipo_vinculo'])
   requireTable(schema, 'financeiro_fila', ['id', 'operacao', 'payload_json', 'status'])
 }
 
@@ -506,6 +508,24 @@ function auditStatement(
   )
 }
 
+function linkStatement(
+  db: Database,
+  schema: SchemaCache,
+  origemTipo: string,
+  origemId: string,
+  destinoTipo: string,
+  destinoId: string,
+  tipoVinculo: string,
+  userId: string | null,
+): D1PreparedStatement {
+  requireTable(schema, 'financeiro_vinculos', ['id', 'origem_tipo', 'origem_id', 'destino_tipo', 'destino_id', 'tipo_vinculo'])
+  return db.prepare(
+    `INSERT OR IGNORE INTO financeiro_vinculos
+      (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo, criado_por)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id(), origemTipo, origemId, destinoTipo, destinoId, tipoVinculo, userId)
+}
+
 function clientAllocationStatements(
   db: Database,
   schema: SchemaCache,
@@ -513,15 +533,16 @@ function clientAllocationStatements(
   lancamentoId: string | null,
   lines: AllocationLine[],
   userId: string | null,
+  rateioIds?: string[],
 ): D1PreparedStatement[] {
   const amount = asPositiveCents(command.valor_centavos)
-  return lines.map((line) =>
+  return lines.map((line, index) =>
     insertStatement(
       db,
       schema,
       'rateio_despesas',
       {
-        id: id(),
+        id: rateioIds?.[index] ?? id(),
         lancamento_id: lancamentoId,
         cotista_id: line.cotistaId,
         aeronave_id: command.aeronave_id,
@@ -695,14 +716,16 @@ export async function createExpense(
   }
 
   if (direct) {
-    const rateioId = id()
+    const lancamentoId = text(command.id) || id()
+    const rateioIds = lines.map(() => id())
     const statements = clientAllocationStatements(
       db,
       schema,
       command,
-      null,
+      lancamentoId,
       lines,
       userId,
+      rateioIds,
     )
     if (!statements.length) {
       throw new FinanceError(
@@ -711,12 +734,45 @@ export async function createExpense(
       )
     }
     await db.batch([
+      insertStatement(
+        db,
+        schema,
+        'lancamentos',
+        {
+          id: lancamentoId,
+          aeronave_id: command.aeronave_id,
+          cotista_aeronave_id: command.cotista_aeronave_id,
+          descricao: command.descricao,
+          categoria_id: nullableText(command.categoria_id),
+          categoria_nome: nullableText(command.categoria_nome ?? command.categoria),
+          grupo_categoria: nullableText(command.grupo_categoria || 'DESPESAS EMPRESA'),
+          fluxo: 'SAIDA',
+          natureza: 'DESPESA',
+          tipo_caixa: command.tipo_caixa || 'SHARE',
+          valor_centavos: amount,
+          valor_total: amount / 100,
+          valor: amount / 100,
+          status: 'PAGO_DIRETAMENTE',
+          data_lancamento: command.data,
+          data_emissao: command.data,
+          data_pagamento: command.data,
+          pago_diretamente: 1,
+          reembolsavel: 0,
+          reembolso_quitado: 1,
+          origem_tipo: 'DESPESA',
+          origem_id: lancamentoId,
+          idempotency_key: command.idempotency_key,
+          criado_por: userId,
+        },
+        ['id', 'descricao', 'fluxo', 'valor_centavos'],
+      ),
       ...statements,
+      ...rateioIds.map((rateioId) => linkStatement(db, schema, 'DESPESA', lancamentoId, 'RATEIO', rateioId, 'DESPESA_RATEIO', userId)),
       auditStatement(
         db,
         schema,
-        'rateio_despesas',
-        rateioId,
+        'lancamentos',
+        lancamentoId,
         'CRIACAO_DESPESA_DIRETA',
         userId,
         null,
@@ -726,9 +782,11 @@ export async function createExpense(
       ),
     ])
     return {
-      id: rateioId,
+      lancamento_id: lancamentoId,
+      rateio_ids: rateioIds,
+      conta_pagar_id: null,
       valor_centavos: amount,
-      status: 'PAGO',
+      status: 'PAGO_DIRETAMENTE',
       idempotent: false,
     }
   }
@@ -1221,24 +1279,59 @@ export async function settlePayable(
         .first<Row>()
 
       if (!existing) {
-        const reimbursement = await createReimbursement(
-          db,
-          {
-            lancamento_origem_id: lancamentoId,
-            cotista_aeronave_id: source.cotista_aeronave_id,
-            aeronave_id: source.aeronave_id,
-            descricao: source.descricao,
-            valor_centavos: amount,
-            data: paymentDate,
-          },
-          userId,
+        const context = await resolveCotista(db, {
+          cotista_aeronave_id: source.cotista_aeronave_id,
+        })
+        if (!context || context.kind !== 'CLIENTE') {
+          throw new FinanceError('Reembolso comum precisa de cotista cliente', 'reembolso_cotista_invalido')
+        }
+        const reimbursementId = id()
+        const shareLancamentoId = id()
+        const clientLancamentoId = id()
+        const contaReceberId = id()
+        statements.push(
+          insertStatement(db, schema, 'reembolsos', {
+            id: reimbursementId, lancamento_origem_id: lancamentoId,
+            conta_receber_id: contaReceberId, cotista_id: context.cotistaAeronaveId,
+            valor_centavos: amount, status: 'PENDENTE', criado_por: userId,
+          }, ['id', 'lancamento_origem_id', 'valor_centavos']),
+          insertStatement(db, schema, 'lancamentos', {
+            id: shareLancamentoId, aeronave_id: context.aeronaveId,
+            cotista_aeronave_id: context.cotistaAeronaveId, descricao: source.descricao || 'Reembolso de despesa',
+            categoria_nome: 'REEMBOLSOS ENTRADAS', grupo_categoria: 'REEMBOLSOS ENTRADAS',
+            fluxo: 'ENTRADA', natureza: 'REEMBOLSO', tipo_caixa: 'SHARE', valor_centavos: amount,
+            valor_total: amount / 100, valor: amount / 100, status: 'AGUARDANDO_REEMBOLSO',
+            data_emissao: paymentDate, data_vencimento: paymentDate, origem_tipo: 'REEMBOLSO',
+            origem_id: reimbursementId, criado_por: userId,
+          }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+          insertStatement(db, schema, 'lancamentos', {
+            id: clientLancamentoId, aeronave_id: context.aeronaveId,
+            cotista_aeronave_id: context.cotistaAeronaveId, descricao: source.descricao || 'Reembolso de despesa',
+            categoria_nome: 'REEMBOLSO', grupo_categoria: 'REEMBOLSO', fluxo: 'SAIDA', natureza: 'DESPESA',
+            tipo_caixa: 'CLIENTE', valor_centavos: amount, valor_total: amount / 100, valor: amount / 100,
+            status: 'EM_ABERTO', data_emissao: paymentDate, data_vencimento: paymentDate,
+            origem_tipo: 'REEMBOLSO', origem_id: reimbursementId, criado_por: userId,
+          }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+          insertStatement(db, schema, 'contas_areceber', {
+            id: contaReceberId, data_vencimento: paymentDate, valor_centavos: amount, valor: amount / 100,
+            descricao: source.descricao || 'Reembolso de despesa', categoria_nome: 'REEMBOLSOS ENTRADAS',
+            aeronave_id: context.aeronaveId, cotista_id: context.cotistaAeronaveId,
+            lancamento_receita_id: shareLancamentoId, lancamento_id: shareLancamentoId,
+            lancamentos_id: shareLancamentoId, lancamento_cliente_id: clientLancamentoId,
+            origem_tipo: 'REEMBOLSO', origem_id: reimbursementId, criado_por: userId, status: 'EM_ABERTO',
+          }, ['id', 'valor_centavos']),
+          linkStatement(db, schema, 'DESPESA', lancamentoId, 'CONTA_A_PAGAR', payableId, 'DESPESA_CONTA_A_PAGAR', userId),
+          linkStatement(db, schema, 'DESPESA', lancamentoId, 'REEMBOLSO', reimbursementId, 'DESPESA_REEMBOLSO', userId),
+          linkStatement(db, schema, 'REEMBOLSO', reimbursementId, 'CONTA_A_RECEBER', contaReceberId, 'REEMBOLSO_CONTA_A_RECEBER', userId),
+          auditStatement(db, schema, 'reembolsos', reimbursementId, 'CRIACAO_REEMBOLSO', userId, null, amount, null, idempotencyKey(body)),
         )
+        statements.push(
+          auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), idempotencyKey(body)),
+        )
+        await db.batch(statements)
         return {
-          ...(await db
-            .prepare('SELECT * FROM contas_apagar WHERE id = ?')
-            .bind(payableId)
-            .first<Row>()),
-          reimbursement,
+          ...(await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()),
+          reimbursement: { id: reimbursementId, contaReceberId, lancamentoId: shareLancamentoId, lancamentoClienteId: clientLancamentoId, valor_centavos: amount, status: 'PENDENTE', idempotent: false },
           idempotent: false,
         }
       }

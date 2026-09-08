@@ -322,6 +322,18 @@ CREATE TABLE IF NOT EXISTS auditoria_financeira (
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS financeiro_vinculos (
+  id TEXT PRIMARY KEY NOT NULL,
+  origem_tipo TEXT NOT NULL,
+  origem_id TEXT NOT NULL,
+  destino_tipo TEXT NOT NULL,
+  destino_id TEXT NOT NULL,
+  tipo_vinculo TEXT NOT NULL,
+  criado_por TEXT,
+  criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
+);
+
 CREATE TABLE IF NOT EXISTS financeiro_fila (
   id TEXT PRIMARY KEY NOT NULL,
   operacao TEXT NOT NULL,
@@ -396,6 +408,8 @@ CREATE INDEX IF NOT EXISTS contas_apagar_status_idx ON contas_apagar(status, dat
 CREATE INDEX IF NOT EXISTS contas_areceber_status_idx ON contas_areceber(status, data_vencimento);
 CREATE INDEX IF NOT EXISTS contas_areceber_idempotency_idx ON contas_areceber(idempotency_key);
 CREATE INDEX IF NOT EXISTS auditoria_financeira_entidade_idx ON auditoria_financeira(entidade, entidade_id, criado_em);
+CREATE INDEX IF NOT EXISTS financeiro_vinculos_origem_idx ON financeiro_vinculos(origem_tipo, origem_id);
+CREATE INDEX IF NOT EXISTS financeiro_vinculos_destino_idx ON financeiro_vinculos(destino_tipo, destino_id);
 CREATE INDEX IF NOT EXISTS financeiro_fila_status_idx ON financeiro_fila(status, criado_em);
 CREATE UNIQUE INDEX IF NOT EXISTS envio_despesas_lancamento_idx ON envio_despesas(lancamento_id) WHERE lancamento_id IS NOT NULL;
 
