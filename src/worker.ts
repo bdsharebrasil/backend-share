@@ -5536,17 +5536,17 @@ async function gerarFinanceiroNfSaida(
       grupo_categoria: 'RECEITAS OPERACIONAIS', tipo: 'receita', prazo: dataVencimento, data_vencimento: dataVencimento,
       fluxo: 'ENTRADA', valor_centavos: Math.round(valor * 100), valor_total: valor, pago_por: ctx.cotista_id,
       caixa: 'SHARE', tipo_caixa: 'SHARE', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
-      status: 'PENDENTE', criado_por: usuario?.id, numero_nf: isRecibo ? null : body.numero,
+      status: 'EM_ABERTO', criado_por: usuario?.id, numero_nf: isRecibo ? null : body.numero,
       numero_recibo: isRecibo ? body.numero : null,
     })
     lancamentoClienteId = uuid()
     await inserirLinhaDinamica(db, 'lancamentos', {
       id: lancamentoClienteId, aeronave_id: ctx.aeronave_id || null, data: dataEmissao, data_emissao: dataEmissao,
       descricao, categoria: CATEGORIA_CLIENTE_NF_SAIDA_NOME, categoria_nome: CATEGORIA_CLIENTE_NF_SAIDA_NOME,
-      categoria_id: CATEGORIA_CLIENTE_NF_SAIDA, categoria_movimentacao_id: CATEGORIA_CLIENTE_NF_SAIDA,
+      categoria_id: null, categoria_cliente_id: CATEGORIA_CLIENTE_NF_SAIDA,
       grupo_categoria: 'CAIXA CLIENTE', tipo: 'DESPESA', prazo: dataVencimento, data_vencimento: dataVencimento,
-      cotista_id: ctx.cotista_id, fluxo: 'SAIDA', valor_centavos: Math.round(valor * 100), valor_total: valor,
-      pago_por: ctx.cotista_id, caixa: 'CLIENTE', tipo_caixa: 'CLIENTE', pago_diretamente: 0,
+      cotista_aeronave_id: ctx.cotista_id, fluxo: 'SAIDA', valor_centavos: Math.round(valor * 100), valor_total: valor,
+      pago_por_cotista_aeronave_id: ctx.cotista_id, caixa: 'CLIENTE', tipo_caixa: 'CLIENTE', pago_diretamente: 0,
       reembolsavel: 0, reembolso_quitado: 0, status: 'EM_ABERTO', criado_por: usuario?.id,
       origem_tipo: 'RECEITA_CLIENTE', origem_id: lancamentoId,
       numero_nf: isRecibo ? null : body.numero, numero_recibo: isRecibo ? body.numero : null,

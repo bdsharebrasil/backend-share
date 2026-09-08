@@ -160,7 +160,7 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'idempotency_key', 'idempotencyKey', 'reference_id', 'valor_centavos', 'valorCentavos',
   'descricao', 'descricao_servico', 'fluxo', 'data', 'data_emissao', 'data_vencimento',
   'vencimento', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id', 'socio_id', 'holding_id',
-  'categoria_id', 'categoria_nome', 'categoria', 'categoria_cliente_id', 'categoria_cliente_nome',
+  'categoria_id', 'categoria_nome', 'categoria', 'categoria_cliente_id', 'categoria_cliente_nome', 'categoria_despesa_id', 'categoria_despesa_subcategoria',
   'grupo_categoria_cliente', 'fornecedor_id', 'fornecedor', 'fornecedor_nome',
   'fornecedores_favoritos_id', 'recibos_saida_id', 'origem_tipo', 'origem_id', 'periodicidade', 'tipo_caixa',
   'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'pago_diretamente', 'pagoDiretamente',
@@ -171,7 +171,7 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
 const OPTIONAL_SCHEMA_COLUMNS = new Set([
   'idempotency_key', 'aeronave_id', 'cotista_aeronave_id', 'holding_id', 'socio_id',
   'cliente_id', 'fornecedor_id', 'fornecedores_favoritos_id', 'fornecedor_nome', 'categoria_id', 'categoria_nome',
-  'grupo_categoria', 'data', 'data_lancamento', 'data_emissao', 'data_vencimento',
+  'grupo_categoria', 'categoria_cliente_id', 'data', 'data_lancamento', 'data_emissao', 'data_vencimento',
   'data_pagamento', 'prazo', 'valor', 'valor_total', 'tipo', 'natureza', 'tipo_caixa',
   'caixa', 'pago_por', 'pago_por_cotista_id', 'pago_por_socio_id', 'pago_diretamente',
   'reembolsavel', 'reembolso_quitado', 'forma_pagamento', 'conta_bancaria_id',
@@ -805,7 +805,10 @@ export async function createExpense(
           aeronave_id: command.aeronave_id,
           cotista_aeronave_id: command.cotista_aeronave_id,
           descricao: command.descricao,
-          categoria_id: nullableText(command.categoria_id),
+          categoria_id: command.tipo_caixa === 'CLIENTE' ? null : nullableText(command.categoria_id),
+          categoria_cliente_id: command.tipo_caixa === 'CLIENTE'
+            ? nullableText(command.categoria_cliente_id ?? command.categoria_id)
+            : null,
           categoria_nome: nullableText(command.categoria_nome ?? command.categoria),
           grupo_categoria: nullableText(command.grupo_categoria || 'DESPESAS EMPRESA'),
           fluxo: 'SAIDA',
@@ -814,7 +817,7 @@ export async function createExpense(
           valor_centavos: amount,
           valor_total: amount / 100,
           valor: amount / 100,
-          status: 'PAGO_DIRETAMENTE',
+          status: 'PAGO',
           data_lancamento: command.data,
           data_emissao: command.data,
           data_pagamento: command.data,
@@ -848,7 +851,7 @@ export async function createExpense(
       rateio_ids: rateioIds,
       conta_pagar_id: null,
       valor_centavos: amount,
-      status: 'PAGO_DIRETAMENTE',
+      status: 'PAGO',
       idempotent: false,
     }
   }
@@ -1052,7 +1055,8 @@ export async function issueRevenue(
           valor_centavos: amount,
           valor_total: amount / 100,
           valor: amount / 100,
-          categoria_id: nullableText(
+          categoria_id: null,
+          categoria_cliente_id: nullableText(
             command.categoria_cliente_id ?? command.categoria_id,
           ),
           categoria_nome: nullableText(

@@ -212,6 +212,8 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
       data_emissao: dataEmissao, data_vencimento: dataVencimento,
       aeronave_id: aeronaveId, cotista_aeronave_id: cotistaId,
       categoria_id: categoriaExiste ? categoriaInformada : null,
+      categoria_cliente_id: body.categoria_cliente_id ?? body.categoria_despesa_id ?? null,
+      categoria_cliente_nome: body.categoria_cliente_nome ?? body.categoria_despesa_subcategoria ?? null,
       categoria_nome: body.categoria_receita_nome ?? body.nome_categoria,
       origem_tipo: 'RECIBO_SAIDA', origem_id: id,
       periodicidade: 'MENSAL',
@@ -265,15 +267,12 @@ financeiroRoutes.delete('/recibos-saida/:id', async (c) => {
     const placeholders = ids.map(() => '?').join(', ')
 
     const statements: D1PreparedStatement[] = []
-    if (ids.length) {
-      statements.push(
-        db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids),
-        db.prepare(`DELETE FROM financeiro_vinculos WHERE (origem_id IN (${placeholders}) OR destino_id IN (${placeholders}))`).bind(...ids, ...ids),
-        db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids),
-      )
-    }
+    if (ids.length) statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE (origem_id IN (${placeholders}) OR destino_id IN (${placeholders}) OR origem_id = ? OR destino_id = ?)`).bind(...ids, ...ids, reciboId, reciboId))
+    else statements.push(db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ? OR destino_id = ?').bind(reciboId, reciboId))
+    if (ids.length) statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
     if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
     statements.push(db.prepare('DELETE FROM recibos_saida WHERE id = ?').bind(reciboId))
+    if (ids.length) statements.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
     await db.batch(statements)
 
     const pdfUrl = String(recibo.pdf_url ?? '')
