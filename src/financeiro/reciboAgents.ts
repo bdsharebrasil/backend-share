@@ -1,4 +1,5 @@
 type Row = Record<string, unknown>
+import type { StatusRecibo } from '../../shared/financeiro-contracts'
 
 type ReceiptInput = {
   tipo_recibo: string
@@ -17,7 +18,7 @@ type ReceiptInput = {
   grupo_categoria?: string | null
 }
 
-const RECEIPT_STATUSES = ['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO'] as const
+const RECEIPT_STATUSES: readonly StatusRecibo[] = ['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO']
 
 export function validateReceiptCommand(body: Row): ReceiptInput {
   const tipo = String(body.tipo_recibo ?? '').trim()
@@ -94,7 +95,7 @@ export async function createReceiptAllocations(db: D1Database, receiptId: string
   return rateios.results ?? []
 }
 
-export async function updateReceiptStatus(db: D1Database, receiptId: string, status: typeof RECEIPT_STATUSES[number]): Promise<void> {
+export async function updateReceiptStatus(db: D1Database, receiptId: string, status: StatusRecibo): Promise<void> {
   if (!receiptStatusIsValid(status)) throw new Error(`Status de recibo inválido: ${status}`)
   await db.prepare('UPDATE recibos SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(status, receiptId).run()
 }
