@@ -5080,7 +5080,40 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
   const diferenca = +(100 - percentuaisNormalizados.reduce((n: number, item: number) => n + item, 0)).toFixed(6)
   if (percentuaisNormalizados.length) percentuaisNormalizados[percentuaisNormalizados.length - 1] = +(percentuaisNormalizados[percentuaisNormalizados.length - 1] + diferenca).toFixed(6)
   const ids: string[] = []
-  for (const [index, row] of (rows.results as any[]).entries()) { const rateioLinhaId = uuid(); ids.push(rateioLinhaId); const pct = cotistas.length === 1 ? 100 : percentuaisNormalizados[index]; const subcategoria = body.subcategoria_1 || null; await portalDb(c).prepare(`INSERT INTO rateio_despesas (id,lancamento_id,categoria_nome,categoria_custo_id,cotista_id,cotista_nome,aeronave_id,aeronave_registro,tipo_rateio,data_vencimento,data_emissao_nf,numero_voo,subcategoria_1,subcategoria_2,subcategoria_3,subcategoria_4,descricao_despesa,pago_por,pago_diretamente,percentual_sociedade,percentual_uso,valor_total,valor_rateado,status,observacoes,conferido_por,anexos_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(rateioLinhaId,lancamentoId,body.categoria_nome || regra.grupo,body.categoria_id || null,row.id,row.nome,body.aeronave_id || null,aeronave?.matricula_registro || null,body.tipo_rateio || 'FIXO',body.vencimento || null,body.data_despesa || null,body.numero_voo || null,subcategoria,body.subcategoria_2 || null,body.subcategoria_3 || null,body.subcategoria_4 || null,body.descricao,body.tipo === 'cliente' ? row.id : (body.pago_por || 'SHARE'),regra.pagoDiretamente,Number(row.percentual_sociedade || 0),pct,valor,+(valor*pct/100).toFixed(2),'PENDENTE',body.observacoes || null,user.id,JSON.stringify(body.anexos || [])).run() }
+  for (const [index, row] of (rows.results as any[]).entries()) {
+    const rateioLinhaId = uuid();
+    ids.push(rateioLinhaId);
+    const pct = cotistas.length === 1 ? 100 : percentuaisNormalizados[index];
+    const valorTotalCentavos = Math.round(valor * 100);
+    const valorRateadoCentavos = Math.round(valor * pct / 100 * 100);
+    await inserirLinhaDinamica(portalDb(c), 'rateio_despesas', {
+      id: rateioLinhaId,
+      lancamento_id: lancamentoId,
+      aeronave_id: body.aeronave_id,
+      cotista_id: row.id,
+      data_emissao: body.data_despesa || null,
+      data_vencimento: body.vencimento || null,
+      categoria_id: body.categoria_id || null,
+      categoria_nome: body.categoria_nome || regra.grupo,
+      subcategoria_1: body.subcategoria_1 || null,
+      subcategoria_2: body.subcategoria_2 || null,
+      subcategoria_3: body.subcategoria_3 || null,
+      subcategoria_4: body.subcategoria_4 || null,
+      tipo_rateio: body.tipo_rateio || 'FIXO',
+      percentual_sociedade: Number(row.percentual_sociedade || 0),
+      percentual_uso: pct,
+      valor_total_centavos: valorTotalCentavos,
+      valor_rateado_centavos: valorRateadoCentavos,
+      valor_pago_real_centavos: regra.pagoDiretamente ? valorRateadoCentavos : 0,
+      pago_por_cotista_id: body.tipo === 'cliente' ? row.id : (body.pago_por || null),
+      pago_diretamente: regra.pagoDiretamente ? 1 : 0,
+      status: regra.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
+      data_pagamento: regra.pagoDiretamente ? (body.data_despesa || null) : null,
+      descricao_despesa: body.descricao,
+      observacoes: body.observacoes || null,
+    });
+  }
+
   if (body.tipo === 'cliente') {
     for (const [index, row] of (rows.results as any[]).entries()) if (row.holding_id && row.socio_id) {
       const movimentoId = uuid();
@@ -5447,12 +5480,12 @@ async function inserirLinhaDinamica(db: any, table: string, row: Record<string, 
   await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_, i) => `?${i + 1}`).join(',')})`).bind(...vals).run()
 }
 
-function tipoRateioHolding(value: unknown): 'FIXO' | 'SOCIEDADE' | 'USO' | 'IGUALITARIO' | 'MANUAL' {
+function tipoRateioHolding(value: unknown): 'FIXO' | 'VARIAVEL_POR_VOO' | 'VARIAVEL_POR_HORA' | 'EXTRA' {
   const tipo = String(value || '').trim().toUpperCase()
-  if (tipo === 'FIXO' || tipo === 'SOCIEDADE' || tipo === 'USO' || tipo === 'IGUALITARIO' || tipo === 'MANUAL') return tipo
-  if (tipo.includes('SOCIEDADE')) return 'SOCIEDADE'
-  if (tipo.includes('USO')) return 'USO'
-  return 'MANUAL'
+  if (tipo === 'FIXO' || tipo === 'VARIAVEL_POR_VOO' || tipo === 'VARIAVEL_POR_HORA' || tipo === 'EXTRA') return tipo
+  if (tipo.includes('VOO')) return 'VARIAVEL_POR_VOO'
+  if (tipo.includes('HORA') || tipo.includes('USO')) return 'VARIAVEL_POR_HORA'
+  return 'FIXO'
 }
 
 async function inserirRateioHolding(db: any, row: Record<string, any>) {
@@ -5476,7 +5509,7 @@ async function inserirRateioHolding(db: any, row: Record<string, any>) {
     valor_pago_real_centavos: row.valor_pago_real_centavos ?? 0,
     pago_por_socio_id: row.pago_por_socio_id ?? row.pago_por,
     pago_diretamente: row.pago_diretamente,
-    status: String(row.status || 'PENDENTE').toUpperCase(),
+    status: String(row.status || 'EM_ABERTO').toUpperCase() === 'PENDENTE' ? 'EM_ABERTO' : String(row.status || 'EM_ABERTO').toUpperCase(),
     data_pagamento: row.data_pagamento,
     descricao_despesa: row.descricao_despesa,
     observacoes: row.observacoes,

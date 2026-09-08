@@ -166,6 +166,8 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'numero_recibo', 'url_recibo', 'pago_diretamente', 'pagoDiretamente',
   'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
   'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
+  'modo_lancamento', 'tipo_movimento_hold', 'grupo_categoria', 'subcategoria_1',
+  'subcategoria_2', 'subcategoria_3', 'subcategoria_4', 'data_competencia_demonstrativo',
 ])
 
 const OPTIONAL_SCHEMA_COLUMNS = new Set([
@@ -351,7 +353,9 @@ function normalizeCommand(body: Row, userId: string | null): Row {
     data_vencimento: nullableText(body.data_vencimento ?? body.vencimento),
     aeronave_id: nullableText(body.aeronave_id),
     cotista_aeronave_id: nullableText(
-      body.cotista_aeronave_id ?? body.cotista_id,
+      body.cotista_aeronave_id ?? body.cotista_id ??
+      (Array.isArray(body.rateios) ? (body.rateios[0] as Row)?.id : null) ??
+      (Array.isArray(body.rateio_linhas) ? (body.rateio_linhas[0] as Row)?.cotista_id : null),
     ),
     socio_id: nullableText(body.socio_id),
     holding_id: nullableText(body.holding_id),
@@ -402,7 +406,8 @@ async function resolveCotista(
   command: Row,
 ): Promise<CotistaContext | null> {
   const cotistaId = nullableText(command.cotista_aeronave_id)
-  if (!cotistaId) return null
+  const socioId = nullableText(command.socio_id)
+  if (!cotistaId && !socioId) return null
 
   const row = await db
     .prepare(
@@ -415,9 +420,9 @@ async function resolveCotista(
          FROM cotista_aeronave ca
          LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
          LEFT JOIN cliente cl ON cl.id = ca.cliente_id
-        WHERE ca.id = ?`,
+        WHERE (? <> '' AND ca.id = ?) OR (? <> '' AND ca.socio_id = ?)`,
     )
-    .bind(cotistaId)
+    .bind(cotistaId || '', cotistaId || '', socioId || '', socioId || '')
     .first<Row>()
 
   if (!row) {
@@ -487,7 +492,7 @@ function allocationLines(body: Row): AllocationLine[] {
         : Math.round(amount * Number(line.percentual ?? 0) / 100),
     pagoPor: nullableText(line.pago_por ?? line.pagoPor),
     pagoDiretamente: asFlag(
-      line.pago_diretamente ?? line.pagoDiretamente,
+      line.pago_diretamente ?? line.pagoDiretamente ?? body.pago_diretamente ?? body.pagoDiretamente,
     ),
   }))
 
@@ -606,7 +611,9 @@ function clientAllocationStatements(
         lancamento_id: lancamentoId,
         cotista_id: line.cotistaId,
         aeronave_id: command.aeronave_id,
-        fornecedor_id: nullableText(command.fornecedor_id),
+        data_emissao: dateValue(command.data_emissao ?? command.data),
+        data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
+        periodicidade: nullableText(command.periodicidade),
         categoria_id: nullableText(command.categoria_id),
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria,
@@ -616,12 +623,13 @@ function clientAllocationStatements(
         percentual_uso: line.percentual,
         valor_total_centavos: amount,
         valor_rateado_centavos: line.valorCentavos,
+        valor_pago_real_centavos: line.pagoDiretamente ? line.valorCentavos : 0,
         valor_total: amount / 100,
         valor_rateado: line.valorCentavos / 100,
         pago_por_cotista_id: line.pagoPor,
         pago_por: line.pagoPor,
         pago_diretamente: line.pagoDiretamente ? 1 : 0,
-        status: line.pagoDiretamente ? 'PAGO' : 'EM_ABERTO',
+        status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
         data_pagamento: line.pagoDiretamente ? command.data : null,
         descricao_despesa: command.descricao,
         observacoes: nullableText(command.observacoes),
@@ -658,6 +666,9 @@ function holdingAllocationStatements(
         movimento_holding_id: movimentoId,
         aeronave_id: command.aeronave_id,
         socio_id: line.socioId,
+        data_emissao: dateValue(command.data_emissao ?? command.data),
+        data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
+        periodicidade: nullableText(command.periodicidade),
         categoria_id: nullableText(command.categoria_id),
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria,
@@ -667,6 +678,7 @@ function holdingAllocationStatements(
         percentual_uso: line.percentual,
         valor_total_centavos: amount,
         valor_rateado_centavos: line.valorCentavos,
+        valor_pago_real_centavos: line.pagoDiretamente ? line.valorCentavos : 0,
         valor_total: amount / 100,
         valor_rateado: line.valorCentavos / 100,
         pago_por_socio_id: line.pagoPor,
@@ -1091,24 +1103,27 @@ export async function issueRevenue(
         {
           id: id(),
           lancamento_id: clientLancamentoId,
-          categoria_custo_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
+          categoria_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
           categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
           subcategoria_1: nullableText(command.categoria_despesa_subcategoria),
           cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
-          cotista_nome: nullableText(context?.nome),
           aeronave_id: context?.aeronaveId || command.aeronave_id,
           tipo_rateio: 'FIXO',
           periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
+          data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
-          data_emissao_nf: command.data,
+          fornecedor_id: nullableText(command.fornecedor_id),
           descricao_despesa: command.descricao,
-          pago_por: context?.cotistaAeronaveId || command.cotista_aeronave_id,
+          pago_por_cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
           pago_diretamente: 1,
           percentual_sociedade: 100,
           percentual_uso: 100,
+          valor_total_centavos: amount,
+          valor_rateado_centavos: amount,
+          valor_pago_real_centavos: amount,
           valor_total: amount / 100,
           valor_rateado: amount / 100,
-          status: 'PENDENTE',
+          status: 'PAGO_DIRETAMENTE',
           numero_recibo: nullableText(command.numero_recibo),
           recibo_url: nullableText(command.url_recibo),
         },
