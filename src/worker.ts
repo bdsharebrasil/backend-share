@@ -6604,9 +6604,24 @@ app.post('/api/financeiro/recibos', async c => {
   const movimentacaoId = possuiCotistaHolding ? uuid() : null
 
   try {
+    const statements: any[] = []
+    // Queue writes issued by the existing dynamic-schema helpers and commit them atomically.
+    const txDb: any = {
+      prepare: (sql: string) => {
+        const statement = db.prepare(sql)
+        if (!/^(INSERT|UPDATE|DELETE)\b/i.test(sql.trim())) return statement
+        return {
+          bind: (...values: any[]) => {
+            const bound = statement.bind(...values)
+            statements.push(bound)
+            return { run: async () => ({ success: true }) }
+          },
+        }
+      },
+    }
     // 1. Cliente: somente cotistas cliente passam pelo caixa Share.
     if (lancamentoId) {
-      await inserirLinhaDinamica(db, 'lancamentos', {
+      await inserirLinhaDinamica(txDb, 'lancamentos', {
         id: lancamentoId, aeronave_id: body.aeronave_id || null, data: dataEmissao, data_emissao: dataEmissao,
         descricao, documento: body.numero_documento_anexo || null, numero_doc: body.numero_documento_anexo || null,
         fornecedor: ehPagamento ? recebedorNome : null, fornecedor_nome: ehPagamento ? recebedorNome : null,
@@ -6628,7 +6643,7 @@ app.post('/api/financeiro/recibos', async c => {
     if (movimentacaoId) {
       const holdingId = pagadorCotista?.holding_id || linhasRateio.find((linha) => linha.socio_id)?.holding_id || null
       if (!holdingId) throw new Error('holding_nao_identificada_para_cotista')
-      await inserirMovimentoHolding(db, {
+      await inserirMovimentoHolding(txDb, {
         id: movimentacaoId, holding_id: holdingId, aeronave_id: body.aeronave_id || null,
         socio_id: pagadorCotista?.socio_id || linhasRateio.find((linha) => linha.socio_id)?.socio_id || null,
         cotista_id: pagadorCotista?.cotista_id || linhasRateio.find((linha) => linha.socio_id)?.cotista_id || null,
@@ -6647,7 +6662,7 @@ app.post('/api/financeiro/recibos', async c => {
       for (const linha of linhasRateio) {
         const rateioId = uuid()
         if (linha.socio_id) {
-          await inserirRateioHolding(db, {
+          await inserirRateioHolding(txDb, {
             id: rateioId, movimento_holding_id: movimentacaoId, holding_id: linha.holding_id,
             socio_id: linha.socio_id, cotista_id: linha.cotista_id, categoria_nome: categoriaNome,
             aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio,
@@ -6657,7 +6672,7 @@ app.post('/api/financeiro/recibos', async c => {
           })
         } else {
           if (!lancamentoId) throw new Error('lancamento_cliente_ausente_para_rateio')
-          await inserirLinhaDinamica(db, 'rateio_despesas', {
+          await inserirLinhaDinamica(txDb, 'rateio_despesas', {
             id: rateioId, lancamento_id: lancamentoId, tipo_rateio: tipoRateio, data_vencimento: body.data_vencimento || null,
             data_emissao_nf: dataEmissao, categoria_nome: categoriaNome, cotista_id: linha.cotista_id, pago_por: linha.pago_por,
             pago_diretamente: ehPagamento ? 1 : regra.pagoDiretamente, aeronave_id: body.aeronave_id || null,
@@ -6665,7 +6680,7 @@ app.post('/api/financeiro/recibos', async c => {
             observacoes: `Rateio ${linha.percentual}% — ${linha.nome}`,
           })
         }
-        await db.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, nome, percentual, valor, cotista_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        await txDb.prepare('INSERT INTO recibo_rateio (id, recibo_id, rateio_despesas_id, nome, percentual, valor, cotista_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
           .bind(uuid(), reciboId, rateioId, linha.nome, linha.percentual, linha.valor, linha.cotista_id).run()
         rateioIdsGerados.push(rateioId)
       }
@@ -6674,7 +6689,7 @@ app.post('/api/financeiro/recibos', async c => {
       if (pagadorCotista.cliente_id) {
         if (!lancamentoId) throw new Error('lancamento_cliente_ausente_para_rateio')
         const rateioId = uuid()
-        await inserirLinhaDinamica(db, 'rateio_despesas', {
+        await inserirLinhaDinamica(txDb, 'rateio_despesas', {
           id: rateioId, lancamento_id: lancamentoId, tipo_rateio: tipoRateio, data_emissao_nf: dataEmissao,
           categoria_nome: categoriaNome, cotista_id: pagadorCotista.cotista_id, pago_por: pagadorCotista.cliente_id,
           pago_diretamente: 1, aeronave_id: body.aeronave_id || null, descricao_despesa: descricao,
@@ -6685,7 +6700,7 @@ app.post('/api/financeiro/recibos', async c => {
         rateioIdsGerados.push(rateioId)
       } else if (pagadorCotista.socio_id) {
         const rateioId = uuid()
-        await inserirRateioHolding(db, {
+        await inserirRateioHolding(txDb, {
           id: rateioId, movimento_holding_id: movimentacaoId, holding_id: pagadorCotista.holding_id,
           socio_id: pagadorCotista.socio_id, cotista_id: pagadorCotista.cotista_id, categoria_nome: categoriaNome,
           aeronave_id: body.aeronave_id || null, tipo_rateio: tipoRateio,
@@ -6699,7 +6714,7 @@ app.post('/api/financeiro/recibos', async c => {
         if (!lancamentoId) throw new Error('lancamento_cliente_ausente_para_rateio')
         const rateioId = uuid()
         const pagoPor = regra.reembolsavel ? 'share' : body.cotista_id
-        await inserirLinhaDinamica(db, 'rateio_despesas', {
+        await inserirLinhaDinamica(txDb, 'rateio_despesas', {
           id: rateioId, lancamento_id: lancamentoId, tipo_rateio: tipoRateio, data_vencimento: body.data_vencimento || null,
           data_emissao_nf: dataEmissao, categoria_nome: regra.grupo, cotista_id: body.cotista_id, pago_por: pagoPor,
           pago_diretamente: regra.pagoDiretamente, aeronave_id: body.aeronave_id || null, descricao_despesa: descricao,
@@ -6711,7 +6726,7 @@ app.post('/api/financeiro/recibos', async c => {
     // 3. recibo em si — snapshot para PDF/histórico, referenciando a lançamento de origem.
     const tipoRecibo = String(body.tipo_recibo)
     const statusRecibo = reembolsavel ? 'aguardando_reembolso' : 'emitido'
-    await inserirLinhaDinamica(db, 'recibos', {
+    await inserirLinhaDinamica(txDb, 'recibos', {
       id: reciboId, numero_recibo: numeroRecibo, tipo_recibo: tipoRecibo,
       colaborador_id: beneficiarioTipo === 'colaborador' ? (String(body.colaborador_id || '').trim() || recebedorId.replace(/^perfil:/, '') || null) : null,
       pagador_tipo: pagadorCotista ? 'cotista_aeronave' : 'empresa',
@@ -6731,32 +6746,22 @@ app.post('/api/financeiro/recibos', async c => {
       subcategoria_3: body.subcategoria_3 || null, subcategoria_4: body.subcategoria_4 || null, url_recibo: reciboUrl,
     })
     for (const rateioId of rateioIdsGerados) {
-      await db.prepare('UPDATE rateio_despesas SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
+      await txDb.prepare('UPDATE rateio_despesas SET numero_recibo = ?1, recibo_url = ?2 WHERE id = ?3').bind(numeroRecibo, reciboUrl, rateioId).run().catch(() => undefined)
     }
     if (contaPagarId) {
       await garantirTabelaContas(c)
-      await db.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor, categoria_id, categoria_nome, descricao, criado_por, aeronave_id, fornecedor_id, cotista_id, colaborador_id, boleto_url, nf_url, lancamento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`).bind(
+      await txDb.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor, categoria_id, categoria_nome, descricao, criado_por, aeronave_id, fornecedor_id, cotista_id, colaborador_id, boleto_url, nf_url, lancamento_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`).bind(
         contaPagarId, body.data_vencimento || dataEmissao, valor, categoriaId || null, categoriaNome, descricao, user.id,
         body.aeronave_id || null, null, beneficiarioTipo === 'cliente' ? clienteId : null,
         beneficiarioTipo === 'colaborador' ? body.colaborador_id : null, body.boleto_url || null, body.nf_url || null, lancamentoId,
       ).run()
     }
 
+    await db.batch(statements)
     const recibo = await db.prepare('SELECT r.*, r.descricao AS descricao_servico, (CAST(r.valor AS REAL) / 100.0) AS valor, r.url_recibo AS pdf_url FROM recibos r WHERE r.id = ?1').bind(reciboId).first()
     return c.json({ recibo, lancamento_id: lancamentoId, movimentacao_id: movimentacaoId, rateio_ids: rateioIdsGerados, rateio_linhas: linhasRateio }, 201)
   } catch (error: any) {
     log.error('[recibos] falha ao emitir recibo', { beneficiario_tipo: beneficiarioTipo, error: error?.message || String(error) })
-    if (contaPagarId) await db.prepare('DELETE FROM contas_apagar WHERE id = ?1').bind(contaPagarId).run().catch(() => undefined)
-    if (lancamentoId) {
-      await db.prepare('DELETE FROM rateio_despesas WHERE lancamento_id = ?1').bind(lancamentoId).run().catch(() => undefined)
-      await db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(lancamentoId).run().catch(() => undefined)
-    }
-    if (movimentacaoId) {
-      await db.prepare('DELETE FROM rateio_hold WHERE movimento_holding_id = ?1').bind(movimentacaoId).run().catch(() => undefined)
-      await db.prepare('DELETE FROM movimentos_holding WHERE id = ?1').bind(movimentacaoId).run().catch(() => undefined)
-    }
-    await db.prepare('DELETE FROM recibo_rateio WHERE recibo_id = ?1').bind(reciboId).run().catch(() => undefined)
-    await db.prepare('DELETE FROM recibos WHERE id = ?1').bind(reciboId).run().catch(() => undefined)
     return c.json({ error: error?.message || 'falha_ao_emitir_recibo' }, 500)
   }
 })
