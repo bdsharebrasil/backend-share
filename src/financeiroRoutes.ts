@@ -61,6 +61,37 @@ async function listar(db: D1Database, sql: string, ...params: unknown[]): Promis
   return result.results ?? []
 }
 
+async function alocarNumeroReciboSaida(db: D1Database, cotistaId: string, dataEmissao: string, codigoInformado?: unknown): Promise<string> {
+  const cotista = await db.prepare(`
+    SELECT COALESCE(ca.codigo_cliente, cl.codigo_cliente, 'CLI') AS codigo_cliente
+    FROM cotista_aeronave ca
+    LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+    WHERE ca.id = ?
+    LIMIT 1
+  `).bind(cotistaId).first<{ codigo_cliente: string | null }>()
+  const codigo = String(codigoInformado ?? cotista?.codigo_cliente ?? 'CLI').trim().toUpperCase() || 'CLI'
+  const anoCompleto = dataEmissao.slice(0, 4)
+  const anoCurto = anoCompleto.slice(-2)
+  const anoCadastrado = await db.prepare('SELECT ano FROM sequencia_numeros_recibo_saida WHERE codigo_cliente = ? AND ano IN (?, ?) ORDER BY CASE WHEN ano = ? THEN 0 ELSE 1 END LIMIT 1').bind(codigo, anoCompleto, anoCurto, anoCompleto).first<{ ano: string }>()
+  const ano = anoCadastrado?.ano ?? anoCompleto
+  const existentes = await listar(db, 'SELECT numero_recibo FROM recibos_saida WHERE numero_recibo LIKE ?', `REC-${codigo}%/${anoCurto}`)
+  const maiorExistente = existentes.reduce((maior, row) => {
+    const match = String(row.numero_recibo ?? '').match(new RegExp(`^REC-${codigo}(\\d+)/${anoCurto}$`))
+    return Math.max(maior, match ? Number(match[1]) : 0)
+  }, 0)
+  const sequencia = await db.prepare(`
+    INSERT INTO sequencia_numeros_recibo_saida (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = CASE
+      WHEN sequencia_numeros_recibo_saida.proximo_numero <= ? THEN ?
+      ELSE sequencia_numeros_recibo_saida.proximo_numero + 1
+    END
+    RETURNING proximo_numero - 1 AS numero
+  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, maiorExistente + 2, maiorExistente + 1, maiorExistente + 2).first<{ numero: number }>()
+  if (!sequencia) throw new Error('falha_ao_gerar_sequencia_recibo_saida')
+  return `REC-${codigo}${sequencia.numero}/${anoCurto}`
+}
+
 async function enriquecerFornecedores(db: D1Database, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
   if (!rows.length) return rows
   const cotistaIds = [...new Set(rows.map((row) => String(row.cotista_aeronave_id ?? row.cotista_id ?? '').trim()).filter(Boolean))]
@@ -172,7 +203,7 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
       return c.json({ error: 'cotista_aeronave_id, aeronave_id, valor_total, data_emissao e descricao_servico são obrigatórios' }, 400)
     }
     const id = crypto.randomUUID()
-    const numero = String(body.numero_recibo ?? body.numero ?? `REC-${id.slice(0, 8).toUpperCase()}`)
+    const numero = await alocarNumeroReciboSaida(c.env.SHARE_DB, cotistaId, dataEmissao, body.codigo_cliente)
     const categoriaInformada = String(body.categoria_receita_id ?? body.categoria_id ?? '').trim()
     const categoriaExiste = categoriaInformada
       ? Boolean(await c.env.SHARE_DB.prepare('SELECT id FROM categoria_movimentacao_share WHERE id = ?').bind(categoriaInformada).first())
