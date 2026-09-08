@@ -477,6 +477,34 @@ function allocationLines(body: Row): AllocationLine[] {
   return lines
 }
 
+async function validateAllocationLines(
+  db: Database,
+  command: Row,
+  lines: AllocationLine[],
+  amount: number,
+): Promise<void> {
+  if (!lines.length) return
+  if (!nullableText(command.aeronave_id)) {
+    throw new FinanceError('Aeronave obrigatória para rateio', 'rateio_aeronave_obrigatoria')
+  }
+  const ids = [...new Set(lines.map((line) => line.cotistaId))]
+  const placeholders = ids.map(() => '?').join(', ')
+  const rows = await db.prepare(
+    `SELECT id FROM cotista_aeronave WHERE id IN (${placeholders}) AND aeronave_id = ?`,
+  ).bind(...ids, command.aeronave_id).all<{ id: string }>()
+  if ((rows.results || []).length !== ids.length) {
+    throw new FinanceError('Todos os cotistas do rateio devem pertencer à aeronave', 'rateio_cotistas_invalidos')
+  }
+  const percentual = lines.reduce((sum, line) => sum + line.percentual, 0)
+  if (Math.abs(percentual - 100) > 0.01) {
+    throw new FinanceError('A soma dos percentuais do rateio deve ser 100%', 'rateio_percentual_invalido')
+  }
+  const total = lines.reduce((sum, line) => sum + line.valorCentavos, 0)
+  if (total !== amount) {
+    throw new FinanceError('A soma dos valores do rateio deve ser igual ao valor da operação', 'rateio_valor_invalido')
+  }
+}
+
 function auditStatement(
   db: Database,
   schema: SchemaCache,
@@ -643,6 +671,7 @@ export async function createExpense(
   )
   const reembolsavel = asFlag(command.reembolsavel)
   const amount = asPositiveCents(command.valor_centavos)
+  await validateAllocationLines(db, command, lines, amount)
 
   if (context?.kind === 'HOLDING') {
     if (!lines.length) {

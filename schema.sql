@@ -350,11 +350,14 @@ CREATE TABLE IF NOT EXISTS envio_despesas (
   tipo TEXT NOT NULL,
   descricao TEXT NOT NULL,
   valor REAL NOT NULL DEFAULT 0,
+  valor_centavos INTEGER,
   data_despesa TEXT,
   vencimento TEXT,
+  data_vencimento TEXT,
   fornecedor TEXT,
   fornecedor_id TEXT,
   cotista_id TEXT,
+  cotista_aeronave_id TEXT,
   cotista_ids TEXT DEFAULT '[]',
   aeronave_id TEXT,
   numero_voo TEXT,
@@ -388,6 +391,20 @@ CREATE TABLE IF NOT EXISTS envio_despesas (
   atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS envio_despesa_anexos (
+  id TEXT PRIMARY KEY NOT NULL,
+  envio_despesa_id TEXT NOT NULL,
+  origem_tipo TEXT NOT NULL,
+  origem_id TEXT NOT NULL,
+  tipo TEXT NOT NULL,
+  numero TEXT,
+  r2_key TEXT,
+  validado INTEGER NOT NULL DEFAULT 0,
+  criado_por TEXT,
+  criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(envio_despesa_id, origem_tipo, origem_id, tipo)
+);
+
 CREATE TABLE IF NOT EXISTS categoria_movimentacao_cliente (
   id TEXT PRIMARY KEY NOT NULL,
   nome TEXT NOT NULL,
@@ -412,6 +429,7 @@ CREATE INDEX IF NOT EXISTS financeiro_vinculos_origem_idx ON financeiro_vinculos
 CREATE INDEX IF NOT EXISTS financeiro_vinculos_destino_idx ON financeiro_vinculos(destino_tipo, destino_id);
 CREATE INDEX IF NOT EXISTS financeiro_fila_status_idx ON financeiro_fila(status, criado_em);
 CREATE UNIQUE INDEX IF NOT EXISTS envio_despesas_lancamento_idx ON envio_despesas(lancamento_id) WHERE lancamento_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS envio_despesa_anexos_envio_idx ON envio_despesa_anexos(envio_despesa_id);
 
 CREATE TABLE IF NOT EXISTS sequencia_numeros_recibos (
   id TEXT PRIMARY KEY NOT NULL,
