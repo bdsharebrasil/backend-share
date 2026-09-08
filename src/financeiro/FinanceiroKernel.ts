@@ -163,7 +163,7 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'categoria_id', 'categoria_nome', 'categoria', 'categoria_cliente_id', 'categoria_cliente_nome', 'categoria_despesa_id', 'categoria_despesa_subcategoria',
   'grupo_categoria_cliente', 'fornecedor_id', 'fornecedor', 'fornecedor_nome',
   'fornecedores_favoritos_id', 'recibos_saida_id', 'origem_tipo', 'origem_id', 'periodicidade', 'tipo_caixa',
-  'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'pago_diretamente', 'pagoDiretamente',
+  'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'numero_recibo', 'url_recibo', 'pago_diretamente', 'pagoDiretamente',
   'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
   'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
 ])
@@ -1062,17 +1062,57 @@ export async function issueRevenue(
           categoria_nome: nullableText(
             command.categoria_cliente_nome ?? command.categoria_nome,
           ),
+          fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+          fornecedores_favoritos_id: nullableText(command.fornecedor_id),
           grupo_categoria:
             nullableText(command.grupo_categoria_cliente) ||
             'ADM SHARE BRASIL',
           data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
-          origem_tipo: 'RECEITA',
+          periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
+          numero_recibo: nullableText(command.numero_recibo),
+          url_recibo: nullableText(command.url_recibo),
+          origem_tipo: upper(command.origem_tipo) === 'RECIBO_SAIDA' ? 'RECIBO_SAIDA' : 'RECEITA',
           origem_id: lancamentoId,
           status: 'EM_ABERTO',
           criado_por: userId,
         },
         ['id', 'descricao', 'fluxo', 'valor_centavos'],
+      ),
+    )
+  }
+
+  if (clientLancamentoId) {
+    statements.push(
+      insertStatement(
+        db,
+        schema,
+        'rateio_despesas',
+        {
+          id: id(),
+          lancamento_id: clientLancamentoId,
+          categoria_custo_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
+          categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+          subcategoria_1: nullableText(command.categoria_despesa_subcategoria),
+          cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
+          cotista_nome: nullableText(context?.nome),
+          aeronave_id: context?.aeronaveId || command.aeronave_id,
+          tipo_rateio: 'FIXO',
+          periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
+          data_vencimento: command.data_vencimento || command.data,
+          data_emissao_nf: command.data,
+          descricao_despesa: command.descricao,
+          pago_por: context?.cotistaAeronaveId || command.cotista_aeronave_id,
+          pago_diretamente: 1,
+          percentual_sociedade: 100,
+          percentual_uso: 100,
+          valor_total: amount / 100,
+          valor_rateado: amount / 100,
+          status: 'PENDENTE',
+          numero_recibo: nullableText(command.numero_recibo),
+          recibo_url: nullableText(command.url_recibo),
+        },
+        ['id', 'lancamento_id'],
       ),
     )
   }

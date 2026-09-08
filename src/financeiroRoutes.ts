@@ -215,6 +215,7 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
       categoria_cliente_id: body.categoria_cliente_id ?? body.categoria_despesa_id ?? null,
       categoria_cliente_nome: body.categoria_cliente_nome ?? body.categoria_despesa_subcategoria ?? null,
       categoria_nome: body.categoria_receita_nome ?? body.nome_categoria,
+      numero_recibo: numero,
       origem_tipo: 'RECIBO_SAIDA', origem_id: id,
       periodicidade: 'MENSAL',
     }, c.get('userId') || null)
@@ -243,8 +244,17 @@ financeiroRoutes.patch('/recibos-saida/:id', async (c) => {
     if (!pdfUrl) return c.json({ error: 'pdf_url_obrigatorio' }, 400)
     const result = await c.env.SHARE_DB.prepare('UPDATE recibos_saida SET pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(pdfUrl, c.req.param('id')).run()
     if (!result.meta.changes) return c.json({ error: 'recibo_saida_nao_encontrado' }, 404)
-    const recibo = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(c.req.param('id')).first()
-    return c.json({ recibo })
+    const recibo = await c.env.SHARE_DB.prepare('SELECT numero_recibo, lancamentos_id FROM recibos_saida WHERE id = ?').bind(c.req.param('id')).first<{ numero_recibo: string | null; lancamentos_id: string | null }>()
+    const principalId = String(recibo?.lancamentos_id ?? '').trim()
+    const principal = principalId ? await c.env.SHARE_DB.prepare('SELECT id FROM lancamentos WHERE id = ?').bind(principalId).first<{ id: string }>() : null
+    const cliente = principal ? await c.env.SHARE_DB.prepare('SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = ? LIMIT 1').bind(principal.id, 'CLIENTE').first<{ id: string }>() : null
+    const ids = [principal?.id, cliente?.id].filter((id): id is string => Boolean(id))
+    for (const lancamentoId of ids) {
+      await c.env.SHARE_DB.prepare(`UPDATE lancamentos SET numero_recibo = ?, url_recibo = ?, origem_tipo = CASE WHEN tipo_caixa = 'CLIENTE' THEN 'RECIBO_SAIDA' ELSE origem_tipo END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(recibo?.numero_recibo ?? null, pdfUrl, lancamentoId).run()
+      await c.env.SHARE_DB.prepare('UPDATE rateio_despesas SET numero_recibo = ?, recibo_url = ? WHERE lancamento_id = ?').bind(recibo?.numero_recibo ?? null, pdfUrl, lancamentoId).run().catch(() => undefined)
+    }
+    const reciboAtualizado = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(c.req.param('id')).first()
+    return c.json({ recibo: reciboAtualizado })
   } catch (error) { return errorResponse(c, error) }
 })
 

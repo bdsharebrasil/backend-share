@@ -5291,6 +5291,17 @@ app.post('/api/interno/emails', async c => {
     const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
+  if (status === 'enviado') {
+    for (const referencia of ids.filter((item) => item.startsWith('recibo_saida:'))) {
+      const reciboId = referencia.slice('recibo_saida:'.length)
+      const recibo = await db.prepare('SELECT lancamentos_id FROM recibos_saida WHERE id = ?').bind(reciboId).first<{ lancamentos_id: string | null }>().catch(() => null)
+      const principalId = String(recibo?.lancamentos_id ?? '').trim()
+      const cliente = principalId ? await db.prepare('SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = ? LIMIT 1').bind(principalId, 'CLIENTE').first<{ id: string }>().catch(() => null) : null
+      for (const lancamentoId of [principalId, cliente?.id].filter(Boolean)) {
+        await db.prepare(`UPDATE lancamentos SET observacoes = CASE WHEN COALESCE(observacoes, '') = '' THEN ? ELSE observacoes || '\n' || ? END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind('E-mail do recibo: enviado', 'E-mail do recibo: enviado', lancamentoId).run()
+      }
+    }
+  }
   await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
