@@ -142,7 +142,6 @@ CREATE TABLE IF NOT EXISTS rateios_cotistas (
 CREATE TABLE IF NOT EXISTS rateio_despesas (
   id TEXT PRIMARY KEY NOT NULL,
   lancamento_id TEXT,
-  lancamentos_id TEXT,
   categoria_nome TEXT,
   categoria_custo_id TEXT,
   cotista_id TEXT,
@@ -196,7 +195,7 @@ CREATE TABLE IF NOT EXISTS movimentos_holding (
 
 CREATE TABLE IF NOT EXISTS rateio_hold (
   id TEXT PRIMARY KEY NOT NULL,
-  movimentos_holding_id TEXT,
+  movimento_holding_id TEXT,
   categoria_nome TEXT,
   categoria_custo_id TEXT,
   fornecedor_id TEXT,
@@ -391,7 +390,7 @@ CREATE INDEX IF NOT EXISTS lancamentos_data_emissao_idx ON lancamentos(data_emis
 CREATE INDEX IF NOT EXISTS lancamentos_idempotency_idx ON lancamentos(idempotency_key);
 CREATE INDEX IF NOT EXISTS lancamentos_caixa_idx ON lancamentos(tipo_caixa, status);
 CREATE INDEX IF NOT EXISTS rateios_cotistas_lancamento_idx ON rateios_cotistas(lancamento_id);
-CREATE INDEX IF NOT EXISTS rateio_despesas_lancamento_idx ON rateio_despesas(lancamentos_id, lancamento_id);
+CREATE INDEX IF NOT EXISTS rateio_despesas_lancamento_idx ON rateio_despesas(lancamento_id);
 CREATE INDEX IF NOT EXISTS movimentos_holding_holding_idx ON movimentos_holding(holding_id, data);
 CREATE INDEX IF NOT EXISTS contas_apagar_status_idx ON contas_apagar(status, data_vencimento);
 CREATE INDEX IF NOT EXISTS contas_areceber_status_idx ON contas_areceber(status, data_vencimento);
