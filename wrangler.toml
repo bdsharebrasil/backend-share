@@ -11,6 +11,7 @@ fallthrough = true
 [vars]
 EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 SUPABASE_URL = "https://jilmlmdgeyzubylncpjy.supabase.co"
+R2_PUBLIC_URL = "https://share-brasil.com"
 
 # ============= KV NAMESPACE =============
 [[kv_namespaces]]

@@ -17,6 +17,7 @@ type Bindings = {
   SHARE_DB: D1Database
   FILES?: R2Bucket
   SHARE_FILES?: R2Bucket
+  R2_PUBLIC_URL?: string
 }
 
 type Variables = {
@@ -343,7 +344,10 @@ financeiroRoutes.post('/notas-saida/anexos', async (c) => {
     const id = crypto.randomUUID()
     const key = `share/${prefixo}/${documentoId}/${id}-${arquivo.name}`
     await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
-    const url = `/api/financeiro/notas-saida/anexos/${id}/arquivo?key=${encodeURIComponent(key)}`
+    const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
+    const url = publicBase
+      ? `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
+      : `/api/financeiro/notas-saida/anexos/${id}/arquivo?key=${encodeURIComponent(key)}`
     return c.json({ id, url }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
