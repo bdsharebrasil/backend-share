@@ -69,6 +69,14 @@ interface HotelReservationHotel {
   telefone_reservas: string | null
 }
 
+
+type WorkerSchemaRequirement = { table: string; columns?: string[] }
+async function validateWorkerSchema(c: Context<{ Bindings: Bindings }>, requirements: WorkerSchemaRequirement[]): Promise<void> {
+  const db=portalDb(c); const missing:string[]=[]
+  for (const r of requirements) { const q=await db.prepare(`SELECT name FROM pragma_table_info(?)`).bind(r.table).all<{name:string}>().catch(()=>({results:[] as {name:string}[]})); const cols=new Set((q.results||[]).map(x=>String(x.name))); if(!cols.size){missing.push(`tabela ${r.table}`);continue} for(const col of r.columns||[]) if(!cols.has(col)) missing.push(`${r.table}.${col}`) }
+  if(missing.length) throw new Error(`Schema incompatível; aplique a migration D1 correspondente. Ausências: ${missing.join(', ')}`)
+}
+
 // ─── App Initialization ───────────────────────────────────────────────────────
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -2625,21 +2633,7 @@ function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
 }
 
 async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
-  void c
-  return
-  const db = portalDb(c)
-  await db.batch([
-    db.prepare(`CREATE TABLE IF NOT EXISTS short_links (code TEXT PRIMARY KEY NOT NULL, r2_key TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS email_templates (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL, assunto TEXT NOT NULL, corpo_html TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS email_envios (id TEXT PRIMARY KEY NOT NULL, tipo TEXT, reference_type TEXT, reference_id TEXT, destinatario TEXT NOT NULL, assunto TEXT NOT NULL, status TEXT NOT NULL, erro_mensagem TEXT, enviado_por TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS mensagens (id TEXT PRIMARY KEY NOT NULL, remetente_id TEXT NOT NULL, destinatario_id TEXT NOT NULL, assunto TEXT, conteudo TEXT NOT NULL, lida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS mensagens_usuario (mensagem_id TEXT NOT NULL, usuario_id TEXT NOT NULL, papel TEXT NOT NULL CHECK (papel IN ('remetente', 'destinatario')), lida INTEGER NOT NULL DEFAULT 0, favorita INTEGER NOT NULL DEFAULT 0, arquivada INTEGER NOT NULL DEFAULT 0, excluida INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (mensagem_id, usuario_id))`),
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_mensagens_usuario_pasta ON mensagens_usuario (usuario_id, papel, excluida, arquivada, favorita, lida)`),
-  ])
-  // Migração legada: o D1 não aceita múltiplas instruções em um único prepare.
-  await db.prepare('ALTER TABLE user_profiles ADD COLUMN email_envio TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE mensagens ADD COLUMN lida INTEGER NOT NULL DEFAULT 0').run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'short_links',columns:['code']},{table:'email_templates',columns:['id']},{table:'mensagens',columns:['id']},{table:'mensagens_usuario',columns:['id']}])
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
@@ -3300,44 +3294,16 @@ async function buscarTripulante(c: Context<{ Bindings: Bindings }>, id: string):
 }
 
 async function garantirTabelaDisponibilidadeTripulacao(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN socio_id TEXT NULL`).run().catch(() => undefined)
-  await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN cliente_emprestimo_id TEXT NULL`).run().catch(() => undefined)
-  await portalDb(c).prepare(`ALTER TABLE solicitacoes_reserva_voo ADD COLUMN socio_emprestimo_id TEXT NULL`).run().catch(() => undefined)
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS escala_tripulacao (
-    id TEXT PRIMARY KEY NOT NULL,
-    tripulacao_id TEXT NOT NULL,
-    aeronave_id TEXT NULL,
-    solicitacao_id TEXT NULL,
-    funcao TEXT NOT NULL DEFAULT 'PIC',
-    data_inicio TEXT NOT NULL,
-    data_fim TEXT NOT NULL,
-    status TEXT NULL,
-    observacoes TEXT NULL,
-    criado_por TEXT NULL,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`).run()
+  await validateWorkerSchema(c, [{table:'disponibilidade_tripulacao',columns:['id']}])
 }
 
 async function garantirTabelaPlanosVoo(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS planos_voo (
-    id TEXT PRIMARY KEY NOT NULL,
-    numero_voo TEXT NULL,
-    adep TEXT NOT NULL,
-    ades TEXT NOT NULL,
-    data_voo TEXT NULL,
-    eobt TEXT NULL,
-    payload_json TEXT NOT NULL,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`).run()
+  await validateWorkerSchema(c, [{table:'planos_voo',columns:['id']}])
 }
 
 
 async function garantirComplianceTripulacao(c: Context<{ Bindings: Bindings }>) {
-  await portalDb(c).prepare('ALTER TABLE aeronave ADD COLUMN numero_motores INTEGER NULL').run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'compliance_tripulacao',columns:['id']}])
 }
 
 async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>, tripulanteId: string, aeronaveId: string): Promise<string | null> {
@@ -3613,13 +3579,7 @@ app.delete('/api/interno/agendamento/:id', async c => {
 })
 
 async function garantirTabelaChecklist(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  const db = portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS checklists_pre_voo (id TEXT PRIMARY KEY NOT NULL, solicitacao_id TEXT NULL, aeronave_id TEXT NULL, cliente_id TEXT NULL, status TEXT NOT NULL DEFAULT 'rascunho', precisa_abastecer INTEGER NULL, abastecimento_id TEXT NULL, respostas TEXT NOT NULL DEFAULT '{}', observacoes TEXT NULL, executado_por TEXT NULL, executado_por_nome TEXT NULL, concluido_em TEXT NULL, criado_por TEXT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, numero_voo TEXT NULL, nivel_oleo TEXT NULL, alerta_id TEXT NULL)`).run()
-  await db.prepare(`CREATE TABLE IF NOT EXISTS alerta_checklist (id TEXT PRIMARY KEY NOT NULL, checklists_pre_voo_id TEXT NULL, alerta1 TEXT NULL, alerta2 TEXT NULL, alerta3 TEXT NULL, alerta4 TEXT NULL, alerta5 TEXT NULL, alerta6 TEXT NULL, alerta7 TEXT NULL, alerta8 TEXT NULL, alerta9 TEXT NULL, alerta10 TEXT NULL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
-  // Compatibilidade: migra dados da tabela reduzida criada anteriormente, sem usá-la novamente.
-  await db.prepare(`INSERT OR IGNORE INTO checklists_pre_voo (id, solicitacao_id, respostas, observacoes, abastecimento_id, status, executado_por, criado_em, atualizado_em, precisa_abastecer, nivel_oleo, alerta_id, concluido_em) SELECT id, solicitacao_id, itens, observacoes, abastecimento_id, status, usuario_id, criado_em, atualizado_em, precisa_abastecer, nivel_oleo, alerta_id, concluido_em FROM checklist_pre_voo`).run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'checklists_pre_voo',columns:['id']}])
 }
 
 app.get('/api/interno/agendamento/:id/checklist', async c => {
@@ -3694,12 +3654,7 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
 })
 
 async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  const db = portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS jornadas_voo (id TEXT PRIMARY KEY NOT NULL, solicitacao_id TEXT NULL, aeronave_id TEXT NOT NULL, tripulante_id TEXT NULL, data TEXT NOT NULL, horario_acionamento TEXT NULL, horario_apresentacao TEXT NULL, horario_corte_inicio TEXT NULL, horario_corte_final TEXT NULL, status TEXT NOT NULL DEFAULT 'em_rota', observacoes TEXT NULL, criado_por TEXT NULL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, numero_jornada INTEGER NOT NULL DEFAULT 1, data_jornada TEXT NOT NULL DEFAULT '', apresentacao_em TEXT NOT NULL DEFAULT '', inicio_em TEXT NULL, fim_em TEXT NULL, minutos_pos_corte INTEGER NOT NULL DEFAULT 45, nivel_alerta_jornada TEXT NOT NULL DEFAULT 'normal')`).run()
-  for (const column of ['tripulante_id TEXT NULL', 'data TEXT NULL', 'horario_acionamento TEXT NULL', 'horario_apresentacao TEXT NULL', 'horario_corte_inicio TEXT NULL', 'horario_corte_final TEXT NULL']) await db.prepare(`ALTER TABLE jornadas_voo ADD COLUMN ${column}`).run().catch(() => undefined)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS pernas_jornada_voo (id TEXT PRIMARY KEY NOT NULL, jornada_id TEXT NOT NULL, numero INTEGER NOT NULL, origem TEXT NOT NULL, destino TEXT NOT NULL, horario_ac TEXT NULL, horario_dep TEXT NULL, horario_pouso TEXT NULL, horario_corte TEXT NULL, status TEXT NOT NULL DEFAULT 'em_voo', lancamento_diario_id TEXT NULL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
+  await validateWorkerSchema(c, [{table:'jornadas_voo',columns:['id']},{table:'pernas_jornada_voo',columns:['id']}])
 }
 function minutosEntre(inicio: string | null, fim: string | null): number { if (!inicio || !fim) return 0; const a = new Date(inicio).getTime(), b = new Date(fim).getTime(); return Number.isFinite(a) && Number.isFinite(b) && b >= a ? Math.round((b-a)/60000) : 0 }
 function normalizarHorarioJornada(data: string, valor: unknown): string | null {
@@ -3761,9 +3716,7 @@ app.post('/api/interno/seguranca/migrar-senhas', async c => {
 })
 
 async function garantirTabelaSequenciaVoos(c: Context<{ Bindings: Bindings }>): Promise<void> {
-  void c
-  return
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS voo_sequencia_cotista (cotista_key TEXT PRIMARY KEY NOT NULL, ultimo_numero INTEGER NOT NULL DEFAULT 0)`).run()
+  await validateWorkerSchema(c, [{table:'voo_sequencia_cotista',columns:['cotista_key','ultimo_numero']}])
 }
 async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, cotistaKey: string): Promise<string> {
   const sequence = await portalDb(c).prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
@@ -3855,65 +3808,11 @@ app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
 
 // ─── Operações: abastecimentos ─────────────────────────────────────────────
 async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS abastecimentos (
-    id TEXT PRIMARY KEY NOT NULL,
-    cliente_id TEXT NULL, socio_id TEXT NULL, aeronave_id TEXT NULL,
-    data TEXT NOT NULL, tipo_combustivel TEXT NULL, trecho TEXT NULL, local TEXT NOT NULL,
-    numero_comanda TEXT NULL, numero_nf TEXT NULL, litros REAL NOT NULL DEFAULT 0,
-    valor_unitario REAL NOT NULL DEFAULT 0, valor_total REAL NOT NULL DEFAULT 0, desconto REAL NULL,
-    comanda_url TEXT NULL, nota_url TEXT NULL, boleto_url TEXT NULL, fornecedor_id TEXT NULL,
-    status TEXT NULL, observacao TEXT NULL, forma_pagamento TEXT NULL, data_vencimento_boleto TEXT NULL,
-    criado_por TEXT NULL, lancamento_diario_id TEXT NULL, data_pagamento TEXT NULL, banco TEXT NULL,
-    voo_emprestado INTEGER NOT NULL DEFAULT 0, numero_voo TEXT NULL
-  )`).run()
-  await portalDb(c).prepare('ALTER TABLE abastecimentos ADD COLUMN prazo_envio_cliente_dias INTEGER NULL').run().catch(() => undefined)
-  await portalDb(c).prepare('ALTER TABLE abastecimentos ADD COLUMN prazo_envio_cliente_em TEXT NULL').run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'abastecimentos',columns:['id','data']}])
 }
 
 async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS relatorio_despesa_viagem_anexos (
-    id TEXT PRIMARY KEY NOT NULL,
-    relatorio_despesa_viagem_id TEXT NOT NULL,
-    indice_despesa INTEGER NOT NULL DEFAULT 0,
-    nome_arquivo TEXT NOT NULL,
-    caminho_arquivo TEXT NOT NULL,
-    url_arquivo TEXT NOT NULL,
-    tipo_arquivo TEXT,
-    tamanho_arquivo INTEGER,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`).run()
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS relatorio_despesa_viagem (
-    id TEXT PRIMARY KEY NOT NULL,
-    numero_relatorio TEXT NOT NULL,
-    numero_voo TEXT,
-    cliente_id TEXT,
-    socio_id TEXT,
-    aeronave_id TEXT,
-    rota TEXT,
-    data_inicio TEXT NOT NULL,
-    data_fim TEXT NOT NULL,
-    quantidade_dias INTEGER NOT NULL DEFAULT 1,
-    tripulacao_id TEXT,
-    nome_tripulante TEXT,
-    tripulante_id_2 TEXT,
-    nome_tripulante_2 TEXT,
-    despesas TEXT NOT NULL DEFAULT '[]',
-    total_valor REAL NOT NULL DEFAULT 0,
-    observacoes TEXT,
-    status TEXT NOT NULL DEFAULT 'rascunho',
-    pdf_url TEXT,
-    criado_por TEXT,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`).run()
-  await portalDb(c).prepare('ALTER TABLE relatorio_despesa_viagem ADD COLUMN socio_id TEXT').run().catch(() => undefined)
-  await portalDb(c).prepare('ALTER TABLE relatorio_despesa_viagem ADD COLUMN tripulante_id_2 TEXT').run().catch(() => undefined)
-  await portalDb(c).prepare('ALTER TABLE relatorio_despesa_viagem ADD COLUMN nome_tripulante_2 TEXT').run().catch(() => undefined)
-  await portalDb(c).prepare('ALTER TABLE relatorio_despesa_viagem ADD COLUMN pdf_url TEXT').run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'relatorio_despesa_viagem_anexos',columns:['id']},{table:'relatorio_despesa_viagem',columns:['id']}])
 }
 
 function despesasRelatorioViagem(valor: unknown) {
@@ -4341,15 +4240,7 @@ app.delete('/api/sharebrasil/contatos/:id', async c => {
 })
 
 async function garantirForeignKeyCotistas(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  const db = portalDb(c)
-  const foreignKeys = await db.prepare("SELECT \"from\" AS column_name, \"table\" AS foreign_table_name FROM pragma_foreign_key_list('hold_socios')").all<any>().catch(() => ({ results: [] as any[] }))
-  if (!(foreignKeys.results || []).some((row: any) => row.column_name === 'cotista_id' && row.foreign_table_name === 'cotista_aeronave')) return
-  await db.prepare(`CREATE TABLE IF NOT EXISTS hold_socios_corrigida (id TEXT PRIMARY KEY NOT NULL, cotista_id TEXT, nome TEXT NOT NULL, cpf TEXT NOT NULL, email_principal TEXT, emails TEXT NOT NULL DEFAULT '[]', endereco TEXT, cidade TEXT, uf TEXT, contato_financeiro TEXT, telefone_financeiro TEXT, telefone TEXT, observacoes TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, holding_id TEXT NOT NULL REFERENCES holdings(id))`).run()
-  await db.prepare(`INSERT OR IGNORE INTO hold_socios_corrigida SELECT id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, criado_em, atualizado_em, holding_id FROM hold_socios`).run()
-  await db.prepare('DROP TABLE hold_socios').run()
-  await db.prepare('ALTER TABLE hold_socios_corrigida RENAME TO hold_socios').run()
+  await validateWorkerSchema(c, [{table:'hold_socios',columns:['id','holding_id']}])
 }
 app.get('/api/sharebrasil/clientes', async c => {
   const user = await shareBrasilUser(c)
@@ -4793,19 +4684,7 @@ app.post('/api/sharebrasil/calendario', async c => {
 
 // ─── Hotéis Share Brasil: contatos, CRUD e reservas por email ─────────────────
 async function garantirTabelaHoteis(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS hoteis (
-    id TEXT PRIMARY KEY NOT NULL, nome TEXT NOT NULL, telefone TEXT, endereco TEXT, uf TEXT, cidade TEXT,
-    preco_single REAL, preco_duplo REAL, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    estrelas INTEGER, convenio INTEGER NOT NULL DEFAULT 0, email TEXT, telefone_reservas TEXT, contato_comercial TEXT,
-    telefone_comercial TEXT, email_comercial TEXT, observacoes TEXT
-  )`).run()
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS reservas_hoteis (
-    id TEXT PRIMARY KEY NOT NULL, hotel_id TEXT NOT NULL, criado_por TEXT, data_checkin TEXT NOT NULL, data_checkout TEXT NOT NULL,
-    tipo_quarto TEXT, quantidade_hospedes INTEGER NOT NULL, hospede_nome TEXT NOT NULL, hospede_telefone TEXT NOT NULL,
-    hospede_email TEXT, observacoes TEXT, destinatario_email TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'SOLICITADA', criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`).run()
+  await validateWorkerSchema(c, [{table:'hoteis',columns:['id']},{table:'reservas_hoteis',columns:['id']}])
 }
 
 function hotelPayload(row: Record<string, any>) {
@@ -4880,38 +4759,7 @@ app.post('/api/sharebrasil/hoteis/:id/reservar', async c => {
 
 // ─── Centro de Treinamento: tutoriais, treinamentos e salas colaborativas ────
 async function ensureTrainingTables(c: Context<{ Bindings: Bindings }>) {
-  const db = portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS centro_reunioes (
-    id TEXT PRIMARY KEY NOT NULL,
-    titulo TEXT NOT NULL,
-    descricao TEXT,
-    status TEXT NOT NULL DEFAULT 'ATIVA',
-    criado_por TEXT NOT NULL,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    encerrado_em TEXT NULL
-  )`).run()
-  await db.prepare(`CREATE TABLE IF NOT EXISTS manual_tutoriais (
-    id TEXT PRIMARY KEY NOT NULL,
-    titulo TEXT NOT NULL,
-    descricao TEXT NOT NULL DEFAULT '',
-    video_url TEXT,
-    conteudo_html TEXT,
-    categoria TEXT NOT NULL DEFAULT 'TUTORIAL',
-    ordem INTEGER NOT NULL DEFAULT 0,
-    criado_por TEXT,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    tema TEXT,
-    arquivo_url TEXT,
-    tipo_arquivo TEXT,
-    tamanho_arquivo INTEGER,
-    publicado INTEGER NOT NULL DEFAULT 1
-  )`).run()
-  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN tema TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN arquivo_url TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN tipo_arquivo TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN tamanho_arquivo INTEGER').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE manual_tutoriais ADD COLUMN publicado INTEGER NOT NULL DEFAULT 1').run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'centro_reunioes',columns:['id']},{table:'manual_tutoriais',columns:['id']}])
 }
 
 function trainingPayload(row: Record<string, any>) {
@@ -5225,21 +5073,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
 
 // ─── Financeiro: central de e-mail ───────────────────────────────────────────
 async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  await portalDb(c).prepare('ALTER TABLE user_profiles ADD COLUMN email_envio TEXT').run().catch(() => undefined)
-  await portalDb(c).prepare('CREATE TABLE IF NOT EXISTS assinaturas_email (id TEXT PRIMARY KEY NOT NULL, usuario_id TEXT NOT NULL UNIQUE, nome TEXT NOT NULL, cargo TEXT, telefone TEXT, endereco TEXT, email TEXT NOT NULL, logo_url TEXT, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)').run()
-  await portalDb(c).prepare(`CREATE TABLE IF NOT EXISTS emails_enviados (
-    id TEXT PRIMARY KEY NOT NULL,
-    destinatarios TEXT NOT NULL,
-    assunto TEXT NOT NULL,
-    mensagem TEXT NOT NULL,
-    anexos TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'enviado',
-    erro TEXT,
-    enviado_por TEXT,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`).run()
+  await validateWorkerSchema(c, [{table:'user_profiles',columns:['id','email_envio']},{table:'assinaturas_email',columns:['id']},{table:'emails_enviados',columns:['id']}])
 }
 function emailArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean)
@@ -5436,61 +5270,7 @@ const PAGADOR_PADRAO_RECIBO = {
 // é agnóstico a quem desembolsou (isso vive só em `lancamentos`/`tipo_caixa`); rateio entre
 // cotistas usa `cotista_aeronave` (cliente_id OU socio_id, cobrindo também clientes com holding).
 async function garantirTabelasRecibos(c: Context<{ Bindings: Bindings }>) {
-  const db = portalDb(c)
-  const existing = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recibos'").first<{ sql: string }>()
-  const isCanonical = existing?.sql?.includes("pagador_tipo") && existing.sql.includes("recibo_reembolso")
-  if (existing && !isCanonical) {
-    await db.prepare('ALTER TABLE recibos RENAME TO recibos_legacy').run()
-  }
-  await db.prepare(`CREATE TABLE IF NOT EXISTS recibos (
-    id TEXT PRIMARY KEY NOT NULL,
-    numero_recibo TEXT UNIQUE,
-    tipo_recibo TEXT NOT NULL CHECK (tipo_recibo IN ('recibo_reembolso','recibo_colaborador','recibo_pagamento')),
-    colaborador_id TEXT REFERENCES user_profiles(id),
-    aeronave_id TEXT REFERENCES aeronave(id),
-    rateado INTEGER NOT NULL DEFAULT 0 CHECK (rateado IN (0,1)),
-    pagador_tipo TEXT NOT NULL CHECK (pagador_tipo IN ('empresa','cotista_aeronave')),
-    pagador_id TEXT NOT NULL,
-    nome_pagador TEXT,
-    documento_pagador TEXT,
-    endereco_pagador TEXT,
-    cidade_pagador TEXT,
-    uf_pagador TEXT,
-    valor INTEGER NOT NULL DEFAULT 0,
-    descricao TEXT,
-    data_emissao TEXT,
-    data_vencimento TEXT,
-    forma_pagamento TEXT,
-    tipo_caixa TEXT NOT NULL CHECK (tipo_caixa IN ('share','cliente','hold')),
-    categoria_movimentacao_id TEXT NOT NULL,
-    grupo_categoria TEXT,
-    status TEXT,
-    lancamento_id TEXT,
-    criado_por TEXT,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    url_recibo TEXT,
-    recebedor_nome TEXT,
-    numero_documento_anexo TEXT,
-    observacoes TEXT
-  )`).run()
-  if (existing && !isCanonical) {
-    await db.prepare(`INSERT OR IGNORE INTO recibos (id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado, pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador, valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa, categoria_movimentacao_id, grupo_categoria, status, lancamento_id, criado_por, criado_em, url_recibo, recebedor_nome, numero_documento_anexo, observacoes)
-      SELECT id, numero_recibo,
-        CASE tipo_recibo WHEN 'cliente_reembolsavel' THEN 'recibo_reembolso' WHEN 'colaborador' THEN 'recibo_colaborador' ELSE 'recibo_pagamento' END,
-        colaborador_id, aeronave_id, COALESCE(rateado,0), CASE WHEN cotista_id IS NULL THEN 'empresa' ELSE 'cotista_aeronave' END,
-        COALESCE(cotista_id, cliente_id, 'SHARE'), nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
-        CAST(ROUND(COALESCE(valor,0) * 100) AS INTEGER), COALESCE(descricao_servico, descricao), data_emissao, data_vencimento, forma_pagamento,
-        CASE upper(COALESCE(tipo_caixa,'')) WHEN 'CLIENTE' THEN 'cliente' WHEN 'HOLDING' THEN 'hold' ELSE 'share' END,
-        COALESCE(categoria_movimentacao_id, categoria_lancamento_id, categoria_id, 'SEM_CATEGORIA'), grupo_categoria, status, lancamento_id, criado_por, criado_em,
-        COALESCE(recibo_url, pdf_url), recebedor_nome, numero_documento_anexo, observacoes FROM recibos_legacy`).run().catch((error) => log.warn('[recibos] migração legada parcial', error?.message || error))
-    await db.prepare('DROP TABLE recibos_legacy').run().catch(() => undefined)
-  }
-  await db.prepare(`CREATE TABLE IF NOT EXISTS sequencia_numeros_recibos (id TEXT PRIMARY KEY NOT NULL, cotista_aeronave_id TEXT, codigo_cliente TEXT NOT NULL, ano INTEGER NOT NULL, proximo_numero INTEGER NOT NULL DEFAULT 1, UNIQUE(codigo_cliente, ano))`).run()
-  await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_anexos (id TEXT PRIMARY KEY NOT NULL, recibo_id TEXT, finalidade TEXT, nome_arquivo TEXT NOT NULL, caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0, enviado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP)`).run()
-  await db.prepare(`CREATE TABLE IF NOT EXISTS recibo_rateio (id TEXT PRIMARY KEY NOT NULL, recibo_id TEXT NOT NULL, rateio_despesas_id TEXT NOT NULL, cotista_id TEXT NOT NULL, nome TEXT, percentual REAL NOT NULL, valor REAL NOT NULL)`).run()
-  await db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS recibos_numero_idx ON recibos(numero_recibo) WHERE numero_recibo IS NOT NULL').run()
-  await db.prepare('CREATE INDEX IF NOT EXISTS recibos_criado_idx ON recibos(criado_em DESC)').run()
-  await db.prepare('CREATE INDEX IF NOT EXISTS recibo_anexos_recibo_idx ON recibo_anexos(recibo_id, finalidade)').run()
+  await validateWorkerSchema(c, [{table:'recibos',columns:['id']},{table:'sequencia_numeros_recibos',columns:['id']},{table:'recibo_anexos',columns:['id']},{table:'recibo_rateio',columns:['id']}])
 }
 
 // Mesma regra usada em /api/financeiro/envios-pagamento: define grupo_categoria, tipo_caixa,
@@ -5585,13 +5365,19 @@ function resolverCategoriaReceitaShare(body: Record<string, any>, isRecibo: bool
 async function garantirTabelasNfSaida(c: Context<{ Bindings: Bindings }>) {
   // O schema de notas_fiscais_saida, recibos_saida e recibo_anexos é gerenciado
   // exclusivamente pelas migrações do D1. O Worker apenas utiliza as tabelas.
-  void c
+  await validateWorkerSchema(c, [
+    { table: 'notas_fiscais_saida', columns: ['id'] },
+    { table: 'recibos_saida', columns: ['id'] },
+    { table: 'recibo_anexos', columns: ['id'] },
+  ])
 }
 
 async function inserirLinhaDinamica(db: any, table: string, row: Record<string, any>) {
   const info = await db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as any
   const cols = new Set((info.results || []).map((x: any) => x.name))
-  const entries = Object.entries(row).filter(([k]) => cols.has(k))
+  const incompatible = Object.keys(row).filter((key) => !cols.has(key) && row[key] !== undefined)
+  if (incompatible.length) throw new Error(`colunas_incompativeis_${table}:${incompatible.join(',')}`)
+  const entries = Object.entries(row).filter(([k, value]) => cols.has(k) && value !== undefined)
   if (!entries.length) throw new Error(`tabela_${table}_sem_colunas`)
   const names = entries.map(([k]) => k); const vals = entries.map(([, v]) => v ?? null)
   await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map((_, i) => `?${i + 1}`).join(',')})`).bind(...vals).run()
@@ -5846,35 +5632,7 @@ async function gerarFinanceiroNfSaida(
 // salvarArquivoShareBrasil usado para documentos de cliente/sócio.
 
 async function garantirTabelaFichaPeso(c: Context<{ Bindings: Bindings }>) {
-  void c
-  return
-  const db = portalDb(c)
-  await db.prepare(`CREATE TABLE IF NOT EXISTS ctm_ficha_peso_balanceamento (
-    id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
-    aeronave_id TEXT NOT NULL,
-    peso_balanceamento_id TEXT NOT NULL,
-    data_voo TEXT NOT NULL,
-    numero_voo TEXT,
-    piloto_responsavel TEXT NOT NULL,
-    peso_vazio_kg REAL NOT NULL,
-    braco_vazio REAL,
-    momento_vazio REAL,
-    itens_carregamento TEXT NOT NULL DEFAULT '[]',
-    fuel_litros REAL, fuel_kg REAL, fuel_braco REAL, fuel_momento REAL,
-    peso_total_kg REAL, momento_total REAL, cg_calculado REAL,
-    peso_maximo_decolagem REAL, peso_maximo_pouso REAL, peso_maximo_sem_combustivel REAL,
-    cg_limite_dianteiro REAL, cg_limite_traseiro REAL,
-    dentro_dos_limites INTEGER,
-    status TEXT NOT NULL DEFAULT 'RASCUNHO',
-    snapshot_limites TEXT NOT NULL,
-    observacoes TEXT,
-    solicitacao_id TEXT,
-    assinatura_nome TEXT,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    finalizado_em TEXT
-  )`).run()
-  await db.prepare('ALTER TABLE ctm_ficha_peso_balanceamento ADD COLUMN solicitacao_id TEXT').run().catch(() => undefined)
-  await db.prepare('ALTER TABLE ctm_ficha_peso_balanceamento ADD COLUMN assinatura_nome TEXT').run().catch(() => undefined)
+  await validateWorkerSchema(c, [{table:'ctm_ficha_peso_balanceamento',columns:['id','solicitacao_id','assinatura_nome']}])
 }
 
 const parseJsonOr = (value: unknown, fallback: unknown) => {
@@ -5991,7 +5749,10 @@ function normalizarCategoriaShare(linha: LinhaGenerica) {
 // ─── Contas a pagar / a receber ──────────────────────────────────────────────
 
 async function garantirTabelaContas(c: Context<{ Bindings: Bindings }>): Promise<void> {
-  void c
+  await validateWorkerSchema(c, [
+    { table: 'contas_apagar', columns: ['id', 'status'] },
+    { table: 'contas_areceber', columns: ['id', 'status'] },
+  ])
 }
 
 function mapearContaAPagar(linha: LinhaGenerica): LinhaGenerica {

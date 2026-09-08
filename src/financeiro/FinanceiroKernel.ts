@@ -5,6 +5,13 @@ export type FinanceOperation = 'DESPESA' | 'RECEITA' | 'REEMBOLSO'
 export type FinanceFlow = 'ENTRADA' | 'SAIDA'
 export type CotistaKind = 'CLIENTE' | 'HOLDING'
 
+export const STATUS_LANCAMENTO = ['EM_ABERTO', 'PAGO', 'RECEBIDO', 'ATRASADO', 'CANCELADO'] as const
+export const STATUS_CONTA_PAGAR = ['EM_ABERTO', 'PAGO', 'CANCELADO'] as const
+export const STATUS_CONTA_RECEBER = ['EM_ABERTO', 'RECEBIDO', 'ATRASADO', 'CANCELADO'] as const
+export const STATUS_RATEIO = ['EM_ABERTO', 'PAGO', 'CANCELADO'] as const
+export const STATUS_REEMBOLSO = ['PENDENTE', 'AGUARDANDO_REEMBOLSO', 'RECEBIDO', 'REEMBOLSADO', 'CANCELADO'] as const
+export const STATUS_FILA = ['PENDENTE', 'PROCESSANDO', 'PROCESSADO', 'ERRO'] as const
+
 export class FinanceError extends Error {
   constructor(
     message: string,
@@ -113,14 +120,52 @@ function requireTable(
 export async function validateFinanceSchema(db: Database): Promise<void> {
   const schema = await loadSchema(db)
 
-  requireTable(schema, 'lancamentos', ['id'])
-  requireTable(schema, 'contas_apagar', ['id', 'lancamento_id'])
-  requireTable(schema, 'contas_areceber', ['id'])
-  requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id'])
+  requireTable(schema, 'lancamentos', ['id', 'descricao', 'fluxo', 'valor_centavos', 'status'])
+  requireTable(schema, 'contas_apagar', ['id', 'lancamento_id', 'valor_centavos', 'status'])
+  requireTable(schema, 'contas_areceber', ['id', 'valor_centavos', 'status'])
+  requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id', 'status'])
   requireTable(schema, 'rateio_hold', ['id', 'movimento_holding_id', 'socio_id'])
   requireTable(schema, 'movimentos_holding', ['id'])
   requireTable(schema, 'reembolsos', ['id', 'lancamento_origem_id'])
   requireTable(schema, 'auditoria_financeira', ['id'])
+  requireTable(schema, 'financeiro_fila', ['id', 'operacao', 'payload_json', 'status'])
+}
+
+const FRONTEND_CONTRACT_FIELDS = new Set([
+  'idempotency_key', 'idempotencyKey', 'reference_id', 'valor_centavos', 'valorCentavos',
+  'descricao', 'descricao_servico', 'fluxo', 'data', 'data_emissao', 'data_vencimento',
+  'vencimento', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id', 'socio_id', 'holding_id',
+  'categoria_id', 'categoria_nome', 'categoria', 'fornecedor_id', 'fornecedor', 'tipo_caixa',
+  'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'pago_diretamente', 'pagoDiretamente',
+  'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
+  'motivo', 'valor', 'operacao', 'payload',
+])
+
+const OPTIONAL_SCHEMA_COLUMNS = new Set([
+  'idempotency_key', 'aeronave_id', 'cotista_aeronave_id', 'holding_id', 'socio_id',
+  'cliente_id', 'fornecedor_id', 'fornecedor_nome', 'categoria_id', 'categoria_nome',
+  'grupo_categoria', 'data', 'data_lancamento', 'data_emissao', 'data_vencimento',
+  'data_pagamento', 'prazo', 'valor', 'valor_total', 'tipo', 'natureza', 'tipo_caixa',
+  'caixa', 'pago_por', 'pago_por_cotista_id', 'pago_por_socio_id', 'pago_diretamente',
+  'reembolsavel', 'reembolso_quitado', 'forma_pagamento', 'conta_bancaria_id',
+  'comprovante_url', 'observacoes', 'anexos_json', 'criado_por', 'origem_tipo',
+  'origem_id', 'colaborador_ref_id', 'nf_saida_id', 'lancamentos_id', 'lancamento_id',
+  'lancamento_cliente_id', 'movimentos_holding_id', 'movimento_holding_id',
+  'periodicidade', 'tipo_rateio', 'percentual_sociedade', 'percentual_uso',
+  'valor_total_centavos', 'valor_rateado_centavos', 'valor_pago_real_centavos',
+  'valor_total', 'valor_rateado', 'descricao_despesa', 'categoria_custo_id',
+  'cotista_nome', 'aeronave_registro', 'recibo_url', 'numero_recibo', 'motivo',
+  'usuario_id', 'valor_anterior_centavos', 'valor_novo_centavos',
+])
+
+function validateFrontendContract(body: Row): void {
+  const unknown = Object.keys(body).filter((field) => !FRONTEND_CONTRACT_FIELDS.has(field))
+  if (unknown.length) {
+    throw new FinanceError(
+      `Campos desconhecidos ou incompatíveis: ${unknown.join(', ')}`,
+      'contrato_campo_desconhecido',
+    )
+  }
 }
 
 function addKnownColumns(
@@ -146,6 +191,17 @@ function addKnownColumns(
         500,
       )
     }
+  }
+
+  const incompatible = Object.keys(values).filter(
+    (column) => !available.has(column) && !OPTIONAL_SCHEMA_COLUMNS.has(column),
+  )
+  if (incompatible.length) {
+    throw new FinanceError(
+      `Colunas incompatíveis em ${table}: ${incompatible.join(', ')}`,
+      'schema_coluna_incompativel',
+      500,
+    )
   }
 
   const entries = Object.entries(values).filter(
@@ -209,6 +265,17 @@ function updateStatement(
     )
   }
 
+  const incompatible = Object.keys(values).filter(
+    (column) => !available.has(column) && !OPTIONAL_SCHEMA_COLUMNS.has(column),
+  )
+  if (incompatible.length) {
+    throw new FinanceError(
+      `Colunas incompatíveis em ${table}: ${incompatible.join(', ')}`,
+      'schema_coluna_incompativel',
+      500,
+    )
+  }
+
   const entries = Object.entries(values).filter(
     ([column, value]) => available.has(column) && value !== undefined,
   )
@@ -233,6 +300,7 @@ function idempotencyKey(body: Row): string | null {
 }
 
 function normalizeCommand(body: Row, userId: string | null): Row {
+  validateFrontendContract(body)
   const valorCentavos = asPositiveCents(
     body.valor_centavos ?? body.valorCentavos,
   )
@@ -472,7 +540,7 @@ function clientAllocationStatements(
         pago_por_cotista_id: line.pagoPor,
         pago_por: line.pagoPor,
         pago_diretamente: line.pagoDiretamente ? 1 : 0,
-        status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'PENDENTE',
+        status: line.pagoDiretamente ? 'PAGO' : 'EM_ABERTO',
         data_pagamento: line.pagoDiretamente ? command.data : null,
         descricao_despesa: command.descricao,
         observacoes: nullableText(command.observacoes),
@@ -522,7 +590,7 @@ function holdingAllocationStatements(
         valor_rateado: line.valorCentavos / 100,
         pago_por_socio_id: line.pagoPor,
         pago_diretamente: line.pagoDiretamente ? 1 : 0,
-        status: line.pagoDiretamente ? 'PAGO' : 'PENDENTE',
+        status: line.pagoDiretamente ? 'PAGO' : 'EM_ABERTO',
         data_pagamento: line.pagoDiretamente ? command.data : null,
         descricao_despesa: command.descricao,
         observacoes: nullableText(command.observacoes),
@@ -660,7 +728,7 @@ export async function createExpense(
     return {
       id: rateioId,
       valor_centavos: amount,
-      status: 'PAGO_DIRETAMENTE',
+      status: 'PAGO',
       idempotent: false,
     }
   }
