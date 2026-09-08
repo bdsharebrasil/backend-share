@@ -249,6 +249,50 @@ financeiroRoutes.patch('/recibos-saida/:id', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.delete('/recibos-saida/:id', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const reciboId = c.req.param('id')
+    const recibo = await db.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(reciboId).first<Record<string, unknown>>()
+    if (!recibo) return c.json({ error: 'recibo_saida_nao_encontrado' }, 404)
+
+    const contaId = String(recibo.contas_areceber_id ?? '').trim()
+    const reciboLancamentoId = String(recibo.lancamentos_id ?? '').trim()
+    const conta = contaId ? await db.prepare('SELECT lancamentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null }>() : null
+    const lancamentoIds = [...new Set([reciboLancamentoId, conta?.lancamentos_id ?? ''].filter(Boolean))]
+    if (reciboLancamentoId) {
+      const espelho = await listar(db, 'SELECT id FROM lancamentos WHERE origem_id = ?', reciboLancamentoId)
+      lancamentoIds.push(...espelho.map((row) => String(row.id)).filter(Boolean))
+    }
+    const ids = [...new Set(lancamentoIds)]
+    const placeholders = ids.map(() => '?').join(', ')
+
+    const statements: D1PreparedStatement[] = []
+    if (ids.length) {
+      statements.push(
+        db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids),
+        db.prepare(`DELETE FROM financeiro_vinculos WHERE (origem_id IN (${placeholders}) OR destino_id IN (${placeholders}))`).bind(...ids, ...ids),
+        db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids),
+      )
+    }
+    if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
+    statements.push(db.prepare('DELETE FROM recibos_saida WHERE id = ?').bind(reciboId))
+    await db.batch(statements)
+
+    const pdfUrl = String(recibo.pdf_url ?? '')
+    if (pdfUrl) {
+      try {
+        const parsed = new URL(pdfUrl)
+        const key = parsed.searchParams.get('key') || decodeURIComponent(parsed.pathname.replace(/^\//, ''))
+        if (key) await storage(c)?.delete(key)
+      } catch (error) {
+        console.warn('[financeiro] não foi possível excluir o PDF do recibo:', error)
+      }
+    }
+    return c.json({ ok: true, id: reciboId })
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.post('/recibos-saida/:id/dar-baixa', async (c) => {
   try {
     const reciboId = c.req.param('id')
