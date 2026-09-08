@@ -16,6 +16,7 @@ import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } f
 type Bindings = {
   SHARE_DB: D1Database
   FILES?: R2Bucket
+  SHARE_FILES?: R2Bucket
 }
 
 type Variables = {
@@ -46,6 +47,10 @@ function errorResponse(c: any, error: unknown) {
     },
     500,
   )
+}
+
+function storage(c: any): R2Bucket | undefined {
+  return c.env.SHARE_FILES || c.env.FILES
 }
 
 async function listar(db: D1Database, sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
@@ -117,14 +122,64 @@ financeiroRoutes.get('/contas-areceber', async (c) => {
   try { return c.json(await consultarContas(c, 'contas_areceber')) } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.get('/recibos-saida', async (c) => {
+  try {
+    const rows = await listar(c.env.SHARE_DB, 'SELECT * FROM recibos_saida ORDER BY date(data_emissao) DESC, criado_em DESC LIMIT 500')
+    return c.json({ recibos: rows })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/recibos-saida', async (c) => {
+  try {
+    const body = await c.req.json<Record<string, unknown>>()
+    const cotistaId = String(body.cotista_aeronave_id ?? body.cotista_id ?? '').trim()
+    const aeronaveId = String(body.aeronave_id ?? '').trim()
+    const valor = Number(body.valor ?? 0)
+    const dataEmissao = String(body.data_emissao ?? '').trim()
+    const dataVencimento = String(body.data_vencimento ?? dataEmissao).trim()
+    const descricao = String(body.descricao_servico ?? body.descricao ?? '').trim()
+    if (!cotistaId || !aeronaveId || !(valor > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao) || !descricao) {
+      return c.json({ error: 'cotista_aeronave_id, aeronave_id, valor, data_emissao e descricao_servico são obrigatórios' }, 400)
+    }
+    const id = crypto.randomUUID()
+    const numero = String(body.numero_recibo ?? body.numero ?? `REC-${id.slice(0, 8).toUpperCase()}`)
+    const categoriaInformada = String(body.categoria_receita_id ?? body.categoria_id ?? '').trim()
+    const categoriaExiste = categoriaInformada
+      ? Boolean(await c.env.SHARE_DB.prepare('SELECT id FROM categoria_movimentacao_share WHERE id = ?').bind(categoriaInformada).first())
+      : false
+    const financeiro = await issueRevenue(c.env.SHARE_DB, {
+      idempotency_key: `recibo_saida:${id}`,
+      valor_centavos: Math.round(valor * 100), descricao,
+      data_emissao: dataEmissao, data_vencimento: dataVencimento,
+      aeronave_id: aeronaveId, cotista_aeronave_id: cotistaId,
+      categoria_id: categoriaExiste ? categoriaInformada : null,
+      categoria_nome: body.categoria_receita_nome ?? body.nome_categoria,
+      origem_tipo: 'RECIBO_SAIDA', origem_id: id,
+    }, c.get('userId') || null)
+    await c.env.SHARE_DB.prepare(`INSERT INTO recibos_saida
+      (id, numero_recibo, cotista_id, aeronave_id, valor_total, percentual, descricao_servico,
+       nome_categoria, categoria_id, categoria_despesa_subcategoria, data_emissao, data_vencimento,
+       status, contas_areceber_id, lancamentos_id, criado_por)
+      VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', ?, ?, ?)`)
+      .bind(id, numero, cotistaId, aeronaveId, valor, descricao,
+        body.categoria_receita_nome ?? body.nome_categoria ?? null,
+        categoriaExiste ? categoriaInformada : null,
+        body.categoria_despesa_subcategoria ?? null, dataEmissao, dataVencimento,
+        financeiro.contaReceberId ?? null, financeiro.id ?? null, c.get('userId') || null).run()
+    const recibo = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(id).first()
+    return c.json({ recibo }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
   try {
     const db = c.env.SHARE_DB
+    const opcional = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
     const [categorias, contas, cotistas, holdings] = await Promise.all([
-      listar(db, 'SELECT id, nome, tipo, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
-      listar(db, 'SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco'),
-      listar(db, "SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, ca.aeronave_id, ca.percentual_sociedade FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY nome"),
-      listar(db, 'SELECT id, nome, conta_bancaria FROM holdings ORDER BY nome'),
+      opcional('SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
+      opcional('SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco'),
+      opcional("SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, ca.aeronave_id, ca.percentual_sociedade FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY nome"),
+      opcional('SELECT id, nome, conta_bancaria FROM holdings ORDER BY nome'),
     ])
     return c.json({ categorias, contas_bancarias: contas, cotistas, holdings, pagadores: cotistas })
   } catch (error) { return errorResponse(c, error) }
@@ -149,10 +204,10 @@ financeiroRoutes.get('/lancamentos', async (c) => {
     const caixa = c.req.query('caixa')
     const filtros: string[] = []
     const params: unknown[] = []
-    if (inicio) { filtros.push('date(COALESCE(data, data_emissao, criado_em)) >= date(?)'); params.push(inicio) }
-    if (fim) { filtros.push('date(COALESCE(data, data_emissao, criado_em)) <= date(?)'); params.push(fim) }
+    if (inicio) { filtros.push('date(COALESCE(data_emissao, criado_em)) >= date(?)'); params.push(inicio) }
+    if (fim) { filtros.push('date(COALESCE(data_emissao, criado_em)) <= date(?)'); params.push(fim) }
     if (caixa) { filtros.push('tipo_caixa = ?'); params.push(caixa.toUpperCase()) }
-    const rows = await listar(c.env.SHARE_DB, `SELECT * FROM lancamentos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(data, data_emissao, criado_em)) DESC, criado_em DESC LIMIT 500`, ...params)
+    const rows = await listar(c.env.SHARE_DB, `SELECT * FROM lancamentos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(data_emissao, criado_em)) DESC, criado_em DESC LIMIT 500`, ...params)
     return c.json({ lancamentos: rows })
   } catch (error) { return errorResponse(c, error) }
 })
@@ -196,7 +251,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
 
 financeiroRoutes.get('/cotista/dashboard', async (c) => {
   try {
-    const rows = await listar(c.env.SHARE_DB, 'SELECT id, data, descricao, numero_doc, fornecedor_nome, categoria_nome, grupo_categoria, tipo, data_vencimento, fluxo, valor_centavos, pago_por, tipo_caixa, pago_diretamente, reembolsavel, reembolso_quitado, status, observacoes FROM lancamentos ORDER BY date(data) DESC, criado_em DESC LIMIT 500')
+    const rows = await listar(c.env.SHARE_DB, 'SELECT id, data_emissao AS data, descricao, numero_doc, fornecedor_nome, categoria_nome, grupo_categoria, data_vencimento, fluxo, valor_centavos, pago_por, tipo_caixa, pago_diretamente, reembolsavel, reembolso_quitado, status, observacoes FROM lancamentos ORDER BY date(data_emissao) DESC, criado_em DESC LIMIT 500')
     const lancamentos = rows.map((row) => ({ id: row.id, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.tipo ?? null, prazo: row.data_vencimento ?? null, fluxo: row.fluxo === 'ENTRADA' ? 'ENTRADA' : 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
     const entradas = lancamentos.filter((row) => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const saidas = lancamentos.filter((row) => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
@@ -287,7 +342,7 @@ financeiroRoutes.get('/recibos/opcoes', async (c) => {
 })
 
 financeiroRoutes.patch('/recibos/:id/status', async (c) => {
-  const body = await c.req.json<{ status?: string }>().catch(() => ({}))
+  const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
   const allowed = new Set(['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO'])
   if (!body.status || !allowed.has(body.status)) return c.json({ error: 'status_recibo_invalido' }, 400)
   await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, c.req.param('id')).run()
@@ -333,7 +388,7 @@ financeiroRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) => {
 })
 
 financeiroRoutes.patch('/envios-pagamento/:id', async (c) => {
-  const body = await c.req.json<{ status?: string }>().catch(() => ({}))
+  const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
   const allowed = new Set(['PENDENTE', 'APROVADO', 'CONVERTIDO', 'CANCELADO', 'EMAIL_ENVIADO'])
   if (!body.status || !allowed.has(body.status)) return c.json({ error: 'status_solicitacao_invalido' }, 400)
   await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, c.req.param('id')).run()
@@ -360,7 +415,8 @@ financeiroRoutes.post('/recibos/anexos', async (c) => {
     // O upload é uma etapa de arquivo. A criação do recibo permanece no
     // ReceiptAgent e o Worker não cria nem altera tabelas.
     await validateFinanceSchema(c.env.SHARE_DB)
-    if (!c.env.FILES) return c.json({ error: 'storage_nao_configurado' }, 503)
+    const bucket = storage(c)
+    if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
     const form = await c.req.parseBody()
     const arquivo = form.arquivo
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
@@ -368,7 +424,7 @@ financeiroRoutes.post('/recibos/anexos', async (c) => {
     if (!reciboId) return c.json({ error: 'recibo_id_obrigatorio' }, 400)
     const id = crypto.randomUUID()
     const key = `recibos/${reciboId}/original/${id}-${arquivo.name}`
-    await c.env.FILES.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
+    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, arquivo.name, key, arquivo.type || 'application/octet-stream', arquivo.size, c.get('userId') || null, reciboId, 'ORIGINAL').run()
     await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'PDF_PENDENTE', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
     return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo`, nome_arquivo: arquivo.name, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size }, 201)
@@ -378,14 +434,15 @@ financeiroRoutes.post('/recibos/anexos', async (c) => {
 financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
   try {
     await validateFinanceSchema(c.env.SHARE_DB)
-    if (!c.env.FILES) return c.json({ error: 'storage_nao_configurado' }, 503)
+    const bucket = storage(c)
+    if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
     const form = await c.req.parseBody()
     const arquivo = form.arquivo
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const reciboId = c.req.param('id')
     const anexoId = crypto.randomUUID()
     const key = `recibos/${reciboId}/pdf/${anexoId}.pdf`
-    await c.env.FILES.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: 'application/pdf' } })
+    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: 'application/pdf' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
     await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
     return c.json({ anexo_id: anexoId, pdf_url: `/api/financeiro/recibos/anexos/${anexoId}/arquivo` }, 201)
@@ -393,10 +450,11 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
 })
 
 financeiroRoutes.get('/recibos/anexos/:id/arquivo', async (c) => {
-  if (!c.env.FILES) return c.json({ error: 'storage_nao_configurado' }, 503)
+  const bucket = storage(c)
+  if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
   const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, tipo_arquivo FROM recibo_anexos WHERE id = ?').bind(c.req.param('id')).first<{ caminho_arquivo: string; tipo_arquivo: string }>()
   if (!row) return c.notFound()
-  const object = await c.env.FILES.get(row.caminho_arquivo)
+  const object = await bucket.get(row.caminho_arquivo)
   if (!object) return c.notFound()
   return c.body(await object.arrayBuffer(), 200, { 'Content-Type': row.tipo_arquivo, 'Cache-Control': 'private, max-age=3600' })
 })
