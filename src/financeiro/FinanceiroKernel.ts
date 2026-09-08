@@ -96,6 +96,7 @@ async function loadSchema(db: Database): Promise<SchemaCache> {
     'recibos_saida',
     'notas_fiscais_saida',
     'recibo_rateio',
+    'sequencia_numeros_recibos',
     'cotista_aeronave',
     'cliente',
     'hold_socios',
