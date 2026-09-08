@@ -399,3 +399,32 @@ CREATE INDEX IF NOT EXISTS contas_areceber_idempotency_idx ON contas_areceber(id
 CREATE INDEX IF NOT EXISTS auditoria_financeira_entidade_idx ON auditoria_financeira(entidade, entidade_id, criado_em);
 CREATE INDEX IF NOT EXISTS financeiro_fila_status_idx ON financeiro_fila(status, criado_em);
 CREATE UNIQUE INDEX IF NOT EXISTS envio_despesas_lancamento_idx ON envio_despesas(lancamento_id) WHERE lancamento_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS sequencia_numeros_recibos (
+  id TEXT PRIMARY KEY NOT NULL,
+  cotista_aeronave_id TEXT,
+  codigo_cliente TEXT NOT NULL,
+  ano INTEGER NOT NULL,
+  proximo_numero INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(codigo_cliente, ano)
+);
+
+CREATE TABLE IF NOT EXISTS recibos (
+  id TEXT PRIMARY KEY NOT NULL,
+  numero_recibo TEXT UNIQUE,
+  tipo_recibo TEXT NOT NULL CHECK (tipo_recibo IN ('recibo_reembolso','recibo_colaborador','recibo_pagamento')),
+  colaborador_id TEXT REFERENCES user_profiles(id), aeronave_id TEXT REFERENCES aeronave(id),
+  rateado INTEGER NOT NULL DEFAULT 0 CHECK (rateado IN (0,1)),
+  pagador_tipo TEXT NOT NULL CHECK (pagador_tipo IN ('empresa','cotista_aeronave')), pagador_id TEXT NOT NULL,
+  nome_pagador TEXT, documento_pagador TEXT, endereco_pagador TEXT, cidade_pagador TEXT, uf_pagador TEXT,
+  valor INTEGER NOT NULL DEFAULT 0, descricao TEXT, data_emissao TEXT, data_vencimento TEXT, forma_pagamento TEXT,
+  tipo_caixa TEXT NOT NULL CHECK (tipo_caixa IN ('share','cliente','hold')), categoria_movimentacao_id TEXT NOT NULL,
+  grupo_categoria TEXT, status TEXT, lancamento_id TEXT, criado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+  url_recibo TEXT, recebedor_nome TEXT, numero_documento_anexo TEXT, observacoes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS recibo_anexos (
+  id TEXT PRIMARY KEY NOT NULL, recibo_id TEXT, finalidade TEXT, nome_arquivo TEXT NOT NULL,
+  caminho_arquivo TEXT NOT NULL, tipo_arquivo TEXT NOT NULL, tamanho_arquivo INTEGER NOT NULL DEFAULT 0,
+  enviado_por TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+);
