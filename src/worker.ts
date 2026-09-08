@@ -4875,7 +4875,17 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await ensureTrainingTables(c)
-  const result = await portalDb(c).prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por WHERE r.status = 'ATIVA' ORDER BY r.criado_em DESC`).all()
+  const filtro = await isMeetingManager(c, user) ? '' : "WHERE r.status = 'ATIVA'"
+  const result = await portalDb(c).prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por ${filtro} ORDER BY r.criado_em DESC`).all()
+  return c.json(result.results)
+})
+
+app.get('/api/sharebrasil/centro-treinamento/reunioes/encerradas', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  const result = await portalDb(c).prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por WHERE r.status = 'ENCERRADA' ORDER BY r.encerrado_em DESC, r.criado_em DESC`).all()
   return c.json(result.results)
 })
 
@@ -4898,6 +4908,16 @@ app.post('/api/sharebrasil/centro-treinamento/reunioes/:id/encerrar', async c =>
   if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   await portalDb(c).prepare("UPDATE centro_reunioes SET status = 'ENCERRADA', encerrado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+app.delete('/api/sharebrasil/centro-treinamento/reunioes/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
+  await ensureTrainingTables(c)
+  const result = await portalDb(c).prepare("DELETE FROM centro_reunioes WHERE id = ?1 AND status = 'ENCERRADA'").bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.json({ error: 'sala_nao_encerrada_ou_nao_encontrada' }, 409)
   return c.json({ success: true })
 })
 
