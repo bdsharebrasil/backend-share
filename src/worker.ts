@@ -7,6 +7,7 @@ import { z } from 'zod'
 import logoShareBytes from './assets/share-signature-logo.png'
 import signatureBytes from './assets/assinatura-para-recibo.png'
 import { financeiroRoutes } from './financeiroRoutes'
+import { processFinanceQueue } from './financeiro/FinanceiroKernel'
 
 const SIGNATURE_LOGO_CID = 'share-brasil-signature-logo'
 const SIGNATURE_LOGO_BASE64 = arrayBufferBase64(logoShareBytes)
@@ -5884,6 +5885,11 @@ export default {
   fetch: app.fetch,
   async scheduled(_event: any, _env: Bindings, ctx: ExecutionContext) {
     const tasks = [
+      // Processa a fila financeira no próprio Worker. A fila usa somente
+      // tabelas existentes; migrations são a única forma de alterar o D1.
+      _env.SHARE_DB
+        ? processFinanceQueue(_env.SHARE_DB, null, 50)
+        : Promise.resolve([]),
       // Aquece weather e notam dos principais aeródromos
       ...PREFETCH_ICAOS.flatMap(icao => [
         fetch(`${WORKER_URL}/api/weather/${icao}`),
