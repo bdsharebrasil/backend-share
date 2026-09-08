@@ -5654,9 +5654,11 @@ app.post('/api/interno/emails', async c => {
   const multipart = c.req.header('content-type')?.includes('multipart/form-data')
   const body = multipart ? await c.req.parseBody() : await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const destinatarios = emailArray(body.destinatarios)
+  const copias = emailArray(body.cc).filter((email) => !destinatarios.includes(email))
+  const todosDestinatarios = [...destinatarios, ...copias]
   const assunto = String(body.assunto || '').trim(); const mensagem = [String(body.mensagem || '').trim(), String(body.dados_bancarios || '').trim()].filter(Boolean).join('\n\n'); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
-  if (destinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
+  if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c)
   const db = portalDb(c); const anexos: any[] = []
@@ -5698,7 +5700,7 @@ app.post('/api/interno/emails', async c => {
   const assinaturaAtual = await assinaturaOperacional(c, user)
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
   const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
   if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), ids.length, status, erro, user.id).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
