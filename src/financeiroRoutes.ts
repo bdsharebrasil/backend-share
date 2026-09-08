@@ -6,6 +6,9 @@ import {
   FinanceError,
   issueRevenue,
   issueReceipt,
+  emitirReciboReembolso,
+  emitirReciboColaborador,
+  emitirReciboPagamento,
   processFinanceQueue,
   settlePayable,
   settleReceivable,
@@ -158,7 +161,15 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   if (vencidasAte) { filtros.push("date(data_vencimento) <= date(?)"); params.push(vencidasAte) }
   const rows = await listar(c.env.SHARE_DB, `SELECT * FROM ${table}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(data_vencimento) ASC, criado_em DESC LIMIT 500`, ...params)
   const rowsComFornecedor = await enriquecerFornecedores(c.env.SHARE_DB, rows)
-  return rowsComFornecedor.map(mapConta)
+  const mapped = rowsComFornecedor.map(mapConta)
+  if (table !== 'contas_areceber') return mapped
+  return Promise.all(mapped.map(async (conta) => ({
+    ...conta,
+    rateios: await listar(c.env.SHARE_DB,
+      'SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid',
+      conta.lancamentoId,
+    ),
+  })))
 }
 
 /*
@@ -309,10 +320,11 @@ financeiroRoutes.post('/recibos-saida/:id/dar-baixa', async (c) => {
     const contaId = String(recibo.contas_areceber_id ?? '').trim()
     if (!contaId) return c.json({ error: 'conta_a_receber_nao_vinculada' }, 409)
     const result = await settleReceivable(c.env.SHARE_DB, contaId, {
-      data_recebimento: body.data_pagamento ?? body.dataRecebimento,
-      banco_recebimento: body.conta_bancaria ?? body.bancoRecebimento,
+      data_recebimento: body.data_recebimento ?? body.data_pagamento ?? body.dataRecebimento,
+      conta_bancaria_id: body.conta_bancaria_id ?? body.conta_bancaria ?? body.bancoRecebimento,
       forma_pagamento: body.forma_pagamento ?? body.formaPagamento,
-      comprovante_recebimento_url: body.comprovante_url ?? body.comprovanteRecebimentoUrl,
+      comprovante_url: body.comprovante_url ?? body.comprovanteRecebimentoUrl,
+      pagamentos: body.pagamentos,
     }, c.get('userId') || null)
     return c.json({ ok: true, conta: result })
   } catch (error) { return errorResponse(c, error) }
@@ -500,11 +512,14 @@ financeiroRoutes.post('/reembolsos', async (c) => {
 
 financeiroRoutes.post('/recibos', async (c) => {
   try {
-    const result = await issueReceipt(
-      c.env.SHARE_DB,
-      await c.req.json(),
-      c.get('userId') || null,
-    )
+    const body = await c.req.json<Record<string, unknown>>()
+    const handlers: Record<string, typeof issueReceipt> = {
+      recibo_reembolso: emitirReciboReembolso,
+      recibo_colaborador: emitirReciboColaborador,
+      recibo_pagamento: emitirReciboPagamento,
+    }
+    const handler = handlers[String(body.tipo_recibo)] || issueReceipt
+    const result = await handler(c.env.SHARE_DB, body, c.get('userId') || null)
     return c.json(result, 201)
   } catch (error) {
     return errorResponse(c, error)
