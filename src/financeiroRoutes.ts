@@ -270,15 +270,20 @@ financeiroRoutes.get('/recibos', async (c) => {
 financeiroRoutes.get('/recibos/opcoes', async (c) => {
   const db = c.env.SHARE_DB
   const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
-  const [clientes, colaboradores, aeronaves, cotistas, categorias, categoriasCliente] = await Promise.all([
+  const [clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categoriasCliente] = await Promise.all([
     read('SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente ORDER BY razao_social'),
-    read('SELECT id, nome_completo, nome_exibicao, cpf, nome_banco, tipo_conta, conta_numero, agencia_numero, pix FROM user_profiles ORDER BY nome_completo'),
+    read("SELECT id, nome_completo, nome_exibicao, cpf, endereco, cidade, uf, email, telefone, canac, nome_banco, tipo_conta, conta_numero, agencia_numero, pix, 'user_profiles' AS origem FROM user_profiles ORDER BY nome_completo"),
+    read("SELECT id, nome_completo, cpf, endereco, cidade, uf, telefone, canac, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo"),
     read('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro'),
     read('SELECT id, aeronave_id, cliente_id, socio_id, codigo_cliente, percentual_sociedade FROM cotista_aeronave ORDER BY codigo_cliente'),
     read('SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
     read('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
   ])
-  return c.json({ clientes, colaboradores, aeronaves, cotistas, categorias, categorias_cliente: categoriasCliente, recebedores: colaboradores })
+  const recebedores = [
+    ...colaboradores.map((item: any) => ({ ...item, id: `perfil:${item.id}`, nome: item.nome_completo || item.nome_exibicao || item.email || '', tipo_user: item.tipo_user || 'colaborador' })),
+    ...freelancers.map((item: any) => ({ ...item, id: `freelancer:${item.id}`, nome: item.nome_completo || '', tipo_user: 'freelancer' })),
+  ].sort((a: any, b: any) => String(a.nome_completo || '').localeCompare(String(b.nome_completo || ''), 'pt-BR'))
+  return c.json({ clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categorias_cliente: categoriasCliente, recebedores })
 })
 
 financeiroRoutes.patch('/recibos/:id/status', async (c) => {
