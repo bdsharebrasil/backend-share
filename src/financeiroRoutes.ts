@@ -5,6 +5,7 @@ import {
   enqueueFinance,
   FinanceError,
   issueRevenue,
+  issueReceipt,
   processFinanceQueue,
   settlePayable,
   settleReceivable,
@@ -95,6 +96,19 @@ financeiroRoutes.post('/reembolsos', async (c) => {
       c.get('userId') || null,
     )
     return c.json(result, result.idempotent ? 200 : 201)
+  } catch (error) {
+    return errorResponse(c, error)
+  }
+})
+
+financeiroRoutes.post('/recibos', async (c) => {
+  try {
+    const result = await issueReceipt(
+      c.env.SHARE_DB,
+      await c.req.json(),
+      c.get('userId') || null,
+    )
+    return c.json(result, 201)
   } catch (error) {
     return errorResponse(c, error)
   }

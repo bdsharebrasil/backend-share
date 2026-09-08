@@ -73,6 +73,8 @@ async function loadSchema(db: Database): Promise<SchemaCache> {
     'auditoria_financeira',
     'financeiro_vinculos',
     'financeiro_fila',
+    'recibos',
+    'recibo_rateio',
     'cotista_aeronave',
     'cliente',
     'hold_socios',
@@ -1659,4 +1661,100 @@ export async function processFinanceQueue(
     }
   }
   return result
+}
+
+
+export async function issueReceipt(
+  db: Database,
+  body: Row,
+  userId: string | null,
+): Promise<Row> {
+  const tipo = text(body.tipo_recibo)
+  if (!['recibo_reembolso', 'recibo_colaborador', 'recibo_pagamento'].includes(tipo)) {
+    throw new FinanceError('tipo_recibo inválido', 'tipo_recibo_invalido')
+  }
+  const pagadorTipo = text(body.pagador_tipo)
+  const pagadorId = text(body.pagador_id)
+  if (!['empresa', 'cotista_aeronave'].includes(pagadorTipo) || !pagadorId) {
+    throw new FinanceError('Pagador inválido', 'pagador_invalido')
+  }
+  const categoriaId = nullableText(body.categoria_movimentacao_id)
+  if (!categoriaId) {
+    throw new FinanceError('categoria_movimentacao_id é obrigatória', 'categoria_obrigatoria')
+  }
+  const schema = await loadSchema(db)
+  requireTable(schema, 'recibos', ['id', 'tipo_recibo', 'pagador_tipo', 'pagador_id', 'valor', 'categoria_movimentacao_id', 'lancamento_id'])
+  requireTable(schema, 'recibo_rateio', ['id', 'recibo_id', 'rateio_id', 'percentual', 'valor', 'cotista_id'])
+
+  const comando: Row = {
+    ...body,
+    descricao: body.descricao ?? body.descricao_servico,
+    valor_centavos: body.valor_centavos,
+    data: body.data_emissao,
+    categoria_id: categoriaId,
+    aeronave_id: body.aeronave_id,
+    cotista_aeronave_id: pagadorTipo === 'cotista_aeronave' ? pagadorId : body.cotista_aeronave_id,
+    tipo_caixa: pagadorTipo === 'cotista_aeronave' ? 'CLIENTE' : 'SHARE',
+    grupo_categoria: tipo === 'recibo_reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
+    fluxo: 'SAIDA',
+    pago_diretamente: tipo === 'recibo_pagamento' && pagadorTipo === 'cotista_aeronave',
+    reembolsavel: tipo === 'recibo_reembolso',
+  }
+  const financeiro = await createExpense(db, comando, userId)
+  const reciboId = id()
+  const lancamentoId = text(financeiro.lancamento_id ?? financeiro.id)
+  const rateios = await db.prepare('SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(lancamentoId).all<Row>()
+  const numero = `REC-${new Date().getFullYear()}-${reciboId.slice(0, 8).toUpperCase()}`
+  const statements: D1PreparedStatement[] = [
+    insertStatement(db, schema, 'recibos', {
+      id: reciboId,
+      numero_recibo: numero,
+      tipo_recibo: tipo,
+      colaborador_id: nullableText(body.colaborador_id),
+      aeronave_id: nullableText(body.aeronave_id),
+      rateado: rateios.results?.length ? 1 : 0,
+      pagador_tipo: pagadorTipo,
+      pagador_id: pagadorId,
+      nome_pagador: nullableText(body.nome_pagador),
+      valor: Number(body.valor_centavos),
+      descricao: text(body.descricao ?? body.descricao_servico),
+      data_emissao: body.data_emissao,
+      data_vencimento: nullableText(body.data_vencimento),
+      forma_pagamento: nullableText(body.forma_pagamento),
+      tipo_caixa: pagadorTipo === 'cotista_aeronave' ? 'cliente' : 'share',
+      categoria_movimentacao_id: categoriaId,
+      grupo_categoria: comando.grupo_categoria,
+      status: 'EMITIDO',
+      lancamento_id: lancamentoId,
+      recebedor_nome: nullableText(body.recebedor_nome),
+      observacoes: nullableText(body.observacoes),
+      criado_por: userId,
+    }, ['id', 'tipo_recibo', 'pagador_tipo', 'pagador_id', 'valor', 'categoria_movimentacao_id']),
+    ...rateios.results.map((rateio) => insertStatement(db, schema, 'recibo_rateio', {
+      id: id(), recibo_id: reciboId, rateio_id: rateio.id, percentual: Number(rateio.percentual || 0),
+      valor: Number(rateio.valor || 0), cotista_id: rateio.cotista_id,
+    }, ['id', 'recibo_id', 'valor', 'cotista_id'])),
+    linkStatement(db, schema, 'RECIBO', reciboId, 'LANCAMENTO', lancamentoId, 'RECIBO_LANCAMENTO', userId),
+    ...rateios.results.map((rateio) => linkStatement(db, schema, 'RECIBO', reciboId, 'RATEIO', String(rateio.id), 'RECIBO_RATEIO', userId)),
+    auditStatement(db, schema, 'recibos', reciboId, 'CRIACAO_RECIBO', userId, null, Number(body.valor_centavos), null, null),
+  ]
+  await db.batch(statements)
+  const recibo = {
+    id: reciboId,
+    numero_recibo: numero,
+    tipo_recibo: tipo,
+    pagador_tipo: pagadorTipo,
+    pagador_id: pagadorId,
+    aeronave_id: body.aeronave_id || null,
+    rateado: rateios.results?.length ? 1 : 0,
+    valor: Number(body.valor_centavos),
+    valor_centavos: Number(body.valor_centavos),
+    descricao: text(body.descricao ?? body.descricao_servico),
+    data_emissao: body.data_emissao,
+    categoria_id: categoriaId,
+    categoria_movimentacao_id: categoriaId,
+    status: 'EMITIDO',
+    lancamento_id: lancamentoId,
+  }
+  return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, rateio_ids: rateios.results.map((rateio) => rateio.id), rateio_linhas: rateios.results, status: 'EMITIDO', valor_centavos: Number(body.valor_centavos) }
 }
