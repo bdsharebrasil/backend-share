@@ -547,11 +547,11 @@ function linkStatement(
   userId: string | null,
 ): D1PreparedStatement {
   requireTable(schema, 'financeiro_vinculos', ['id', 'origem_tipo', 'origem_id', 'destino_tipo', 'destino_id', 'tipo_vinculo'])
-  return db.prepare(
-    `INSERT OR IGNORE INTO financeiro_vinculos
-      (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo, criado_por)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id(), origemTipo, origemId, destinoTipo, destinoId, tipoVinculo, userId)
+    return db.prepare(
+      `INSERT OR IGNORE INTO financeiro_vinculos
+       (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(id(), origemTipo, origemId, destinoTipo, destinoId, tipoVinculo)
 }
 
 function clientAllocationStatements(
@@ -1594,6 +1594,22 @@ export async function processFinanceQueue(
   const result: Row[] = []
   for (const row of rows.results || []) {
     try {
+      const claimed = await db
+        .prepare(
+          `UPDATE financeiro_fila
+              SET status = 'PROCESSANDO',
+                  tentativas = tentativas + 1
+            WHERE id = ?
+              AND status = 'PENDENTE'`,
+        )
+        .bind(row.id)
+        .run()
+
+      if (!claimed.meta.changes) {
+        result.push({ id: row.id, status: 'IGNORADO', motivo: 'item_ja_reservado' })
+        continue
+      }
+
       const payload = JSON.parse(String(row.payload_json)) as Row
       const operation = upper(row.operacao) as FinanceOperation
 
@@ -1614,11 +1630,10 @@ export async function processFinanceQueue(
         .prepare(
           `UPDATE financeiro_fila
               SET status = 'PROCESSADO',
-                  tentativas = tentativas + 1,
                   processado_em = CURRENT_TIMESTAMP,
                   erro = NULL
             WHERE id = ?
-              AND status = 'PENDENTE'`,
+              AND status = 'PROCESSANDO'`,
         )
         .bind(row.id)
         .run()
@@ -1629,10 +1644,9 @@ export async function processFinanceQueue(
         .prepare(
           `UPDATE financeiro_fila
               SET status = 'ERRO',
-                  tentativas = tentativas + 1,
                   erro = ?
             WHERE id = ?
-              AND status = 'PENDENTE'`,
+              AND status = 'PROCESSANDO'`,
         )
         .bind(error instanceof Error ? error.message : String(error), row.id)
         .run()
