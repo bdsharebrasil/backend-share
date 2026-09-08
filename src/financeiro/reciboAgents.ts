@@ -60,16 +60,23 @@ export async function allocateReceiptNumber(db: D1Database, cotistaId: string, c
     const match = String(item.numero_recibo ?? '').match(padrao)
     return Math.max(maior, match ? Number(match[1]) : 0)
   }, 0)
-  const id = crypto.randomUUID()
-  const proximoNumero = Math.max(maiorExistente + 1, 101)
-  const row = await db.prepare(`
-    INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = ?
-    RETURNING proximo_numero - 1 AS numero
-  `).bind(id, cotistaId, codigo, ano, proximoNumero, proximoNumero).first<{ numero: number }>()
-  if (!row) throw new Error('falha_ao_gerar_sequencia_numeros_recibos')
-  return `REC-${codigo}${String(row.numero).padStart(3, '0')}/${anoCurto}`
+  const existente = await db.prepare(
+    'SELECT id, proximo_numero FROM sequencia_numeros_recibos WHERE codigo_cliente = ? AND ano = ?',
+  ).bind(codigo, ano).first<{ id: string; proximo_numero: number }>()
+  const numero = Math.max(Number(existente?.proximo_numero || 1), maiorExistente + 1)
+
+  if (existente) {
+    await db.prepare(
+      'UPDATE sequencia_numeros_recibos SET proximo_numero = ?, cotista_aeronave_id = ? WHERE id = ?',
+    ).bind(numero + 1, cotistaId, existente.id).run()
+  } else {
+    await db.prepare(`
+      INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(crypto.randomUUID(), cotistaId, codigo, ano, numero + 1).run()
+  }
+
+  return `REC-${codigo}${String(numero).padStart(3, '0')}/${anoCurto}`
 }
 
 export async function createReceiptRecord(db: D1Database, input: ReceiptInput, id: string, number: string, userId: string | null): Promise<void> {
