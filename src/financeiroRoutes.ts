@@ -48,6 +48,51 @@ function errorResponse(c: any, error: unknown) {
   )
 }
 
+async function listar(db: D1Database, sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
+  const result = await db.prepare(sql).bind(...params).all<Record<string, unknown>>()
+  return result.results ?? []
+}
+
+function mapConta(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    dataVencimento: row.data_vencimento,
+    valor: Number(row.valor ?? Number(row.valor_centavos ?? 0) / 100),
+    categoriaId: row.categoria_id ?? null,
+    categoriaNome: row.categoria_nome ?? null,
+    descricao: row.descricao ?? null,
+    criadoPor: row.criado_por ?? null,
+    aeronaveId: row.aeronave_id ?? null,
+    fornecedorId: row.fornecedor_id ?? null,
+    cotistaId: row.cotista_id ?? null,
+    boletoUrl: row.boleto_url ?? null,
+    nfUrl: row.nf_url ?? null,
+    nfSaidaId: row.nf_saida_id ?? null,
+    dataPagamento: row.data_pagamento ?? row.data_recebimento ?? null,
+    bancoPagamento: row.banco_pagamento ?? row.banco_recebimento ?? null,
+    comprovantePagamentoUrl: row.comprovante_pagamento_url ?? row.comprovante_recebimento_url ?? null,
+    lancamentoId: row.lancamento_id ?? row.lancamentos_id ?? row.lancamento_receita_id ?? null,
+    status: row.status,
+    criadoEm: row.criado_em,
+    atualizadoEm: row.atualizado_em,
+  }
+}
+
+async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber') {
+  const status = c.req.query('status')
+  const cotistaId = c.req.query('cotistaId')
+  const fornecedorId = c.req.query('fornecedorId')
+  const vencidasAte = c.req.query('vencidasAte')
+  const filtros: string[] = []
+  const params: unknown[] = []
+  if (status) { filtros.push('status = ?'); params.push(status) }
+  if (cotistaId && table === 'contas_areceber') { filtros.push('cotista_id = ?'); params.push(cotistaId) }
+  if (fornecedorId && table === 'contas_apagar') { filtros.push('fornecedor_id = ?'); params.push(fornecedorId) }
+  if (vencidasAte) { filtros.push("date(data_vencimento) <= date(?)"); params.push(vencidasAte) }
+  const rows = await listar(c.env.SHARE_DB, `SELECT * FROM ${table}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(data_vencimento) ASC, criado_em DESC LIMIT 500`, ...params)
+  return rows.map(mapConta)
+}
+
 /*
  * Esta rota somente valida o schema. Ela não cria, altera ou exclui tabelas.
  * Pode ser usada no health check ou no deploy para detectar incompatibilidade.
@@ -59,6 +104,78 @@ financeiroRoutes.get('/schema/validate', async (c) => {
   } catch (error) {
     return errorResponse(c, error)
   }
+})
+
+financeiroRoutes.get('/contas-apagar', async (c) => {
+  try { return c.json(await consultarContas(c, 'contas_apagar')) } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/contas-areceber', async (c) => {
+  try { return c.json(await consultarContas(c, 'contas_areceber')) } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const [categorias, contas, cotistas, holdings] = await Promise.all([
+      listar(db, 'SELECT id, nome, tipo, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
+      listar(db, 'SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco'),
+      listar(db, "SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, ca.aeronave_id, ca.percentual_sociedade FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY nome"),
+      listar(db, 'SELECT id, nome, conta_bancaria FROM holdings ORDER BY nome'),
+    ])
+    return c.json({ categorias, contas_bancarias: contas, cotistas, holdings, pagadores: cotistas })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/share/opcoes', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const [categorias, contas, empresas] = await Promise.all([
+      listar(db, 'SELECT id, nome, tipo, grupo_categoria AS grupo, tipo_despesa AS classificacao, empresa_id, 0 AS reembolsavel FROM categoria_movimentacao_share ORDER BY nome'),
+      listar(db, 'SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco'),
+      listar(db, 'SELECT id, razao_social, cnpj FROM empresa ORDER BY razao_social'),
+    ])
+    return c.json({ categorias, contas_bancarias: contas, empresas })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/lancamentos', async (c) => {
+  try {
+    const inicio = c.req.query('inicio')
+    const fim = c.req.query('fim')
+    const caixa = c.req.query('caixa')
+    const filtros: string[] = []
+    const params: unknown[] = []
+    if (inicio) { filtros.push('date(COALESCE(data, data_emissao, criado_em)) >= date(?)'); params.push(inicio) }
+    if (fim) { filtros.push('date(COALESCE(data, data_emissao, criado_em)) <= date(?)'); params.push(fim) }
+    if (caixa) { filtros.push('tipo_caixa = ?'); params.push(caixa.toUpperCase()) }
+    const rows = await listar(c.env.SHARE_DB, `SELECT * FROM lancamentos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(data, data_emissao, criado_em)) DESC, criado_em DESC LIMIT 500`, ...params)
+    return c.json({ lancamentos: rows })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/dashboard/financeiro', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const [receber, pagar, movimentacoes] = await Promise.all([
+      listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
+      listar(db, "SELECT valor_centavos, status FROM contas_apagar WHERE status <> 'CANCELADO'"),
+      listar(db, 'SELECT id, descricao, status, data_pagamento, valor_centavos, observacoes, criado_em FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
+    ])
+    const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
+    const totalPago = pagar.filter((row) => row.status === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
+    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: pagar.filter((row) => row.status === 'EM_ABERTO').length, pagamentos_confirmados: pagar.filter((row) => row.status === 'PAGO').length }, movimentacoes: movimentacoes.map((row) => ({ ...row, valor: Number(row.valor_centavos || 0) / 100 })) })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/cotista/dashboard', async (c) => {
+  try {
+    const rows = await listar(c.env.SHARE_DB, 'SELECT id, data, descricao, numero_doc, fornecedor_nome, categoria_nome, grupo_categoria, tipo, data_vencimento, fluxo, valor_centavos, pago_por, tipo_caixa, pago_diretamente, reembolsavel, reembolso_quitado, status, observacoes FROM lancamentos ORDER BY date(data) DESC, criado_em DESC LIMIT 500')
+    const lancamentos = rows.map((row) => ({ id: row.id, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.tipo ?? null, prazo: row.data_vencimento ?? null, fluxo: row.fluxo === 'ENTRADA' ? 'ENTRADA' : 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
+    const entradas = lancamentos.filter((row) => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
+    const saidas = lancamentos.filter((row) => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
+    return c.json({ lancamentos, saldos: [], matrizCompensacao: {}, holdings: [], resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: saidas, pendentes: lancamentos.filter((row) => row.status === 'EM_ABERTO').length, media_mensal: 0, media_lancamento: lancamentos.length ? (entradas + saidas) / lancamentos.length : 0 }, fechamento_mensal: [], ranking_gastos: [], ranking_cotistas: [] })
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.post('/lancamentos/despesa', async (c) => {
