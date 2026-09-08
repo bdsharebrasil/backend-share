@@ -1796,6 +1796,125 @@ export async function processFinanceQueue(
   return result
 }
 
+async function createReceiptExitFinance(
+  db: Database,
+  schema: SchemaCache,
+  command: Row,
+  input: Row,
+  receiptId: string,
+  userId: string | null,
+): Promise<{ shareLancamentoId: string; clienteLancamentoId: string; contaPagarId: string; rateioId: string }> {
+  const amount = asPositiveCents(input.valor_centavos)
+  const shareLancamentoId = id()
+  const clienteLancamentoId = id()
+  const contaPagarId = id()
+  const rateioId = id()
+  const cotistaId = text(input.pagador_id)
+  const cotista = await db
+    .prepare('SELECT aeronave_id, percentual_sociedade FROM cotista_aeronave WHERE id = ?')
+    .bind(cotistaId)
+    .first<{ aeronave_id: string | null; percentual_sociedade: number | null }>()
+  if (!cotista) {
+    throw new FinanceError('Cotista da aeronave não encontrado', 'cotista_aeronave_nao_encontrado')
+  }
+
+  // O recibo de saída representa uma receita no Caixa Share e uma saída no
+  // Caixa Cliente. O rateio só é criado depois do lançamento cliente, pois
+  // sua FK deve apontar para esse lançamento (e não para o lançamento Share).
+  const categoriaClienteId = nullableText(
+    command.categoria_lancamento_id ?? command.categoria_cliente_id,
+  )
+  const statements = [
+    insertStatement(db, schema, 'lancamentos', {
+      id: shareLancamentoId,
+      aeronave_id: cotista.aeronave_id ?? command.aeronave_id,
+      cotista_aeronave_id: cotistaId,
+      descricao: input.descricao,
+      categoria_id: nullableText(input.categoria_movimentacao_id),
+      categoria_nome: nullableText(command.categoria_nome_manual ?? command.categoria_nome),
+      grupo_categoria: 'RECEITAS OPERACIONAIS',
+      fluxo: 'RECEITA',
+      tipo_caixa: 'SHARE',
+      valor_centavos: amount,
+      valor_total: amount / 100,
+      valor: amount / 100,
+      status: 'EM_ABERTO',
+      data_lancamento: input.data_emissao,
+      data_emissao: input.data_emissao,
+      data_vencimento: input.data_vencimento,
+      pago_diretamente: 0,
+      reembolsavel: 0,
+      origem_tipo: 'RECIBO_SAIDA',
+      origem_id: receiptId,
+      numero_recibo: nullableText(command.numero_recibo),
+      criado_por: userId,
+      observacoes: nullableText(input.observacoes),
+    }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+    insertStatement(db, schema, 'lancamentos', {
+      id: clienteLancamentoId,
+      aeronave_id: cotista.aeronave_id ?? command.aeronave_id,
+      cotista_aeronave_id: cotistaId,
+      descricao: input.descricao,
+      categoria_id: null,
+      categoria_cliente_id: categoriaClienteId,
+      categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome_manual),
+      grupo_categoria: 'CAIXA CLIENTE',
+      fluxo: 'SAIDA',
+      tipo_caixa: 'CLIENTE',
+      valor_centavos: amount,
+      valor_total: amount / 100,
+      valor: amount / 100,
+      status: 'EM_ABERTO',
+      data_lancamento: input.data_emissao,
+      data_emissao: input.data_emissao,
+      data_vencimento: input.data_vencimento,
+      pago_diretamente: 0,
+      reembolsavel: 0,
+      origem_tipo: 'RECIBO_SAIDA',
+      origem_id: shareLancamentoId,
+      criado_por: userId,
+      observacoes: nullableText(input.observacoes),
+    }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+    insertStatement(db, schema, 'contas_apagar', {
+      id: contaPagarId,
+      data_vencimento: input.data_vencimento || input.data_emissao,
+      valor_centavos: amount,
+      categoria_id: nullableText(input.categoria_movimentacao_id),
+      categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome_manual),
+      descricao: input.descricao,
+      aeronave_id: cotista.aeronave_id ?? command.aeronave_id,
+      cotista_id: cotistaId,
+      lancamentos_id: clienteLancamentoId,
+      criado_por: userId,
+      origem_tipo: 'RECIBO_SAIDA',
+      status: 'EM_ABERTO',
+    }, ['id', 'data_vencimento', 'valor_centavos', 'lancamentos_id']),
+    insertStatement(db, schema, 'rateio_despesas', {
+      id: rateioId,
+      lancamento_id: clienteLancamentoId,
+      aeronave_id: cotista.aeronave_id ?? command.aeronave_id,
+      cotista_id: cotistaId,
+      data_emissao: input.data_emissao,
+      data_vencimento: input.data_vencimento,
+      categoria_id: categoriaClienteId,
+      categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome_manual),
+      tipo_rateio: 'FIXO',
+      periodicidade: command.periodicidade || 'ÚNICO',
+      percentual_sociedade: Number(cotista.percentual_sociedade ?? 0),
+      percentual_uso: 100,
+      valor_total_centavos: amount,
+      valor_rateado_centavos: amount,
+      valor_pago_real_centavos: 0,
+      pago_diretamente: 0,
+      status: 'EM_ABERTO',
+      descricao_despesa: input.descricao,
+      observacoes: nullableText(input.observacoes),
+    }, ['id', 'lancamento_id', 'aeronave_id', 'cotista_id']),
+  ]
+  await db.batch(statements)
+  return { shareLancamentoId, clienteLancamentoId, contaPagarId, rateioId }
+}
+
 
 export async function issueReceipt(
   db: Database,
@@ -1840,10 +1959,13 @@ export async function issueReceipt(
   const ano = input.data_emissao.slice(0, 4)
   const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
   await createReceiptRecord(db, input, reciboId, numero, userId)
-  const financeiro = await createExpense(db, comando, userId)
-  const lancamentoId = text(financeiro.lancamento_id ?? financeiro.id)
+  const financeiro = input.pagador_tipo === 'cotista_aeronave'
+    ? await createReceiptExitFinance(db, schema, comando, input, reciboId, userId)
+    : await createExpense(db, comando, userId)
+  const lancamentoId = text('shareLancamentoId' in financeiro ? financeiro.shareLancamentoId : financeiro.lancamento_id ?? financeiro.id)
+  const rateioLancamentoId = text('clienteLancamentoId' in financeiro ? financeiro.clienteLancamentoId : lancamentoId)
   await db.prepare('UPDATE recibos SET lancamento_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(lancamentoId, reciboId).run()
-  const rateios = await createReceiptAllocations(db, reciboId, lancamentoId)
+  const rateios = await createReceiptAllocations(db, reciboId, rateioLancamentoId)
   await db.batch([
     linkStatement(db, schema, 'RECIBO', reciboId, 'LANCAMENTO', lancamentoId, 'RECIBO_LANCAMENTO', userId),
     ...rateios.map((rateio) => linkStatement(db, schema, 'RECIBO', reciboId, 'RATEIO', String(rateio.id), 'RECIBO_RATEIO', userId)),
@@ -1867,5 +1989,5 @@ export async function issueReceipt(
     status: 'PDF_PENDENTE',
     lancamento_id: lancamentoId,
   }
-  return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: 'PDF_PENDENTE', valor_centavos: input.valor_centavos }
+  return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, lancamento_cliente_id: rateioLancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: 'PDF_PENDENTE', valor_centavos: input.valor_centavos }
 }
