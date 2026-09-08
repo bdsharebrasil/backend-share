@@ -12,6 +12,7 @@ export class FinanceKernelError extends Error {
 }
 
 const text = (value: unknown) => value == null ? '' : String(value).trim()
+const flag = (value: unknown) => value === true || value === 1 || ['1', 'true', 'sim', 'yes'].includes(text(value).toLowerCase())
 const positive = (value: unknown) => {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) throw new FinanceKernelError('Valor deve ser maior que zero', 'valor_invalido')
@@ -22,14 +23,24 @@ const moneyCents = (body: Row) => body.valorCentavos != null || body.valor_centa
   : Math.round(positive(body.valor_total ?? body.valor) * 100)
 const idempotency = (body: Row) => text(body.idempotencyKey ?? body.idempotency_key ?? body.reference_id) || null
 const uuid = () => crypto.randomUUID()
+const dateOf = (body: Row) => text(body.data_emissao ?? body.data ?? new Date().toISOString().slice(0, 10))
+const upper = (value: unknown, fallback: string) => text(value || fallback).toUpperCase()
 
 async function columns(db: Database, table: string) {
   const result = await db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all<{ name: string }>()
   return new Set((result.results || []).map(row => String(row.name)))
 }
 
+async function insertDynamic(db: Database, table: string, input: Row) {
+  const available = await columns(db, table)
+  const entries = Object.entries(input).filter(([key, value]) => available.has(key) && value !== undefined)
+  if (!entries.length) throw new FinanceKernelError(`Schema incompatível: ${table}`, 'schema_incompativel', 500)
+  const names = entries.map(([key]) => key)
+  await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`).bind(...entries.map(([, value]) => value)).run()
+}
+
 async function audit(db: Database, entity: string, entityId: string, operation: string, userId: string | null, oldValue: number | null, newValue: number | null, reason: string | null, key: string | null) {
-  await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, valor_anterior_centavos, valor_novo_centavos, usuario_id, motivo, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(uuid(), entity, entityId, operation, oldValue, newValue, userId, reason, key).run()
+  await db.prepare('INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, valor_anterior_centavos, valor_novo_centavos, usuario_id, motivo, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uuid(), entity, entityId, operation, oldValue, newValue, userId, reason, key).run()
 }
 
 async function collaborator(db: Database, body: Row) {
@@ -43,75 +54,163 @@ async function collaborator(db: Database, body: Row) {
   return id
 }
 
-async function insertDynamic(db: Database, table: string, input: Row) {
-  const available = await columns(db, table)
-  const entries = Object.entries(input).filter(([key, value]) => available.has(key) && value !== undefined)
-  if (!entries.length) throw new FinanceKernelError(`Schema incompatível: ${table}`, 'schema_incompativel', 500)
-  const names = entries.map(([key]) => key)
-  await db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`).bind(...entries.map(([, value]) => value)).run()
+function rateioType(value: unknown) {
+  const normalized = text(value).toUpperCase().replaceAll(' ', '_')
+  return ['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA'].includes(normalized) ? normalized : 'FIXO'
+}
+
+function rateioLines(body: Row, amount: number) {
+  const supplied = Array.isArray(body.rateio_linhas) ? body.rateio_linhas : Array.isArray(body.rateios) ? body.rateios : []
+  if (supplied.length) return supplied.map((line: Row) => ({
+    cotista_id: text(line.cotista_id ?? line.cotistaId), socio_id: text(line.socio_id ?? line.socioId) || null,
+    holding_id: text(line.holding_id ?? line.holdingId) || null, nome: text(line.nome) || 'Cotista',
+    percentual: Number(line.percentual ?? line.percentual_sociedade ?? 0), valorCentavos: line.valor_centavos != null ? Math.round(Number(line.valor_centavos)) : Math.round(Number(line.valor ?? 0) * 100),
+    pago_por: text(line.pago_por ?? line.pagoPor) || null, pago_diretamente: flag(line.pago_diretamente ?? line.pagoDiretamente),
+  }))
+  const cotistaId = text(body.cotista_id ?? body.cotista_aeronave_id)
+  return cotistaId ? [{ cotista_id: cotistaId, socio_id: text(body.socio_id) || null, holding_id: text(body.holding_id) || null, nome: 'Cotista', percentual: 100, valorCentavos: amount, pago_por: text(body.pago_por) || null, pago_diretamente: flag(body.pago_diretamente ?? body.pagoDiretamente) }] : []
+}
+
+async function holdingContext(db: Database, body: Row, lines: Row[]) {
+  if (text(body.socio_id ?? body.socioId ?? body.holding_id ?? body.holdingId)) return { socioId: text(body.socio_id ?? body.socioId) || null, holdingId: text(body.holding_id ?? body.holdingId) || null }
+  const cotistaId = text(body.cotista_id ?? body.cotista_aeronave_id) || text(lines.find(line => line.socio_id)?.cotista_id)
+  if (!cotistaId) return { socioId: null, holdingId: null }
+  const row = await db.prepare('SELECT ca.socio_id, hs.holding_id FROM cotista_aeronave ca LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?').bind(cotistaId).first<Row>().catch(() => null)
+  return { socioId: text(row?.socio_id) || null, holdingId: text(row?.holding_id) || null }
+}
+
+async function createAllocationRows(db: Database, body: Row, sourceId: string | null, movementId: string | null, amount: number, userId: string | null, direct: boolean, holding: boolean, data: string, suppliedLines?: Row[]) {
+  const lines = suppliedLines ?? rateioLines(body, amount)
+  if (!lines.length) return []
+  const type = rateioType(body.tipo_rateio)
+  const ids: string[] = []
+  for (const line of lines) {
+    const id = uuid(); ids.push(id)
+    const value = line.valorCentavos > 0 ? line.valorCentavos : Math.round(amount * Number(line.percentual || 0) / 100)
+    const paidDirect = direct || line.pago_diretamente ? 1 : 0
+    if (holding || line.socio_id) {
+      await insertDynamic(db, 'rateio_hold', {
+        id, movimento_holding_id: movementId, cotista_id: line.cotista_id || null, socio_id: line.socio_id || null, holding_id: line.holding_id || body.holding_id || null,
+        aeronave_id: body.aeronave_id ?? null, categoria_id: body.categoria_id ?? null, categoria_nome: text(body.categoria_nome ?? body.categoria), tipo_rateio: type,
+        percentual_sociedade: line.percentual || null, percentual_uso: line.percentual || null, valor_total_centavos: amount, valor_rateado_centavos: value,
+        valor_total: amount / 100, valor_rateado: value / 100, pago_por_socio_id: line.pago_por || null, pago_diretamente: paidDirect,
+        status: paidDirect ? 'PAGO' : 'EM_ABERTO', data_pagamento: paidDirect ? (body.data_pagamento ?? data) : null, descricao_despesa: text(body.descricao), observacoes: body.observacoes ?? null, criado_por: userId,
+      })
+    } else {
+      await insertDynamic(db, 'rateio_despesas', {
+        id, lancamento_id: sourceId, cotista_id: line.cotista_id || null, aeronave_id: body.aeronave_id ?? null, fornecedor_id: body.fornecedor_id ?? null,
+        categoria_id: body.categoria_id ?? null, categoria_nome: text(body.categoria_nome ?? body.categoria), tipo_rateio: type, percentual_sociedade: line.percentual || null, percentual_uso: line.percentual || null,
+        valor_total_centavos: amount, valor_rateado_centavos: value, valor_total: amount / 100, valor_rateado: value / 100, pago_por_cotista_id: line.pago_por || null, pago_por: line.pago_por || null,
+        pago_diretamente: paidDirect, status: paidDirect ? 'PAGO_DIRETAMENTE' : 'PENDENTE', data_pagamento: paidDirect ? (body.data_pagamento ?? data) : null, descricao_despesa: text(body.descricao), observacoes: body.observacoes ?? null,
+      })
+    }
+  }
+  return ids
 }
 
 export async function createExpense(db: Database, body: Row, userId: string | null) {
   const key = idempotency(body)
-  if (key) { const old = await db.prepare('SELECT id FROM lancamentos WHERE idempotency_key = ?').bind(key).first<Row>(); if (old) return { id: old.id, idempotent: true } }
-  const id = text(body.id) || uuid(), amount = moneyCents(body), direct = Boolean(body.pagoDiretamente ?? body.pago_diretamente), collaboratorId = await collaborator(db, body)
-  const statusInformado = text(body.status).toUpperCase()
-  const status = ['EM_ABERTO', 'AGUARDANDO_REEMBOLSO', 'REEMBOLSADO', 'PAGO'].includes(statusInformado)
-    ? statusInformado
-    : direct || Boolean(body.pago ?? body.data_pagamento) ? 'PAGO' : 'EM_ABERTO'
-  const data = text(body.data_emissao ?? body.data ?? new Date().toISOString().slice(0, 10))
-  await insertDynamic(db, 'lancamentos', { id, descricao: text(body.descricao), fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: text(body.tipo_caixa ?? body.caixa ?? 'SHARE').toUpperCase(), caixa: text(body.caixa ?? body.tipo_caixa ?? 'SHARE').toUpperCase(), categoria_nome: text(body.categoria_nome ?? body.categoria ?? 'SEM CATEGORIA'), categoria: text(body.categoria_nome ?? body.categoria ?? 'SEM CATEGORIA'), grupo_categoria: text(body.grupo_categoria ?? 'DESPESA'), valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, data_lancamento: data, data_emissao: data, data, data_vencimento: body.data_vencimento ?? body.vencimento ?? null, prazo: body.prazo ?? body.vencimento ?? null, aeronave_id: body.aeronave_id ?? null, cotista_id: body.cotista_id ?? null, colaborador_ref_id: collaboratorId, idempotency_key: key, origem_tipo: text(body.origem_tipo ?? 'DESPESA'), origem_id: text(body.origem_id) || null, status, criado_por: userId, observacoes: body.observacoes ?? null })
-  let contaId: string | null = null
-  if (!direct) { contaId = uuid(); await insertDynamic(db, 'contas_apagar', { id: contaId, data_vencimento: body.data_vencimento ?? body.vencimento ?? text(body.data ?? new Date().toISOString().slice(0, 10)), valor_centavos: amount, valor: amount / 100, descricao: text(body.descricao), categoria_id: body.categoria_id ?? null, categoria_nome: text(body.categoria_nome ?? body.categoria), criado_por: userId, aeronave_id: body.aeronave_id ?? null, fornecedor_id: body.fornecedor_id ?? null, cotista_id: body.cotista_id ?? null, colaborador_id: collaboratorId, lancamento_id: id, origem_tipo: 'DESPESA', origem_id: id, idempotency_key: key, status: status === 'PAGO' || status === 'REEMBOLSADO' ? 'PAGO' : 'EM_ABERTO' }) }
-  await audit(db, 'lancamento', id, 'CRIACAO_DESPESA', userId, null, amount, text(body.motivo) || null, key)
-  return { id, contaPagarId: contaId, valorCentavos: amount, status, idempotent: false }
-}
-
-export async function settlePayable(db: Database, id: string, body: Row, userId: string | null) {
-  const row = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(id).first<Row>(); if (!row) throw new FinanceKernelError('Conta a pagar não encontrada', 'nao_encontrado', 404)
-  const current = text(row.status).toUpperCase(); if (current === 'PAGO') return { ...row, idempotent: true }; if (current === 'CANCELADO') throw new FinanceKernelError('Conta cancelada não pode ser paga', 'conta_cancelada')
-  const date = text(body.dataPagamento ?? body.data_pagamento); if (!date) throw new FinanceKernelError('Data de pagamento obrigatória', 'data_pagamento_obrigatoria')
-  const amount = Number(row.valor_centavos ?? Math.round(Number(row.valor || 0) * 100)); const linked = text(row.lancamento_id) || null
-  const statements = [db.prepare(`UPDATE contas_apagar SET status='PAGO', valor_centavos=?, data_pagamento=?, banco_pagamento=?, comprovante_pagamento_url=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND UPPER(status) NOT IN ('PAGO','CANCELADO')`).bind(amount, date, body.bancoPagamento ?? body.banco_pagamento ?? null, body.comprovantePagamentoUrl ?? body.comprovante_pagamento_url ?? null, id)]
-  if (linked) statements.push(db.prepare(`UPDATE lancamentos SET status='PAGO', data_pagamento=?, valor_centavos=COALESCE(valor_centavos, ?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?`).bind(date, amount, linked))
-  await db.batch(statements); await audit(db, 'conta_apagar', id, 'BAIXA', userId, amount, amount, text(body.motivo) || null, idempotency(body)); return { ...(await db.prepare('SELECT * FROM contas_apagar WHERE id=?').bind(id).first<Row>()), idempotent: false }
-}
-
-export async function issueRevenue(db: Database, body: Row, userId: string | null) {
-  const key = idempotency(body); if (key) { const old = await db.prepare('SELECT id FROM contas_areceber WHERE idempotency_key=?').bind(key).first<Row>(); if (old) return { id: old.lancamento_id ?? old.lancamentos_id, contaReceberId: old.id, idempotent: true } }
-  const amount = moneyCents(body), id = uuid(), accountId = uuid(), data = text(body.data_emissao ?? body.data ?? new Date().toISOString().slice(0, 10))
-  const cotistaId = text(body.cotista_id ?? body.cotista_aeronave_id) || null
-  const origemTipo = text(body.origem_tipo ?? 'RECEITA')
-  const origemId = text(body.origem_id) || null
-  const categoriaNome = text(body.categoria_nome ?? 'RECEITA')
-  let lancamentoClienteId: string | null = null
-  await insertDynamic(db, 'lancamentos', { id, descricao: text(body.descricao), fluxo: 'ENTRADA', natureza: 'RECEITA', tipo_caixa: text(body.tipo_caixa ?? body.caixa ?? 'SHARE').toUpperCase(), caixa: text(body.caixa ?? body.tipo_caixa ?? 'SHARE').toUpperCase(), categoria_nome: categoriaNome, categoria: categoriaNome, grupo_categoria: 'RECEITA', valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, data_lancamento: data, data_emissao: data, data, data_vencimento: body.data_vencimento ?? body.vencimento ?? null, prazo: body.data_vencimento ?? body.vencimento ?? null, cotista_id: cotistaId, origem_tipo: origemTipo, origem_id: origemId, idempotency_key: key, status: 'EM_ABERTO', criado_por: userId, observacoes: body.observacoes ?? null })
-  await insertDynamic(db, 'contas_areceber', { id: accountId, data_vencimento: body.data_vencimento ?? body.vencimento ?? text(body.data_emissao ?? new Date().toISOString().slice(0, 10)), valor_centavos: amount, valor: amount / 100, descricao: text(body.descricao), categoria_id: body.categoria_id ?? null, categoria_nome: categoriaNome, criado_por: userId, cotista_id: cotistaId, lancamento_receita_id: id, lancamento_id: id, lancamentos_id: id, lancamento_cliente_id: lancamentoClienteId, origem_tipo: origemTipo, origem_id: origemId || id, idempotency_key: key, status: 'EM_ABERTO' })
-  if (cotistaId && body.criar_lancamento_cliente !== false) {
-    lancamentoClienteId = uuid()
-    const categoriaClienteId = body.categoria_cliente_id ?? body.categoria_movimentacao_cliente_id ?? body.categoria_id ?? null
-    const categoriaClienteNome = text(body.categoria_cliente_nome ?? body.categoria_nome_cliente ?? categoriaNome) || 'CAIXA CLIENTE'
-    await insertDynamic(db, 'lancamentos', {
-      id: lancamentoClienteId, descricao: text(body.descricao), fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'CLIENTE', caixa: 'CLIENTE',
-      categoria_id: categoriaClienteId, categoria_movimentacao_id: categoriaClienteId, categoria_nome: categoriaClienteNome, categoria: categoriaClienteNome,
-      grupo_categoria: text(body.grupo_categoria_cliente ?? 'CAIXA CLIENTE'), valor_centavos: amount, valor_total: amount / 100, valor: amount / 100,
-      data_lancamento: data, data_emissao: data, data, data_vencimento: body.data_vencimento ?? body.vencimento ?? null,
-      prazo: body.data_vencimento ?? body.vencimento ?? null, cotista_id: cotistaId, origem_tipo: origemTipo, origem_id: id,
-      status: 'EM_ABERTO', criado_por: userId, observacoes: body.observacoes ?? null,
-    })
+  if (key) {
+    const old = await db.prepare('SELECT id FROM lancamentos WHERE idempotency_key=?').bind(key).first<Row>().catch(() => null)
+    if (old) return { id: old.id, idempotent: true }
+    if ((await columns(db, 'movimentos_holding')).has('idempotency_key')) {
+      const oldHolding = await db.prepare('SELECT id FROM movimentos_holding WHERE idempotency_key=?').bind(key).first<Row>()
+      if (oldHolding) return { id: oldHolding.id, idempotent: true }
+    }
   }
-  await audit(db, 'lancamento', id, 'EMISSAO_RECEITA', userId, null, amount, text(body.motivo) || null, key)
-  return { id, contaReceberId: accountId, lancamentoClienteId, valorCentavos: amount, status: 'EM_ABERTO', idempotent: false }
-}
+  const amount = moneyCents(body), direct = flag(body.pagoDiretamente ?? body.pago_diretamente), data = dateOf(body)
+  let lines = rateioLines(body, amount), context = await holdingContext(db, body, lines)
+  const holding = Boolean(context.socioId || context.holdingId || lines.some(line => line.socio_id))
+  if (holding) lines = lines.map(line => ({ ...line, socio_id: line.socio_id || context.socioId, holding_id: line.holding_id || context.holdingId }))
+  const reembolsavel = flag(body.reembolsavel)
+  const statusInformado = upper(body.status, '')
+  const status = ['EM_ABERTO', 'AGUARDANDO_REEMBOLSO', 'REEMBOLSADO', 'PAGO'].includes(statusInformado) ? statusInformado : direct ? 'PAGO' : 'EM_ABERTO'
+  const collaboratorId = await collaborator(db, body)
+  let lancamentoId: string | null = null, movementId: string | null = null, contaId: string | null = null
 
-export async function settleReceivable(db: Database, id: string, body: Row, userId: string | null) {
-  const row = await db.prepare('SELECT * FROM contas_areceber WHERE id=?').bind(id).first<Row>(); if (!row) throw new FinanceKernelError('Conta a receber não encontrada', 'nao_encontrado', 404); const current = text(row.status).toUpperCase(); if (current === 'RECEBIDO') return { ...row, idempotent: true }; if (current === 'CANCELADO') throw new FinanceKernelError('Conta cancelada não pode ser recebida', 'conta_cancelada'); const date = text(body.dataRecebimento ?? body.data_recebimento); if (!date) throw new FinanceKernelError('Data de recebimento obrigatória', 'data_recebimento_obrigatoria'); const linked = text(row.lancamentos_id ?? row.lancamento_id) || null; const explicitClient = text(row.lancamento_cliente_id) || null; const linkedClient = explicitClient || (linked ? text((await db.prepare("SELECT id FROM lancamentos WHERE tipo_caixa='CLIENTE' AND origem_id=? ORDER BY criado_em DESC LIMIT 1").bind(linked).first<Row>())?.id) || null : null); const amount = Number(row.valor_centavos ?? Math.round(Number(row.valor || 0) * 100)); const statements = [db.prepare(`UPDATE contas_areceber SET status='RECEBIDO', valor_centavos=?, data_recebimento=?, data_pagamento=?, banco_recebimento=?, comprovante_recebimento_url=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND UPPER(status) NOT IN ('RECEBIDO','CANCELADO')`).bind(amount, date, date, body.bancoRecebimento ?? body.banco_recebimento ?? null, body.comprovanteRecebimentoUrl ?? body.comprovante_recebimento_url ?? null, id)]; if (linked) statements.push(db.prepare(`UPDATE lancamentos SET status='RECEBIDO', data_pagamento=?, valor_centavos=COALESCE(valor_centavos, ?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?`).bind(date, amount, linked)); if (linkedClient) statements.push(db.prepare(`UPDATE lancamentos SET status='PAGO', data_pagamento=?, valor_centavos=COALESCE(valor_centavos, ?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?`).bind(date, amount, linkedClient)); await db.batch(statements); await audit(db, 'conta_areceber', id, 'BAIXA', userId, amount, amount, text(body.motivo) || null, idempotency(body)); return { ...(await db.prepare('SELECT * FROM contas_areceber WHERE id=?').bind(id).first<Row>()), idempotent: false }
+  if (holding) {
+    movementId = text(body.id) || uuid()
+    await insertDynamic(db, 'movimentos_holding', { id: movementId, holding_id: context.holdingId || null, socio_id: context.socioId || null, cotista_id: body.cotista_id ?? null, aeronave_id: body.aeronave_id ?? null, data: data, data_movimento: data, descricao: text(body.descricao), fornecedor_nome: body.fornecedor_nome ?? body.fornecedor ?? null, categoria_id: body.categoria_id ?? null, categoria_nome: body.categoria_nome ?? body.categoria ?? null, grupo_categoria: body.grupo_categoria ?? 'DESPESAS EMPRESA', fluxo: 'SAIDA', natureza: reembolsavel ? 'REEMBOLSO' : 'DESPESA', valor_centavos: amount, pago_diretamente: direct ? 1 : 0, status, criado_por: userId, observacoes: body.observacoes ?? null, idempotency_key: key })
+    await createAllocationRows(db, body, null, movementId, amount, userId, direct, true, data, lines)
+  } else if (!direct) {
+    lancamentoId = text(body.id) || uuid()
+    await insertDynamic(db, 'lancamentos', { id: lancamentoId, aeronave_id: body.aeronave_id ?? null, cotista_aeronave_id: body.cotista_id ?? body.cotista_aeronave_id ?? null, descricao: text(body.descricao), fornecedor_nome: body.fornecedor_nome ?? body.fornecedor ?? null, categoria_id: body.categoria_id ?? null, categoria_nome: body.categoria_nome ?? body.categoria ?? 'SEM CATEGORIA', grupo_categoria: body.grupo_categoria ?? (reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'), fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'SHARE', valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, status, data_lancamento: data, data_emissao: data, data_vencimento: body.data_vencimento ?? body.vencimento ?? null, pago_diretamente: 0, reembolsavel: reembolsavel ? 1 : 0, reembolso_quitado: 0, colaborador_ref_id: collaboratorId, origem_tipo: text(body.origem_tipo ?? 'DESPESA'), origem_id: text(body.origem_id) || null, idempotency_key: key, criado_por: userId, observacoes: body.observacoes ?? null })
+    contaId = uuid()
+    await insertDynamic(db, 'contas_apagar', { id: contaId, data_vencimento: body.data_vencimento ?? body.vencimento ?? data, valor_centavos: amount, valor: amount / 100, descricao: text(body.descricao), categoria_id: body.categoria_id ?? null, categoria_nome: body.categoria_nome ?? body.categoria ?? null, criado_por: userId, aeronave_id: body.aeronave_id ?? null, fornecedor_id: body.fornecedor_id ?? null, cotista_id: body.cotista_id ?? null, colaborador_id: collaboratorId, lancamento_id: lancamentoId, origem_tipo: 'DESPESA', origem_id: lancamentoId, idempotency_key: key, status: status === 'PAGO' ? 'PAGO' : 'EM_ABERTO' })
+    await createAllocationRows(db, body, lancamentoId, null, amount, userId, false, false, data, lines)
+  } else {
+    await createAllocationRows(db, body, null, null, amount, userId, true, false, data, lines)
+  }
+  const id = lancamentoId || movementId
+  if (!id) throw new FinanceKernelError('Despesa sem origem financeira', 'origem_financeira_ausente', 500)
+  await audit(db, holding ? 'movimentos_holding' : direct ? 'rateio_despesas' : 'lancamento', id, 'CRIACAO_DESPESA', userId, null, amount, text(body.motivo) || null, key)
+  return { id, contaPagarId: contaId, movimentoHoldingId: movementId, rateioIds: [], valorCentavos: amount, status, idempotent: false }
 }
 
 export async function createReimbursement(db: Database, body: Row, userId: string | null) {
-  const key = idempotency(body); if (key) { const old = await db.prepare('SELECT * FROM reembolsos WHERE idempotency_key=?').bind(key).first<Row>(); if (old) return { ...old, idempotent: true } } const amount = moneyCents(body), id = uuid(); const original = text(body.lancamentoOrigemId ?? body.lancamento_origem_id ?? body.lancamento_id); if (!original) throw new FinanceKernelError('Lançamento de origem obrigatório', 'lancamento_origem_obrigatorio'); await insertDynamic(db, 'reembolsos', { id, lancamento_origem_id: original, colaborador_id: body.colaborador_id ?? null, cotista_id: body.cotista_id ?? null, valor_centavos: amount, idempotency_key: key, criado_por: userId, status: 'PENDENTE' }); const receivable = await issueRevenue(db, { ...body, valorCentavos: amount, origem_tipo: 'REEMBOLSO', origem_id: id, idempotencyKey: `${key || id}:receita` }, userId); await db.prepare('UPDATE reembolsos SET conta_receber_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(receivable.contaReceberId, id).run(); return { id, contaReceberId: receivable.contaReceberId, valorCentavos: amount, status: 'EM_ABERTO', idempotent: false }
+  const key = idempotency(body), original = text(body.lancamentoOrigemId ?? body.lancamento_origem_id ?? body.lancamento_id)
+  if (!original) throw new FinanceKernelError('Lançamento de origem obrigatório', 'lancamento_origem_obrigatorio')
+  const amount = moneyCents(body), id = uuid(), accountId = uuid(), data = dateOf(body), cotistaId = text(body.cotista_id ?? body.cotista_aeronave_id) || null
+  await insertDynamic(db, 'reembolsos', { id, lancamento_origem_id: original, colaborador_id: body.colaborador_id ?? null, cotista_id: cotistaId, valor_centavos: amount, idempotency_key: key, criado_por: userId, status: 'PENDENTE' })
+  const shareId = uuid(), clientId = cotistaId ? uuid() : null
+  await insertDynamic(db, 'lancamentos', { id: shareId, aeronave_id: body.aeronave_id ?? null, cotista_aeronave_id: cotistaId, descricao: text(body.descricao ?? 'Reembolso de despesa'), categoria_nome: 'REEMBOLSOS ENTRADAS', grupo_categoria: 'REEMBOLSOS ENTRADAS', fluxo: 'ENTRADA', natureza: 'REEMBOLSO', tipo_caixa: 'SHARE', valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, status: 'AGUARDANDO_REEMBOLSO', data_lancamento: data, data_emissao: data, data_vencimento: body.data_vencimento ?? data, origem_tipo: 'REEMBOLSO', origem_id: id, criado_por: userId, observacoes: body.observacoes ?? null })
+  if (clientId) await insertDynamic(db, 'lancamentos', { id: clientId, aeronave_id: body.aeronave_id ?? null, cotista_aeronave_id: cotistaId, descricao: text(body.descricao ?? 'Reembolso de despesa'), categoria_nome: body.categoria_cliente_nome ?? 'REEMBOLSO', grupo_categoria: 'REEMBOLSO', fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'CLIENTE', valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, status: 'EM_ABERTO', data_lancamento: data, data_emissao: data, data_vencimento: body.data_vencimento ?? data, origem_tipo: 'REEMBOLSO', origem_id: id, criado_por: userId })
+  await insertDynamic(db, 'contas_areceber', { id: accountId, data_vencimento: body.data_vencimento ?? data, valor_centavos: amount, valor: amount / 100, descricao: text(body.descricao ?? 'Reembolso de despesa'), categoria_nome: 'REEMBOLSOS ENTRADAS', aeronave_id: body.aeronave_id ?? null, cotista_id: cotistaId, lancamento_receita_id: shareId, lancamento_id: shareId, lancamentos_id: shareId, lancamento_cliente_id: clientId, origem_tipo: 'REEMBOLSO', origem_id: id, idempotency_key: `${key || id}:receber`, criado_por: userId, status: 'EM_ABERTO' })
+  await db.prepare('UPDATE reembolsos SET conta_receber_id=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(accountId, id).run()
+  return { id, contaReceberId: accountId, lancamentoId: shareId, lancamentoClienteId: clientId, valorCentavos: amount, status: 'EM_ABERTO', idempotent: false }
+}
+
+export async function settlePayable(db: Database, id: string, body: Row, userId: string | null) {
+  const row = await db.prepare('SELECT * FROM contas_apagar WHERE id=?').bind(id).first<Row>(); if (!row) throw new FinanceKernelError('Conta a pagar não encontrada', 'nao_encontrado', 404)
+  if (upper(row.status, '') === 'PAGO') return { ...row, idempotent: true }
+  if (upper(row.status, '') === 'CANCELADO') throw new FinanceKernelError('Conta cancelada não pode ser paga', 'conta_cancelada')
+  const date = text(body.dataPagamento ?? body.data_pagamento); if (!date) throw new FinanceKernelError('Data de pagamento obrigatória', 'data_pagamento_obrigatoria')
+  const amount = Number(row.valor_centavos ?? Math.round(Number(row.valor || 0) * 100)), linked = text(row.lancamento_id) || null
+  await db.prepare("UPDATE contas_apagar SET status='PAGO', valor_centavos=?, data_pagamento=?, banco_pagamento=?, comprovante_pagamento_url=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(amount, date, body.bancoPagamento ?? body.banco_pagamento ?? null, body.comprovantePagamentoUrl ?? body.comprovante_pagamento_url ?? null, id).run()
+  if (linked) await db.prepare("UPDATE lancamentos SET status='PAGO', data_pagamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(date, linked).run()
+  const source = linked ? await db.prepare('SELECT * FROM lancamentos WHERE id=?').bind(linked).first<Row>() : null
+  let reimbursement: Row | null = null
+  if (source && flag(source.reembolsavel) && !flag(source.reembolso_quitado)) {
+    const existing = await db.prepare('SELECT id, conta_receber_id FROM reembolsos WHERE lancamento_origem_id=? ORDER BY criado_em DESC LIMIT 1').bind(linked).first<Row>()
+    reimbursement = existing ? { id: existing.id, contaReceberId: existing.conta_receber_id, idempotent: true } : await createReimbursement(db, { lancamento_id: linked, cotista_id: source.cotista_aeronave_id ?? source.cotista_id, aeronave_id: source.aeronave_id, descricao: source.descricao, valorCentavos: amount, data: date, data_vencimento: source.data_vencimento }, userId)
+    await db.prepare("UPDATE rateio_despesas SET status='AGUARDANDO_REEMBOLSO' WHERE lancamento_id=? AND status NOT IN ('CANCELADO','REEMBOLSADO')").bind(linked).run().catch(() => undefined)
+  }
+  await audit(db, 'conta_apagar', id, 'BAIXA', userId, amount, amount, text(body.motivo) || null, idempotency(body))
+  return { ...(await db.prepare('SELECT * FROM contas_apagar WHERE id=?').bind(id).first<Row>()), reimbursement, idempotent: false }
+}
+
+export async function issueRevenue(db: Database, body: Row, userId: string | null) {
+  const key = idempotency(body)
+  if (key) {
+    const old = await db.prepare('SELECT id, lancamento_receita_id, lancamento_id, lancamentos_id FROM contas_areceber WHERE idempotency_key=?').bind(key).first<Row>()
+    if (old) return { id: old.lancamento_receita_id ?? old.lancamento_id ?? old.lancamentos_id, contaReceberId: old.id, idempotent: true }
+  }
+  const amount = moneyCents(body), id = uuid(), accountId = uuid(), data = dateOf(body), cotistaId = text(body.cotista_id ?? body.cotista_aeronave_id) || null
+  const clientId = cotistaId && body.criar_lancamento_cliente !== false ? uuid() : null
+  await insertDynamic(db, 'lancamentos', { id, descricao: text(body.descricao), fluxo: 'ENTRADA', natureza: 'RECEITA', tipo_caixa: upper(body.tipo_caixa ?? body.caixa, 'SHARE'), valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, categoria_id: body.categoria_id ?? null, categoria_nome: body.categoria_nome ?? 'RECEITA', grupo_categoria: 'RECEITA', cotista_aeronave_id: cotistaId, data_emissao: data, data_vencimento: body.data_vencimento ?? body.vencimento ?? data, origem_tipo: body.origem_tipo ?? 'RECEITA', origem_id: body.origem_id ?? null, status: 'EM_ABERTO', criado_por: userId })
+  if (clientId) await insertDynamic(db, 'lancamentos', { id: clientId, descricao: text(body.descricao), fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'CLIENTE', valor_centavos: amount, valor_total: amount / 100, valor: amount / 100, categoria_id: body.categoria_cliente_id ?? body.categoria_id ?? null, categoria_nome: body.categoria_cliente_nome ?? body.categoria_nome ?? 'CAIXA CLIENTE', grupo_categoria: body.grupo_categoria_cliente ?? 'CAIXA CLIENTE', cotista_aeronave_id: cotistaId, data_emissao: data, data_vencimento: body.data_vencimento ?? body.vencimento ?? data, origem_tipo: body.origem_tipo ?? 'RECEITA', origem_id: id, status: 'EM_ABERTO', criado_por: userId })
+  await insertDynamic(db, 'contas_areceber', { id: accountId, data_vencimento: body.data_vencimento ?? body.vencimento ?? data, valor_centavos: amount, valor: amount / 100, descricao: text(body.descricao), categoria_id: body.categoria_id ?? null, categoria_nome: body.categoria_nome ?? 'RECEITA', cotista_id: cotistaId, lancamento_receita_id: id, lancamento_cliente_id: clientId, lancamento_id: id, lancamentos_id: id, origem_tipo: body.origem_tipo ?? 'RECEITA', origem_id: body.origem_id ?? id, idempotency_key: key, criado_por: userId, status: 'EM_ABERTO' })
+  return { id, contaReceberId: accountId, lancamentoClienteId: clientId, valorCentavos: amount, status: 'EM_ABERTO', idempotent: false }
+}
+
+export async function settleReceivable(db: Database, id: string, body: Row, userId: string | null) {
+  const row = await db.prepare('SELECT * FROM contas_areceber WHERE id=?').bind(id).first<Row>(); if (!row) throw new FinanceKernelError('Conta a receber não encontrada', 'nao_encontrado', 404)
+  if (upper(row.status, '') === 'RECEBIDO') return { ...row, idempotent: true }
+  const date = text(body.dataRecebimento ?? body.data_recebimento); if (!date) throw new FinanceKernelError('Data de recebimento obrigatória', 'data_recebimento_obrigatoria')
+  const amount = Number(row.valor_centavos ?? Math.round(Number(row.valor || 0) * 100)), linked = text(row.lancamentos_id ?? row.lancamento_id), client = text(row.lancamento_cliente_id)
+  await db.prepare("UPDATE contas_areceber SET status='RECEBIDO', data_recebimento=?, data_pagamento=?, banco_recebimento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(date, date, body.bancoRecebimento ?? body.banco_recebimento ?? null, id).run()
+  if (linked) await db.prepare("UPDATE lancamentos SET status='RECEBIDO', data_pagamento=? WHERE id=?").bind(date, linked).run()
+  if (client) await db.prepare("UPDATE lancamentos SET status='PAGO', data_pagamento=? WHERE id=?").bind(date, client).run()
+  const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id=?').bind(id).first<Row>().catch(() => null)
+  if (reimbursement) { await db.prepare("UPDATE reembolsos SET status='RECEBIDO', recebido_em=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?").bind(date, reimbursement.id).run(); await db.prepare('UPDATE lancamentos SET reembolso_quitado=1 WHERE id=?').bind(reimbursement.lancamento_origem_id).run(); await db.prepare("UPDATE rateio_despesas SET status='REEMBOLSADO', data_pagamento=? WHERE lancamento_id=?").bind(date, reimbursement.lancamento_origem_id).run().catch(() => undefined) }
+  await audit(db, 'conta_areceber', id, 'BAIXA', userId, amount, amount, text(body.motivo) || null, idempotency(body))
+  return { ...(await db.prepare('SELECT * FROM contas_areceber WHERE id=?').bind(id).first<Row>()), idempotent: false }
 }
 
 export async function enqueueFinance(db: Database, operation: FinanceOperation, payload: Row) { const id = uuid(); await db.prepare('INSERT INTO financeiro_fila (id, operacao, payload_json) VALUES (?, ?, ?)').bind(id, operation, JSON.stringify(payload)).run(); return { id, status: 'PENDENTE' } }
 
-export async function processFinanceQueue(db: Database, userId: string | null, limit = 20) { const rows = await db.prepare("SELECT * FROM financeiro_fila WHERE status='PENDENTE' ORDER BY criado_em LIMIT ?").bind(limit).all<Row>(); const result = []; for (const row of rows.results || []) { try { const payload = JSON.parse(String(row.payload_json)); let output: any; if (row.operacao === 'DESPESA') output = await createExpense(db, payload, userId); else if (row.operacao === 'RECEITA') output = await issueRevenue(db, payload, userId); else output = await createReimbursement(db, payload, userId); await db.prepare("UPDATE financeiro_fila SET status='PROCESSADO', processado_em=CURRENT_TIMESTAMP, tentativas=tentativas+1 WHERE id=? AND status='PENDENTE'").bind(row.id).run(); result.push({ id: row.id, status: 'PROCESSADO', output }); } catch (error) { await db.prepare("UPDATE financeiro_fila SET status='ERRO', erro=?, tentativas=tentativas+1 WHERE id=? AND status='PENDENTE'").bind(text(error instanceof Error ? error.message : error), row.id).run(); result.push({ id: row.id, status: 'ERRO' }); } } return result }
+export async function processFinanceQueue(db: Database, userId: string | null, limit = 20) {
+  const rows = await db.prepare("SELECT * FROM financeiro_fila WHERE status='PENDENTE' ORDER BY criado_em LIMIT ?").bind(limit).all<Row>(), result: Row[] = []
+  for (const row of rows.results || []) { try { const payload = JSON.parse(String(row.payload_json)); const output = row.operacao === 'DESPESA' ? await createExpense(db, payload, userId) : row.operacao === 'RECEITA' ? await issueRevenue(db, payload, userId) : await createReimbursement(db, payload, userId); await db.prepare("UPDATE financeiro_fila SET status='PROCESSADO', processado_em=CURRENT_TIMESTAMP, tentativas=tentativas+1 WHERE id=? AND status='PENDENTE'").bind(row.id).run(); result.push({ id: row.id, status: 'PROCESSADO', output }) } catch (error) { await db.prepare("UPDATE financeiro_fila SET status='ERRO', erro=?, tentativas=tentativas+1 WHERE id=? AND status='PENDENTE'").bind(text(error instanceof Error ? error.message : error), row.id).run(); result.push({ id: row.id, status: 'ERRO' }) } }
+  return result
+}
