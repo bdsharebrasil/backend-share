@@ -339,9 +339,9 @@ financeiroRoutes.post('/notas-saida/anexos', async (c) => {
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const origem = String(form.origem ?? 'nota_fiscal_saida')
     const documentoId = String(form.documento_id ?? '').trim() || crypto.randomUUID()
-    const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : 'nf_saida'
+    const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : 'nota_fiscal_saida'
     const id = crypto.randomUUID()
-    const key = `documentos_saida/${prefixo}/${documentoId}/${id}-${arquivo.name}`
+    const key = `share/${prefixo}/${documentoId}/${id}-${arquivo.name}`
     await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
     const url = `/api/financeiro/notas-saida/anexos/${id}/arquivo?key=${encodeURIComponent(key)}`
     return c.json({ id, url }, 201)
