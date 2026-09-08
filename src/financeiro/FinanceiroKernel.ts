@@ -521,6 +521,44 @@ function allocationLines(body: Row): AllocationLine[] {
   return lines
 }
 
+async function receiptAllocationLines(
+  db: Database,
+  command: Row,
+  input: Row,
+): Promise<Row[]> {
+  if (Array.isArray(command.rateio_linhas) || Array.isArray(command.rateios)) {
+    return (command.rateio_linhas ?? command.rateios) as Row[]
+  }
+
+  const tipoRateio = upper(command.tipo_rateio)
+  if (!['TODOS', 'TODOS_COTISTAS', 'TODOS_OS_COTISTAS', 'IGUAL', 'IGUALMENTE'].includes(tipoRateio)) {
+    return []
+  }
+
+  const aeronaveId = text(input.aeronave_id ?? command.aeronave_id)
+  if (!aeronaveId) {
+    throw new FinanceError('Aeronave obrigatória para rateio', 'rateio_aeronave_obrigatoria')
+  }
+  const cotistas = await db.prepare(
+    'SELECT id FROM cotista_aeronave WHERE aeronave_id = ? ORDER BY id',
+  ).bind(aeronaveId).all<{ id: string }>()
+  const ids = cotistas.results ?? []
+  if (!ids.length) {
+    throw new FinanceError('Nenhum cotista encontrado para a aeronave', 'rateio_cotistas_invalidos')
+  }
+
+  const amount = asPositiveCents(input.valor_centavos)
+  const percentual = 100 / ids.length
+  const valorBase = Math.floor(amount / ids.length)
+  let restante = amount - valorBase * ids.length
+  return ids.map(({ id: cotistaId }) => ({
+    cotista_id: cotistaId,
+    percentual: Number(percentual.toFixed(3)),
+    valor_centavos: valorBase + (restante-- > 0 ? 1 : 0),
+    pago_diretamente: true,
+  }))
+}
+
 async function validateAllocationLines(
   db: Database,
   command: Row,
@@ -1973,9 +2011,36 @@ export async function issueReceipt(
   const ano = input.data_emissao.slice(0, 4)
   const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
   await createReceiptRecord(db, input, reciboId, numero, userId)
-  const financeiro = input.pagador_tipo === 'cotista_aeronave'
-    ? await createReceiptExitFinance(db, schema, comando, input, reciboId, userId)
-    : await createExpense(db, comando, userId)
+  const reciboPagamentoCliente = input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave'
+  const categoriaNome = nullableText(body.categoria_nome) || nullableText(
+    (await db.prepare(`
+      SELECT nome FROM categoria_movimentacao_cliente WHERE id = ?
+      UNION ALL
+      SELECT nome FROM categoria_movimentacao_share WHERE id = ?
+      LIMIT 1
+    `).bind(input.categoria_movimentacao_id, input.categoria_movimentacao_id).first<{ nome: string | null }>())?.nome,
+  )
+  const rateioLinhas = reciboPagamentoCliente
+    ? await receiptAllocationLines(db, comando, input)
+    : []
+  const financeiro = reciboPagamentoCliente
+    ? await createExpense(db, {
+      valor_centavos: input.valor_centavos,
+      descricao: input.descricao,
+      data: input.data_emissao,
+      aeronave_id: input.aeronave_id,
+      cotista_aeronave_id: input.pagador_id,
+      tipo_caixa: 'CLIENTE',
+      categoria_id: null,
+      categoria_cliente_id: input.categoria_movimentacao_id,
+      categoria_nome: categoriaNome,
+      data_vencimento: input.data_vencimento || input.data_emissao,
+      rateio_linhas: rateioLinhas,
+      pago_diretamente: true,
+    }, userId)
+    : input.pagador_tipo === 'cotista_aeronave'
+      ? await createReceiptExitFinance(db, schema, comando, input, reciboId, userId)
+      : await createExpense(db, comando, userId)
   const lancamentoId = text('shareLancamentoId' in financeiro ? financeiro.shareLancamentoId : financeiro.lancamento_id ?? financeiro.id)
   const rateioLancamentoId = text('clienteLancamentoId' in financeiro ? financeiro.clienteLancamentoId : lancamentoId)
   await db.prepare('UPDATE recibos SET lancamento_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(lancamentoId, reciboId).run()

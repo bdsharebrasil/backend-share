@@ -80,12 +80,13 @@ async function alocarNumeroReciboSaida(db: D1Database, cotistaId: string, dataEm
     const match = String(row.numero_recibo ?? '').match(new RegExp(`^REC-${codigo}(\\d+)/${anoCurto}$`))
     return Math.max(maior, match ? Number(match[1]) : 0)
   }, 0)
+  const proximoNumero = Math.max(maiorExistente + 1, 101)
   const sequencia = await db.prepare(`
     INSERT INTO sequencia_numeros_recibo_saida (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = ?
     RETURNING proximo_numero - 1 AS numero
-  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, maiorExistente + 2, maiorExistente + 2).first<{ numero: number }>()
+  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, proximoNumero, proximoNumero).first<{ numero: number }>()
   if (!sequencia) throw new Error('falha_ao_gerar_sequencia_recibo_saida')
   return `REC-${codigo}${String(sequencia.numero).padStart(3, '0')}/${anoCurto}`
 }
