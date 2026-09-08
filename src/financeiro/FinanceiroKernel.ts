@@ -1774,7 +1774,10 @@ export async function issueReceipt(
   const reciboId = id()
   const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : ''))
   if (!cotistaId) throw new FinanceError('cotista_aeronave_id é obrigatório para gerar a sequência do recibo', 'cotista_sequencia_obrigatorio')
-  const codigo = text(body.codigo_cliente) || 'SHARE'
+  const codigoCotista = !text(body.codigo_cliente) && cotistaId
+    ? text((await db.prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<{ codigo_cliente: string | null }>())?.codigo_cliente)
+    : ''
+  const codigo = text(body.codigo_cliente) || codigoCotista || 'SHARE'
   const ano = input.data_emissao.slice(0, 4)
   const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
   await createReceiptRecord(db, input, reciboId, numero, userId)
