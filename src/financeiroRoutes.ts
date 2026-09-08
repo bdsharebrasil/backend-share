@@ -83,14 +83,11 @@ async function alocarNumeroReciboSaida(db: D1Database, cotistaId: string, dataEm
   const sequencia = await db.prepare(`
     INSERT INTO sequencia_numeros_recibo_saida (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
     VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = CASE
-      WHEN sequencia_numeros_recibo_saida.proximo_numero <= ? THEN ?
-      ELSE sequencia_numeros_recibo_saida.proximo_numero + 1
-    END
+    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = ?
     RETURNING proximo_numero - 1 AS numero
-  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, maiorExistente + 2, maiorExistente + 1, maiorExistente + 2).first<{ numero: number }>()
+  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, maiorExistente + 2, maiorExistente + 2).first<{ numero: number }>()
   if (!sequencia) throw new Error('falha_ao_gerar_sequencia_recibo_saida')
-  return `REC-${codigo}${sequencia.numero}/${anoCurto}`
+  return `REC-${codigo}${String(sequencia.numero).padStart(3, '0')}/${anoCurto}`
 }
 
 async function enriquecerFornecedores(db: D1Database, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
@@ -487,11 +484,39 @@ financeiroRoutes.post('/recibos', async (c) => {
 })
 
 financeiroRoutes.get('/recibos', async (c) => {
+  const db = c.env.SHARE_DB
   const status = c.req.query('status')
   const result = status
-    ? await c.env.SHARE_DB.prepare('SELECT * FROM recibos WHERE status = ? ORDER BY criado_em DESC LIMIT 200').bind(status).all()
-    : await c.env.SHARE_DB.prepare('SELECT * FROM recibos ORDER BY criado_em DESC LIMIT 200').all()
-  return c.json({ recibos: result.results ?? [] })
+    ? await db.prepare('SELECT * FROM recibos WHERE status = ? ORDER BY criado_em DESC LIMIT 200').bind(status).all<Record<string, unknown>>()
+    : await db.prepare('SELECT * FROM recibos ORDER BY criado_em DESC LIMIT 200').all<Record<string, unknown>>()
+  const recibos = result.results ?? []
+  const cotistaIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cotista_aeronave').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
+  const reciboIds = recibos.map((row) => String(row.id ?? '')).filter(Boolean)
+  const cotistas = cotistaIds.length
+    ? await listar(db, `SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, COALESCE(cl.cnpj, hs.cpf) AS documento, COALESCE(cl.endereco, hs.endereco) AS endereco, COALESCE(cl.cidade, hs.cidade) AS cidade, COALESCE(cl.uf, hs.uf) AS uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id IN (${cotistaIds.map(() => '?').join(', ')})`, ...cotistaIds)
+    : []
+  const cotistaPorId = new Map(cotistas.map((row) => [String(row.id), row]))
+  const rateios = reciboIds.length
+    ? await listar(db, `SELECT rr.id, rr.recibo_id, rr.rateio_id, rr.percentual, rr.valor, rr.cotista_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cotista_nome FROM recibo_rateio rr LEFT JOIN cotista_aeronave ca ON ca.id = rr.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE rr.recibo_id IN (${reciboIds.map(() => '?').join(', ')}) ORDER BY rr.rowid`, ...reciboIds)
+    : []
+  const rateiosPorRecibo = new Map<string, Record<string, unknown>[]>()
+  for (const rateio of rateios) {
+    const lista = rateiosPorRecibo.get(String(rateio.recibo_id)) ?? []
+    lista.push(rateio)
+    rateiosPorRecibo.set(String(rateio.recibo_id), lista)
+  }
+  return c.json({ recibos: recibos.map((recibo) => {
+    const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
+    return {
+      ...recibo,
+      nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? null : 'Share Brasil',
+      documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? null : null,
+      endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? null : null,
+      cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? null : null,
+      uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? null : null,
+      rateio_linhas: rateiosPorRecibo.get(String(recibo.id)) ?? [],
+    }
+  }) })
 })
 
 financeiroRoutes.get('/recibos/opcoes', async (c) => {

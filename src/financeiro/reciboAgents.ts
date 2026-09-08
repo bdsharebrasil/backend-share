@@ -53,15 +53,22 @@ export function receiptStatusIsValid(status: string): boolean {
 }
 
 export async function allocateReceiptNumber(db: D1Database, cotistaId: string, codigo: string, ano: string): Promise<string> {
+  const anoCurto = ano.slice(-2)
+  const existentes = await db.prepare('SELECT numero_recibo FROM recibos WHERE numero_recibo LIKE ?').bind(`REC-${codigo}%`).all<{ numero_recibo: string }>()
+  const padrao = new RegExp(`^REC-${codigo}(\\d+)/(?:${ano}|${anoCurto})$`)
+  const maiorExistente = (existentes.results ?? []).reduce((maior, item) => {
+    const match = String(item.numero_recibo ?? '').match(padrao)
+    return Math.max(maior, match ? Number(match[1]) : 0)
+  }, 0)
   const id = crypto.randomUUID()
   const row = await db.prepare(`
     INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
-    VALUES (?, ?, ?, ?, 2)
-    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = sequencia_numeros_recibos.proximo_numero + 1
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = ?
     RETURNING proximo_numero - 1 AS numero
-  `).bind(id, cotistaId, codigo, ano).first<{ numero: number }>()
+  `).bind(id, cotistaId, codigo, ano, maiorExistente + 2, maiorExistente + 2).first<{ numero: number }>()
   if (!row) throw new Error('falha_ao_gerar_sequencia_numeros_recibos')
-  return `REC-${codigo}${row.numero}/${ano}`
+  return `REC-${codigo}${String(row.numero).padStart(3, '0')}/${anoCurto}`
 }
 
 export async function createReceiptRecord(db: D1Database, input: ReceiptInput, id: string, number: string, userId: string | null): Promise<void> {
