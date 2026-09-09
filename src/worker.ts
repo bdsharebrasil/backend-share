@@ -2144,6 +2144,19 @@ function assinaturaTexto(assinatura: { nome?: string; cargo?: string; telefone?:
   return ['Atenciosamente,', assinatura.nome, assinatura.cargo, assinatura.telefone, assinatura.endereco, assinatura.email].filter((item) => item && String(item).trim()).join('\n')
 }
 
+type AnexoMensagem = { id: string; nome_arquivo: string; caminho_arquivo: string; tipo_arquivo: string; tamanho_arquivo: number; criado_em?: string }
+function lerAnexosMensagem(valor: unknown): AnexoMensagem[] {
+  try {
+    const parsed = typeof valor === 'string' ? JSON.parse(valor) : valor
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === 'object' && item.id && item.nome_arquivo && item.caminho_arquivo).map((item: any) => ({
+      id: String(item.id), nome_arquivo: String(item.nome_arquivo), caminho_arquivo: String(item.caminho_arquivo), tipo_arquivo: String(item.tipo_arquivo || 'application/octet-stream'), tamanho_arquivo: Number(item.tamanho_arquivo || 0), criado_em: item.criado_em ? String(item.criado_em) : undefined,
+    })) : []
+  } catch { return [] }
+}
+function anexosMensagemPublicos(valor: unknown) {
+  return lerAnexosMensagem(valor).map(({ caminho_arquivo, ...anexo }) => anexo)
+}
+
 async function prepararEstadosMensagens(c: Context<{ Bindings: Bindings }>, usuarioId: string) {
   await portalDb(c).prepare(`
     INSERT OR IGNORE INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida)
@@ -2163,7 +2176,7 @@ async function listarMensagensPasta(c: Context<{ Bindings: Bindings }>, usuarioI
     arquivo: 'e.arquivada = 1 AND e.excluida = 0',
   }
   const result = await portalDb(c).prepare(`
-    SELECT m.id, m.remetente_id, m.destinatario_id, m.assunto, m.conteudo, m.criado_em,
+    SELECT m.id, m.remetente_id, m.destinatario_id, m.assunto, m.conteudo, m.criado_em, m.anexos_mensagens,
       e.papel, e.lida, e.favorita, e.arquivada, e.excluida,
       COALESCE(NULLIF(trim(rem.nome_exibicao), ''), NULLIF(trim(rem.nome_completo), ''), rem.email, m.remetente_id) AS remetente_nome,
       COALESCE(NULLIF(trim(dest.nome_exibicao), ''), NULLIF(trim(dest.nome_completo), ''), dest.email, m.destinatario_id) AS destinatario_nome
@@ -2174,10 +2187,11 @@ async function listarMensagensPasta(c: Context<{ Bindings: Bindings }>, usuarioI
     WHERE ${filtros[pasta]}
     ORDER BY datetime(m.criado_em) DESC, m.id DESC
   `).bind(usuarioId).all()
-  return Promise.all((result.results as any[]).map(async (mensagem) => ({
+  return (result.results as any[]).map((mensagem) => ({
     ...mensagem,
-    anexos: (await portalDb(c).prepare('SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM anexos_mensagens WHERE mensagem_id = ?1 ORDER BY criado_em, id').bind(mensagem.id).all()).results,
-  })))
+    anexos: anexosMensagemPublicos(mensagem.anexos_mensagens),
+    anexos_mensagens: undefined,
+  }))
 }
 
 app.get('/api/mensagens/usuarios', async (c) => {
@@ -2217,20 +2231,19 @@ app.post('/api/mensagens', async (c) => {
     const id = uuid()
     const assinatura = await assinaturaOperacional(c, user)
     const conteudoFinal = `${conteudo}\n\n${assinaturaTexto(assinatura)}`
-    const anexos: Array<{ id: string; nome_arquivo: string; caminho_arquivo: string; tipo_arquivo: string; tamanho_arquivo: number }> = []
+    const anexos: AnexoMensagem[] = []
     for (const arquivo of arquivos) {
       const anexoId = uuid()
       const caminho = await salvarArquivoShareBrasil(c, remetenteId, arquivo, `anexo_mensagens/${id}`)
       anexos.push({ id: anexoId, nome_arquivo: arquivo.name, caminho_arquivo: caminho, tipo_arquivo: arquivo.type || 'application/octet-stream', tamanho_arquivo: arquivo.size })
     }
     await portalDb(c).batch([
-      portalDb(c).prepare('INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo) VALUES (?, ?, ?, ?, ?)').bind(id, remetenteId, destinatarioId, String(body.assunto || '').trim() || null, conteudoFinal),
+      portalDb(c).prepare('INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo, anexos_mensagens) VALUES (?, ?, ?, ?, ?, ?)').bind(id, remetenteId, destinatarioId, String(body.assunto || '').trim() || null, conteudoFinal, JSON.stringify(anexos)),
       portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'remetente', 1)").bind(id, remetenteId),
       portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'destinatario', 0)").bind(id, destinatarioId),
-      ...anexos.map((anexo) => portalDb(c).prepare('INSERT INTO anexos_mensagens (id, mensagem_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo) VALUES (?, ?, ?, ?, ?, ?)').bind(anexo.id, id, anexo.nome_arquivo, anexo.caminho_arquivo, anexo.tipo_arquivo, anexo.tamanho_arquivo)),
     ])
 
-    return c.json({ success: true, id, destinatario_id: destinatarioId, anexos: anexos.map(({ caminho_arquivo, ...anexo }) => anexo), message: 'Mensagem enviada com sucesso' }, 201)
+    return c.json({ success: true, id, destinatario_id: destinatarioId, anexos: anexosMensagemPublicos(anexos), message: 'Mensagem enviada com sucesso' }, 201)
   } catch (e: any) {
     log.error('[mensagens:send]', e.message)
     return c.json({ error: e.message }, 500)
@@ -2324,7 +2337,8 @@ app.get('/api/mensagens/:id', async (c) => {
       await portalDb(c).prepare('UPDATE mensagens_usuario SET lida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ?').bind(id, usuarioId).run()
       msg.lida = 1
     }
-    msg.anexos = (await portalDb(c).prepare('SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM anexos_mensagens WHERE mensagem_id = ?1 ORDER BY criado_em, id').bind(id).all()).results
+    msg.anexos = anexosMensagemPublicos(msg.anexos_mensagens)
+    delete msg.anexos_mensagens
     return c.json(msg)
   } catch (e: any) {
     log.error('[mensagens:get]', e.message)
@@ -2353,12 +2367,13 @@ app.get('/api/mensagens/:id/anexos/:anexoId', async (c) => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'Não autorizado' }, 401)
   const mensagemId = c.req.param('id')
-  const anexo = await portalDb(c).prepare(`
-    SELECT a.nome_arquivo, a.caminho_arquivo, a.tipo_arquivo
-    FROM anexos_mensagens a
-    INNER JOIN mensagens_usuario mu ON mu.mensagem_id = a.mensagem_id AND mu.usuario_id = ?1 AND mu.excluida = 0
-    WHERE a.mensagem_id = ?2 AND a.id = ?3
-  `).bind(user.id, mensagemId, c.req.param('anexoId')).first<{ nome_arquivo: string; caminho_arquivo: string; tipo_arquivo: string | null }>()
+  const mensagemComAnexos = await portalDb(c).prepare(`
+    SELECT m.anexos_mensagens
+    FROM mensagens m
+    INNER JOIN mensagens_usuario mu ON mu.mensagem_id = m.id AND mu.usuario_id = ?1 AND mu.excluida = 0
+    WHERE m.id = ?2
+  `).bind(user.id, mensagemId).first<{ anexos_mensagens: unknown }>()
+  const anexo = lerAnexosMensagem(mensagemComAnexos?.anexos_mensagens).find((item) => item.id === c.req.param('anexoId'))
   if (!anexo) return c.notFound()
   const object = await shareBrasilBucket(c).get(anexo.caminho_arquivo)
   if (!object) return c.notFound()
@@ -2646,7 +2661,7 @@ function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
 async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
   // mensagens_usuario tem chave composta (mensagem_id, usuario_id), não uma
   // coluna id. email_templates não pertence ao schema atual de mensagens.
-  await validateWorkerSchema(c, [{table:'mensagens',columns:['id']},{table:'mensagens_usuario',columns:['mensagem_id','usuario_id','papel','lida','favorita','arquivada','excluida']},{table:'anexos_mensagens',columns:['id','mensagem_id','nome_arquivo','caminho_arquivo','tipo_arquivo','tamanho_arquivo']}])
+  await validateWorkerSchema(c, [{table:'mensagens',columns:['id','anexos_mensagens']},{table:'mensagens_usuario',columns:['mensagem_id','usuario_id','papel','lida','favorita','arquivada','excluida']}])
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
