@@ -359,22 +359,36 @@ financeiroRoutes.delete('/recibos-saida/:id', async (c) => {
 
     const contaId = String(recibo.contas_areceber_id ?? '').trim()
     const reciboLancamentoId = String(recibo.lancamentos_id ?? '').trim()
-    const conta = contaId ? await db.prepare('SELECT lancamentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null }>() : null
+    const conta = contaId
+      ? await db.prepare('SELECT lancamentos_id, movimentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null; movimentos_id: string | null }>()
+      : null
     const lancamentoIds = [...new Set([reciboLancamentoId, conta?.lancamentos_id ?? ''].filter(Boolean))]
+    const movimentoIds = [...new Set([conta?.movimentos_id ?? '', reciboLancamentoId].filter(Boolean))]
     if (reciboLancamentoId) {
       const espelho = await listar(db, 'SELECT id FROM lancamentos WHERE origem_id = ?', reciboLancamentoId)
       lancamentoIds.push(...espelho.map((row) => String(row.id)).filter(Boolean))
     }
     const ids = [...new Set(lancamentoIds)]
+    const movimentos = [...new Set(movimentoIds)]
     const placeholders = ids.map(() => '?').join(', ')
+    const movimentoPlaceholders = movimentos.map(() => '?').join(', ')
+    const rateioIds = ids.length
+      ? (await listar(db, `SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`, ...ids)).map((row) => String(row.id)).filter(Boolean)
+      : []
 
     const statements: D1PreparedStatement[] = []
     if (ids.length) statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE (origem_id IN (${placeholders}) OR destino_id IN (${placeholders}) OR origem_id = ? OR destino_id = ?)`).bind(...ids, ...ids, reciboId, reciboId))
     else statements.push(db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ? OR destino_id = ?').bind(reciboId, reciboId))
+    if (rateioIds.length) {
+      const rateioPlaceholders = rateioIds.map(() => '?').join(', ')
+      statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioPlaceholders})`).bind(...rateioIds))
+    }
     if (ids.length) statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
+    if (movimentos.length) statements.push(db.prepare(`DELETE FROM rateio_hold WHERE movimento_holding_id IN (${movimentoPlaceholders})`).bind(...movimentos))
     if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
     statements.push(db.prepare('DELETE FROM recibos_saida WHERE id = ?').bind(reciboId))
     if (ids.length) statements.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
+    if (movimentos.length) statements.push(db.prepare(`DELETE FROM movimentos_holding WHERE id IN (${movimentoPlaceholders})`).bind(...movimentos))
     await db.batch(statements)
 
     const pdfUrl = String(recibo.pdf_url ?? '')
