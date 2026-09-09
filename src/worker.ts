@@ -3811,12 +3811,18 @@ function numeroRelatorioViagem() {
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
   const row = await portalDb(c).prepare(`SELECT r.*,
-      c.razao_social AS cliente_nome,
+      COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), NULLIF(hs.nome, ''), ca.codigo_cliente) AS cliente_nome,
+      hs.nome AS socio_nome,
       a.matricula_registro AS aeronave_matricula,
       COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo, f1.nome_completo) AS nome_tripulante,
       COALESCE(NULLIF(r.nome_tripulante_2, ''), t2.nome_completo, f2.nome_completo) AS nome_tripulante_2
     FROM relatorio_despesa_viagem r
     LEFT JOIN cliente c ON c.id = r.cliente_id
+    LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id
+      AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id)
+        OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id)))
+    LEFT JOIN cliente cc ON cc.id = ca.cliente_id
+    LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id)
     LEFT JOIN aeronave a ON a.id = r.aeronave_id
     LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
     LEFT JOIN tripulacao_freelancer f1 ON f1.id = r.tripulacao_id
@@ -3851,7 +3857,25 @@ app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const rows = await portalDb(c).prepare('SELECT * FROM relatorio_despesa_viagem ORDER BY date(data_inicio) DESC, criado_em DESC LIMIT 200').all<Record<string, any>>()
+    const rows = await portalDb(c).prepare(`SELECT r.*,
+        COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), NULLIF(hs.nome, ''), ca.codigo_cliente) AS cliente_nome,
+        hs.nome AS socio_nome,
+        a.matricula_registro AS aeronave_matricula,
+        COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo, f1.nome_completo) AS nome_tripulante,
+        COALESCE(NULLIF(r.nome_tripulante_2, ''), t2.nome_completo, f2.nome_completo) AS nome_tripulante_2
+      FROM relatorio_despesa_viagem r
+      LEFT JOIN cliente c ON c.id = r.cliente_id
+      LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id
+        AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id)
+          OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id)))
+      LEFT JOIN cliente cc ON cc.id = ca.cliente_id
+      LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id)
+      LEFT JOIN aeronave a ON a.id = r.aeronave_id
+      LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
+      LEFT JOIN tripulacao_freelancer f1 ON f1.id = r.tripulacao_id
+      LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
+      LEFT JOIN tripulacao_freelancer f2 ON f2.id = r.tripulante_id_2
+      ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).all<Record<string, any>>()
     return c.json({ relatorios: (rows.results || []).map((row) => ({ ...row, status: statusRelatorioViagem(row.status), despesas: despesasRelatorioViagem(row.despesas) })) })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:listar]', error?.message || error)
