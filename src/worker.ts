@@ -2174,7 +2174,10 @@ async function listarMensagensPasta(c: Context<{ Bindings: Bindings }>, usuarioI
     WHERE ${filtros[pasta]}
     ORDER BY datetime(m.criado_em) DESC, m.id DESC
   `).bind(usuarioId).all()
-  return result.results
+  return Promise.all((result.results as any[]).map(async (mensagem) => ({
+    ...mensagem,
+    anexos: (await portalDb(c).prepare('SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM anexos_mensagens WHERE mensagem_id = ?1 ORDER BY criado_em, id').bind(mensagem.id).all()).results,
+  })))
 }
 
 app.get('/api/mensagens/usuarios', async (c) => {
@@ -2198,7 +2201,8 @@ app.post('/api/mensagens', async (c) => {
 
   const remetenteId = user.id
   try {
-    const body = await c.req.json<{ destinatario_id?: string; assunto?: string; conteudo?: string }>()
+    const multipart = c.req.header('content-type')?.includes('multipart/form-data')
+    const body = multipart ? await c.req.parseBody() : await c.req.json<Record<string, any>>()
     const destinatarioId = String(body.destinatario_id || '').trim()
     const conteudo = String(body.conteudo || '').trim()
     if (!destinatarioId || !conteudo) return c.json({ error: 'destinatario_id e conteudo são obrigatórios' }, 400)
@@ -2207,16 +2211,26 @@ app.post('/api/mensagens', async (c) => {
     const destinatario = await portalDb(c).prepare("SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(destinatarioId).first<{ id: string }>()
     if (!destinatario) return c.json({ error: 'destinatario_nao_encontrado' }, 404)
 
+    const arquivos = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : [])
+      .filter((arquivo): arquivo is File => arquivo instanceof File && arquivo.size > 0)
+      .slice(0, 10)
     const id = uuid()
     const assinatura = await assinaturaOperacional(c, user)
     const conteudoFinal = `${conteudo}\n\n${assinaturaTexto(assinatura)}`
+    const anexos: Array<{ id: string; nome_arquivo: string; caminho_arquivo: string; tipo_arquivo: string; tamanho_arquivo: number }> = []
+    for (const arquivo of arquivos) {
+      const anexoId = uuid()
+      const caminho = await salvarArquivoShareBrasil(c, remetenteId, arquivo, `anexo_mensagens/${id}`)
+      anexos.push({ id: anexoId, nome_arquivo: arquivo.name, caminho_arquivo: caminho, tipo_arquivo: arquivo.type || 'application/octet-stream', tamanho_arquivo: arquivo.size })
+    }
     await portalDb(c).batch([
       portalDb(c).prepare('INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo) VALUES (?, ?, ?, ?, ?)').bind(id, remetenteId, destinatarioId, String(body.assunto || '').trim() || null, conteudoFinal),
       portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'remetente', 1)").bind(id, remetenteId),
       portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'destinatario', 0)").bind(id, destinatarioId),
+      ...anexos.map((anexo) => portalDb(c).prepare('INSERT INTO anexos_mensagens (id, mensagem_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo) VALUES (?, ?, ?, ?, ?, ?)').bind(anexo.id, id, anexo.nome_arquivo, anexo.caminho_arquivo, anexo.tipo_arquivo, anexo.tamanho_arquivo)),
     ])
 
-    return c.json({ success: true, id, destinatario_id: destinatarioId, message: 'Mensagem enviada com sucesso' }, 201)
+    return c.json({ success: true, id, destinatario_id: destinatarioId, anexos: anexos.map(({ caminho_arquivo, ...anexo }) => anexo), message: 'Mensagem enviada com sucesso' }, 201)
   } catch (e: any) {
     log.error('[mensagens:send]', e.message)
     return c.json({ error: e.message }, 500)
@@ -2310,6 +2324,7 @@ app.get('/api/mensagens/:id', async (c) => {
       await portalDb(c).prepare('UPDATE mensagens_usuario SET lida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ?').bind(id, usuarioId).run()
       msg.lida = 1
     }
+    msg.anexos = (await portalDb(c).prepare('SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM anexos_mensagens WHERE mensagem_id = ?1 ORDER BY criado_em, id').bind(id).all()).results
     return c.json(msg)
   } catch (e: any) {
     log.error('[mensagens:get]', e.message)
@@ -2332,6 +2347,22 @@ app.delete('/api/mensagens/:id', async (c) => {
     log.error('[mensagens:delete]', e.message)
     return c.json({ error: e.message }, 500)
   }
+})
+
+app.get('/api/mensagens/:id/anexos/:anexoId', async (c) => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'Não autorizado' }, 401)
+  const mensagemId = c.req.param('id')
+  const anexo = await portalDb(c).prepare(`
+    SELECT a.nome_arquivo, a.caminho_arquivo, a.tipo_arquivo
+    FROM anexos_mensagens a
+    INNER JOIN mensagens_usuario mu ON mu.mensagem_id = a.mensagem_id AND mu.usuario_id = ?1 AND mu.excluida = 0
+    WHERE a.mensagem_id = ?2 AND a.id = ?3
+  `).bind(user.id, mensagemId, c.req.param('anexoId')).first<{ nome_arquivo: string; caminho_arquivo: string; tipo_arquivo: string | null }>()
+  if (!anexo) return c.notFound()
+  const object = await shareBrasilBucket(c).get(anexo.caminho_arquivo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': anexo.tipo_arquivo || 'application/octet-stream', 'Content-Disposition': `inline; filename="${shareBrasilFileName(anexo.nome_arquivo)}"`, 'Cache-Control': 'private, max-age=3600' } })
 })
 
 // ─── Route: Demonstrativo OCR (Claude) ────────────────────────────────────────
@@ -2615,7 +2646,7 @@ function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
 async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
   // mensagens_usuario tem chave composta (mensagem_id, usuario_id), não uma
   // coluna id. email_templates não pertence ao schema atual de mensagens.
-  await validateWorkerSchema(c, [{table:'mensagens',columns:['id']},{table:'mensagens_usuario',columns:['mensagem_id','usuario_id','papel','lida','favorita','arquivada','excluida']}])
+  await validateWorkerSchema(c, [{table:'mensagens',columns:['id']},{table:'mensagens_usuario',columns:['mensagem_id','usuario_id','papel','lida','favorita','arquivada','excluida']},{table:'anexos_mensagens',columns:['id','mensagem_id','nome_arquivo','caminho_arquivo','tipo_arquivo','tamanho_arquivo']}])
 }
 
 function portalBase64Url(bytes: Uint8Array): string {
@@ -4398,7 +4429,8 @@ function categoriaDocumentoCliente(value: unknown): string {
 async function salvarArquivoShareBrasil(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: string): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
   if (file.size > 25 * 1024 * 1024) throw new Error('arquivo_excede_25mb')
-  const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
+  const pastaNormalizada = pasta.replace(/^\/+/, '').replace(/^share\/+/, '')
+  const key = `share/${pastaNormalizada}/${userId}/${Date.now()}-${uuid().slice(0, 8)}-${shareBrasilFileName(file.name)}`
   await shareBrasilBucket(c).put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
   return key
 }
