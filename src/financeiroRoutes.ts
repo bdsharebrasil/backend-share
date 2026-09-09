@@ -662,11 +662,7 @@ financeiroRoutes.get('/recibos/opcoes', async (c) => {
 })
 
 financeiroRoutes.patch('/recibos/:id/status', async (c) => {
-  const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
-  const allowed = new Set(['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO'])
-  if (!body.status || !allowed.has(body.status)) return c.json({ error: 'status_recibo_invalido' }, 400)
-  await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, c.req.param('id')).run()
-  return c.json({ ok: true, status: body.status })
+  return c.json({ error: 'status_recibo_somente_pelo_fluxo_de_emissao_e_upload' }, 405)
 })
 
 financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
@@ -746,7 +742,6 @@ financeiroRoutes.post('/recibos/anexos', async (c) => {
     const key = `recibos/${reciboId}/original/${id}-${arquivo.name}`
     await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, arquivo.name, key, arquivo.type || 'application/octet-stream', arquivo.size, c.get('userId') || null, reciboId, 'ORIGINAL').run()
-    await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'PDF_PENDENTE', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
     return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo`, nome_arquivo: arquivo.name, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
@@ -759,10 +754,16 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     const form = await c.req.parseBody()
     const arquivo = form.arquivo
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+    if (arquivo.size <= 0 || (arquivo.type && arquivo.type !== 'application/pdf')) return c.json({ error: 'arquivo_pdf_invalido' }, 400)
     const reciboId = c.req.param('id')
+    const recibo = await c.env.SHARE_DB.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
+    if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    if (String(recibo.status).toUpperCase() !== 'PDF_PENDENTE') return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
+    const bytes = new Uint8Array(await arquivo.arrayBuffer())
+    if (bytes.length < 5 || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') return c.json({ error: 'conteudo_pdf_invalido' }, 400)
     const anexoId = crypto.randomUUID()
     const key = `recibos/${reciboId}/pdf/${anexoId}.pdf`
-    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: 'application/pdf' } })
+    await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
     await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
     return c.json({ anexo_id: anexoId, pdf_url: `/api/financeiro/recibos/anexos/${anexoId}/arquivo` }, 201)

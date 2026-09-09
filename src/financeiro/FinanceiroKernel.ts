@@ -1426,10 +1426,12 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     if (payment.tipo_pagador === 'HOLDING' && !payment.pagador_holding_id) throw new FinanceError('Holding pagadora não informada', 'holding_pagadora_obrigatoria')
     const value = asPositiveCents(payment.valor_centavos)
     if (!Array.isArray(payment.rateios) || !payment.rateios.length) throw new FinanceError('Cada pagamento precisa de rateios', 'rateios_obrigatorios')
+    if (!payment.data_pagamento || !/^\d{4}-\d{2}-\d{2}$/.test(String(payment.data_pagamento))) throw new FinanceError('Data do pagamento é obrigatória', 'data_pagamento_obrigatoria')
     const sum = payment.rateios.reduce((n, x) => n + asPositiveCents(x.valor_centavos), 0)
     if (sum !== value) throw new FinanceError('A distribuição dos rateios não confere com o pagamento', 'distribuicao_pagamento_invalida')
     const date = dateValue(payment.data_pagamento ?? body.data_recebimento ?? body.dataRecebimento)
     const bank = await resolveContaBancariaId(db, payment.conta_bancaria_id ?? body.conta_bancaria_id ?? body.banco_recebimento ?? body.bancoRecebimento ?? body.conta_bancaria ?? body.contaBancaria)
+    if (!bank) throw new FinanceError('Conta bancária do pagamento não encontrada', 'conta_bancaria_obrigatoria')
     for (const allocation of payment.rateios) {
       const rid = text(allocation.rateio_id)
       const cents = asPositiveCents(allocation.valor_centavos)
@@ -1456,7 +1458,14 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const paid = (existingByRateio.get(rid) || 0) + (distributed.get(rid) || 0)
     const expected = Number(r.valor_rateado_centavos)
     const status = paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
-    statements.push(updateStatement(db, schema, 'rateio_despesas', { status, data_pagamento: paid ? lastDate : null, atualizado_em: new Date().toISOString() }, 'id = ?', [rid]))
+    statements.push(updateStatement(db, schema, 'rateio_despesas', {
+      // rateio_pagamentos é a fonte de verdade; este campo é apenas um
+      // espelho materializado para listagens e relatórios legados.
+      valor_pago_real_centavos: paid,
+      status,
+      data_pagamento: paid ? lastDate : null,
+      atualizado_em: new Date().toISOString(),
+    }, 'id = ?', [rid]))
   }
   if (shareId) {
     const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
@@ -1466,7 +1475,11 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   }
   statements.push(auditStatement(db, schema, 'contas_areceber', receivableId, 'BAIXA', userId, newTotal, finalTotal, nullableText(body.motivo), nullableText(body.idempotency_key)))
   await db.batch(statements)
-  return { ...(await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()), idempotent: false, pagamentos: acceptedPayments }
+  const updated = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
+  const updatedRateios = shareId
+    ? await db.prepare('SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(shareId).all<Row>()
+    : { results: [] as Row[] }
+  return { ...updated, idempotent: false, pagamentos: acceptedPayments, rateios: updatedRateios.results || [] }
 }
 export async function enqueueFinance(
   db: Database,
