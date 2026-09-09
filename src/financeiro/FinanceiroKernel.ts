@@ -1683,11 +1683,21 @@ export async function processFinanceQueue(
 }
 
 async function createReimbursementFinance(db: Database, _schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
+  const categoriaShare = await db.prepare(`
+    SELECT id
+      FROM categoria_movimentacao_share
+     WHERE id = ?
+        OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%'
+        OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
+     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, nome
+     LIMIT 1
+  `).bind(CATEGORIA_SHARE_RECIBO, CATEGORIA_SHARE_RECIBO).first<{ id: string }>()
+
   const expense = await createExpense(db, {
     ...command,
     idempotency_key: `recibo-reembolso:${receiptId}`,
     aeronave_id: input.aeronave_id,
-    categoria_id: CATEGORIA_SHARE_RECIBO,
+    categoria_id: categoriaShare?.id ?? null,
     categoria_nome: 'REEMBOLSOS SHARE',
     tipo_caixa: 'SHARE',
     fluxo: 'SAIDA',
