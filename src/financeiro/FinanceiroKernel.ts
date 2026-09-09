@@ -648,43 +648,77 @@ function clientAllocationStatements(
   rateioIds?: string[],
 ): D1PreparedStatement[] {
   const amount = asPositiveCents(command.valor_centavos)
-  return lines.map((line, index) =>
-    insertStatement(
-      db,
-      schema,
-      'rateio_despesas',
-      {
-        id: rateioIds?.[index] ?? id(),
-        lancamento_id: lancamentoId,
-        cotista_id: line.cotistaId,
-        aeronave_id: command.aeronave_id,
-        data_emissao: dateValue(command.data_emissao ?? command.data),
-        data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
-        periodicidade: nullableText(command.periodicidade),
-        categoria_id: nullableText(command.categoria_id),
-        categoria_nome: nullableText(
-          command.categoria_nome ?? command.categoria,
+  return lines.flatMap((line, index) => {
+    const rateioId = rateioIds?.[index] ?? id()
+    const statements: D1PreparedStatement[] = [
+      insertStatement(
+        db,
+        schema,
+        'rateio_despesas',
+        {
+          id: rateioId,
+          lancamento_id: lancamentoId,
+          cotista_id: line.cotistaId,
+          aeronave_id: command.aeronave_id,
+          data_emissao: dateValue(command.data_emissao ?? command.data),
+          data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
+          periodicidade: nullableText(command.periodicidade),
+          categoria_id: nullableText(command.categoria_id),
+          categoria_nome: nullableText(
+            command.categoria_nome ?? command.categoria,
+          ),
+          tipo_rateio: upper(command.tipo_rateio || 'FIXO'),
+          percentual_sociedade: line.percentual,
+          percentual_uso: line.percentual,
+          valor_total_centavos: amount,
+          valor_rateado_centavos: line.valorCentavos,
+          valor_total: amount / 100,
+          valor_rateado: line.valorCentavos / 100,
+          pago_por_cotista_id: line.pagoPor,
+          pago_por: line.pagoPor,
+          pago_diretamente: line.pagoDiretamente ? 1 : 0,
+          status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
+          data_pagamento: line.pagoDiretamente ? command.data : null,
+          descricao_despesa: command.descricao,
+          observacoes: nullableText(command.observacoes),
+          criado_por: userId,
+        },
+        ['id', 'cotista_id', 'aeronave_id'],
+      ),
+    ]
+
+    if (line.pagoDiretamente) {
+      const pagadorCotistaId = line.pagoPor || line.cotistaId
+      statements.push(
+        insertStatement(
+          db,
+          schema,
+          'rateio_pagamentos',
+          {
+            id: id(),
+            rateio_id: rateioId,
+            recibo_id: nullableText(command.recibo_id),
+            conta_receber_id: null,
+            tipo_pagador: 'COTISTA',
+            pagador_cotista_id: pagadorCotistaId,
+            pagador_holding_id: null,
+            valor_centavos: line.valorCentavos,
+            data_pagamento: dateValue(command.data_pagamento ?? command.data),
+            conta_bancaria_id: nullableText(command.conta_bancaria_id),
+            comprovante_url: nullableText(command.comprovante_url),
+            forma_pagamento: nullableText(command.forma_pagamento),
+            status: 'CONFIRMADO',
+            observacoes: nullableText(command.observacoes),
+            idempotency_key: `DIRETO:${command.idempotency_key || lancamentoId}:${rateioId}`,
+            criado_por: userId,
+          },
+          ['id', 'rateio_id', 'valor_centavos'],
         ),
-        tipo_rateio: upper(command.tipo_rateio || 'FIXO'),
-        percentual_sociedade: line.percentual,
-        percentual_uso: line.percentual,
-        valor_total_centavos: amount,
-        valor_rateado_centavos: line.valorCentavos,
-        valor_pago_real_centavos: line.pagoDiretamente ? line.valorCentavos : 0,
-        valor_total: amount / 100,
-        valor_rateado: line.valorCentavos / 100,
-        pago_por_cotista_id: line.pagoPor,
-        pago_por: line.pagoPor,
-        pago_diretamente: line.pagoDiretamente ? 1 : 0,
-        status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
-        data_pagamento: line.pagoDiretamente ? command.data : null,
-        descricao_despesa: command.descricao,
-        observacoes: nullableText(command.observacoes),
-        criado_por: userId,
-      },
-      ['id', 'cotista_id', 'aeronave_id'],
-    ),
-  )
+      )
+    }
+
+    return statements
+  })
 }
 
 function holdingAllocationStatements(
@@ -725,7 +759,6 @@ function holdingAllocationStatements(
         percentual_uso: line.percentual,
         valor_total_centavos: amount,
         valor_rateado_centavos: line.valorCentavos,
-        valor_pago_real_centavos: line.pagoDiretamente ? line.valorCentavos : 0,
         valor_total: amount / 100,
         valor_rateado: line.valorCentavos / 100,
         pago_por_socio_id: line.pagoPor,
@@ -1142,13 +1175,14 @@ export async function issueRevenue(
   }
 
   if (clientLancamentoId) {
+    const clientRateioId = id()
     statements.push(
       insertStatement(
         db,
         schema,
         'rateio_despesas',
         {
-          id: id(),
+          id: clientRateioId,
           lancamento_id: clientLancamentoId,
           categoria_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
           categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
@@ -1167,7 +1201,6 @@ export async function issueRevenue(
           percentual_uso: 100,
           valor_total_centavos: amount,
           valor_rateado_centavos: amount,
-          valor_pago_real_centavos: amount,
           valor_total: amount / 100,
           valor_rateado: amount / 100,
           status: 'PAGO_DIRETAMENTE',
@@ -1175,6 +1208,30 @@ export async function issueRevenue(
           recibo_url: nullableText(command.url_recibo),
         },
         ['id', 'lancamento_id'],
+      ),
+      insertStatement(
+        db,
+        schema,
+        'rateio_pagamentos',
+        {
+          id: id(),
+          rateio_id: clientRateioId,
+          recibo_id: nullableText(command.recibo_id),
+          conta_receber_id: null,
+          tipo_pagador: 'COTISTA',
+          pagador_cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
+          pagador_holding_id: null,
+          valor_centavos: amount,
+          data_pagamento: dateValue(command.data_pagamento ?? command.data),
+          conta_bancaria_id: nullableText(command.conta_bancaria_id),
+          comprovante_url: nullableText(command.comprovante_url),
+          forma_pagamento: nullableText(command.forma_pagamento),
+          status: 'CONFIRMADO',
+          observacoes: nullableText(command.observacoes),
+          idempotency_key: `DIRETO:${command.idempotency_key || clientLancamentoId}:${clientRateioId}`,
+          criado_por: userId,
+        },
+        ['id', 'rateio_id', 'valor_centavos'],
       ),
     )
   }
@@ -1459,9 +1516,6 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const expected = Number(r.valor_rateado_centavos)
     const status = paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
     statements.push(updateStatement(db, schema, 'rateio_despesas', {
-      // rateio_pagamentos é a fonte de verdade; este campo é apenas um
-      // espelho materializado para listagens e relatórios legados.
-      valor_pago_real_centavos: paid,
       status,
       data_pagamento: paid ? lastDate : null,
       atualizado_em: new Date().toISOString(),
@@ -1628,7 +1682,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
     linkStatement(db,schema,'REEMBOLSO',reimbursementId,'CONTA_A_RECEBER',receivableId,'REEMBOLSO_CONTA_A_RECEBER',userId),
   ]
   const lines = Array.isArray(input.rateio_linhas) && input.rateio_linhas.length ? input.rateio_linhas : [{cotista_id:cotistaId, percentual_uso:100, valor_rateado_centavos:amount}]
-  for (const line of lines) statements.push(insertStatement(db,schema,'rateio_despesas',{id:id(),lancamento_id:shareId,aeronave_id:common.aeronave_id,cotista_id:line.cotista_id,data_emissao:input.data_emissao,data_vencimento:common.data_vencimento,categoria_id:category,categoria_nome:nullableText(input.categoria_nome),tipo_rateio:'FIXO',periodicidade:'ÚNICO',percentual_uso:Number(line.percentual_uso),valor_total_centavos:amount,valor_rateado_centavos:Number(line.valor_rateado_centavos),valor_pago_real_centavos:0,pago_diretamente:0,status:'AGUARDANDO_REEMBOLSO',descricao_despesa:input.descricao,observacoes:nullableText(input.observacoes)},['id','lancamento_id','aeronave_id','cotista_id']))
+  for (const line of lines) statements.push(insertStatement(db,schema,'rateio_despesas',{id:id(),lancamento_id:shareId,aeronave_id:common.aeronave_id,cotista_id:line.cotista_id,data_emissao:input.data_emissao,data_vencimento:common.data_vencimento,categoria_id:category,categoria_nome:nullableText(input.categoria_nome),tipo_rateio:'FIXO',periodicidade:'ÚNICO',percentual_uso:Number(line.percentual_uso),valor_total_centavos:amount,valor_rateado_centavos:Number(line.valor_rateado_centavos),pago_diretamente:0,status:'AGUARDANDO_REEMBOLSO',descricao_despesa:input.descricao,observacoes:nullableText(input.observacoes)},['id','lancamento_id','aeronave_id','cotista_id']))
   await db.batch(statements); return {shareLancamentoId:shareId,clienteLancamentoId:clientId,contaReceberId:receivableId}
 }
 
@@ -1673,6 +1727,7 @@ async function issueReceiptInternal(
 
   const comando: Row = {
     ...body,
+    recibo_id: reciboId,
     descricao: input.descricao,
     valor_centavos: input.valor_centavos,
     data: input.data_emissao,
