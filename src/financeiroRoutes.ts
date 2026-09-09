@@ -817,7 +817,7 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     const reciboId = c.req.param('id')
     const recibo = await c.env.SHARE_DB.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
     if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
-    if (!['PDF_PENDENTE', 'ANEXO_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'].includes(String(recibo.status).toUpperCase())) return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
+    if (!['CRIADO', 'PDF_PENDENTE', 'ANEXO_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'].includes(String(recibo.status).toUpperCase())) return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
     const bytes = new Uint8Array(await arquivo.arrayBuffer())
     if (bytes.length < 5 || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') return c.json({ error: 'conteudo_pdf_invalido' }, 400)
     const anexoId = crypto.randomUUID()
