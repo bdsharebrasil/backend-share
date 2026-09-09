@@ -95,14 +95,15 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
   await db.prepare(`
     INSERT INTO recibos (
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
-      pagador_tipo, pagador_id, valor, descricao, data_emissao, data_vencimento,
-      forma_pagamento, tipo_caixa, categoria_movimentacao_id, grupo_categoria,
-      status, recebedor_nome, observacoes, criado_por
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?)
+      pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
+      valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
+      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
     input.rateado ? 1 : 0, input.pagador_tipo, input.pagador_id,
-    input.valor_centavos, input.descricao,
+    input.nome_pagador, input.documento_pagador, input.endereco_pagador,
+    input.cidade_pagador, input.uf_pagador, input.valor_centavos, input.descricao,
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     input.pagador_tipo === 'cotista_aeronave' ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, input.recebedor_nome,
@@ -125,5 +126,5 @@ export async function createReceiptAllocations(db: D1Database, receiptId: string
 
 export async function updateReceiptStatus(db: D1Database, receiptId: string, status: StatusRecibo): Promise<void> {
   if (!receiptStatusIsValid(status)) throw new Error(`Status de recibo inválido: ${status}`)
-  await db.prepare('UPDATE recibos SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(status, receiptId).run()
+  await db.prepare('UPDATE recibos SET status = ? WHERE id = ?').bind(status, receiptId).run()
 }
