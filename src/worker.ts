@@ -4981,10 +4981,14 @@ app.get('/api/gestor/ferias', async c => {
   const registros = await db.prepare(`SELECT f.id, f.colaborador_id, f.data_inicio, f.data_fim, f.quantidade_dias, f.status, f.observacoes, f.motivo_reprovacao, f.aprovado_em, f.criado_em, p.nome_completo, p.nome_exibicao, p.email, p.departamento, p.data_admissao
     FROM solicitacoes_ferias f LEFT JOIN user_profiles p ON p.id = f.colaborador_id
     ORDER BY CASE f.status WHEN 'solicitada' THEN 1 WHEN 'aprovada' THEN 2 ELSE 3 END, date(f.data_inicio), p.nome_completo`).all().catch(() => ({ results: [] }))
+  const periodos = await db.prepare(`SELECT pa.id, pa.user_id AS colaborador_id, pa.data_inicio, pa.data_fim, pa.data_limite_concessao, pa.dias_direito, pa.dias_gozados, pa.dias_abono, pa.dias_disponiveis, pa.status, pa.criado_em, p.nome_completo, p.nome_exibicao, p.email, p.departamento, p.data_admissao
+    FROM periodos_aquisitivos_ferias pa LEFT JOIN user_profiles p ON p.id = pa.user_id
+    ORDER BY date(pa.data_fim), p.nome_completo`).all().catch(() => ({ results: [] }))
   const vencidas = await db.prepare("SELECT COUNT(*) AS total FROM solicitacoes_ferias WHERE status = 'aprovada' AND date(data_fim) < date(?1)").bind(inicio).first<{ total: number }>().catch(() => ({ total: 0 }))
   const ativas = await db.prepare("SELECT COUNT(*) AS total FROM solicitacoes_ferias WHERE status = 'aprovada' AND date(data_inicio) <= date(?1) AND date(data_fim) >= date(?1)").bind(inicio).first<{ total: number }>().catch(() => ({ total: 0 }))
   const solicitadas = await db.prepare("SELECT COUNT(*) AS total FROM solicitacoes_ferias WHERE status = 'solicitada'").first<{ total: number }>().catch(() => ({ total: 0 }))
-  return c.json({ inicio, registros: registros.results, resumo: { ativas: Number(ativas?.total || 0), solicitadas: Number(solicitadas?.total || 0), vencidas: Number(vencidas?.total || 0) } })
+  const periodosVencidos = (periodos.results || []).filter((periodo: any) => String(periodo.status || '').toUpperCase() === 'VENCIDO' || (periodo.data_limite_concessao && String(periodo.data_limite_concessao) < inicio && !['GOZADO', 'CANCELADO'].includes(String(periodo.status || '').toUpperCase()))).length
+  return c.json({ inicio, registros: registros.results, periodos: periodos.results, resumo: { ativas: Number(ativas?.total || 0), solicitadas: Number(solicitadas?.total || 0), vencidas: Number(vencidas?.total || 0) + periodosVencidos } })
 })
 
 app.patch('/api/gestor/ferias/:id', async c => {
