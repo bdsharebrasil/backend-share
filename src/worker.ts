@@ -3811,7 +3811,10 @@ function numeroRelatorioViagem() {
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
   const row = await portalDb(c).prepare(`SELECT r.*,
-      COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), NULLIF(hs.nome, ''), ca.codigo_cliente) AS cliente_nome,
+      CASE WHEN r.socio_id IS NOT NULL
+        THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
+        ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
+      END AS cliente_nome,
       hs.nome AS socio_nome,
       a.matricula_registro AS aeronave_matricula,
       COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo, f1.nome_completo) AS nome_tripulante,
@@ -3839,7 +3842,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
     await garantirTabelaRelatorioDespesaViagem(c)
     const db = portalDb(c)
     const [clientes, aeronaves, tripulantes, categorias, socios] = await Promise.all([
-      db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
+      db.prepare("SELECT id, razao_social, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
       db.prepare("SELECT id, nome_completo AS nome, canac, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
@@ -3858,7 +3861,10 @@ app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const rows = await portalDb(c).prepare(`SELECT r.*,
-        COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), NULLIF(hs.nome, ''), ca.codigo_cliente) AS cliente_nome,
+        CASE WHEN r.socio_id IS NOT NULL
+          THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
+          ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
+        END AS cliente_nome,
         hs.nome AS socio_nome,
         a.matricula_registro AS aeronave_matricula,
         COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo, f1.nome_completo) AS nome_tripulante,
