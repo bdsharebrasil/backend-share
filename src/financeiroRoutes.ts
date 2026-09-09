@@ -747,7 +747,17 @@ financeiroRoutes.get('/envios-pagamento/opcoes', async (c) => {
 financeiroRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => c.json({ recibos: [], relatorios: [], abastecimentos: [] }))
 
 financeiroRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) => {
-  const result = await c.env.SHARE_DB.prepare('SELECT id, aeronave_id, cliente_id, socio_id, codigo_cliente, percentual_sociedade FROM cotista_aeronave WHERE aeronave_id = ? ORDER BY codigo_cliente').bind(c.req.param('id')).all()
+  const result = await c.env.SHARE_DB.prepare(`
+    SELECT ca.id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.codigo_cliente,
+           ca.percentual_sociedade,
+           COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, 'Cotista não identificado') AS nome,
+           CASE WHEN ca.socio_id IS NOT NULL THEN 1 ELSE 0 END AS eh_holding
+      FROM cotista_aeronave ca
+      LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+      LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+     WHERE ca.aeronave_id = ?
+     ORDER BY COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente)
+  `).bind(c.req.param('id')).all()
   return c.json({ cotistas: result.results ?? [] })
 })
 
