@@ -3791,6 +3791,16 @@ async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) 
 }
 
 async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindings }>) {
+  const db = portalDb(c)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS sequencia_relatorios_despesa_viagem (
+      codigo_cotista TEXT NOT NULL,
+      aeronave_id TEXT NOT NULL,
+      ano TEXT NOT NULL,
+      ultimo_numero INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (codigo_cotista, aeronave_id, ano)
+    )
+  `).run()
   await validateWorkerSchema(c, [{table:'relatorio_despesa_viagem_anexos',columns:['id']},{table:'relatorio_despesa_viagem',columns:['id']}])
 }
 
@@ -3805,8 +3815,45 @@ function statusRelatorioViagem(valor: unknown) {
   return validos.has(normalizado) ? normalizado : String(valor || 'rascunho')
 }
 
-function numeroRelatorioViagem() {
-  return `RV-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`
+
+function normalizarCodigoRelatorio(value: unknown): string {
+  return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+}
+
+function normalizarMatriculaRelatorio(value: unknown): string {
+  return String(value || '').trim().toUpperCase().replace(/\s+/g, ' ')
+}
+
+async function gerarNumeroRelatorioViagem(
+  db: D1Database,
+  clienteId: string,
+  socioId: string | null,
+  aeronaveId: string,
+  dataInicio: string,
+): Promise<string> {
+  const codigoRow = socioId
+    ? await db.prepare(`SELECT ca.codigo_cliente AS codigo_cliente FROM hold_socios hs LEFT JOIN cotista_aeronave ca ON ca.id = hs.cotista_id AND ca.aeronave_id = ?1 WHERE hs.id = ?2 LIMIT 1`).bind(aeronaveId, socioId).first<{ codigo_cliente: string | null }>()
+    : await db.prepare(`SELECT COALESCE(NULLIF(c.codigo_cliente, ''), NULLIF(ca.codigo_cliente, '')) AS codigo_cliente FROM cliente c LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = ?2 AND (ca.cliente_id = c.id OR ca.id = ?1) WHERE c.id = ?1 LIMIT 1`).bind(clienteId, aeronaveId).first<{ codigo_cliente: string | null }>()
+  const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
+  const codigo = normalizarCodigoRelatorio(codigoRow?.codigo_cliente)
+  const matricula = normalizarMatriculaRelatorio(aeronave?.matricula_registro)
+  const ano = /^\d{4}-\d{2}-\d{2}$/.test(dataInicio) ? dataInicio.slice(2, 4) : ''
+  if (!codigo) throw new Error('codigo_cotista_obrigatorio')
+  if (!matricula) throw new Error('matricula_aeronave_obrigatoria')
+  if (!ano) throw new Error('ano_relatorio_invalido')
+  await db.prepare(`CREATE TABLE IF NOT EXISTS sequencia_relatorios_despesa_viagem (codigo_cotista TEXT NOT NULL, aeronave_id TEXT NOT NULL, ano TEXT NOT NULL, ultimo_numero INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (codigo_cotista, aeronave_id, ano))`).run()
+  const prefixo = `REL-${codigo}-`
+  const sufixo = `/${ano} ${matricula}`
+  const anteriores = await db.prepare('SELECT numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2').bind(`${prefixo}%${sufixo}`, aeronaveId).all<{ numero_relatorio: string }>()
+  const maiorExistente = (anteriores.results || []).reduce((maior, item) => {
+    const numero = String(item.numero_relatorio || '')
+    if (!numero.startsWith(prefixo) || !numero.endsWith(sufixo)) return maior
+    const sequencia = Number(numero.slice(prefixo.length, -sufixo.length))
+    return Number.isInteger(sequencia) && sequencia > maior ? sequencia : maior
+  }, 0)
+  const proximo = await db.prepare(`INSERT INTO sequencia_relatorios_despesa_viagem (codigo_cotista, aeronave_id, ano, ultimo_numero) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(codigo_cotista, aeronave_id, ano) DO UPDATE SET ultimo_numero = MAX(ultimo_numero + 1, ?4) RETURNING ultimo_numero`).bind(codigo, aeronaveId, ano, maiorExistente + 1).first<{ ultimo_numero: number }>()
+  if (!proximo?.ultimo_numero) throw new Error('falha_ao_gerar_numero_relatorio')
+  return `REL-${codigo}-${String(proximo.ultimo_numero).padStart(3, '0')}/${ano} ${matricula}`
 }
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
@@ -3960,7 +4007,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
     const db = portalDb(c)
     const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>()
     const id = uuid()
-    const numero = String(body.numero_relatorio || '').trim() || numeroRelatorioViagem()
+    const numero = `PENDENTE-${id}`
     const status = statusRelatorioViagem(body.status || 'rascunho')
     await db.prepare(`
       INSERT INTO relatorio_despesa_viagem (
@@ -4014,7 +4061,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     const despesas = body.despesas === undefined ? undefined : JSON.stringify(despesasRelatorioViagem(body.despesas))
     await db.prepare(`
       UPDATE relatorio_despesa_viagem SET
-        numero_relatorio = COALESCE(?, numero_relatorio), numero_voo = ?, cliente_id = COALESCE(?, cliente_id), socio_id = ?,
+        numero_relatorio = numero_relatorio, numero_voo = ?, cliente_id = COALESCE(?, cliente_id), socio_id = ?,
         aeronave_id = COALESCE(?, aeronave_id), matricula_aeronave = COALESCE(?, matricula_aeronave), rota = COALESCE(?, rota),
         data_inicio = COALESCE(?, data_inicio), data_fim = COALESCE(?, data_fim), quantidade_dias = COALESCE(?, quantidade_dias),
         tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
@@ -4023,7 +4070,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
         total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?, atualizado_em = CURRENT_TIMESTAMP
       WHERE id = ?
     `).bind(
-      body.numero_relatorio || null, body.numero_voo || null, body.cliente_id || null, body.socio_id || null,
+      body.numero_voo || null, body.cliente_id || null, body.socio_id || null,
       aeronaveId, aeronave?.matricula_registro || body.matricula_aeronave || null, body.rota || null, dataInicio || null, dataFim || null,
       body.quantidade_dias != null ? Number(body.quantidade_dias) : null, body.tripulacao_id || null, body.nome_tripulante || null,
       body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
@@ -4058,9 +4105,16 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     if (!relatorio) return c.notFound()
     if (statusRelatorioViagem(relatorio.status) !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
     if (!despesasRelatorioViagem(relatorio.despesas).some((item: any) => Number(item?.valor ?? item?.amount) > 0)) return c.json({ error: 'relatorio_sem_despesas' }, 400)
-    await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(id).run()
+    const numero = await gerarNumeroRelatorioViagem(
+      db,
+      String(relatorio.cliente_id || ''),
+      relatorio.socio_id ? String(relatorio.socio_id) : null,
+      String(relatorio.aeronave_id || ''),
+      String(relatorio.data_inicio || ''),
+    )
+    await db.prepare("UPDATE relatorio_despesa_viagem SET numero_relatorio = ?, status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(numero, id).run()
     try {
-      await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, status: 'finalizado' }, user.id)
+      await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, numero_relatorio: numero, status: 'finalizado' }, user.id)
     } catch (error) {
       await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'rascunho', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(id).run()
       throw error
