@@ -636,9 +636,14 @@ financeiroRoutes.get('/recibos', async (c) => {
   const cotistaIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cotista_aeronave').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
   const reciboIds = recibos.map((row) => String(row.id ?? '')).filter(Boolean)
   const cotistas = cotistaIds.length
-    ? await listar(db, `SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, COALESCE(cl.cnpj, hs.cpf) AS documento, COALESCE(cl.endereco, hs.endereco) AS endereco, COALESCE(cl.cidade, hs.cidade) AS cidade, COALESCE(cl.uf, hs.uf) AS uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id IN (${cotistaIds.map(() => '?').join(', ')})`, ...cotistaIds)
+    ? await listar(db, `SELECT ca.id, ca.cliente_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, COALESCE(cl.cnpj, hs.cpf) AS documento, COALESCE(cl.endereco, hs.endereco) AS endereco, COALESCE(cl.cidade, hs.cidade) AS cidade, COALESCE(cl.uf, hs.uf) AS uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id IN (${cotistaIds.map(() => '?').join(', ')}) OR ca.cliente_id IN (${cotistaIds.map(() => '?').join(', ')})`, ...cotistaIds, ...cotistaIds)
     : []
-  const cotistaPorId = new Map(cotistas.map((row) => [String(row.id), row]))
+  const cotistaPorId = new Map<string, Record<string, unknown>>()
+  cotistas.forEach((row) => {
+    for (const chave of [row.id, row.cliente_id]) {
+      if (chave) cotistaPorId.set(String(chave), row)
+    }
+  })
   const rateios = reciboIds.length
     ? await listar(db, `SELECT rr.id, rr.recibo_id, rr.rateio_id, rr.percentual, rr.valor, rr.cotista_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cotista_nome FROM recibo_rateio rr LEFT JOIN cotista_aeronave ca ON ca.id = rr.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE rr.recibo_id IN (${reciboIds.map(() => '?').join(', ')}) ORDER BY rr.rowid`, ...reciboIds)
     : []
@@ -652,11 +657,11 @@ financeiroRoutes.get('/recibos', async (c) => {
     const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
     return {
       ...recibo,
-      nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? null : 'Share Brasil',
-      documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? null : null,
-      endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? null : null,
-      cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? null : null,
-      uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? null : null,
+      nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? recibo.nome_pagador ?? null : 'Share Brasil',
+      documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? recibo.documento_pagador ?? null : recibo.documento_pagador ?? null,
+      endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? recibo.endereco_pagador ?? null : recibo.endereco_pagador ?? null,
+      cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? recibo.cidade_pagador ?? null : recibo.cidade_pagador ?? null,
+      uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? recibo.uf_pagador ?? null : recibo.uf_pagador ?? null,
       rateio_linhas: rateiosPorRecibo.get(String(recibo.id)) ?? [],
     }
   }) })
@@ -696,14 +701,14 @@ financeiroRoutes.patch('/recibos/:id/status', async (c) => {
     const status = String(body.status ?? '').toUpperCase()
     const permitidos = new Set(['ANEXO_PENDENTE', 'PDF_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'])
     if (!permitidos.has(status)) return c.json({ error: 'status_recibo_invalido' }, 400)
-    const result = await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(status, c.req.param('id')).run()
+    const result = await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ? WHERE id = ?').bind(status, c.req.param('id')).run()
     if (!result.meta.changes) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     return c.json({ ok: true, status })
   } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
-  await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(c.req.param('id')).run()
+  await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'CANCELADO' WHERE id = ?").bind(c.req.param('id')).run()
   return c.json({ ok: true })
 })
 
@@ -825,9 +830,9 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
     const pdfUrl = `/api/financeiro/recibos/anexos/${anexoId}/arquivo`
-    await c.env.SHARE_DB.prepare('UPDATE recibos SET url_recibo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(pdfUrl, reciboId).run()
+    await c.env.SHARE_DB.prepare('UPDATE recibos SET url_recibo = ? WHERE id = ?').bind(pdfUrl, reciboId).run()
     const financeiro = await finalizarRecibo(c.env.SHARE_DB, reciboId, c.get('userId') || null)
-    await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
+    await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO' WHERE id = ?").bind(reciboId).run()
     return c.json({ anexo_id: anexoId, pdf_url: pdfUrl, ...financeiro }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
