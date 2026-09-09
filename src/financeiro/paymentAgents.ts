@@ -23,7 +23,20 @@ export function validatePaymentRequest(body: Row): PaymentRequest {
   if (!String(body.data_despesa ?? '').match(/^\d{4}-\d{2}-\d{2}/)) throw new Error('data_despesa inválida')
   if (!String(body.categoria_id ?? '').trim()) throw new Error('categoria_id é obrigatório')
   const rateioLinhas = linhas.map((linha) => ({ cotista_id: String(linha.cotista_id ?? ''), percentual: Number(linha.percentual), valor_centavos: Number(linha.valor_centavos) }))
-  if (tipo !== 'share' && (!rateioLinhas.length || Math.abs(rateioLinhas.reduce((total, linha) => total + linha.percentual, 0) - 100) > 0.01 || rateioLinhas.some((linha) => !linha.cotista_id || !Number.isInteger(linha.valor_centavos) || linha.valor_centavos <= 0))) throw new Error('rateio_linhas inválido')
+  if (tipo !== 'share') {
+    const percentualTotal = rateioLinhas.reduce((total, linha) => total + linha.percentual, 0)
+    const valorTotal = rateioLinhas.reduce((total, linha) => total + linha.valor_centavos, 0)
+    const linhasInvalidas = rateioLinhas.some((linha) =>
+      !linha.cotista_id ||
+      !Number.isFinite(linha.percentual) ||
+      linha.percentual < 0 ||
+      !Number.isInteger(linha.valor_centavos) ||
+      linha.valor_centavos <= 0,
+    )
+    if (!rateioLinhas.length || linhasInvalidas || Math.abs(percentualTotal - 100) > 0.01 || valorTotal !== valor) {
+      throw new Error('rateio_linhas inválido')
+    }
+  }
   return {
     tipo: tipo as PaymentRequest['tipo'], descricao: String(body.descricao).trim(), valor_centavos: valor,
     data_despesa: String(body.data_despesa), data_vencimento: body.data_vencimento ? String(body.data_vencimento) : null,
