@@ -5,7 +5,6 @@ import {
   enqueueFinance,
   FinanceError,
   issueRevenue,
-  issueReceipt,
   emitirReciboReembolso,
   emitirReciboColaborador,
   emitirReciboPagamento,
@@ -582,7 +581,7 @@ financeiroRoutes.post('/reembolsos', async (c) => {
 financeiroRoutes.post('/recibos', async (c) => {
   try {
     const body = await c.req.json<Record<string, unknown>>()
-    const handlers: Record<string, typeof issueReceipt> = {
+    const handlers: Record<string, (db: D1Database, body: Record<string, unknown>, userId: string | null) => Promise<Record<string, unknown>>> = {
       recibo_reembolso: emitirReciboReembolso,
       recibo_colaborador: emitirReciboColaborador,
       recibo_pagamento: emitirReciboPagamento,

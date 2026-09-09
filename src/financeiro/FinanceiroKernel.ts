@@ -1621,25 +1621,25 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
 
 export async function emitirReciboReembolso(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_reembolso') throw new FinanceError('Tipo de recibo inválido para reembolso', 'tipo_recibo_invalido')
-  return issueReceipt(db, body, userId)
+  return issueReceiptInternal(db, body, userId)
 }
 
 export async function emitirReciboColaborador(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_colaborador') throw new FinanceError('Tipo de recibo inválido para colaborador', 'tipo_recibo_invalido')
-  return issueReceipt(db, body, userId)
+  return issueReceiptInternal(db, body, userId)
 }
 
 export async function emitirReciboPagamento(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_pagamento') throw new FinanceError('Tipo de recibo inválido para pagamento', 'tipo_recibo_invalido')
-  return issueReceipt(db, body, userId)
+  return issueReceiptInternal(db, body, userId)
 }
 
 export async function emitirReciboSaida(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_saida') throw new FinanceError('Tipo de recibo inválido para saída', 'tipo_recibo_invalido')
-  return issueReceipt(db, body, userId)
+  return issueReceiptInternal(db, body, userId)
 }
 
-export async function issueReceipt(
+async function issueReceiptInternal(
   db: Database,
   body: Row,
   userId: string | null,
@@ -1681,6 +1681,7 @@ export async function issueReceipt(
   const codigo = text(body.codigo_cliente) || codigoCotista || 'SHARE'
   const ano = input.data_emissao.slice(0, 4)
   const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
+  try {
   await createReceiptRecord(db, input, reciboId, numero, userId)
   const reciboPagamentoCliente = input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave'
   const categoriaNome = nullableText(body.categoria_nome) || nullableText(
@@ -1740,4 +1741,20 @@ export async function issueReceipt(
     lancamento_id: lancamentoId,
   }
   return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, lancamento_cliente_id: rateioLancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: 'PDF_PENDENTE', valor_centavos: input.valor_centavos }
+  } catch (error) {
+    const created = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?').bind(reciboId).first<{ lancamento_id: string | null }>()
+    const createdLancamentoId = created?.lancamento_id || null
+    await db.batch([
+      db.prepare('DELETE FROM recibo_rateio WHERE recibo_id = ?').bind(reciboId),
+      db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ?').bind(reciboId),
+      db.prepare('DELETE FROM recibos WHERE id = ?').bind(reciboId),
+      ...(createdLancamentoId ? [
+        db.prepare('DELETE FROM reembolsos WHERE lancamento_origem_id = ?').bind(createdLancamentoId),
+        db.prepare('DELETE FROM contas_areceber WHERE lancamentos_id = ?').bind(createdLancamentoId),
+        db.prepare('DELETE FROM rateio_despesas WHERE lancamento_id = ?').bind(createdLancamentoId),
+        db.prepare('DELETE FROM lancamentos WHERE id = ?').bind(createdLancamentoId),
+      ] : []),
+    ])
+    throw error
+  }
 }
