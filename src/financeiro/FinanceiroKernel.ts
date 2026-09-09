@@ -1179,6 +1179,7 @@ export async function issueRevenue(
 
   if (clientLancamentoId) {
     const clientRateioId = id()
+    const reciboSaida = upper(command.origem_tipo) === 'RECIBO_SAIDA'
     statements.push(
       insertStatement(
         db,
@@ -1198,21 +1199,21 @@ export async function issueRevenue(
           data_vencimento: command.data_vencimento || command.data,
           fornecedor_id: nullableText(command.fornecedor_id),
           descricao_despesa: command.descricao,
-          pago_por_cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
-          pago_diretamente: 1,
+          pago_por_cotista_id: reciboSaida ? null : (context?.cotistaAeronaveId || command.cotista_aeronave_id),
+          pago_diretamente: reciboSaida ? 0 : 1,
           percentual_sociedade: 100,
           percentual_uso: 100,
           valor_total_centavos: amount,
           valor_rateado_centavos: amount,
           valor_total: amount / 100,
           valor_rateado: amount / 100,
-          status: 'PAGO_DIRETAMENTE',
+          status: reciboSaida ? 'AGUARDANDO_REEMBOLSO' : 'PAGO_DIRETAMENTE',
           numero_recibo: nullableText(command.numero_recibo),
           recibo_url: nullableText(command.url_recibo),
         },
         ['id', 'lancamento_id'],
       ),
-      insertStatement(
+      ...(reciboSaida ? [] : [insertStatement(
         db,
         schema,
         'rateio_pagamentos',
@@ -1235,7 +1236,7 @@ export async function issueRevenue(
           criado_por: userId,
         },
         ['id', 'rateio_id', 'valor_centavos'],
-      ),
+      )]),
     )
   }
 
@@ -1520,6 +1521,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const expected = Number(r.valor_rateado_centavos)
     const status = paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
     statements.push(updateStatement(db, schema, 'rateio_despesas', {
+      valor_pago_real_centavos: paid,
       status,
       data_pagamento: paid ? lastDate : null,
       atualizado_em: new Date().toISOString(),
@@ -1528,7 +1530,8 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   if (shareId) {
     const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
     if (novoStatusConta === 'RECEBIDO') statements.push(updateStatement(db, schema, 'lancamentos', { status: 'RECEBIDO', data_pagamento: lastDate, conta_bancaria_id: lastBank, comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
-    const client = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(shareId).first<Row>()
+    const origem = await db.prepare('SELECT origem_id FROM lancamentos WHERE id = ?').bind(shareId).first<Row>()
+    const client = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(origem?.origem_id ?? null).first<Row>()
     if (client && allPaid) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: lastDate, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
   }
   statements.push(auditStatement(db, schema, 'contas_areceber', receivableId, 'BAIXA', userId, newTotal, finalTotal, nullableText(body.motivo), nullableText(body.idempotency_key)))
@@ -1686,7 +1689,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
     linkStatement(db,schema,'REEMBOLSO',reimbursementId,'CONTA_A_RECEBER',receivableId,'REEMBOLSO_CONTA_A_RECEBER',userId),
   ]
   const lines = Array.isArray(input.rateio_linhas) && input.rateio_linhas.length ? input.rateio_linhas : [{cotista_id:cotistaId, percentual_uso:100, valor_rateado_centavos:amount}]
-  for (const line of lines) statements.push(insertStatement(db,schema,'rateio_despesas',{id:id(),lancamento_id:shareId,aeronave_id:common.aeronave_id,cotista_id:line.cotista_id,data_emissao:input.data_emissao,data_vencimento:common.data_vencimento,categoria_id:category,categoria_nome:nullableText(input.categoria_nome),tipo_rateio:'FIXO',periodicidade:'ÚNICO',percentual_uso:Number(line.percentual_uso),valor_total_centavos:amount,valor_rateado_centavos:Number(line.valor_rateado_centavos),pago_diretamente:0,status:'AGUARDANDO_REEMBOLSO',descricao_despesa:input.descricao,observacoes:nullableText(input.observacoes)},['id','lancamento_id','aeronave_id','cotista_id']))
+  for (const line of lines) statements.push(insertStatement(db,schema,'rateio_despesas',{id:id(),lancamento_id:shareId,aeronave_id:common.aeronave_id,cotista_id:line.cotista_id,data_emissao:input.data_emissao,data_vencimento:common.data_vencimento,categoria_id:category,categoria_nome:nullableText(input.categoria_nome),tipo_rateio:'FIXO',periodicidade:'ÚNICO',percentual_uso:Number(line.percentual ?? line.percentual_uso ?? 0),percentual_sociedade:Number(line.percentual_sociedade ?? line.percentual ?? line.percentual_uso ?? 0),valor_total_centavos:amount,valor_rateado_centavos:Number(line.valor_centavos ?? line.valor_rateado_centavos ?? 0),valor_pago_real_centavos:0,pago_diretamente:0,status:'AGUARDANDO_REEMBOLSO',descricao_despesa:input.descricao,observacoes:nullableText(input.observacoes)},['id','lancamento_id','aeronave_id','cotista_id']))
   await db.batch(statements); return {shareLancamentoId:shareId,clienteLancamentoId:clientId,contaReceberId:receivableId}
 }
 
@@ -1851,8 +1854,7 @@ async function issueReceiptInternal(
     pago_diretamente: input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave',
     reembolsavel: input.tipo_recibo === 'recibo_reembolso',
   }
-  const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : ''))
-  if (!cotistaId) throw new FinanceError('cotista_aeronave_id é obrigatório para gerar a sequência do recibo', 'cotista_sequencia_obrigatorio')
+  const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : '')) || null
   const codigoCotista = !text(body.codigo_cliente) && cotistaId
     ? text((await db.prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<{ codigo_cliente: string | null }>())?.codigo_cliente)
     : ''
@@ -1860,7 +1862,7 @@ async function issueReceiptInternal(
   const ano = input.data_emissao.slice(0, 4)
   const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
   try {
-  await createReceiptRecord(db, input, reciboId, numero, userId)
+  await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
   const categoriaNome = nullableText(body.categoria_nome) || nullableText(
     (await db.prepare(`
       SELECT nome FROM categoria_movimentacao_cliente WHERE id = ?

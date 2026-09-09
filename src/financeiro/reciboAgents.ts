@@ -16,6 +16,16 @@ type ReceiptInput = {
   recebedor_nome?: string | null
   observacoes?: string | null
   grupo_categoria?: string | null
+  rateado?: boolean | number | null
+  nome_pagador?: string | null
+  documento_pagador?: string | null
+  endereco_pagador?: string | null
+  cidade_pagador?: string | null
+  uf_pagador?: string | null
+  recebedor_cpf?: string | null
+  recebedor_endereco?: string | null
+  recebedor_cidade?: string | null
+  recebedor_uf?: string | null
 }
 
 const RECEIPT_STATUSES: readonly StatusRecibo[] = ['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO']
@@ -52,7 +62,7 @@ export function receiptStatusIsValid(status: string): boolean {
   return (RECEIPT_STATUSES as readonly string[]).includes(status)
 }
 
-export async function allocateReceiptNumber(db: D1Database, cotistaId: string, codigo: string, ano: string): Promise<string> {
+export async function allocateReceiptNumber(db: D1Database, cotistaId: string | null, codigo: string, ano: string): Promise<string> {
   const anoCurto = ano.slice(-2)
   const existentes = await db.prepare('SELECT numero_recibo FROM recibos WHERE numero_recibo LIKE ?').bind(`REC-${codigo}%`).all<{ numero_recibo: string }>()
   const padrao = new RegExp(`^REC-${codigo}(\\d+)/(?:${ano}|${anoCurto})$`)
@@ -60,16 +70,16 @@ export async function allocateReceiptNumber(db: D1Database, cotistaId: string, c
     const match = String(item.numero_recibo ?? '').match(padrao)
     return Math.max(maior, match ? Number(match[1]) : 0)
   }, 0)
-  const existente = await db.prepare(
+  const existente = cotistaId ? await db.prepare(
     'SELECT id, proximo_numero FROM sequencia_numeros_recibos WHERE codigo_cliente = ? AND ano = ?',
-  ).bind(codigo, ano).first<{ id: string; proximo_numero: number }>()
+  ).bind(codigo, ano).first<{ id: string; proximo_numero: number }>() : null
   const numero = Math.max(Number(existente?.proximo_numero || 1), maiorExistente + 1)
 
   if (existente) {
     await db.prepare(
       'UPDATE sequencia_numeros_recibos SET proximo_numero = ?, cotista_aeronave_id = ? WHERE id = ?',
     ).bind(numero + 1, cotistaId, existente.id).run()
-  } else {
+  } else if (cotistaId) {
     await db.prepare(`
       INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
       VALUES (?, ?, ?, ?, ?)
@@ -86,10 +96,11 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       pagador_tipo, pagador_id, valor, descricao, data_emissao, data_vencimento,
       forma_pagamento, tipo_caixa, categoria_movimentacao_id, grupo_categoria,
       status, recebedor_nome, observacoes, criado_por
-    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
-    input.pagador_tipo, input.pagador_id, input.valor_centavos, input.descricao,
+    input.rateado ? 1 : 0, input.pagador_tipo, input.pagador_id,
+    input.valor_centavos, input.descricao,
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     input.pagador_tipo === 'cotista_aeronave' ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, input.recebedor_nome,

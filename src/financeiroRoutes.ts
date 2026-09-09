@@ -299,6 +299,18 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
       origem_tipo: 'RECIBO_SAIDA', origem_id: id,
       periodicidade: 'MENSAL',
     }, c.get('userId') || null)
+    if (financeiro.lancamentoClienteId) {
+      await c.env.SHARE_DB.prepare(`
+        UPDATE rateio_despesas
+        SET percentual_sociedade = COALESCE((SELECT percentual_sociedade FROM cotista_aeronave WHERE id = ?), 100),
+            percentual_uso = 100,
+            periodicidade = 'MENSAL',
+            valor_pago_real_centavos = 0,
+            status = 'AGUARDANDO_REEMBOLSO',
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE lancamento_id = ?
+      `).bind(cotistaId, financeiro.lancamentoClienteId).run()
+    }
     await c.env.SHARE_DB.prepare(`INSERT INTO recibos_saida
       (id, numero_recibo, cotista_id, aeronave_id, valor_total, percentual, descricao_servico,
        nome_categoria, categoria_id, subcategoria_1, data_emissao, data_vencimento,
@@ -662,7 +674,15 @@ financeiroRoutes.get('/recibos/opcoes', async (c) => {
 })
 
 financeiroRoutes.patch('/recibos/:id/status', async (c) => {
-  return c.json({ error: 'status_recibo_somente_pelo_fluxo_de_emissao_e_upload' }, 405)
+  try {
+    const body = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
+    const status = String(body.status ?? '').toUpperCase()
+    const permitidos = new Set(['ANEXO_PENDENTE', 'PDF_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'])
+    if (!permitidos.has(status)) return c.json({ error: 'status_recibo_invalido' }, 400)
+    const result = await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(status, c.req.param('id')).run()
+    if (!result.meta.changes) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    return c.json({ ok: true, status })
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
@@ -758,7 +778,7 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     const reciboId = c.req.param('id')
     const recibo = await c.env.SHARE_DB.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
     if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
-    if (String(recibo.status).toUpperCase() !== 'PDF_PENDENTE') return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
+    if (!['PDF_PENDENTE', 'ANEXO_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'].includes(String(recibo.status).toUpperCase())) return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
     const bytes = new Uint8Array(await arquivo.arrayBuffer())
     if (bytes.length < 5 || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') return c.json({ error: 'conteudo_pdf_invalido' }, 400)
     const anexoId = crypto.randomUUID()
