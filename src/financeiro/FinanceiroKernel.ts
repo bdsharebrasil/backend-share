@@ -175,9 +175,9 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'fornecedores_favoritos_id', 'recibos_saida_id', 'origem_tipo', 'origem_id', 'periodicidade', 'tipo_caixa',
   'cliente_id', 'recebedor_id', 'recebedor_nome', 'recebedor_cpf', 'recebedor_endereco', 'recebedor_cidade', 'recebedor_uf',
   'pagador_tipo', 'pagador_id', 'categoria_movimentacao_id', 'categoria_nome_manual', 'natureza_despesa', 'anexo_id', 'numero_documento_anexo',
-  'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'numero_recibo', 'url_recibo', 'pago_diretamente', 'pagoDiretamente',
+  'forma_pagamento', 'conta_bancaria_id', 'data_pagamento', 'comprovante_url', 'observacoes', 'numero_recibo', 'url_recibo', 'pago_diretamente', 'pagoDiretamente',
   'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
-  'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
+  'lancamento_id', 'lancamento_origem_id', 'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
   'modo_lancamento', 'tipo_movimento_hold', 'grupo_categoria', 'subcategoria_1',
   'subcategoria_2', 'subcategoria_3', 'subcategoria_4', 'data_competencia_demonstrativo',
 ])
@@ -207,6 +207,10 @@ function validateFrontendContract(body: Row): void {
       'contrato_campo_desconhecido',
     )
   }
+}
+
+type NormalizeOptions = {
+  internal?: boolean
 }
 
 function addKnownColumns(
@@ -340,8 +344,8 @@ function idempotencyKey(body: Row): string | null {
   )
 }
 
-function normalizeCommand(body: Row, userId: string | null): Row {
-  validateFrontendContract(body)
+function normalizeCommand(body: Row, userId: string | null, options: NormalizeOptions = {}): Row {
+  if (!options.internal) validateFrontendContract(body)
   const valorCentavos = asPositiveCents(
     body.valor_centavos ?? body.valorCentavos,
   )
@@ -510,7 +514,7 @@ function allocationLines(body: Row): AllocationLine[] {
     ),
   }))
 
-  if (lines.some((line) => !line.cotistaId)) {
+  if (lines.some((line) => !line.cotistaId || !Number.isFinite(line.percentual) || line.percentual < 0)) {
     throw new FinanceError(
       'Todo rateio precisa de cotista',
       'rateio_cotista_obrigatorio',
@@ -783,9 +787,10 @@ export async function createExpense(
   db: Database,
   body: Row,
   userId: string | null,
+  options: NormalizeOptions = {},
 ): Promise<Row> {
   const schema = await loadSchema(db)
-  const command = normalizeCommand(body, userId)
+  const command = normalizeCommand(body, userId, options)
   const existing = await findExistingByIdempotency(
     db,
     schema,
@@ -1057,9 +1062,10 @@ export async function issueRevenue(
   db: Database,
   body: Row,
   userId: string | null,
+  options: NormalizeOptions = {},
 ): Promise<Row> {
   const schema = await loadSchema(db)
-  const command = normalizeCommand({ ...body, fluxo: 'ENTRADA' }, userId)
+  const command = normalizeCommand({ ...body, fluxo: 'ENTRADA' }, userId, options)
   const existing = await findExistingByIdempotency(
     db,
     schema,
@@ -1691,7 +1697,7 @@ async function createReimbursementFinance(db: Database, _schema: SchemaCache, co
     recibo_id: receiptId,
     data: input.data_emissao,
     data_vencimento: input.data_vencimento || input.data_emissao,
-  }, userId)
+  }, userId, { internal: true })
 
   return {
     shareLancamentoId: text(expense.lancamento_id || expense.id),
@@ -1732,7 +1738,7 @@ async function buildReceiptColaborador(
     colaborador_id: input.colaborador_id,
     pago_diretamente: false,
     reembolsavel: false,
-  }, userId)
+  }, userId, { internal: true })
 }
 
 async function buildReceiptPagamento(
@@ -1761,7 +1767,7 @@ async function buildReceiptPagamento(
       sem_rateio: true,
       pago_diretamente: true,
       reembolsavel: false,
-    }, userId)
+    }, userId, { internal: true })
   }
 
   return createExpense(db, {
@@ -1771,7 +1777,7 @@ async function buildReceiptPagamento(
     sem_rateio: true,
     pago_diretamente: false,
     reembolsavel: false,
-  }, userId)
+  }, userId, { internal: true })
 }
 
 async function buildReceiptSaida(
@@ -1795,7 +1801,7 @@ async function buildReceiptSaida(
     origem_tipo: 'RECIBO_SAIDA',
     origem_id: receiptId,
     criar_lancamento_cliente: true,
-  }, userId)
+  }, userId, { internal: true })
 
   return {
     ...result,
