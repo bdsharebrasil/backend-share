@@ -468,6 +468,8 @@ type AllocationLine = {
 }
 
 function allocationLines(body: Row): AllocationLine[] {
+  if (body.sem_rateio === true) return []
+
   const supplied = Array.isArray(body.rateio_linhas)
     ? body.rateio_linhas
     : Array.isArray(body.rateios)
@@ -1675,24 +1677,16 @@ export async function processFinanceQueue(
 }
 
 async function createReimbursementFinance(db: Database, _schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
-  const cotistaId = text(command.cotista_aeronave_id || input.pagador_id)
-  const cotista = cotistaId && cotistaId !== 'empresa'
-    ? await db.prepare('SELECT id, aeronave_id FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<Row>()
-    : input.cliente_id
-      ? await db.prepare('SELECT id, aeronave_id FROM cotista_aeronave WHERE cliente_id = ? ORDER BY id LIMIT 1').bind(input.cliente_id).first<Row>()
-      : null
-  if (!cotista?.id) throw new FinanceError('Cotista da aeronave não encontrado', 'cotista_aeronave_nao_encontrado')
-
   const expense = await createExpense(db, {
     ...command,
     idempotency_key: `recibo-reembolso:${receiptId}`,
-    aeronave_id: cotista.aeronave_id ?? input.aeronave_id,
-    cotista_aeronave_id: cotista.id,
+    aeronave_id: input.aeronave_id,
     categoria_id: CATEGORIA_SHARE_RECIBO,
     categoria_nome: 'REEMBOLSOS SHARE',
     tipo_caixa: 'SHARE',
     fluxo: 'SAIDA',
     reembolsavel: true,
+    sem_rateio: true,
     pago_diretamente: false,
     recibo_id: receiptId,
     data: input.data_emissao,
@@ -1734,6 +1728,7 @@ async function buildReceiptColaborador(
     ...command,
     tipo_caixa: 'SHARE',
     fluxo: 'SAIDA',
+    sem_rateio: true,
     colaborador_id: input.colaborador_id,
     pago_diretamente: false,
     reembolsavel: false,
@@ -1763,6 +1758,7 @@ async function buildReceiptPagamento(
       fluxo: 'SAIDA',
       categoria_id: null,
       categoria_cliente_id: input.categoria_movimentacao_id,
+      sem_rateio: true,
       pago_diretamente: true,
       reembolsavel: false,
     }, userId)
@@ -1772,6 +1768,7 @@ async function buildReceiptPagamento(
     ...command,
     tipo_caixa: 'SHARE',
     fluxo: 'SAIDA',
+    sem_rateio: true,
     pago_diretamente: false,
     reembolsavel: false,
   }, userId)
