@@ -4053,7 +4053,8 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
     const db = portalDb(c)
     const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>()
     const id = uuid()
-    const numero = `PENDENTE-${id}`
+    const socioId = body.socio_id ? String(body.socio_id) : null
+    const numero = await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
     const status = statusRelatorioViagem(body.status || 'rascunho')
     await db.prepare(`
       INSERT INTO relatorio_despesa_viagem (
@@ -4065,7 +4066,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
         total_sharebrasil, criado_por
       ) VALUES (${new Array(30).fill('?').join(', ')})
     `).bind(
-      id, numero, body.numero_voo || null, clienteId, body.socio_id || null, aeronaveId,
+      id, numero, body.numero_voo || null, clienteId, socioId, aeronaveId,
       aeronave?.matricula_registro || body.matricula_aeronave || null, rota, dataInicio, dataFim,
       Number(body.quantidade_dias || 1), tripulacaoId || null, nomeTripulante || null,
       body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null,
@@ -4151,13 +4152,16 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     if (!relatorio) return c.notFound()
     if (statusRelatorioViagem(relatorio.status) !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
     if (!despesasRelatorioViagem(relatorio.despesas).some((item: any) => Number(item?.valor ?? item?.amount) > 0)) return c.json({ error: 'relatorio_sem_despesas' }, 400)
-    const numero = await gerarNumeroRelatorioViagem(
-      db,
-      String(relatorio.cliente_id || ''),
-      relatorio.socio_id ? String(relatorio.socio_id) : null,
-      String(relatorio.aeronave_id || ''),
-      String(relatorio.data_inicio || ''),
-    )
+    const numeroAtual = String(relatorio.numero_relatorio || '')
+    const numero = numeroAtual.startsWith('REL-')
+      ? numeroAtual
+      : await gerarNumeroRelatorioViagem(
+          db,
+          String(relatorio.cliente_id || ''),
+          relatorio.socio_id ? String(relatorio.socio_id) : null,
+          String(relatorio.aeronave_id || ''),
+          String(relatorio.data_inicio || ''),
+        )
     await db.prepare("UPDATE relatorio_despesa_viagem SET numero_relatorio = ?1, status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(numero, id).run()
     try {
       await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, numero_relatorio: numero, status: 'finalizado' }, user.id)
