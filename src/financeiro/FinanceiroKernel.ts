@@ -1380,7 +1380,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   return { ...(await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()), idempotent: false }
 }
 
-type RealPayment = { tipo_pagador: 'COTISTA' | 'SHARE' | 'HOLDING'; pagador_cotista_id?: string | null; pagador_holding_id?: string | null; valor_centavos: number; rateios: Array<{ rateio_id: string; valor_centavos: number }> }
+type RealPayment = { idempotency_key?: string | null; data_pagamento?: string | null; conta_bancaria_id?: string | null; comprovante_url?: string | null; forma_pagamento?: string | null; tipo_pagador: 'COTISTA' | 'SHARE' | 'HOLDING'; pagador_cotista_id?: string | null; pagador_holding_id?: string | null; valor_centavos: number; rateios: Array<{ rateio_id: string; valor_centavos: number }> }
 
 export async function settleReceivable(db: Database, receivableId: string, body: Row, userId: string | null): Promise<Row> {
   const schema = await loadSchema(db)
@@ -1392,11 +1392,14 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   if (!payments.length) throw new FinanceError('Informe pelo menos um pagador real', 'pagadores_obrigatorios')
   const total = asPositiveCents(row.valor_centavos)
   const sumPayments = payments.reduce((n, x) => n + Number(x.valor_centavos), 0)
-  if (sumPayments !== total) throw new FinanceError('A soma dos pagamentos deve ser igual à conta a receber', 'soma_pagamentos_invalida')
+  if (sumPayments <= 0) throw new FinanceError('A soma dos pagamentos deve ser positiva', 'soma_pagamentos_invalida')
+  const valorContaReceber = total
   const shareId = nullableText(row.lancamentos_id ?? row.lancamento_id)
   const rateios = shareId ? await db.prepare('SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN (\'CANCELADO\')').bind(shareId).all<Row>() : { results: [] as Row[] }
   const allowed = new Map((rateios.results || []).map(r => [String(r.id), Number(r.valor_rateado_centavos)]))
   const distributed = new Map<string, number>()
+  const confirmadoAnterior = Number((await db.prepare("SELECT COALESCE(SUM(valor_centavos), 0) AS total FROM rateio_pagamentos WHERE conta_receber_id = ? AND status = 'CONFIRMADO'").bind(receivableId).first<Row>())?.total || 0)
+  if (confirmadoAnterior + sumPayments > valorContaReceber) throw new FinanceError('O pagamento excede o saldo da conta a receber', 'conta_receber_excedida')
   const statements: D1PreparedStatement[] = []
   const date = dateValue(body.data_recebimento ?? body.dataRecebimento)
   const bank = await resolveContaBancariaId(db, body.conta_bancaria_id ?? body.banco_recebimento ?? body.bancoRecebimento ?? body.conta_bancaria ?? body.contaBancaria)
@@ -1412,19 +1415,21 @@ export async function settleReceivable(db: Database, receivableId: string, body:
       const rid = text(allocation.rateio_id); const cents = asPositiveCents(allocation.valor_centavos)
       if (!allowed.has(rid)) throw new FinanceError('Rateio não pertence à conta a receber', 'rateio_fora_da_conta')
       distributed.set(rid, (distributed.get(rid) || 0) + cents)
-      statements.push(insertStatement(db, schema, 'rateio_pagamentos', { id: id(), rateio_id: rid, conta_receber_id: receivableId, tipo_pagador: payment.tipo_pagador, pagador_cotista_id: payment.pagador_cotista_id || null, pagador_holding_id: payment.pagador_holding_id || null, valor_centavos: cents, data_pagamento: date, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), status: 'CONFIRMADO', criado_por: userId }, ['id','rateio_id','conta_receber_id','valor_centavos']))
+      statements.push(insertStatement(db, schema, 'rateio_pagamentos', { id: id(), rateio_id: rid, conta_receber_id: receivableId, tipo_pagador: payment.tipo_pagador, pagador_cotista_id: payment.pagador_cotista_id || null, pagador_holding_id: payment.pagador_holding_id || null, valor_centavos: cents, data_pagamento: date, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), status: 'CONFIRMADO', idempotency_key: nullableText(payment.idempotency_key) || `${receivableId}:${payment.tipo_pagador}:${payment.valor_centavos}:${date}`, criado_por: userId }, ['id','rateio_id','conta_receber_id','valor_centavos','idempotency_key']))
     }
   }
   for (const [rid, paid] of distributed) if (paid > (allowed.get(rid) || 0)) throw new FinanceError('Pagamento excede o valor esperado do rateio', 'rateio_excedido')
-  statements.push(updateStatement(db, schema, 'contas_areceber', { status: 'RECEBIDO', data_recebimento: date, data_pagamento: date, banco_recebimento: bank, comprovante_recebimento_url: nullableText(body.comprovante_url ?? body.comprovanteRecebimentoUrl), atualizado_em: new Date().toISOString() }, 'id = ?', [receivableId]))
-  if (shareId) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'RECEBIDO', data_pagamento: date, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
+  const novoStatusConta = confirmadoAnterior + sumPayments >= valorContaReceber ? 'RECEBIDO' : 'EM_ABERTO'
+  statements.push(updateStatement(db, schema, 'contas_areceber', { status: novoStatusConta, data_recebimento: date, data_pagamento: date, banco_recebimento: bank, comprovante_recebimento_url: nullableText(body.comprovante_url ?? body.comprovanteRecebimentoUrl), atualizado_em: new Date().toISOString() }, 'id = ?', [receivableId]))
+  if (shareId) statements.push(updateStatement(db, schema, 'lancamentos', { status: novoStatusConta, data_pagamento: date, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
   for (const r of rateios.results || []) {
     const rid = String(r.id); const paid = Number((await db.prepare('SELECT COALESCE(SUM(valor_centavos),0) total FROM rateio_pagamentos WHERE rateio_id = ? AND status = \'CONFIRMADO\'').bind(rid).first<Row>())?.total || 0) + (distributed.has(rid) ? distributed.get(rid)! : 0)
     const expected = Number(r.valor_rateado_centavos); const status = paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
-    statements.push(updateStatement(db, schema, 'rateio_despesas', { valor_pago_real_centavos: paid, data_pagamento: paid ? date : null, status, atualizado_em: new Date().toISOString() }, 'id = ?', [rid]))
+    statements.push(updateStatement(db, schema, 'rateio_despesas', { data_pagamento: paid ? date : null, status, atualizado_em: new Date().toISOString() }, 'id = ?', [rid]))
   }
   const client = shareId ? await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(shareId).first<Row>() : null
-  if (client && [...allowed.keys()].every(rid => ((distributed.get(rid) || 0) >= (allowed.get(rid) || 0)))) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: date, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
+  const rateiosQuitados = (await db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'REEMBOLSADO' THEN 1 ELSE 0 END) AS quitados FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(shareId).first<Row>())
+  if (client && Number(rateiosQuitados?.total || 0) > 0 && Number(rateiosQuitados?.total || 0) === Number(rateiosQuitados?.quitados || 0)) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: date, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
   statements.push(auditStatement(db, schema, 'contas_areceber', receivableId, 'BAIXA', userId, total, total, nullableText(body.motivo), idempotencyKey(body)))
   await db.batch(statements)
   return { ...(await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()), idempotent: false, pagamentos: payments }
@@ -1568,7 +1573,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
   if (!cotista) throw new FinanceError('Cotista da aeronave não encontrado', 'cotista_aeronave_nao_encontrado')
   const shareId=id(), clientId=id(), receivableId=id(), reimbursementId=id()
   const category = nullableText(input.categoria_movimentacao_id)
-  const common = { aeronave_id: cotista.aeronave_id ?? input.aeronave_id, cotista_aeronave_id: cotistaId, descricao: input.descricao, valor_centavos: amount, valor_total: amount/100, valor: amount/100, data_emissao: input.data_emissao, data_lancamento: input.data_emissao, data_vencimento: input.data_vencimento || input.data_emissao, criado_por: userId, origem_tipo: 'REEMBOLSO', origem_id: reimbursementId }
+  const common = { aeronave_id: cotista.aeronave_id ?? input.aeronave_id, cotista_aeronave_id: cotistaId, descricao: input.descricao, valor_centavos: amount, valor_total: amount/100, valor: amount/100, data_emissao: input.data_emissao, data_lancamento: input.data_emissao, data_vencimento: input.data_vencimento || input.data_emissao, criado_por: userId, origem_tipo: 'RECIBO_REEMBOLSO', origem_id: receiptId }
   const statements: D1PreparedStatement[] = [
     insertStatement(db,schema,'lancamentos',{id:shareId,...common,categoria_id:CATEGORIA_SHARE_RECIBO,categoria_nome:'REEMBOLSOS SHARE',fluxo:'SAIDA',tipo_caixa:'SHARE',status:'EM_ABERTO',reembolsavel:1},['id','descricao','fluxo','valor_centavos']),
     insertStatement(db,schema,'lancamentos',{id:clientId,...common,categoria_cliente_id:category,categoria_nome:nullableText(input.categoria_nome),fluxo:'SAIDA',tipo_caixa:'CLIENTE',status:'AGUARDANDO_REEMBOLSO',pago_diretamente:0},['id','descricao','fluxo','valor_centavos']),

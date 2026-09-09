@@ -9,6 +9,7 @@ import {
   emitirReciboReembolso,
   emitirReciboColaborador,
   emitirReciboPagamento,
+  emitirReciboSaida,
   processFinanceQueue,
   settlePayable,
   settleReceivable,
@@ -585,8 +586,11 @@ financeiroRoutes.post('/recibos', async (c) => {
       recibo_reembolso: emitirReciboReembolso,
       recibo_colaborador: emitirReciboColaborador,
       recibo_pagamento: emitirReciboPagamento,
+      recibo_saida: emitirReciboSaida,
     }
-    const handler = handlers[String(body.tipo_recibo)] || issueReceipt
+    const tipo = String(body.tipo_recibo ?? '')
+    const handler = handlers[tipo]
+    if (!handler) return c.json({ error: 'tipo_recibo_invalido', message: 'Tipo de recibo não suportado' }, 400)
     const result = await handler(c.env.SHARE_DB, body, c.get('userId') || null)
     return c.json(result, 201)
   } catch (error) {

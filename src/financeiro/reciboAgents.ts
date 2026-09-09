@@ -22,7 +22,7 @@ const RECEIPT_STATUSES: readonly StatusRecibo[] = ['CRIADO', 'ANEXO_PENDENTE', '
 
 export function validateReceiptCommand(body: Row): ReceiptInput {
   const tipo = String(body.tipo_recibo ?? '').trim()
-  if (!['recibo_reembolso', 'recibo_colaborador', 'recibo_pagamento'].includes(tipo)) throw new Error('tipo_recibo inválido')
+  if (!['recibo_reembolso', 'recibo_colaborador', 'recibo_pagamento', 'recibo_saida'].includes(tipo)) throw new Error('tipo_recibo inválido')
   const pagadorTipo = String(body.pagador_tipo ?? '').trim()
   const pagadorId = String(body.pagador_id ?? '').trim()
   const categoria = String(body.categoria_movimentacao_id ?? '').trim()
