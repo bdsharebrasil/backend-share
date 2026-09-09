@@ -3383,7 +3383,7 @@ app.post('/api/interno/tripulacao/:id/habilitacoes', async c => {
 app.patch('/api/interno/tripulacao/habilitacoes/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string | null; classe_cma?: string | null; validade_cma?: string | null; fs_rh?: string | null }>().catch(() => ({} as any))
-  const result = await portalDb(c).prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = COALESCE(?1, tipo_habilitacao), data_validade = ?, classe_cma = ?, validade_cma = ?, fs_rh = ? WHERE id = ?6').bind(body.tipo_habilitacao?.trim() || null, body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null, c.req.param('id')).run()
+  const result = await portalDb(c).prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = COALESCE(?1, tipo_habilitacao), data_validade = ?2, classe_cma = ?3, validade_cma = ?4, fs_rh = ?5 WHERE id = ?6').bind(body.tipo_habilitacao?.trim() || null, body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -3400,7 +3400,7 @@ app.post('/api/interno/tripulacao-freelancer', async c => {
 app.patch('/api/interno/tripulacao-freelancer/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
-  const result = await portalDb(c).prepare('UPDATE tripulacao_freelancer SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), telefone = ?, aeronave_id = ?, observacao = ?, status = COALESCE(?6, status) WHERE id = ?7').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.telefone || null, body.aeronave_id || null, body.observacao || null, body.status || null, c.req.param('id')).run()
+  const result = await portalDb(c).prepare('UPDATE tripulacao_freelancer SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), telefone = ?3, aeronave_id = ?4, observacao = ?5, status = COALESCE(?6, status) WHERE id = ?7').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.telefone || null, body.aeronave_id || null, body.observacao || null, body.status || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
