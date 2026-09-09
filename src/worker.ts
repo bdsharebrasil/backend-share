@@ -4158,7 +4158,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
       String(relatorio.aeronave_id || ''),
       String(relatorio.data_inicio || ''),
     )
-    await db.prepare("UPDATE relatorio_despesa_viagem SET numero_relatorio = ?, status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(numero, id).run()
+    await db.prepare("UPDATE relatorio_despesa_viagem SET numero_relatorio = ?1, status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(numero, id).run()
     try {
       await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, numero_relatorio: numero, status: 'finalizado' }, user.id)
     } catch (error) {
