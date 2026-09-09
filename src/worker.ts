@@ -3876,9 +3876,10 @@ async function gerarNumeroRelatorioViagem(
   socioId: string | null,
   aeronaveId: string,
   dataInicio: string,
+  relatorioIdExcluir: string | null = null,
 ): Promise<string> {
   const codigoRow = socioId
-    ? await db.prepare(`SELECT ca.codigo_cliente AS codigo_cliente FROM hold_socios hs LEFT JOIN cotista_aeronave ca ON ca.id = hs.cotista_id AND ca.aeronave_id = ?1 WHERE hs.id = ?2 LIMIT 1`).bind(aeronaveId, socioId).first<{ codigo_cliente: string | null }>()
+    ? await db.prepare(`SELECT ca.codigo_cliente AS codigo_cliente FROM hold_socios hs LEFT JOIN cotista_aeronave ca ON ca.id = hs.cotista_id WHERE hs.id = ?1 LIMIT 1`).bind(socioId).first<{ codigo_cliente: string | null }>()
     : await db.prepare(`SELECT COALESCE(NULLIF(c.codigo_cliente, ''), NULLIF(ca.codigo_cliente, '')) AS codigo_cliente FROM cliente c LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = ?2 AND (ca.cliente_id = c.id OR ca.id = ?1) WHERE c.id = ?1 LIMIT 1`).bind(clienteId, aeronaveId).first<{ codigo_cliente: string | null }>()
   const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
   const codigo = normalizarCodigoRelatorio(codigoRow?.codigo_cliente)
@@ -3890,16 +3891,20 @@ async function gerarNumeroRelatorioViagem(
   await db.prepare(`CREATE TABLE IF NOT EXISTS sequencia_relatorios_despesa_viagem (codigo_cotista TEXT NOT NULL, aeronave_id TEXT NOT NULL, ano TEXT NOT NULL, ultimo_numero INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (codigo_cotista, aeronave_id, ano))`).run()
   const prefixo = `REL-${codigo}-`
   const sufixo = `/${ano} ${matricula}`
-  const anteriores = await db.prepare('SELECT numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2').bind(`${prefixo}%${sufixo}`, aeronaveId).all<{ numero_relatorio: string }>()
+  const anterioresQuery = relatorioIdExcluir
+    ? db.prepare('SELECT id, numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2 AND id <> ?3').bind(`${prefixo}%${sufixo}`, aeronaveId, relatorioIdExcluir)
+    : db.prepare('SELECT id, numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2').bind(`${prefixo}%${sufixo}`, aeronaveId)
+  const anteriores = await anterioresQuery.all<{ id: string; numero_relatorio: string }>()
   const maiorExistente = (anteriores.results || []).reduce((maior, item) => {
     const numero = String(item.numero_relatorio || '')
     if (!numero.startsWith(prefixo) || !numero.endsWith(sufixo)) return maior
     const sequencia = Number(numero.slice(prefixo.length, -sufixo.length))
     return Number.isInteger(sequencia) && sequencia > maior ? sequencia : maior
   }, 0)
-  const proximo = await db.prepare(`INSERT INTO sequencia_relatorios_despesa_viagem (codigo_cotista, aeronave_id, ano, ultimo_numero) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(codigo_cotista, aeronave_id, ano) DO UPDATE SET ultimo_numero = MAX(ultimo_numero + 1, ?4) RETURNING ultimo_numero`).bind(codigo, aeronaveId, ano, maiorExistente + 1).first<{ ultimo_numero: number }>()
+  const proximoNumero = maiorExistente + 1
+  const proximo = await db.prepare(`INSERT INTO sequencia_relatorios_despesa_viagem (codigo_cotista, aeronave_id, ano, ultimo_numero) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(codigo_cotista, aeronave_id, ano) DO UPDATE SET ultimo_numero = excluded.ultimo_numero RETURNING ultimo_numero`).bind(codigo, aeronaveId, ano, proximoNumero).first<{ ultimo_numero: number }>()
   if (!proximo?.ultimo_numero) throw new Error('falha_ao_gerar_numero_relatorio')
-  return `REL-${codigo}-${String(proximo.ultimo_numero).padStart(3, '0')}/${ano} ${matricula}`
+  return `REL-${codigo}-${String(proximoNumero).padStart(3, '0')}/${ano} ${matricula}`
 }
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
@@ -4127,12 +4132,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     ).run()
     if (['finalizado', 'enviado_cliente'].includes(novoStatus)) {
       const salvo = await buscarRelatorioViagemComNomes(c, id)
-      try {
-        if (salvo) await sincronizarRelatorioViagemFinanceiro(db, salvo, user.id)
-      } catch (error) {
-        await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'rascunho', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(id).run()
-        throw error
-      }
+      if (salvo) await sincronizarRelatorioViagemFinanceiro(db, salvo, user.id)
     }
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
@@ -4152,23 +4152,16 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     if (!relatorio) return c.notFound()
     if (statusRelatorioViagem(relatorio.status) !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
     if (!despesasRelatorioViagem(relatorio.despesas).some((item: any) => Number(item?.valor ?? item?.amount) > 0)) return c.json({ error: 'relatorio_sem_despesas' }, 400)
-    const numeroAtual = String(relatorio.numero_relatorio || '')
-    const numero = numeroAtual.startsWith('REL-')
-      ? numeroAtual
-      : await gerarNumeroRelatorioViagem(
-          db,
-          String(relatorio.cliente_id || ''),
-          relatorio.socio_id ? String(relatorio.socio_id) : null,
-          String(relatorio.aeronave_id || ''),
-          String(relatorio.data_inicio || ''),
-        )
+    const numero = await gerarNumeroRelatorioViagem(
+      db,
+      String(relatorio.cliente_id || ''),
+      relatorio.socio_id ? String(relatorio.socio_id) : null,
+      String(relatorio.aeronave_id || ''),
+      String(relatorio.data_inicio || ''),
+      id,
+    )
     await db.prepare("UPDATE relatorio_despesa_viagem SET numero_relatorio = ?1, status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(numero, id).run()
-    try {
-      await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, numero_relatorio: numero, status: 'finalizado' }, user.id)
-    } catch (error) {
-      await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'rascunho', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(id).run()
-      throw error
-    }
+    await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, numero_relatorio: numero, status: 'finalizado' }, user.id)
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:finalizar]', error?.message || error)
