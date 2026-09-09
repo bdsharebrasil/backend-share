@@ -8,6 +8,7 @@ import logoShareBytes from './assets/share-signature-logo.png'
 import signatureBytes from './assets/assinatura-para-recibo.png'
 import { financeiroRoutes } from './financeiroRoutes'
 import { processFinanceQueue } from './financeiro/FinanceiroKernel'
+import { sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
 
 const SIGNATURE_LOGO_CID = 'share-brasil-signature-logo'
 const SIGNATURE_LOGO_BASE64 = arrayBufferBase64(logoShareBytes)
@@ -3826,16 +3827,19 @@ async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>,
 }
 
 app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const db = portalDb(c)
-    const [clientes, aeronaves, tripulantes, categorias] = await Promise.all([
+    const [clientes, aeronaves, tripulantes, categorias, socios] = await Promise.all([
       db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
       db.prepare("SELECT id, nome_completo AS nome, canac, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
+      db.prepare('SELECT id, nome FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
     ])
-    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results })
+    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results, socios: socios.results, voos: [] })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:opcoes]', error?.message || error)
     return c.json({ error: error?.message || 'falha_ao_carregar_opcoes' }, 500)
@@ -3843,6 +3847,8 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
 })
 
 app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const rows = await portalDb(c).prepare('SELECT * FROM relatorio_despesa_viagem ORDER BY date(data_inicio) DESC, criado_em DESC LIMIT 200').all<Record<string, any>>()
@@ -3854,6 +3860,8 @@ app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
 })
 
 app.get('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const relatorio = await buscarRelatorioViagemComNomes(c, c.req.param('id'))
@@ -3862,6 +3870,201 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:detalhe]', error?.message || error)
     return c.json({ error: error?.message || 'falha_ao_carregar_relatorio' }, 500)
+  }
+})
+
+app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const body = await c.req.json<Record<string, any>>().catch(() => null)
+    if (!body) return c.json({ error: 'payload_invalido' }, 400)
+    const clienteId = String(body.cliente_id || '').trim()
+    const aeronaveId = String(body.aeronave_id || '').trim()
+    const rota = String(body.rota || '').trim()
+    const tripulacaoId = String(body.tripulacao_id || '').trim()
+    const nomeTripulante = String(body.nome_tripulante || '').trim()
+    const dataInicio = String(body.data_inicio || '').trim()
+    const dataFim = String(body.data_fim || '').trim()
+    if (!clienteId) return c.json({ error: 'cliente_obrigatorio' }, 400)
+    if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+    if (!rota) return c.json({ error: 'trecho_obrigatorio' }, 400)
+    if (!tripulacaoId && !nomeTripulante) return c.json({ error: 'tripulante_obrigatorio' }, 400)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) return c.json({ error: 'datas_obrigatorias' }, 400)
+    if (dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
+
+    const db = portalDb(c)
+    const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>()
+    const id = uuid()
+    const numero = String(body.numero_relatorio || '').trim() || numeroRelatorioViagem()
+    const status = statusRelatorioViagem(body.status || 'rascunho')
+    await db.prepare(`
+      INSERT INTO relatorio_despesa_viagem (
+        id, numero_relatorio, numero_voo, cliente_id, socio_id, aeronave_id, matricula_aeronave,
+        rota, data_inicio, data_fim, quantidade_dias, tripulacao_id, nome_tripulante,
+        tripulante_id_2, nome_tripulante_2, observacoes, despesas, status,
+        total_valor, total_combustivel, total_hospedagem, total_alimentacao, total_transporte,
+        total_outros, total_tripulacao, total_tripulante_1, total_tripulante_2, total_cliente,
+        total_sharebrasil, criado_por
+      ) VALUES (${new Array(30).fill('?').join(', ')})
+    `).bind(
+      id, numero, body.numero_voo || null, clienteId, body.socio_id || null, aeronaveId,
+      aeronave?.matricula_registro || body.matricula_aeronave || null, rota, dataInicio, dataFim,
+      Number(body.quantidade_dias || 1), tripulacaoId || null, nomeTripulante || null,
+      body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null,
+      JSON.stringify(despesasRelatorioViagem(body.despesas)), status,
+      Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0),
+      Number(body.total_alimentacao || 0), Number(body.total_transporte || 0), Number(body.total_outros || 0),
+      Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0), Number(body.total_tripulante_2 || 0),
+      Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), user.id,
+    ).run()
+    const relatorio = await buscarRelatorioViagemComNomes(c, id)
+    if (!relatorio) return c.json({ error: 'falha_ao_carregar_relatorio_criado' }, 500)
+    if (['finalizado', 'enviado_cliente'].includes(status)) await sincronizarRelatorioViagemFinanceiro(db, relatorio, user.id)
+    return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) }, 201)
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:criar]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_criar_relatorio' }, 500)
+  }
+})
+
+app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const id = c.req.param('id')
+    const db = portalDb(c)
+    const atual = await db.prepare('SELECT id, status FROM relatorio_despesa_viagem WHERE id = ?1').bind(id).first<{ id: string; status: string }>()
+    if (!atual) return c.notFound()
+    const statusAtual = statusRelatorioViagem(atual.status)
+    if (statusAtual !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
+    const body = await c.req.json<Record<string, any>>().catch(() => null)
+    if (!body) return c.json({ error: 'payload_invalido' }, 400)
+    const novoStatus = statusRelatorioViagem(body.status || statusAtual)
+    const dataInicio = body.data_inicio == null ? null : String(body.data_inicio || '').trim()
+    const dataFim = body.data_fim == null ? null : String(body.data_fim || '').trim()
+    if (dataInicio && dataFim && dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
+    const aeronaveId = body.aeronave_id ? String(body.aeronave_id).trim() : null
+    const aeronave = aeronaveId ? await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>() : null
+    const despesas = body.despesas === undefined ? undefined : JSON.stringify(despesasRelatorioViagem(body.despesas))
+    await db.prepare(`
+      UPDATE relatorio_despesa_viagem SET
+        numero_relatorio = COALESCE(?, numero_relatorio), numero_voo = ?, cliente_id = COALESCE(?, cliente_id), socio_id = ?,
+        aeronave_id = COALESCE(?, aeronave_id), matricula_aeronave = COALESCE(?, matricula_aeronave), rota = COALESCE(?, rota),
+        data_inicio = COALESCE(?, data_inicio), data_fim = COALESCE(?, data_fim), quantidade_dias = COALESCE(?, quantidade_dias),
+        tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
+        despesas = COALESCE(?, despesas), status = ?, total_valor = ?, total_combustivel = ?, total_hospedagem = ?,
+        total_alimentacao = ?, total_transporte = ?, total_outros = ?, total_tripulacao = ?, total_tripulante_1 = ?,
+        total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?, atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(
+      body.numero_relatorio || null, body.numero_voo || null, body.cliente_id || null, body.socio_id || null,
+      aeronaveId, aeronave?.matricula_registro || body.matricula_aeronave || null, body.rota || null, dataInicio || null, dataFim || null,
+      body.quantidade_dias != null ? Number(body.quantidade_dias) : null, body.tripulacao_id || null, body.nome_tripulante || null,
+      body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
+      Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0), Number(body.total_alimentacao || 0),
+      Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
+      Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), id,
+    ).run()
+    if (['finalizado', 'enviado_cliente'].includes(novoStatus)) {
+      const salvo = await buscarRelatorioViagemComNomes(c, id)
+      try {
+        if (salvo) await sincronizarRelatorioViagemFinanceiro(db, salvo, user.id)
+      } catch (error) {
+        await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'rascunho', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(id).run()
+        throw error
+      }
+    }
+    return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:atualizar]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_atualizar_relatorio' }, 500)
+  }
+})
+
+app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const id = c.req.param('id')
+    const db = portalDb(c)
+    const relatorio = await buscarRelatorioViagemComNomes(c, id)
+    if (!relatorio) return c.notFound()
+    if (statusRelatorioViagem(relatorio.status) !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
+    if (!despesasRelatorioViagem(relatorio.despesas).some((item: any) => Number(item?.valor ?? item?.amount) > 0)) return c.json({ error: 'relatorio_sem_despesas' }, 400)
+    await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(id).run()
+    try {
+      await sincronizarRelatorioViagemFinanceiro(db, { ...relatorio, status: 'finalizado' }, user.id)
+    } catch (error) {
+      await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'rascunho', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(id).run()
+      throw error
+    }
+    return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:finalizar]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_finalizar_relatorio' }, 400)
+  }
+})
+
+app.delete('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const result = await portalDb(c).prepare("DELETE FROM relatorio_despesa_viagem WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(c.req.param('id')).run()
+    if (!result.meta.changes) return c.json({ error: 'somente_rascunhos_podem_ser_excluidos' }, 409)
+    return c.json({ success: true })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:excluir]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_excluir_relatorio' }, 500)
+  }
+})
+
+app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const id = c.req.param('id')
+    const db = portalDb(c)
+    const relatorio = await db.prepare('SELECT id, numero_relatorio, matricula_aeronave, pdf_path FROM relatorio_despesa_viagem WHERE id = ?1').bind(id).first<any>()
+    if (!relatorio) return c.notFound()
+    const form = await c.req.formData()
+    const file = form.get('arquivo') as unknown
+    if (!file || typeof file !== 'object' || !('size' in file) || Number((file as File).size) <= 0) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+    if ((file as File).type !== 'application/pdf' && !/\.pdf$/i.test((file as File).name || '')) return c.json({ error: 'somente_pdf_permitido' }, 400)
+    const matriculaSafe = String(relatorio.matricula_aeronave || 'SEM-MATRICULA').replace(/[^A-Z0-9-]/gi, '')
+    const numeroSafe = String(relatorio.numero_relatorio || 'REL').replace(/[\/\s]/g, '-')
+    const key = await salvarArquivoShareBrasil(c, user.id, file as File, `relatorio_despesa_viagem/${matriculaSafe}/${numeroSafe}`)
+    if (relatorio.pdf_path) await shareBrasilBucket(c).delete(relatorio.pdf_path).catch(() => undefined)
+    const pdfUrl = `/api/financeiro/relatorios-despesa-viagem/${id}/pdf`
+    await db.prepare('UPDATE relatorio_despesa_viagem SET pdf_path = ?, pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(key, pdfUrl, id).run()
+    return c.json({ success: true, pdf_url: pdfUrl, pdf_path: key }, 201)
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:upload-pdf]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_salvar_pdf' }, 400)
+  }
+})
+
+app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const row = await portalDb(c).prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(c.req.param('id')).first<{ pdf_path: string | null; numero_relatorio: string }>()
+    if (!row?.pdf_path) return c.notFound()
+    const object = await shareBrasilBucket(c).get(row.pdf_path)
+    if (!object) return c.notFound()
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="${shareBrasilFileName(row.numero_relatorio || 'relatorio')}.pdf"`,
+      },
+    })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:baixar-pdf]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_pdf' }, 500)
   }
 })
 
