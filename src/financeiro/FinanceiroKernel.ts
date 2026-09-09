@@ -1835,6 +1835,42 @@ async function buildReceiptSaida(
   }
 }
 
+export async function finalizarRecibo(
+  db: Database,
+  receiptId: string,
+  userId: string | null,
+): Promise<Row> {
+  const receipt = await db.prepare('SELECT * FROM recibos WHERE id = ? LIMIT 1').bind(receiptId).first<Row>()
+  if (!receipt) throw new FinanceError('Recibo não encontrado', 'recibo_nao_encontrado', 404)
+  if (text(receipt.lancamento_id)) {
+    return { recibo_id: receiptId, lancamento_id: receipt.lancamento_id, idempotent: true }
+  }
+
+  const builders: Record<string, ReceiptFinanceBuilder> = {
+    recibo_reembolso: async (database, schema, command, input, id, createdBy) =>
+      createReimbursementFinance(database, schema, command, input, id, createdBy),
+    recibo_colaborador: buildReceiptColaborador,
+    recibo_pagamento: buildReceiptPagamento,
+    recibo_saida: buildReceiptSaida,
+  }
+  const buildFinance = builders[text(receipt.tipo_recibo)]
+  if (!buildFinance) throw new FinanceError('Tipo de recibo inválido', 'tipo_recibo_invalido')
+
+  return issueReceiptInternal(
+    db,
+    {
+      ...receipt,
+      valor_centavos: receipt.valor,
+      categoria_movimentacao_id: receipt.categoria_movimentacao_id,
+      data: receipt.data_emissao,
+      cotista_aeronave_id: receipt.pagador_tipo === 'cotista_aeronave' ? receipt.pagador_id : null,
+    },
+    userId,
+    buildFinance,
+    receiptId,
+  )
+}
+
 export async function emitirReciboReembolso(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_reembolso') throw new FinanceError('Tipo de recibo inválido para reembolso', 'tipo_recibo_invalido')
   return issueReceiptInternal(db, body, userId, async (database, schema, command, input, receiptId, createdBy) =>
@@ -1913,6 +1949,7 @@ async function issueReceiptInternal(
   body: Row,
   userId: string | null,
   buildFinance: ReceiptFinanceBuilder,
+  existingReceiptId?: string,
 ): Promise<Row> {
   let input
   try {
@@ -1928,7 +1965,7 @@ async function issueReceiptInternal(
   requireTable(schema, 'recibo_rateio', ['id', 'recibo_id', 'rateio_id', 'percentual', 'valor', 'cotista_id'])
   requireTable(schema, 'sequencia_numeros_recibos', ['id', 'cotista_aeronave_id', 'codigo_cliente', 'ano', 'proximo_numero'])
 
-  const reciboId = id()
+  const reciboId = existingReceiptId || id()
   const comando: Row = {
     ...body,
     recibo_id: reciboId,
@@ -1945,14 +1982,46 @@ async function issueReceiptInternal(
     reembolsavel: input.tipo_recibo === 'recibo_reembolso',
   }
   const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : '')) || null
-  const codigoCotista = !text(body.codigo_cliente) && cotistaId
+  const codigoCotista = !existingReceiptId && !text(body.codigo_cliente) && cotistaId
     ? text((await db.prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<{ codigo_cliente: string | null }>())?.codigo_cliente)
     : ''
   const codigo = text(body.codigo_cliente) || codigoCotista || 'SHARE'
   const ano = input.data_emissao.slice(0, 4)
-  const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
+  const numero = existingReceiptId ? text(body.numero_recibo) : await allocateReceiptNumber(db, cotistaId, codigo, ano)
+  if (!numero) throw new FinanceError('Número do recibo não encontrado', 'numero_recibo_ausente', 500)
   try {
-  await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
+  if (!existingReceiptId) {
+    await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
+    return {
+      recibo: {
+        id: reciboId,
+        numero_recibo: numero,
+        tipo_recibo: input.tipo_recibo,
+        pagador_tipo: input.pagador_tipo,
+        pagador_id: input.pagador_id,
+        aeronave_id: input.aeronave_id || null,
+        rateado: 0,
+        valor: input.valor_centavos,
+        valor_centavos: input.valor_centavos,
+        descricao: input.descricao,
+        data_emissao: input.data_emissao,
+        data_vencimento: input.data_vencimento || null,
+        categoria_id: input.categoria_movimentacao_id,
+        categoria_movimentacao_id: input.categoria_movimentacao_id,
+        status: 'CRIADO',
+        url_recibo: null,
+        lancamento_id: null,
+      },
+      recibo_id: reciboId,
+      numero_recibo: numero,
+      lancamento_id: null,
+      lancamento_cliente_id: null,
+      rateio_ids: [],
+      rateio_linhas: [],
+      status: 'CRIADO',
+      valor_centavos: input.valor_centavos,
+    }
+  }
   const categoriaNome = nullableText(body.categoria_nome) || nullableText(
     (await db.prepare(`
       SELECT nome FROM categoria_movimentacao_cliente WHERE id = ?
@@ -1961,7 +2030,8 @@ async function issueReceiptInternal(
       LIMIT 1
     `).bind(input.categoria_movimentacao_id, input.categoria_movimentacao_id).first<{ nome: string | null }>())?.nome,
   )
-  const financeiro = await buildFinance(db, schema, {
+  let financeiroCriado: Row | null = null
+  const financeiro = financeiroCriado = await buildFinance(db, schema, {
     ...comando,
     categoria_nome: categoriaNome,
   }, input, reciboId, userId)
@@ -1997,18 +2067,27 @@ async function issueReceiptInternal(
   return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, lancamento_cliente_id: rateioLancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: 'PDF_PENDENTE', valor_centavos: input.valor_centavos }
   } catch (error) {
     const created = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?').bind(reciboId).first<{ lancamento_id: string | null }>()
-    const createdLancamentoId = created?.lancamento_id || null
+    const lancamentoIds = [...new Set([
+      created?.lancamento_id,
+      financeiroCriado?.shareLancamentoId,
+      financeiroCriado?.clienteLancamentoId,
+      financeiroCriado?.lancamento_id,
+      financeiroCriado?.lancamento_cliente_id,
+    ].map((value) => text(value)).filter(Boolean))]
     await db.batch([
       db.prepare('DELETE FROM recibo_rateio WHERE recibo_id = ?').bind(reciboId),
       db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ?').bind(reciboId),
-      db.prepare('DELETE FROM recibos WHERE id = ?').bind(reciboId),
-      ...(createdLancamentoId ? [
-        db.prepare('DELETE FROM reembolsos WHERE lancamento_origem_id = ?').bind(createdLancamentoId),
-        db.prepare('DELETE FROM contas_areceber WHERE lancamentos_id = ?').bind(createdLancamentoId),
-        db.prepare('DELETE FROM contas_apagar WHERE lancamentos_id = ?').bind(createdLancamentoId),
-        db.prepare('DELETE FROM rateio_despesas WHERE lancamento_id = ?').bind(createdLancamentoId),
-        db.prepare('DELETE FROM lancamentos WHERE id = ?').bind(createdLancamentoId),
+      ...(lancamentoIds.length ? [
+        db.prepare('DELETE FROM financeiro_vinculos WHERE destino_id IN (' + lancamentoIds.map(() => '?').join(', ') + ')').bind(...lancamentoIds),
       ] : []),
+      ...lancamentoIds.flatMap((lancamentoId) => [
+        db.prepare('DELETE FROM reembolsos WHERE lancamento_origem_id = ?').bind(lancamentoId),
+        db.prepare('DELETE FROM contas_areceber WHERE lancamentos_id = ?').bind(lancamentoId),
+        db.prepare('DELETE FROM contas_apagar WHERE lancamentos_id = ?').bind(lancamentoId),
+        db.prepare('DELETE FROM rateio_despesas WHERE lancamento_id = ?').bind(lancamentoId),
+        db.prepare('DELETE FROM lancamentos WHERE id = ?').bind(lancamentoId),
+      ]),
+      ...(!existingReceiptId ? [db.prepare('DELETE FROM recibos WHERE id = ?').bind(reciboId)] : []),
     ])
     throw error
   }
