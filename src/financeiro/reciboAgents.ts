@@ -12,6 +12,7 @@ type ReceiptInput = {
   data_vencimento?: string | null
   forma_pagamento?: string | null
   aeronave_id?: string | null
+  cliente_id?: string | null
   colaborador_id?: string | null
   recebedor_nome?: string | null
   observacoes?: string | null
@@ -51,6 +52,7 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     data_vencimento: body.data_vencimento ? String(body.data_vencimento) : null,
     forma_pagamento: body.forma_pagamento ? String(body.forma_pagamento) : null,
     aeronave_id: body.aeronave_id ? String(body.aeronave_id) : null,
+    cliente_id: body.cliente_id ? String(body.cliente_id) : null,
     colaborador_id: body.colaborador_id ? String(body.colaborador_id) : null,
     recebedor_nome: body.recebedor_nome ? String(body.recebedor_nome) : null,
     observacoes: body.observacoes ? String(body.observacoes) : null,
