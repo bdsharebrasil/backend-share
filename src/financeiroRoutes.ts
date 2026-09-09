@@ -6,6 +6,7 @@ import {
   FinanceError,
   issueRevenue,
   emitirReciboReembolso,
+  finalizarRecibo,
   emitirReciboColaborador,
   emitirReciboPagamento,
   emitirReciboSaida,
@@ -824,8 +825,10 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
     const pdfUrl = `/api/financeiro/recibos/anexos/${anexoId}/arquivo`
-    await c.env.SHARE_DB.prepare("UPDATE recibos SET url_recibo = ?, status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(pdfUrl, reciboId).run()
-    return c.json({ anexo_id: anexoId, pdf_url: pdfUrl }, 201)
+    await c.env.SHARE_DB.prepare('UPDATE recibos SET url_recibo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(pdfUrl, reciboId).run()
+    const financeiro = await finalizarRecibo(c.env.SHARE_DB, reciboId, c.get('userId') || null)
+    await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
+    return c.json({ anexo_id: anexoId, pdf_url: pdfUrl, ...financeiro }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
