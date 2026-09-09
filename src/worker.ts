@@ -3810,7 +3810,8 @@ function numeroRelatorioViagem() {
 }
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
-  const row = await portalDb(c).prepare(`SELECT r.*,
+  const db = portalDb(c)
+  const row = await db.prepare(`SELECT r.*,
       CASE WHEN r.socio_id IS NOT NULL
         THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
         ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
@@ -3832,7 +3833,9 @@ async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>,
     LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
     LEFT JOIN tripulacao_freelancer f2 ON f2.id = r.tripulante_id_2
     WHERE r.id = ?1`).bind(id).first<Record<string, any>>()
-  return row ? { ...row, status: statusRelatorioViagem(row.status), despesas: despesasRelatorioViagem(row.despesas) } : null
+  if (!row) return null
+  const anexos = await db.prepare('SELECT id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, caminho_arquivo, url_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos WHERE relatorio_despesa_viagem_id = ?1 ORDER BY indice_despesa, criado_em').bind(id).all()
+  return { ...row, status: statusRelatorioViagem(row.status), despesas: despesasRelatorioViagem(row.despesas), anexos: anexos.results || [] }
 }
 
 app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
@@ -3841,14 +3844,20 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const db = portalDb(c)
-    const [clientes, aeronaves, tripulantes, categorias, socios] = await Promise.all([
-      db.prepare("SELECT id, razao_social, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
+    const [clientes, aeronaves, tripulantes, categorias, socios, voos] = await Promise.all([
+      db.prepare("SELECT id, razao_social, codigo_cliente, holding FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
-      db.prepare("SELECT id, nome_completo AS nome, canac, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
+      db.prepare("SELECT id, nome_completo, canac, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
       db.prepare('SELECT id, nome FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
+      db.prepare(`SELECT s.numero_voo, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino,
+          s.data_agendada, s.dias_duracao, a.matricula_registro
+        FROM solicitacoes_reserva_voo s
+        LEFT JOIN aeronave a ON a.id = s.aeronave_id
+        WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
+        ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC LIMIT 200`).all().catch(() => ({ results: [] })),
     ])
-    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results, socios: socios.results, voos: [] })
+    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results, socios: socios.results, voos: voos.results })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:opcoes]', error?.message || error)
     return c.json({ error: error?.message || 'falha_ao_carregar_opcoes' }, 500)
@@ -4053,6 +4062,64 @@ app.delete('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
   }
 })
 
+app.post('/api/financeiro/relatorios-despesa-viagem/:id/anexos', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const idRelatorio = c.req.param('id')
+    const relatorio = await portalDb(c).prepare('SELECT id FROM relatorio_despesa_viagem WHERE id = ?1').bind(idRelatorio).first<{ id: string }>()
+    if (!relatorio) return c.notFound()
+    const form = await c.req.formData()
+    const file = form.get('arquivo') as unknown
+    const indiceDespesa = Math.max(0, Number(form.get('indice_despesa') || 0))
+    if (!(file instanceof File) || !file.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+    if (!file.type.startsWith('image/') && file.type !== 'application/pdf') return c.json({ error: 'somente_imagem_ou_pdf_permitido' }, 415)
+    const anexoId = uuid()
+    const key = await salvarArquivoShareBrasil(c, user.id, file, `share/relatorio_despesa_viagem/anexos_notas/${idRelatorio}/${anexoId}`)
+    const urlArquivo = `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(idRelatorio)}/anexos/${encodeURIComponent(anexoId)}/arquivo`
+    await portalDb(c).prepare(`INSERT INTO relatorio_despesa_viagem_anexos
+      (id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, caminho_arquivo, url_arquivo, tipo_arquivo, tamanho_arquivo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(anexoId, idRelatorio, indiceDespesa, file.name, key, urlArquivo, file.type || null, file.size).run()
+    return c.json({ anexo: { id: anexoId, relatorio_despesa_viagem_id: idRelatorio, indice_despesa: indiceDespesa, nome_arquivo: file.name, caminho_arquivo: key, url_arquivo: urlArquivo, tipo_arquivo: file.type || null, tamanho_arquivo: file.size } }, 201)
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:anexo]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_salvar_anexo' }, 400)
+  }
+})
+
+app.delete('/api/financeiro/relatorios-despesa-viagem/:id/anexos/:anexoId', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const db = portalDb(c)
+    const anexo = await db.prepare('SELECT id, caminho_arquivo FROM relatorio_despesa_viagem_anexos WHERE id = ?1 AND relatorio_despesa_viagem_id = ?2').bind(c.req.param('anexoId'), c.req.param('id')).first<{ id: string; caminho_arquivo: string }>()
+    if (!anexo) return c.notFound()
+    await db.prepare('DELETE FROM relatorio_despesa_viagem_anexos WHERE id = ?1').bind(anexo.id).run()
+    await shareBrasilBucket(c).delete(anexo.caminho_arquivo).catch(() => undefined)
+    return c.json({ success: true })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:excluir-anexo]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_excluir_anexo' }, 400)
+  }
+})
+
+app.get('/api/financeiro/relatorios-despesa-viagem/:id/anexos/:anexoId/arquivo', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    const anexo = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM relatorio_despesa_viagem_anexos WHERE id = ?1 AND relatorio_despesa_viagem_id = ?2').bind(c.req.param('anexoId'), c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
+    if (!anexo) return c.notFound()
+    const object = await shareBrasilBucket(c).get(anexo.caminho_arquivo)
+    if (!object) return c.notFound()
+    return new Response(object.body, { headers: { 'Content-Type': anexo.tipo_arquivo || 'application/octet-stream', 'Content-Disposition': `inline; filename="${shareBrasilFileName(anexo.nome_arquivo)}"` } })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:baixar-anexo]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_anexo' }, 500)
+  }
+})
+
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -4068,7 +4135,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
     if ((file as File).type !== 'application/pdf' && !/\.pdf$/i.test((file as File).name || '')) return c.json({ error: 'somente_pdf_permitido' }, 400)
     const matriculaSafe = String(relatorio.matricula_aeronave || 'SEM-MATRICULA').replace(/[^A-Z0-9-]/gi, '')
     const numeroSafe = String(relatorio.numero_relatorio || 'REL').replace(/[\/\s]/g, '-')
-    const key = await salvarArquivoShareBrasil(c, user.id, file as File, `relatorio_despesa_viagem/${matriculaSafe}/${numeroSafe}`)
+    const key = await salvarArquivoShareBrasil(c, user.id, file as File, `share/relatorio_despesa_viagem/pdf_relatorios/${matriculaSafe}/${numeroSafe}`)
     if (relatorio.pdf_path) await shareBrasilBucket(c).delete(relatorio.pdf_path).catch(() => undefined)
     const pdfUrl = `/api/financeiro/relatorios-despesa-viagem/${id}/pdf`
     await db.prepare('UPDATE relatorio_despesa_viagem SET pdf_path = ?, pdf_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(key, pdfUrl, id).run()
