@@ -4696,7 +4696,7 @@ app.get('/api/sharebrasil/clientes', async c => {
     db.prepare('SELECT * FROM documentos_socio ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
   ])
-  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronave: aeronave.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
+  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronave.results, aeronave: aeronave.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
 })
 
 app.post('/api/sharebrasil/holdings', async c => {
@@ -4737,9 +4737,22 @@ app.post('/api/sharebrasil/clientes', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   if (!body.razao_social?.trim()) return c.json({ error: 'razao_social_obrigatoria' }, 400)
+  const aeronaveId = body.aeronave_id ? String(body.aeronave_id).trim() : null
+  const percentual = body.percentual_sociedade == null || body.percentual_sociedade === ''
+    ? 100
+    : Number(body.percentual_sociedade)
+  if (aeronaveId && (!Number.isFinite(percentual) || percentual < 0 || percentual > 100)) return c.json({ error: 'percentual_invalido' }, 400)
+  if (aeronaveId) {
+    const aeronave = await portalDb(c).prepare('SELECT id FROM aeronave WHERE id = ?1 AND status <> ?2').bind(aeronaveId, 'inativa').first()
+    if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 400)
+  }
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO cliente (id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, status, holding, codigo_cliente, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.razao_social.trim(), body.cnpj || null, body.inscricao_estadual || null, body.proprietario || null, body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone_cliente || null, body.telefone_outro || null, body.email_principal || null, JSON.stringify(body.emails || []), body.status || 'ativo', body.holding ? 1 : 0, body.codigo_cliente || null, body.observacoes || null).run()
-  return c.json({ id }, 201)
+  const statements = [
+    portalDb(c).prepare('INSERT INTO cliente (id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, status, holding, codigo_cliente, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.razao_social.trim(), body.cnpj || null, body.inscricao_estadual || null, body.proprietario || null, body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone_cliente || null, body.telefone_outro || null, body.email_principal || null, JSON.stringify(body.emails || []), body.status || 'ativo', body.holding ? 1 : 0, body.codigo_cliente || null, body.observacoes || null),
+  ]
+  if (aeronaveId) statements.push(portalDb(c).prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(uuid(), id, aeronaveId, percentual, body.codigo_cliente || null))
+  await portalDb(c).batch(statements)
+  return c.json({ id, aeronave_id: aeronaveId, percentual_sociedade: aeronaveId ? percentual : null }, 201)
 })
 
 app.patch('/api/sharebrasil/clientes/:id', async c => {
