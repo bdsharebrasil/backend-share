@@ -1999,6 +1999,11 @@ async function issueReceiptInternal(
         tipo_recibo: input.tipo_recibo,
         pagador_tipo: input.pagador_tipo,
         pagador_id: input.pagador_id,
+        nome_pagador: body.nome_pagador || null,
+        documento_pagador: body.documento_pagador || null,
+        endereco_pagador: body.endereco_pagador || null,
+        cidade_pagador: body.cidade_pagador || null,
+        uf_pagador: body.uf_pagador || null,
         aeronave_id: input.aeronave_id || null,
         rateado: 0,
         valor: input.valor_centavos,
@@ -2037,7 +2042,7 @@ async function issueReceiptInternal(
   }, input, reciboId, userId)
   const lancamentoId = text('shareLancamentoId' in financeiro ? financeiro.shareLancamentoId : financeiro.lancamento_id ?? financeiro.id)
   const rateioLancamentoId = text('clienteLancamentoId' in financeiro ? financeiro.clienteLancamentoId : lancamentoId)
-  await db.prepare('UPDATE recibos SET lancamento_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(lancamentoId, reciboId).run()
+  await db.prepare('UPDATE recibos SET lancamento_id = ? WHERE id = ?').bind(lancamentoId, reciboId).run()
   const rateios = input.tipo_recibo === 'recibo_saida'
     ? await createReceiptAllocations(db, reciboId, rateioLancamentoId)
     : []
