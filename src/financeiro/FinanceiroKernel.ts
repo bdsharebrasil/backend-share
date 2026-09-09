@@ -2072,6 +2072,7 @@ async function issueReceiptInternal(
       financeiroCriado?.shareLancamentoId,
       financeiroCriado?.clienteLancamentoId,
       financeiroCriado?.lancamento_id,
+      financeiroCriado?.id,
       financeiroCriado?.lancamento_cliente_id,
     ].map((value) => text(value)).filter(Boolean))]
     await db.batch([
