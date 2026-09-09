@@ -1437,6 +1437,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const paymentDate = dateValue(body.data_pagamento ?? body.dataPagamento)
   const amount = asPositiveCents(row.valor_centavos)
   const bank = await resolveContaBancariaId(db, body.conta_bancaria_id ?? body.banco_pagamento ?? body.bancoPagamento)
+  if (!bank) throw new FinanceError('Conta bancária do pagamento não encontrada', 'conta_bancaria_obrigatoria')
   const now = new Date().toISOString()
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
@@ -1686,30 +1687,136 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
   await db.batch(statements); return {shareLancamentoId:shareId,clienteLancamentoId:clientId,contaReceberId:receivableId}
 }
 
+type ReceiptFinanceBuilder = (
+  db: Database,
+  schema: SchemaCache,
+  command: Row,
+  input: Row,
+  receiptId: string,
+  userId: string | null,
+) => Promise<Row>
+
+async function buildReceiptColaborador(
+  db: Database,
+  _schema: SchemaCache,
+  command: Row,
+  input: Row,
+  _receiptId: string,
+  userId: string | null,
+): Promise<Row> {
+  if (!text(input.colaborador_id)) {
+    throw new FinanceError(
+      'Colaborador é obrigatório para este recibo',
+      'colaborador_obrigatorio',
+    )
+  }
+
+  return createExpense(db, {
+    ...command,
+    tipo_caixa: 'SHARE',
+    fluxo: 'SAIDA',
+    colaborador_id: input.colaborador_id,
+    pago_diretamente: false,
+    reembolsavel: false,
+  }, userId)
+}
+
+async function buildReceiptPagamento(
+  db: Database,
+  _schema: SchemaCache,
+  command: Row,
+  input: Row,
+  receiptId: string,
+  userId: string | null,
+): Promise<Row> {
+  if (input.pagador_tipo === 'cotista_aeronave' && !text(input.pagador_id)) {
+    throw new FinanceError(
+      'Cotista pagador é obrigatório para recibo de pagamento',
+      'cotista_pagador_obrigatorio',
+    )
+  }
+
+  if (input.pagador_tipo === 'cotista_aeronave') {
+    const rateioLinhas = await receiptAllocationLines(db, command, input)
+    return createExpense(db, {
+      ...command,
+      recibo_id: receiptId,
+      tipo_caixa: 'CLIENTE',
+      fluxo: 'SAIDA',
+      categoria_id: null,
+      categoria_cliente_id: input.categoria_movimentacao_id,
+      rateio_linhas: rateioLinhas,
+      pago_diretamente: true,
+      reembolsavel: false,
+    }, userId)
+  }
+
+  return createExpense(db, {
+    ...command,
+    tipo_caixa: 'SHARE',
+    fluxo: 'SAIDA',
+    pago_diretamente: false,
+    reembolsavel: false,
+  }, userId)
+}
+
+async function buildReceiptSaida(
+  db: Database,
+  _schema: SchemaCache,
+  command: Row,
+  _input: Row,
+  receiptId: string,
+  userId: string | null,
+): Promise<Row> {
+  if (!text(command.cotista_aeronave_id) || !text(command.aeronave_id)) {
+    throw new FinanceError(
+      'Cotista e aeronave são obrigatórios para recibo de saída',
+      'origem_recibo_saida_obrigatoria',
+    )
+  }
+
+  const result = await issueRevenue(db, {
+    ...command,
+    fluxo: 'ENTRADA',
+    origem_tipo: 'RECIBO_SAIDA',
+    origem_id: receiptId,
+    criar_lancamento_cliente: true,
+  }, userId)
+
+  return {
+    ...result,
+    shareLancamentoId: result.lancamento_id ?? result.id,
+    clienteLancamentoId: result.lancamento_cliente_id ?? null,
+  }
+}
+
 export async function emitirReciboReembolso(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_reembolso') throw new FinanceError('Tipo de recibo inválido para reembolso', 'tipo_recibo_invalido')
-  return issueReceiptInternal(db, body, userId)
+  return issueReceiptInternal(db, body, userId, async (database, schema, command, input, receiptId, createdBy) =>
+    createReimbursementFinance(database, schema, command, input, receiptId, createdBy),
+  )
 }
 
 export async function emitirReciboColaborador(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_colaborador') throw new FinanceError('Tipo de recibo inválido para colaborador', 'tipo_recibo_invalido')
-  return issueReceiptInternal(db, body, userId)
+  return issueReceiptInternal(db, body, userId, buildReceiptColaborador)
 }
 
 export async function emitirReciboPagamento(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_pagamento') throw new FinanceError('Tipo de recibo inválido para pagamento', 'tipo_recibo_invalido')
-  return issueReceiptInternal(db, body, userId)
+  return issueReceiptInternal(db, body, userId, buildReceiptPagamento)
 }
 
 export async function emitirReciboSaida(db: Database, body: Row, userId: string | null): Promise<Row> {
   if (text(body.tipo_recibo) !== 'recibo_saida') throw new FinanceError('Tipo de recibo inválido para saída', 'tipo_recibo_invalido')
-  return issueReceiptInternal(db, body, userId)
+  return issueReceiptInternal(db, body, userId, buildReceiptSaida)
 }
 
 async function issueReceiptInternal(
   db: Database,
   body: Row,
   userId: string | null,
+  buildFinance: ReceiptFinanceBuilder,
 ): Promise<Row> {
   let input
   try {
@@ -1725,6 +1832,7 @@ async function issueReceiptInternal(
   requireTable(schema, 'recibo_rateio', ['id', 'recibo_id', 'rateio_id', 'percentual', 'valor', 'cotista_id'])
   requireTable(schema, 'sequencia_numeros_recibos', ['id', 'cotista_aeronave_id', 'codigo_cliente', 'ano', 'proximo_numero'])
 
+  const reciboId = id()
   const comando: Row = {
     ...body,
     recibo_id: reciboId,
@@ -1740,7 +1848,6 @@ async function issueReceiptInternal(
     pago_diretamente: input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave',
     reembolsavel: input.tipo_recibo === 'recibo_reembolso',
   }
-  const reciboId = id()
   const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : ''))
   if (!cotistaId) throw new FinanceError('cotista_aeronave_id é obrigatório para gerar a sequência do recibo', 'cotista_sequencia_obrigatorio')
   const codigoCotista = !text(body.codigo_cliente) && cotistaId
@@ -1751,7 +1858,6 @@ async function issueReceiptInternal(
   const numero = await allocateReceiptNumber(db, cotistaId, codigo, ano)
   try {
   await createReceiptRecord(db, input, reciboId, numero, userId)
-  const reciboPagamentoCliente = input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave'
   const categoriaNome = nullableText(body.categoria_nome) || nullableText(
     (await db.prepare(`
       SELECT nome FROM categoria_movimentacao_cliente WHERE id = ?
@@ -1760,27 +1866,10 @@ async function issueReceiptInternal(
       LIMIT 1
     `).bind(input.categoria_movimentacao_id, input.categoria_movimentacao_id).first<{ nome: string | null }>())?.nome,
   )
-  const rateioLinhas = reciboPagamentoCliente
-    ? await receiptAllocationLines(db, comando, input)
-    : []
-  const financeiro = reciboPagamentoCliente
-      ? await createExpense(db, {
-      valor_centavos: input.valor_centavos,
-      descricao: input.descricao,
-      data: input.data_emissao,
-      aeronave_id: input.aeronave_id,
-      cotista_aeronave_id: input.pagador_id,
-      tipo_caixa: 'CLIENTE',
-      categoria_id: null,
-      categoria_cliente_id: input.categoria_movimentacao_id,
-      categoria_nome: categoriaNome,
-      data_vencimento: input.data_vencimento || input.data_emissao,
-      rateio_linhas: rateioLinhas,
-      pago_diretamente: true,
-    }, userId)
-    : input.tipo_recibo === 'recibo_reembolso'
-      ? await createReimbursementFinance(db, schema, comando, input, reciboId, userId)
-      : await createExpense(db, comando, userId)
+  const financeiro = await buildFinance(db, schema, {
+    ...comando,
+    categoria_nome: categoriaNome,
+  }, input, reciboId, userId)
   const lancamentoId = text('shareLancamentoId' in financeiro ? financeiro.shareLancamentoId : financeiro.lancamento_id ?? financeiro.id)
   const rateioLancamentoId = text('clienteLancamentoId' in financeiro ? financeiro.clienteLancamentoId : lancamentoId)
   await db.prepare('UPDATE recibos SET lancamento_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(lancamentoId, reciboId).run()
