@@ -4,7 +4,8 @@
   "main": "src/worker.ts",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "type-check": "tsc --noEmit --pretty false"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
