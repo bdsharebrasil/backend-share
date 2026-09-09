@@ -167,11 +167,14 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
 
 const FRONTEND_CONTRACT_FIELDS = new Set([
   'idempotency_key', 'idempotencyKey', 'reference_id', 'valor_centavos', 'valorCentavos',
+  'tipo_recibo', 'rateado', 'recibo_id',
   'descricao', 'descricao_servico', 'fluxo', 'data', 'data_emissao', 'data_vencimento',
   'vencimento', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id', 'socio_id', 'holding_id',
   'categoria_id', 'categoria_nome', 'categoria', 'categoria_cliente_id', 'categoria_cliente_nome', 'categoria_despesa_id', 'categoria_despesa_subcategoria',
   'grupo_categoria_cliente', 'fornecedor_id', 'fornecedor', 'fornecedor_nome',
   'fornecedores_favoritos_id', 'recibos_saida_id', 'origem_tipo', 'origem_id', 'periodicidade', 'tipo_caixa',
+  'cliente_id', 'recebedor_id', 'recebedor_nome', 'recebedor_cpf', 'recebedor_endereco', 'recebedor_cidade', 'recebedor_uf',
+  'pagador_tipo', 'pagador_id', 'categoria_movimentacao_id', 'categoria_nome_manual', 'natureza_despesa', 'anexo_id', 'numero_documento_anexo',
   'forma_pagamento', 'conta_bancaria_id', 'observacoes', 'numero_recibo', 'url_recibo', 'pago_diretamente', 'pagoDiretamente',
   'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
   'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
