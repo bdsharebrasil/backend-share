@@ -4789,6 +4789,23 @@ app.get('/api/gestor/ferias', async c => {
   return c.json({ inicio, registros: registros.results, resumo: { ativas: Number(ativas?.total || 0), solicitadas: Number(solicitadas?.total || 0), vencidas: Number(vencidas?.total || 0) } })
 })
 
+app.patch('/api/gestor/ferias/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<{ status?: string; motivo_reprovacao?: string }>().catch(() => ({} as { status?: string; motivo_reprovacao?: string }))
+  const status = String(body.status || '').trim().toLowerCase()
+  if (!['aprovada', 'reprovada', 'cancelada'].includes(status)) return c.json({ error: 'status_de_ferias_invalido' }, 400)
+  if (status === 'reprovada' && !String(body.motivo_reprovacao || '').trim()) return c.json({ error: 'motivo_reprovacao_obrigatorio' }, 400)
+  const id = c.req.param('id')
+  const db = portalDb(c)
+  const atual = await db.prepare('SELECT id, status FROM solicitacoes_ferias WHERE id = ?1').bind(id).first<{ id: string; status: string }>()
+  if (!atual) return c.notFound()
+  if (atual.status !== 'solicitada' && status !== 'cancelada') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
+  await db.prepare("UPDATE solicitacoes_ferias SET status = ?1, motivo_reprovacao = ?2, aprovado_em = CASE WHEN ?1 = 'aprovada' THEN CURRENT_TIMESTAMP ELSE NULL END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?3")
+    .bind(status, status === 'reprovada' ? String(body.motivo_reprovacao).trim() : null, id).run()
+  return c.json(await db.prepare('SELECT id, colaborador_id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE id = ?1').bind(id).first())
+})
+
 function jsonArray(value: unknown): string {
   return JSON.stringify(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [])
 }
