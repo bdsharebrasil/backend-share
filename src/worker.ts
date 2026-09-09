@@ -5104,7 +5104,6 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
       percentual_uso: pct,
       valor_total_centavos: valorTotalCentavos,
       valor_rateado_centavos: valorRateadoCentavos,
-      valor_pago_real_centavos: regra.pagoDiretamente ? valorRateadoCentavos : 0,
       pago_por_cotista_id: body.tipo === 'cliente' ? row.id : (body.pago_por || null),
       pago_diretamente: regra.pagoDiretamente ? 1 : 0,
       status: regra.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
@@ -5112,6 +5111,26 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
       descricao_despesa: body.descricao,
       observacoes: body.observacoes || null,
     });
+
+    if (regra.pagoDiretamente) {
+      await inserirLinhaDinamica(portalDb(c), 'rateio_pagamentos', {
+        id: uuid(),
+        rateio_id: rateioLinhaId,
+        recibo_id: body.recibo_id || null,
+        conta_receber_id: null,
+        tipo_pagador: 'COTISTA',
+        pagador_cotista_id: row.id,
+        pagador_holding_id: null,
+        valor_centavos: valorRateadoCentavos,
+        data_pagamento: body.data_despesa || new Date().toISOString().slice(0, 10),
+        conta_bancaria_id: body.conta_bancaria_id || null,
+        comprovante_url: body.comprovante_url || null,
+        forma_pagamento: body.forma_pagamento || null,
+        status: 'CONFIRMADO',
+        observacoes: body.observacoes || null,
+        idempotency_key: `LEGACY_DIRETO:${body.idempotency_key || lancamentoId || rateioLinhaId}:${rateioLinhaId}`,
+      });
+    }
   }
 
   if (body.tipo === 'cliente') {
