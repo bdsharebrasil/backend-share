@@ -3814,19 +3814,31 @@ async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>,
   const row = await db.prepare(`SELECT r.*,
       CASE WHEN r.socio_id IS NOT NULL
         THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
-        ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
+        ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), NULLIF(h_socio.nome, ''), NULLIF(h_relacao.nome, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
       END AS cliente_nome,
+        COALESCE(h.nome, hs_holding.nome, h_socio.nome, h_relacao.nome) AS holding_nome,
       hs.nome AS socio_nome,
       a.matricula_registro AS aeronave_matricula,
       COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo, f1.nome_completo) AS nome_tripulante,
       COALESCE(NULLIF(r.nome_tripulante_2, ''), t2.nome_completo, f2.nome_completo) AS nome_tripulante_2
     FROM relatorio_despesa_viagem r
     LEFT JOIN cliente c ON c.id = r.cliente_id
+    LEFT JOIN holdings h ON h.id = r.cliente_id
     LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id
       AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id)
         OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id)))
     LEFT JOIN cliente cc ON cc.id = ca.cliente_id
     LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id)
+    LEFT JOIN holdings hs_holding ON hs_holding.id = hs.holding_id
+    LEFT JOIN holdings h_socio ON h_socio.id = r.socio_id
+    LEFT JOIN holdings h_relacao ON h_relacao.id = (
+      SELECT hs_relacao.holding_id
+      FROM cotista_aeronave ca_relacao
+      LEFT JOIN hold_socios hs_relacao ON hs_relacao.id = ca_relacao.socio_id
+      WHERE ca_relacao.aeronave_id = r.aeronave_id
+        AND (ca_relacao.socio_id = r.socio_id OR hs_relacao.holding_id = r.cliente_id)
+      LIMIT 1
+    )
     LEFT JOIN aeronave a ON a.id = r.aeronave_id
     LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
     LEFT JOIN tripulacao_freelancer f1 ON f1.id = r.tripulacao_id
@@ -3872,19 +3884,31 @@ app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
     const rows = await portalDb(c).prepare(`SELECT r.*,
         CASE WHEN r.socio_id IS NOT NULL
           THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
-          ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
+          ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), NULLIF(h_socio.nome, ''), NULLIF(h_relacao.nome, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
         END AS cliente_nome,
+        COALESCE(h.nome, hs_holding.nome, h_socio.nome, h_relacao.nome) AS holding_nome,
         hs.nome AS socio_nome,
         a.matricula_registro AS aeronave_matricula,
         COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo, f1.nome_completo) AS nome_tripulante,
         COALESCE(NULLIF(r.nome_tripulante_2, ''), t2.nome_completo, f2.nome_completo) AS nome_tripulante_2
       FROM relatorio_despesa_viagem r
       LEFT JOIN cliente c ON c.id = r.cliente_id
+      LEFT JOIN holdings h ON h.id = r.cliente_id
       LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id
         AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id)
           OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id)))
       LEFT JOIN cliente cc ON cc.id = ca.cliente_id
       LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id)
+      LEFT JOIN holdings hs_holding ON hs_holding.id = hs.holding_id
+      LEFT JOIN holdings h_socio ON h_socio.id = r.socio_id
+      LEFT JOIN holdings h_relacao ON h_relacao.id = (
+        SELECT hs_relacao.holding_id
+        FROM cotista_aeronave ca_relacao
+        LEFT JOIN hold_socios hs_relacao ON hs_relacao.id = ca_relacao.socio_id
+        WHERE ca_relacao.aeronave_id = r.aeronave_id
+          AND (ca_relacao.socio_id = r.socio_id OR hs_relacao.holding_id = r.cliente_id)
+        LIMIT 1
+      )
       LEFT JOIN aeronave a ON a.id = r.aeronave_id
       LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
       LEFT JOIN tripulacao_freelancer f1 ON f1.id = r.tripulacao_id
