@@ -385,6 +385,7 @@ financeiroRoutes.delete('/recibos-saida/:id', async (c) => {
     }
     if (ids.length) statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
     if (movimentos.length) statements.push(db.prepare(`DELETE FROM rateio_hold WHERE movimento_holding_id IN (${movimentoPlaceholders})`).bind(...movimentos))
+    if (contaId) statements.push(db.prepare('UPDATE contas_areceber SET recibos_saida_id = NULL WHERE id = ?').bind(contaId))
     if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
     statements.push(db.prepare('DELETE FROM recibos_saida WHERE id = ?').bind(reciboId))
     if (ids.length) statements.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
