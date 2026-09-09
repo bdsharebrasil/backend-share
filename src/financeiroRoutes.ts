@@ -699,11 +699,53 @@ financeiroRoutes.patch('/recibos/:id/status', async (c) => {
   try {
     const body = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
     const status = String(body.status ?? '').toUpperCase()
-    const permitidos = new Set(['ANEXO_PENDENTE', 'PDF_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'])
+    const permitidos = new Set(['ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMAIL_ENVIADO', 'ERRO_ANEXO', 'ERRO_PDF'])
     if (!permitidos.has(status)) return c.json({ error: 'status_recibo_invalido' }, 400)
     const result = await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ? WHERE id = ?').bind(status, c.req.param('id')).run()
     if (!result.meta.changes) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     return c.json({ ok: true, status })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
+  try {
+    const reciboId = c.req.param('id')
+    const body = await c.req.json<Record<string, unknown>>()
+    const receipt = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id, aeronave_id, tipo_caixa, status, valor, descricao, data_emissao, data_vencimento, categoria_movimentacao_id, grupo_categoria, url_recibo FROM recibos WHERE id = ?`).bind(reciboId).first<Record<string, unknown>>()
+    if (!receipt) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    if (String(receipt.tipo_caixa).toLowerCase() !== 'share') return c.json({ error: 'recibo_deve_ser_do_caixa_share' }, 409)
+    if (String(receipt.status).toUpperCase() !== 'EMAIL_ENVIADO') return c.json({ error: 'recibo_precisa_ser_enviado_por_email' }, 409)
+    const lancamentoId = String(receipt.lancamento_id ?? '')
+    if (!lancamentoId) return c.json({ error: 'lancamento_do_recibo_nao_encontrado' }, 409)
+    const lancamento = await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos FROM lancamentos WHERE id = ?`).bind(lancamentoId).first<Record<string, unknown>>()
+    if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
+    const existing = await c.env.SHARE_DB.prepare(`SELECT id FROM contas_apagar WHERE lancamentos_id = ? AND status <> 'CANCELADO' LIMIT 1`).bind(lancamentoId).first<{ id: string }>()
+    if (existing) return c.json({ ok: true, conta_pagar_id: existing.id, rateio_ids: [], idempotent: true })
+    const aeronaveId = String(body.aeronave_id ?? receipt.aeronave_id ?? '').trim()
+    const dataVencimento = String(body.data_vencimento ?? receipt.data_vencimento ?? receipt.data_emissao ?? '').trim()
+    const tipoRateio = String(body.tipo_rateio ?? 'FIXO').toUpperCase()
+    const periodicidade = body.periodicidade ? String(body.periodicidade) : 'ÚNICO'
+    const linhas = Array.isArray(body.linhas) ? body.linhas as Array<Record<string, unknown>> : []
+    const valorCentavos = Number(lancamento.valor_centavos ?? receipt.valor ?? 0)
+    const percentualTotal = linhas.reduce((total, linha) => total + Number(linha.percentual_uso ?? 0), 0)
+    if (!aeronaveId || !dataVencimento || !linhas.length || Math.abs(percentualTotal - 100) > 0.01 || !['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA'].includes(tipoRateio)) return c.json({ error: 'dados_de_rateio_invalidos' }, 400)
+    const cotistaIds = linhas.map((linha) => String(linha.cotista_id ?? '').trim()).filter(Boolean)
+    const cotistas = await listar(c.env.SHARE_DB, `SELECT id, aeronave_id, socio_id, percentual_sociedade FROM cotista_aeronave WHERE id IN (${cotistaIds.map(() => '?').join(',')})`, ...cotistaIds)
+    if (cotistas.length !== cotistaIds.length || cotistas.some((cotista) => String(cotista.aeronave_id) !== aeronaveId)) return c.json({ error: 'cotistas_invalidos_para_aeronave' }, 400)
+    const contaId = crypto.randomUUID()
+    const rateioIds = linhas.map(() => crypto.randomUUID())
+    const categoriaId = body.categoria_id ?? receipt.categoria_movimentacao_id ?? null
+    const categoriaNome = body.categoria_nome ?? receipt.grupo_categoria ?? null
+    const statements = [c.env.SHARE_DB.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, lancamentos_id, nf_url, criado_por, origem_tipo, idempotency_key, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECIBO', ?, 'EM_ABERTO')`).bind(contaId, dataVencimento, valorCentavos, categoriaId, categoriaNome, receipt.descricao ?? 'Recibo', aeronaveId, lancamentoId, receipt.url_recibo ?? null, c.get('userId') || null, `recibo:${reciboId}`)]
+    linhas.forEach((linha, index) => {
+      const cotista = cotistas.find((item) => String(item.id) === String(linha.cotista_id))!
+      const percentual = Number(linha.percentual_uso)
+      const rateado = Math.round(valorCentavos * percentual / 100)
+      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_holding_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)`
+      statements.push(c.env.SHARE_DB.prepare(campos).bind(rateioIds[index], lancamentoId, aeronaveId, cotista.socio_id ?? cotista.id, receipt.data_emissao, dataVencimento, categoriaId, categoriaNome, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, receipt.descricao ?? 'Recibo', body.observacoes ?? null, reciboId, receipt.url_recibo ?? null))
+    })
+    await c.env.SHARE_DB.batch(statements)
+    return c.json({ ok: true, conta_pagar_id: contaId, rateio_ids: rateioIds }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
