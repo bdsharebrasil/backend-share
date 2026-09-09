@@ -1682,38 +1682,53 @@ export async function processFinanceQueue(
   return result
 }
 
-async function createReimbursementFinance(db: Database, _schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
+async function createReimbursementFinance(db: Database, schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
   const categoriaShare = await db.prepare(`
-    SELECT id
-      FROM categoria_movimentacao_share
-     WHERE id = ?
-        OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%'
-        OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
-     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, nome
-     LIMIT 1
+    SELECT id FROM categoria_movimentacao_share
+     WHERE id = ? OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%' OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
+     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, nome LIMIT 1
   `).bind(CATEGORIA_SHARE_RECIBO, CATEGORIA_SHARE_RECIBO).first<{ id: string }>()
+  const cotista = await db.prepare(`
+    SELECT id FROM cotista_aeronave
+     WHERE id = ? OR (cliente_id = ? AND aeronave_id = ?)
+     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1
+  `).bind(command.cotista_aeronave_id || '', input.cliente_id || '', input.aeronave_id || '', command.cotista_aeronave_id || '').first<{ id: string }>()
+  if (!cotista?.id) throw new FinanceError('Cotista cliente não encontrado para o reembolso', 'cotista_reembolso_obrigatorio')
 
-  const expense = await createExpense(db, {
-    ...command,
-    idempotency_key: `recibo-reembolso:${receiptId}`,
-    aeronave_id: input.aeronave_id,
-    categoria_id: categoriaShare?.id ?? null,
-    categoria_nome: 'REEMBOLSOS SHARE',
-    tipo_caixa: 'SHARE',
-    fluxo: 'SAIDA',
-    reembolsavel: true,
-    sem_rateio: true,
-    pago_diretamente: false,
-    recibo_id: receiptId,
-    data: input.data_emissao,
-    data_vencimento: input.data_vencimento || input.data_emissao,
-  }, userId, { internal: true })
-
-  return {
-    shareLancamentoId: text(expense.lancamento_id || expense.id),
-    clienteLancamentoId: null,
-    contaReceberId: null,
-  }
+  const shareLancamentoId = id()
+  const amount = asPositiveCents(input.valor_centavos)
+  await db.batch([
+    insertStatement(db, schema, 'lancamentos', {
+      id: shareLancamentoId,
+      aeronave_id: input.aeronave_id,
+      cotista_aeronave_id: cotista.id,
+      descricao: input.descricao,
+      categoria_id: categoriaShare?.id ?? null,
+      categoria_nome: 'REEMBOLSOS SHARE',
+      grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
+      fluxo: 'SAIDA',
+      natureza: 'DESPESA',
+      tipo_caixa: 'SHARE',
+      valor_centavos: amount,
+      valor_total: amount / 100,
+      valor: amount / 100,
+      status: 'EM_ABERTO',
+      data_lancamento: input.data_emissao,
+      data_emissao: input.data_emissao,
+      data_vencimento: input.data_vencimento || input.data_emissao,
+      pago_diretamente: 0,
+      reembolsavel: 1,
+      reembolso_quitado: 0,
+      origem_tipo: 'RECIBO_REEMBOLSO',
+      origem_id: receiptId,
+      idempotency_key: `recibo-reembolso:${receiptId}`,
+      criado_por: userId,
+      observacoes: nullableText(input.observacoes),
+    }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+    linkStatement(db, schema, 'RECIBO', receiptId, 'LANCAMENTO', shareLancamentoId, 'RECIBO_LANCAMENTO', userId),
+    auditStatement(db, schema, 'lancamentos', shareLancamentoId, 'CRIACAO_DESPESA_REEMBOLSO', userId, null, amount, null, `recibo-reembolso:${receiptId}`),
+  ])
+  return { shareLancamentoId, clienteLancamentoId: null, contaReceberId: null }
 }
 
 type ReceiptFinanceBuilder = (
@@ -1825,6 +1840,57 @@ export async function emitirReciboReembolso(db: Database, body: Row, userId: str
   return issueReceiptInternal(db, body, userId, async (database, schema, command, input, receiptId, createdBy) =>
     createReimbursementFinance(database, schema, command, input, receiptId, createdBy),
   )
+}
+
+export async function programarReciboReembolso(db: Database, receiptId: string, body: Row, userId: string | null): Promise<Row> {
+  const schema = await loadSchema(db)
+  const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id
+    FROM recibos r LEFT JOIN lancamentos l ON l.id = r.lancamento_id
+    WHERE r.id = ? AND r.tipo_recibo = 'recibo_reembolso' LIMIT 1`).bind(receiptId).first<Row>()
+  if (!receipt || !text(receipt.share_lancamento_id)) throw new FinanceError('Recibo de reembolso não encontrado', 'recibo_reembolso_nao_encontrado', 404)
+  const existing = await db.prepare('SELECT id, conta_receber_id FROM reembolsos WHERE lancamento_origem_id = ? LIMIT 1').bind(receipt.share_lancamento_id).first<Row>()
+  if (existing) return { ...existing, idempotent: true }
+
+  const amount = asPositiveCents(receipt.valor)
+  const reimbursementId = id()
+  const clientLancamentoId = id()
+  const contaReceberId = id()
+  const data = dateValue(body.data ?? receipt.data_emissao)
+  const vencimento = nullableText(body.data_vencimento ?? receipt.data_vencimento) || data
+  const cotistaId = text(receipt.cotista_aeronave_id)
+  const statements: D1PreparedStatement[] = [
+    insertStatement(db, schema, 'reembolsos', {
+      id: reimbursementId, lancamento_origem_id: receipt.share_lancamento_id, conta_receber_id: contaReceberId,
+      lancamento_cliente_id: clientLancamentoId, cotista_id: cotistaId, valor_centavos: amount,
+      status: 'AGUARDANDO_REEMBOLSO', idempotency_key: `programar-recibo-reembolso:${receiptId}`, criado_por: userId,
+    }, ['id', 'lancamento_origem_id', 'valor_centavos']),
+    insertStatement(db, schema, 'lancamentos', {
+      id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_aeronave_id: cotistaId,
+      descricao: receipt.descricao || 'Reembolso de despesa', categoria_nome: 'REEMBOLSO', grupo_categoria: 'REEMBOLSO',
+      fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'CLIENTE', valor_centavos: amount, valor_total: amount / 100,
+      valor: amount / 100, status: 'AGUARDANDO_REEMBOLSO', data_lancamento: data, data_emissao: data,
+      data_vencimento: vencimento, pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
+      origem_tipo: 'RECIBO_REEMBOLSO', origem_id: reimbursementId, criado_por: userId,
+    }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+    insertStatement(db, schema, 'contas_areceber', {
+      id: contaReceberId, data_vencimento: vencimento, valor_centavos: amount, descricao: receipt.descricao || 'Reembolso de despesa',
+      categoria_nome: 'REEMBOLSO', aeronave_id: receipt.aeronave_id, cotista_id: cotistaId,
+      lancamentos_id: receipt.share_lancamento_id, origem_tipo: 'RECIBO_REEMBOLSO', origem_id: receiptId,
+      status: 'EM_ABERTO', criado_por: userId,
+    }, ['id', 'valor_centavos']),
+    insertStatement(db, schema, 'rateio_despesas', {
+      id: id(), lancamento_id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_id: cotistaId,
+      data_emissao: data, data_vencimento: vencimento, percentual_sociedade: 100, percentual_uso: 100,
+      valor_total_centavos: amount, valor_rateado_centavos: amount, valor_total: amount / 100, valor_rateado: amount / 100,
+      tipo_rateio: 'FIXO', periodicidade: 'ÚNICO', status: 'AGUARDANDO_REEMBOLSO', descricao_despesa: receipt.descricao,
+      pago_diretamente: 0, valor_pago_real_centavos: 0, criado_por: userId,
+    }, ['id', 'lancamento_id', 'cotista_id', 'aeronave_id']),
+    linkStatement(db, schema, 'RECIBO', receiptId, 'LANCAMENTO', clientLancamentoId, 'RECIBO_LANCAMENTO_CLIENTE', userId),
+    linkStatement(db, schema, 'LANCAMENTO', text(receipt.share_lancamento_id), 'CONTA_A_RECEBER', contaReceberId, 'REEMBOLSO_CONTA_RECEBER', userId),
+    auditStatement(db, schema, 'reembolsos', reimbursementId, 'PROGRAMACAO_REEMBOLSO', userId, null, amount, nullableText(body.observacoes), `programar-recibo-reembolso:${receiptId}`),
+  ]
+  await db.batch(statements)
+  return { id: reimbursementId, lancamento_share_id: receipt.share_lancamento_id, lancamento_cliente_id: clientLancamentoId, conta_receber_id: contaReceberId, status: 'AGUARDANDO_REEMBOLSO', idempotent: false }
 }
 
 export async function emitirReciboColaborador(db: Database, body: Row, userId: string | null): Promise<Row> {

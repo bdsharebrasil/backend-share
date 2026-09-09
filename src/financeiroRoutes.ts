@@ -9,6 +9,7 @@ import {
   emitirReciboColaborador,
   emitirReciboPagamento,
   emitirReciboSaida,
+  programarReciboReembolso,
   processFinanceQueue,
   settlePayable,
   settleReceivable,
@@ -705,6 +706,18 @@ financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
   return c.json({ ok: true })
 })
 
+financeiroRoutes.post('/recibos/:id/reembolso', async (c) => {
+  try {
+    const result = await programarReciboReembolso(
+      c.env.SHARE_DB,
+      c.req.param('id'),
+      await c.req.json().catch(() => ({})),
+      c.get('userId') || null,
+    )
+    return c.json({ ok: true, ...result }, result.idempotent ? 200 : 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.post('/envios-pagamento', async (c) => {
   try {
     const input = validatePaymentRequest(await c.req.json())
@@ -797,11 +810,12 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     const bytes = new Uint8Array(await arquivo.arrayBuffer())
     if (bytes.length < 5 || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') return c.json({ error: 'conteudo_pdf_invalido' }, 400)
     const anexoId = crypto.randomUUID()
-    const key = `recibos/${reciboId}/pdf/${anexoId}.pdf`
+    const key = `share/recibos/recibos-gerados/${reciboId}.pdf`
     await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
-    await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(reciboId).run()
-    return c.json({ anexo_id: anexoId, pdf_url: `/api/financeiro/recibos/anexos/${anexoId}/arquivo` }, 201)
+    const pdfUrl = `/api/financeiro/recibos/anexos/${anexoId}/arquivo`
+    await c.env.SHARE_DB.prepare("UPDATE recibos SET url_recibo = ?, status = 'EMITIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(pdfUrl, reciboId).run()
+    return c.json({ anexo_id: anexoId, pdf_url: pdfUrl }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
