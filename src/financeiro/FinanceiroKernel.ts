@@ -1473,8 +1473,27 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   if (!payments.length) throw new FinanceError('Informe pelo menos um pagador real', 'pagadores_obrigatorios')
   const total = asPositiveCents(row.valor_centavos)
   const shareId = nullableText(row.lancamentos_id ?? row.lancamento_id)
-  const rateios = shareId ? await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(shareId).all<Row>() : { results: [] as Row[] }
+  const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id = ? LIMIT 1').bind(receivableId).first<Row>()
+  const rateioLancamentoId = reimbursement
+    ? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id)
+    : shareId
+  let rateios = rateioLancamentoId
+    ? await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
+    : { results: [] as Row[] }
+
+  if (reimbursement && rateioLancamentoId && !(rateios.results || []).length) {
+    const cotista = await db.prepare('SELECT percentual_sociedade FROM cotista_aeronave WHERE id = ?').bind(reimbursement.cotista_id).first<Row>()
+    const clientLancamento = await db.prepare('SELECT aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome FROM lancamentos WHERE id = ?').bind(rateioLancamentoId).first<Row>()
+    if (!clientLancamento?.aeronave_id || !reimbursement.cotista_id) throw new FinanceError('Dados do reembolso incompletos para gerar o rateio', 'reembolso_incompleto')
+    await db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente, origem_id, origem_tipo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'FIXO', 'ÚNICO', 'AGUARDANDO_REEMBOLSO', ?, 0, ?, 'RECIBO_REEMBOLSO')`).bind(
+      id(), rateioLancamentoId, clientLancamento.aeronave_id, reimbursement.cotista_id, clientLancamento.data_emissao, clientLancamento.data_vencimento,
+      clientLancamento.categoria_id ?? null, clientLancamento.categoria_nome ?? 'REEMBOLSO', Number(cotista?.percentual_sociedade ?? 0), 100,
+      total, total, clientLancamento.descricao ?? 'Reembolso de despesa', reimbursement.id,
+    ).run()
+    rateios = await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
+  }
   const allowed = new Map((rateios.results || []).map(r => [String(r.id), Number(r.valor_rateado_centavos)]))
+  const rateioPadraoId = (rateios.results || []).length === 1 ? String(rateios.results![0].id) : null
   const existingByRateio = new Map<string, number>()
   const existingKeys = new Set<string>()
   const existing = await db.prepare("SELECT rateio_id, valor_centavos, idempotency_key FROM rateio_pagamentos WHERE conta_receber_id = ? AND status = 'CONFIRMADO'").bind(receivableId).all<Row>()
@@ -1495,14 +1514,17 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     if (payment.tipo_pagador === 'COTISTA' && !payment.pagador_cotista_id) throw new FinanceError('Cotista pagador não informado', 'cotista_pagador_obrigatorio')
     if (payment.tipo_pagador === 'HOLDING' && !payment.pagador_holding_id) throw new FinanceError('Holding pagadora não informada', 'holding_pagadora_obrigatoria')
     const value = asPositiveCents(payment.valor_centavos)
-    if (!Array.isArray(payment.rateios) || !payment.rateios.length) throw new FinanceError('Cada pagamento precisa de rateios', 'rateios_obrigatorios')
+    const allocations = Array.isArray(payment.rateios) && payment.rateios.length
+      ? payment.rateios
+      : rateioPadraoId ? [{ rateio_id: rateioPadraoId, valor_centavos: value }] : []
+    if (!allocations.length) throw new FinanceError('Cada pagamento precisa de rateios', 'rateios_obrigatorios')
     if (!payment.data_pagamento || !/^\d{4}-\d{2}-\d{2}$/.test(String(payment.data_pagamento))) throw new FinanceError('Data do pagamento é obrigatória', 'data_pagamento_obrigatoria')
-    const sum = payment.rateios.reduce((n, x) => n + asPositiveCents(x.valor_centavos), 0)
+    const sum = allocations.reduce((n, x) => n + asPositiveCents(x.valor_centavos), 0)
     if (sum !== value) throw new FinanceError('A distribuição dos rateios não confere com o pagamento', 'distribuicao_pagamento_invalida')
     const date = dateValue(payment.data_pagamento ?? body.data_recebimento ?? body.dataRecebimento)
     const bank = await resolveContaBancariaId(db, payment.conta_bancaria_id ?? body.conta_bancaria_id ?? body.banco_recebimento ?? body.bancoRecebimento ?? body.conta_bancaria ?? body.contaBancaria)
     if (!bank) throw new FinanceError('Conta bancária do pagamento não encontrada', 'conta_bancaria_obrigatoria')
-    for (const allocation of payment.rateios) {
+    for (const allocation of allocations) {
       const rid = text(allocation.rateio_id)
       const cents = asPositiveCents(allocation.valor_centavos)
       if (!allowed.has(rid)) throw new FinanceError('Rateio não pertence à conta a receber', 'rateio_fora_da_conta')
@@ -1545,8 +1567,11 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   statements.push(auditStatement(db, schema, 'contas_areceber', receivableId, 'BAIXA', userId, newTotal, finalTotal, nullableText(body.motivo), nullableText(body.idempotency_key)))
   await db.batch(statements)
   const updated = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
-  const updatedRateios = shareId
-    ? await db.prepare('SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(shareId).all<Row>()
+  if (reimbursement && novoStatusConta === 'RECEBIDO') {
+    await db.prepare("UPDATE reembolsos SET status = 'REEMBOLSADO', recebido_em = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(lastDate, reimbursement.id).run()
+  }
+  const updatedRateios = rateioLancamentoId
+    ? await db.prepare('SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(rateioLancamentoId).all<Row>()
     : { results: [] as Row[] }
   return { ...updated, idempotent: false, pagamentos: acceptedPayments, rateios: updatedRateios.results || [] }
 }
@@ -1911,16 +1936,16 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     insertStatement(db, schema, 'contas_areceber', {
       id: contaReceberId, data_vencimento: vencimento, valor_centavos: amount, descricao: receipt.descricao || 'Reembolso de despesa',
       categoria_nome: 'REEMBOLSO', aeronave_id: receipt.aeronave_id, cotista_id: cotistaId,
-      lancamentos_id: receipt.share_lancamento_id, origem_tipo: 'RECIBO_REEMBOLSO', origem_id: receiptId,
+      lancamentos_id: clientLancamentoId, origem_tipo: 'RECIBO_REEMBOLSO', origem_id: receiptId,
       status: 'EM_ABERTO', criado_por: userId,
     }, ['id', 'valor_centavos']),
-    insertStatement(db, schema, 'rateio_despesas', {
-      id: id(), lancamento_id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_id: cotistaId,
-      data_emissao: data, data_vencimento: vencimento, percentual_sociedade: 100, percentual_uso: 100,
-      valor_total_centavos: amount, valor_rateado_centavos: amount, valor_total: amount / 100, valor_rateado: amount / 100,
-      tipo_rateio: 'FIXO', periodicidade: 'ÚNICO', status: 'AGUARDANDO_REEMBOLSO', descricao_despesa: receipt.descricao,
-      pago_diretamente: 0, valor_pago_real_centavos: 0, criado_por: userId,
-    }, ['id', 'lancamento_id', 'cotista_id', 'aeronave_id']),
+    insertStatement(db, schema, 'contas_apagar', {
+      id: id(), data_vencimento: vencimento, valor_centavos: amount, descricao: receipt.descricao || 'Reembolso de despesa',
+      categoria_id: nullableText(body.categoria_id ?? receipt.categoria_id), categoria_nome: nullableText(body.categoria_nome ?? receipt.categoria_nome ?? 'REEMBOLSO'),
+      aeronave_id: receipt.aeronave_id, cotista_id: cotistaId, lancamentos_id: receipt.share_lancamento_id,
+      boleto_url: nullableText(body.boleto_url), nf_url: nullableText(body.nf_url), origem_tipo: 'RECIBO_REEMBOLSO',
+      idempotency_key: `conta-pagar-recibo-reembolso:${receiptId}`, status: 'EM_ABERTO', criado_por: userId,
+    }, ['id', 'data_vencimento', 'valor_centavos', 'lancamentos_id']),
     linkStatement(db, schema, 'RECIBO', receiptId, 'LANCAMENTO', clientLancamentoId, 'RECIBO_LANCAMENTO_CLIENTE', userId),
     linkStatement(db, schema, 'LANCAMENTO', text(receipt.share_lancamento_id), 'CONTA_A_RECEBER', contaReceberId, 'REEMBOLSO_CONTA_RECEBER', userId),
     auditStatement(db, schema, 'reembolsos', reimbursementId, 'PROGRAMACAO_REEMBOLSO', userId, null, amount, nullableText(body.observacoes), `programar-recibo-reembolso:${receiptId}`),
