@@ -92,29 +92,35 @@ async function prepareInsert(db: D1Database, table: string, row: Record<string, 
 
 async function selectCotistas(db: D1Database, report: ReportRow): Promise<{ kind: OwnerKind; rows: CotistaRow[] }> {
   const kind: OwnerKind = text(report.socio_id) ? 'HOLDING' : 'CLIENTE'
-  const query = kind === 'HOLDING'
-    ? `SELECT ca.id, ca.socio_id, hs.holding_id, ca.percentual_sociedade,
+  let result: D1Result<CotistaRow>
+  if (kind === 'HOLDING') {
+    const selected = await db.prepare('SELECT holding_id FROM hold_socios WHERE id = ?1 LIMIT 1').bind(text(report.socio_id)).first<{ holding_id: string | null }>()
+    if (!text(selected?.holding_id)) throw new Error('holding_do_socio_nao_encontrada')
+    result = await db.prepare(`SELECT ca.id, ca.socio_id, hs.holding_id, ca.percentual_sociedade,
           COALESCE(hs.nome, ca.codigo_cliente) AS nome
        FROM cotista_aeronave ca
-       LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
-       WHERE ca.aeronave_id = ?1 AND ca.socio_id IS NOT NULL
-       ORDER BY ca.id`
-    : `SELECT ca.id, ca.socio_id, NULL AS holding_id, ca.percentual_sociedade,
+       INNER JOIN hold_socios hs ON hs.id = ca.socio_id
+       WHERE ca.aeronave_id = ?1 AND hs.holding_id = ?2
+       ORDER BY ca.id`).bind(text(report.aeronave_id), selected.holding_id).all<CotistaRow>()
+  } else {
+    result = await db.prepare(`SELECT ca.id, ca.socio_id, NULL AS holding_id, ca.percentual_sociedade,
           COALESCE(cl.razao_social, ca.codigo_cliente) AS nome
        FROM cotista_aeronave ca
        LEFT JOIN cliente cl ON cl.id = ca.cliente_id
-       WHERE ca.aeronave_id = ?1 AND ca.socio_id IS NULL AND ca.cliente_id IS NOT NULL
-       ORDER BY ca.id`
-  const result = await db.prepare(query).bind(text(report.aeronave_id)).all<CotistaRow>()
+       WHERE ca.aeronave_id = ?1 AND ca.socio_id IS NULL
+         AND (ca.id = ?2 OR ca.cliente_id = ?2)
+       ORDER BY CASE WHEN ca.id = ?2 THEN 0 ELSE 1 END, ca.id
+       LIMIT 1`).bind(text(report.aeronave_id), text(report.cliente_id)).all<CotistaRow>()
+  }
   const rows = (result.results || []).filter((row) => text(row.id))
   if (!rows.length) throw new Error(kind === 'HOLDING' ? 'cotistas_holding_nao_encontrados' : 'cotistas_cliente_nao_encontrados')
   return { kind, rows }
 }
 
-function allocate(amountCentavos: number, rows: CotistaRow[]): Allocation[] {
+function allocate(amountCentavos: number, rows: CotistaRow[], equally = false): Allocation[] {
   const positiveRows = rows.filter((row) => numberValue(row.percentual_sociedade) > 0)
-  const sourceRows = positiveRows.length ? positiveRows : rows
-  const base = sourceRows.map((row) => numberValue(row.percentual_sociedade) || 1)
+  const sourceRows = equally ? rows : positiveRows.length ? positiveRows : rows
+  const base = sourceRows.map((row) => equally ? 1 : numberValue(row.percentual_sociedade) || 1)
   const baseTotal = base.reduce((sum, value) => sum + value, 0)
   const rawAmounts = base.map((value) => amountCentavos * value / baseTotal)
   const amounts = rawAmounts.map(Math.floor)
@@ -166,8 +172,8 @@ async function addRateiosCliente(
   description: string,
   userId: string | null,
 ) {
-  const direct = payer === 'cliente' || payer === 'sharebrasil'
-  const status = payer === 'cliente' ? 'PAGO_DIRETAMENTE' : payer === 'sharebrasil' ? 'PAGO' : 'EM_ABERTO'
+  const direct = false
+  const status = 'EM_ABERTO'
   for (const allocation of allocations) {
     const rateioId = uuid()
     statements.push(await prepareInsert(db, 'rateio_despesas', {
@@ -177,16 +183,16 @@ async function addRateiosCliente(
       cotista_id: allocation.id,
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
       data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
-      data_pagamento: direct ? dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))) : null,
+      data_pagamento: null,
       categoria_nome: payer === 'cliente' ? 'DESPESAS PAGAS DIRETAMENTE PELO CLIENTE' : payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : 'DESPESAS REEMBOLSÁVEIS',
       tipo_rateio: 'VARIAVEL_POR_VOO',
-      periodicidade: 'ÚNICO',
+      periodicidade: 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
       percentual_uso: allocation.percentual_uso,
       valor_total_centavos: amountCentavos,
       valor_rateado_centavos: allocation.valor_rateado_centavos,
-      pago_por_cotista_id: payer === 'cliente' ? allocation.id : null,
-      pago_diretamente: direct ? 1 : 0,
+      pago_por_cotista_id: null,
+      pago_diretamente: 0,
       status,
       descricao_despesa: description,
       observacoes: `Origem: relatório ${text(report.numero_relatorio) || text(report.id)}`,
@@ -205,9 +211,9 @@ async function addRateiosHolding(
   description: string,
   userId: string | null,
 ) {
-  const direct = payer === 'cliente' || payer === 'sharebrasil'
-  const movimentoStatus = direct ? 'PAGO' : 'EM_ABERTO'
-  const rateioStatus = payer === 'cliente' ? 'PAGO_DIRETAMENTE' : payer === 'sharebrasil' ? 'PAGO' : 'EM_ABERTO'
+  const direct = false
+  const movimentoStatus = 'EM_ABERTO'
+  const rateioStatus = 'EM_ABERTO'
   for (const allocation of allocations) {
     if (!allocation.socio_id) continue
     const movimentoId = uuid()
@@ -220,7 +226,7 @@ async function addRateiosHolding(
       tipo_caixa: 'HOLD',
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
       data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
-      data_pagamento: direct ? dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))) : null,
+      data_pagamento: null,
       descricao: description,
       categoria_nome: direct && payer === 'cliente' ? 'DESPESAS PAGAS DIRETAMENTE PELO CLIENTE' : payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : 'DESPESAS REEMBOLSÁVEIS',
       grupo_categoria: payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : 'DESPESAS REEMBOLSÁVEIS',
@@ -242,7 +248,7 @@ async function addRateiosHolding(
       data_pagamento: direct ? dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))) : null,
       categoria_nome: payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : payer === 'cliente' ? 'DESPESAS PAGAS DIRETAMENTE PELO CLIENTE' : 'DESPESAS REEMBOLSÁVEIS',
       tipo_rateio: 'VARIAVEL_POR_VOO',
-      periodicidade: 'ÚNICO',
+      periodicidade: 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
       percentual_uso: allocation.percentual_uso,
       valor_total_centavos: amountCentavos,
@@ -284,13 +290,16 @@ export async function sincronizarRelatorioViagemFinanceiro(
   const statements: D1PreparedStatement[] = []
   const destinos: Array<{ tipo: string; id: string }> = []
   const fallbackDate = dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))
+  const valorAReceberCentavos = [...grouped.entries()]
+    .filter(([payer]) => payer !== 'cliente')
+    .reduce((total, [, payerExpenses]) => total + Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100), 0)
 
   for (const [payer, payerExpenses] of grouped.entries()) {
     if (payer === 'tripulante_2' && !text(report.tripulante_id_2)) throw new Error('tripulante_2_obrigatorio_para_despesa')
     const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
     if (amountCentavos <= 0) continue
     const description = `${payerDescription(report, payer)}${categoryDescription(payerExpenses) ? ` · ${categoryDescription(payerExpenses)}` : ''}`.slice(0, 240)
-    const allocations = allocate(amountCentavos, rows)
+    const allocations = allocate(amountCentavos, rows, kind === 'HOLDING')
     if (!allocations.length) continue
 
     let lancamentoId: string | null = null
@@ -310,19 +319,19 @@ export async function sincronizarRelatorioViagemFinanceiro(
         colaborador_id: tripulanteUserId,
         data_emissao: dateValue(report.data_inicio, fallbackDate),
         data_vencimento: fallbackDate,
-        data_pagamento: payer === 'sharebrasil' ? fallbackDate : null,
+        data_pagamento: null,
         descricao: description,
         categoria_nome: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
         grupo_categoria: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
-        status: payer === 'sharebrasil' ? 'PAGO' : 'EM_ABERTO',
+        status: 'EM_ABERTO',
         fluxo: 'SAIDA',
         tipo_caixa: 'SHARE',
         valor_centavos: amountCentavos,
         pago_por: tripulanteUserId,
-        pago_diretamente: payer === 'sharebrasil' ? 1 : 0,
+        pago_diretamente: 0,
         reembolsavel: reembolsavel ? 1 : 0,
-        reembolso_quitado: payer === 'sharebrasil' ? 1 : 0,
-        forma_pagamento: payer === 'sharebrasil' ? 'PAGO_DIRETAMENTE' : null,
+        reembolso_quitado: 0,
+        forma_pagamento: null,
         observacoes: `Origem: relatório ${text(report.numero_relatorio) || reportId}`,
         criado_por: userId,
         origem_tipo: 'RELATORIO_DESPESA_VIAGEM',
@@ -358,6 +367,28 @@ export async function sincronizarRelatorioViagemFinanceiro(
     } else {
       await addRateiosHolding(db, statements, report, allocations, amountCentavos, payer, description, userId)
     }
+  }
+
+  if (valorAReceberCentavos > 0 && rows[0]) {
+    const contaReceberId = uuid()
+    const lancamentoOrigemId = destinos.find((destino) => destino.tipo === 'LANCAMENTO')?.id || null
+    statements.push(await prepareInsert(db, 'contas_areceber', {
+      id: contaReceberId,
+      data_vencimento: fallbackDate,
+      valor_centavos: valorAReceberCentavos,
+      categoria_nome: 'DESPESAS DE VIAGEM',
+      descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
+      aeronave_id: text(report.aeronave_id),
+      cotista_id: rows[0].id,
+      lancamentos_id: lancamentoOrigemId,
+      status: 'EM_ABERTO',
+      criado_por: userId,
+      origem_tipo: 'RELATORIO_DESPESA_VIAGEM',
+      origem_id: reportId,
+      idempotency_key: `RELATORIO_DESPESA_VIAGEM:${reportId}:CONTA_RECEBER`,
+    }))
+    await addLinkStatements(db, statements, reportId, 'CONTA_RECEBER', contaReceberId, 'RELATORIO_CONTA_RECEBER')
+    destinos.push({ tipo: 'CONTA_RECEBER', id: contaReceberId })
   }
 
   if (!statements.length) throw new Error('relatorio_sem_movimentacao_financeira')
