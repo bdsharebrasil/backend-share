@@ -1905,6 +1905,12 @@ export async function emitirReciboReembolso(db: Database, body: Row, userId: str
 
 export async function programarReciboReembolso(db: Database, receiptId: string, body: Row, userId: string | null): Promise<Row> {
   const schema = await loadSchema(db)
+  const receiptInicial = await db.prepare('SELECT * FROM recibos WHERE id = ? AND tipo_recibo = \'recibo_reembolso\' LIMIT 1').bind(receiptId).first<Row>()
+  if (!receiptInicial) throw new FinanceError('Recibo de reembolso não encontrado', 'recibo_reembolso_nao_encontrado', 404)
+  // A emissão inicial grava somente em recibos. A partir daqui, na ação de
+  // programação após o envio, materializamos o lançamento Share e o restante
+  // do fluxo financeiro.
+  if (!text(receiptInicial.lancamento_id)) await finalizarRecibo(db, receiptId, userId)
   const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id
     FROM recibos r LEFT JOIN lancamentos l ON l.id = r.lancamento_id
     WHERE r.id = ? AND r.tipo_recibo = 'recibo_reembolso' LIMIT 1`).bind(receiptId).first<Row>()

@@ -6,7 +6,6 @@ import {
   FinanceError,
   issueRevenue,
   emitirReciboReembolso,
-  finalizarRecibo,
   emitirReciboColaborador,
   emitirReciboPagamento,
   emitirReciboSaida,
@@ -817,9 +816,12 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
   try {
     const reciboId = c.req.param('id')
     const body = await c.req.json<Record<string, unknown>>()
+    const receiptInicial = await c.env.SHARE_DB.prepare('SELECT id, tipo_recibo, status FROM recibos WHERE id = ?').bind(reciboId).first<Record<string, unknown>>()
+    if (!receiptInicial) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    if (String(receiptInicial.status).toUpperCase() !== 'EMAIL_ENVIADO') return c.json({ error: 'recibo_precisa_ser_enviado_por_email' }, 409)
+    await programarReciboReembolso(c.env.SHARE_DB, reciboId, { ...body, data_vencimento: body.data_vencimento }, c.get('userId') || null)
     const receipt = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id, aeronave_id, tipo_caixa, status, valor, descricao, data_emissao, data_vencimento, categoria_movimentacao_id, categoria_nome, grupo_categoria, url_recibo FROM recibos WHERE id = ?`).bind(reciboId).first<Record<string, unknown>>()
     if (!receipt) return c.json({ error: 'recibo_nao_encontrado' }, 404)
-    if (String(receipt.status).toUpperCase() !== 'EMAIL_ENVIADO') return c.json({ error: 'recibo_precisa_ser_enviado_por_email' }, 409)
     const lancamentoVinculadoId = String(receipt.lancamento_id ?? '').trim()
     const lancamento = lancamentoVinculadoId
       ? await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_id, categoria_nome, data_emissao, data_vencimento FROM lancamentos WHERE id = ?`).bind(lancamentoVinculadoId).first<Record<string, unknown>>()
@@ -828,7 +830,8 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     if (!lancamentoId) return c.json({ error: 'lancamento_do_recibo_nao_encontrado' }, 409)
     if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
     const existing = await c.env.SHARE_DB.prepare(`SELECT id FROM contas_apagar WHERE lancamentos_id = ? AND status <> 'CANCELADO' LIMIT 1`).bind(lancamentoId).first<{ id: string }>()
-    if (existing) return c.json({ ok: true, conta_pagar_id: existing.id, rateio_ids: [], idempotent: true })
+    const existingRateio = await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_despesas WHERE origem_id = ? AND origem_tipo = 'RECIBO' LIMIT 1`).bind(reciboId).first<{ id: string }>().catch(() => null)
+    if (existingRateio) return c.json({ ok: true, conta_pagar_id: existing?.id ?? null, rateio_ids: [existingRateio.id], idempotent: true })
     const aeronaveId = String(body.aeronave_id ?? lancamento.aeronave_id ?? receipt.aeronave_id ?? '').trim()
     const dataVencimento = String(body.data_vencimento ?? lancamento.data_vencimento ?? receipt.data_vencimento ?? lancamento.data_emissao ?? receipt.data_emissao ?? '').trim()
     const tipoRateio = String(body.tipo_rateio ?? 'FIXO').toUpperCase()
@@ -840,7 +843,7 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     const cotistaIds = linhas.map((linha) => String(linha.cotista_id ?? '').trim()).filter(Boolean)
     const cotistas = await listar(c.env.SHARE_DB, `SELECT id, aeronave_id, socio_id, percentual_sociedade FROM cotista_aeronave WHERE id IN (${cotistaIds.map(() => '?').join(',')})`, ...cotistaIds)
     if (cotistas.length !== cotistaIds.length || cotistas.some((cotista) => String(cotista.aeronave_id) !== aeronaveId)) return c.json({ error: 'cotistas_invalidos_para_aeronave' }, 400)
-    const contaId = crypto.randomUUID()
+    const contaId = existing?.id ?? crypto.randomUUID()
     const rateioIds = linhas.map(() => crypto.randomUUID())
     // A conta a pagar pertence ao caixa Share; seu FK de categoria aponta
     // para categoria_movimentacao_share. O rateio, por outro lado, usa a
@@ -852,7 +855,7 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     const descricao = lancamento.descricao ?? receipt.descricao ?? 'Recibo'
     const dataEmissao = lancamento.data_emissao ?? receipt.data_emissao ?? null
     const documentoUrl = receipt.url_recibo ?? null
-    const statements = [c.env.SHARE_DB.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, lancamentos_id, nf_url, criado_por, origem_tipo, idempotency_key, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECIBO', ?, 'EM_ABERTO')`).bind(contaId, dataVencimento, valorCentavos, categoriaIdConta, categoriaNomeConta, descricao, aeronaveId, lancamentoId, documentoUrl, c.get('userId') || null, `recibo:${reciboId}`)]
+    const statements = existing ? [] : [c.env.SHARE_DB.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, lancamentos_id, nf_url, criado_por, origem_tipo, idempotency_key, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECIBO', ?, 'EM_ABERTO')`).bind(contaId, dataVencimento, valorCentavos, categoriaIdConta, categoriaNomeConta, descricao, aeronaveId, lancamentoId, documentoUrl, c.get('userId') || null, `recibo:${reciboId}`)]
     linhas.forEach((linha, index) => {
       const cotista = cotistas.find((item) => String(item.id) === String(linha.cotista_id))!
       const percentual = Number(linha.percentual_uso)
@@ -875,6 +878,9 @@ financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
 
 financeiroRoutes.post('/recibos/:id/reembolso', async (c) => {
   try {
+    const recibo = await c.env.SHARE_DB.prepare('SELECT status FROM recibos WHERE id = ? AND tipo_recibo = \'recibo_reembolso\'').bind(c.req.param('id')).first<{ status: string }>()
+    if (!recibo) return c.json({ error: 'recibo_reembolso_nao_encontrado' }, 404)
+    if (String(recibo.status).toUpperCase() !== 'EMAIL_ENVIADO') return c.json({ error: 'recibo_precisa_ser_enviado_por_email' }, 409)
     const result = await programarReciboReembolso(
       c.env.SHARE_DB,
       c.req.param('id'),
@@ -992,9 +998,10 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
     const pdfUrl = `/api/financeiro/recibos/anexos/${anexoId}/arquivo`
     await c.env.SHARE_DB.prepare('UPDATE recibos SET url_recibo = ? WHERE id = ?').bind(pdfUrl, reciboId).run()
-    const financeiro = await finalizarRecibo(c.env.SHARE_DB, reciboId, c.get('userId') || null)
     await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO' WHERE id = ?").bind(reciboId).run()
-    return c.json({ anexo_id: anexoId, pdf_url: pdfUrl, ...financeiro }, 201)
+    // O PDF deixa o recibo pronto para envio, mas não materializa lançamentos.
+    // A criação financeira ocorre somente na programação após o e-mail.
+    return c.json({ anexo_id: anexoId, pdf_url: pdfUrl, recibo_id: reciboId, status: 'EMITIDO' }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
