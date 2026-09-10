@@ -269,13 +269,18 @@ export async function sincronizarRelatorioViagemFinanceiro(
   db: D1Database,
   report: ReportRow,
   userId: string | null,
+  payerOnly: Payer | null = null,
 ): Promise<{ idempotent: boolean; destinos: Array<{ tipo: string; id: string }> }> {
   const reportId = text(report.id)
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
-  const existing = await db.prepare(`SELECT destino_tipo, destino_id
-    FROM financeiro_vinculos
-    WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
-    ORDER BY criado_em`).bind(reportId).all<{ destino_tipo: string; destino_id: string }>()
+  const existing = payerOnly
+    ? await db.prepare(`SELECT id AS destino_id, 'LANCAMENTO' AS destino_tipo
+        FROM lancamentos WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+        AND origem_id = ?1 AND idempotency_key = ?2`).bind(reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payerOnly}`).all<{ destino_tipo: string; destino_id: string }>()
+    : await db.prepare(`SELECT destino_tipo, destino_id
+        FROM financeiro_vinculos
+        WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
+        ORDER BY criado_em`).bind(reportId).all<{ destino_tipo: string; destino_id: string }>()
   if ((existing.results || []).length) return { idempotent: true, destinos: (existing.results || []).map((item) => ({ tipo: item.destino_tipo, id: item.destino_id })) }
 
   const expenses = expensesFromReport(report)
@@ -296,6 +301,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     .reduce((total, [, payerExpenses]) => total + Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100), 0)
 
   for (const [payer, payerExpenses] of grouped.entries()) {
+    if (payerOnly && payer !== payerOnly) continue
     if (payer === 'tripulante_2' && !text(report.tripulante_id_2)) throw new Error('tripulante_2_obrigatorio_para_despesa')
     const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
     if (amountCentavos <= 0) continue
@@ -342,7 +348,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
       await addLinkStatements(db, statements, reportId, 'LANCAMENTO', lancamentoId, 'RELATORIO_LANCAMENTO')
       destinos.push({ tipo: 'LANCAMENTO', id: lancamentoId })
 
-      if (reembolsavel && tripulanteUserId) {
+      if (reembolsavel) {
         contaPagarId = uuid()
         statements.push(await prepareInsert(db, 'contas_apagar', {
           id: contaPagarId,
@@ -353,6 +359,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
           aeronave_id: text(report.aeronave_id),
           lancamentos_id: lancamentoId,
           colaborador_id: tripulanteUserId,
+          tripulante_id: payer === 'tripulante_1' ? text(report.tripulacao_id) : text(report.tripulante_id_2),
           status: 'EM_ABERTO',
           criado_por: userId,
           origem_tipo: 'RELATORIO_DESPESA_VIAGEM',
@@ -363,14 +370,14 @@ export async function sincronizarRelatorioViagemFinanceiro(
       }
     }
 
-    if (kind === 'CLIENTE') {
+    if (kind === 'CLIENTE' && !payerOnly) {
       await addRateiosCliente(db, statements, report, allocations, amountCentavos, lancamentoId, payer, description, userId)
-    } else {
+    } else if (!payerOnly) {
       await addRateiosHolding(db, statements, report, allocations, amountCentavos, payer, description, userId)
     }
   }
 
-  if (valorAReceberCentavos > 0 && rows[0]) {
+  if (!payerOnly && valorAReceberCentavos > 0 && rows[0]) {
     const contaReceberId = uuid()
     const lancamentoOrigemId = destinos.find((destino) => destino.tipo === 'LANCAMENTO')?.id || null
     statements.push(await prepareInsert(db, 'contas_areceber', {
