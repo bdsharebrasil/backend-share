@@ -3156,7 +3156,9 @@ app.post('/api/interno/diario-bordo/mes', async c => {
   const aeronaveId = String(body.aeronave_id || '').trim()
   const ano = diarioNumber(body.ano, 0)
   const mes = diarioNumber(body.mes, 0)
+  const modoCelula = body.modo_celula === 'tvoo' ? 'tvoo' : body.modo_celula === 'tempo_total' ? 'tempo_total' : null
   if (!aeronaveId || !Number.isInteger(ano) || ano < 2000 || ano > 2100 || !Number.isInteger(mes) || mes < 1 || mes > 12) return c.json({ error: 'aeronave_e_periodo_obrigatorios' }, 400)
+  if (!modoCelula) return c.json({ error: 'modo_celula_invalido' }, 400)
   const db = portalDb(c)
   const aeronave = await db.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
@@ -3166,12 +3168,12 @@ app.post('/api/interno/diario-bordo/mes', async c => {
   const anteriorTotal = diarioNumber(body.celula_anterior_ttotal, diarioNumber(anterior?.celula_atual_ttotal))
   const anteriorVoo = diarioNumber(body.celula_anterior_tvoo, diarioNumber(anterior?.celula_atual_tvoo))
   const id = uuid()
-  await db.prepare(`INSERT INTO diario_mes (id, aeronave_id, ano, mes, celula_anterior_ttotal, celula_atual_ttotal, celula_prox_revisao_ttotal, celula_disponivel_ttotal, horimetro_inicio, horimetro_final, horimetro_ativo, fechado, aerodromo_base, tarifa_diaria, consumo_combustivel, tem_tarifa_diaria, celula_atual_tvoo, celula_disponivel_tvoo, celula_anterior_tvoo, celula_prox_revisao_tvoo)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+  await db.prepare(`INSERT INTO diario_mes (id, aeronave_id, ano, mes, celula_anterior_ttotal, celula_atual_ttotal, celula_prox_revisao_ttotal, celula_disponivel_ttotal, horimetro_inicio, horimetro_final, horimetro_ativo, fechado, aerodromo_base, tarifa_diaria, consumo_combustivel, tem_tarifa_diaria, celula_atual_tvoo, celula_disponivel_tvoo, celula_anterior_tvoo, celula_prox_revisao_tvoo, modo_celula)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
     id, aeronaveId, ano, mes, anteriorTotal, anteriorTotal, diarioNumber(body.celula_prox_revisao_ttotal), 0,
     diarioNumber(body.horimetro_inicio), diarioNumber(body.horimetro_final), diarioNumber(body.horimetro_ativo), 0,
     body.aerodromo_base?.trim() || null, diarioNumber(body.tarifa_diaria), body.consumo_combustivel?.trim() || null, diarioBoolean(body.tem_tarifa_diaria ?? true),
-    anteriorVoo, 0, anteriorVoo, diarioNumber(body.celula_prox_revisao_tvoo),
+    anteriorVoo, 0, anteriorVoo, diarioNumber(body.celula_prox_revisao_tvoo), modoCelula,
   ).run()
   return c.json({ id, aeronave_id: aeronaveId, ano, mes, celula_anterior_ttotal: anteriorTotal, celula_anterior_tvoo: anteriorVoo }, 201)
 })
