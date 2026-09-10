@@ -4259,11 +4259,21 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     if (!report.pdf_path) return c.json({ error: 'pdf_obrigatorio_antes_do_envio' }, 409)
     const valorCentavos = Math.round((Number(report.total_valor || 0) - Number(report.total_cliente || 0)) * 100)
     if (valorCentavos <= 0) return c.json({ error: 'relatorio_sem_valor_a_reembolsar' }, 400)
-    const db = portalDb(c); const contaId = crypto.randomUUID()
-    await db.prepare(`INSERT OR IGNORE INTO contas_areceber (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, cotista_id, status, criado_por, origem_tipo, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', ?, 'RELATORIO_DESPESA_VIAGEM', ?)`)
-      .bind(contaId, body.data_vencimento, valorCentavos, 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', 'RELATORIO DE VIAGEM', `Relatório Despesa de Viagem - ${report.numero_relatorio}`, report.aeronave_id, report.socio_id || report.cliente_id, user.id, `RELATORIO_DESPESA_VIAGEM:${id}:CONTA_RECEBER_CLIENTE`).run()
-    await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', enviado_para_cliente_em = CURRENT_TIMESTAMP, data_vencimento_reembolso = ?, periodicidade_reembolso = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, body.periodicidade || null, id).run().catch(async () => { await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run() })
-    return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaId, message: 'Reembolso programado ao cliente.' })
+    const db = portalDb(c); const hoje = new Date().toISOString().slice(0, 10)
+    const descricao = `Relatório Despesa de Viagem - ${report.numero_relatorio}`
+    const categoriaId = 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300'
+    const shareLancamentoId = crypto.randomUUID(); const clienteLancamentoId = crypto.randomUUID(); const contaId = crypto.randomUUID()
+    const periodicidade = body.periodicidade || 'ÚNICO'; const tipoRateio = body.tipo_rateio || 'FIXO'
+    const idempotencyBase = `RELATORIO_DESPESA_VIAGEM:${id}:REEMBOLSO_CLIENTE`
+    const existing = await db.prepare('SELECT id FROM contas_areceber WHERE idempotency_key = ? LIMIT 1').bind(`${idempotencyBase}:CONTA_RECEBER`).first<{ id: string }>()
+    if (existing) return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: existing.id, message: 'Reembolso já enviado ao cliente.' })
+    await db.batch([
+      db.prepare(`INSERT INTO lancamentos (id, aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome, grupo_categoria, periodicidade, status, fluxo, tipo_caixa, valor_centavos, pago_diretamente, reembolsavel, reembolso_quitado, observacoes, criado_por, origem_tipo, origem_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 'SAIDA', 'CLIENTE', ?, 0, 0, 0, ?, ?, 'RELATORIO_DESPESA_VIAGEM', ?, ?)`).bind(clienteLancamentoId, report.aeronave_id, hoje, body.data_vencimento, descricao, categoriaId, 'RELATORIO DE VIAGEM', 'DESPESAS DE VIAGEM', periodicidade, valorCentavos, `Tipo de rateio: ${tipoRateio}`, user.id, id, `${idempotencyBase}:LANCAMENTO_CLIENTE`),
+      db.prepare(`INSERT INTO lancamentos (id, aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome, grupo_categoria, periodicidade, status, fluxo, tipo_caixa, valor_centavos, pago_diretamente, reembolsavel, reembolso_quitado, observacoes, criado_por, origem_tipo, origem_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 'ENTRADA', 'SHARE', ?, 0, 0, 0, ?, ?, 'RELATORIO_DESPESA_VIAGEM', ?, ?)`).bind(shareLancamentoId, report.aeronave_id, hoje, body.data_vencimento, descricao, categoriaId, 'RELATORIO DE VIAGEM', 'REEMBOLSOS ENTRADAS', periodicidade, valorCentavos, `Tipo de rateio: ${tipoRateio}`, user.id, id, `${idempotencyBase}:LANCAMENTO_SHARE`),
+      db.prepare(`INSERT INTO contas_areceber (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, cotista_id, lancamentos_id, status, criado_por, origem_tipo, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', ?, 'RELATORIO_DESPESA_VIAGEM', ?)`).bind(contaId, body.data_vencimento, valorCentavos, categoriaId, 'RELATORIO DE VIAGEM', descricao, report.aeronave_id, report.socio_id || report.cliente_id, clienteLancamentoId, user.id, `${idempotencyBase}:CONTA_RECEBER`),
+      db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', enviado_para_cliente_em = CURRENT_TIMESTAMP, data_vencimento_reembolso = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
+    ])
+    return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaId, lancamento_cliente_id: clienteLancamentoId, lancamento_share_id: shareLancamentoId, message: 'Reembolso programado ao cliente.' })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:enviar-cliente]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_enviar_cliente' }, 400) }
 })
 app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
