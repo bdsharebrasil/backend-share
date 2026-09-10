@@ -637,15 +637,27 @@ financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
     if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) return c.json({ error: 'tipo_arquivo_nao_suportado' }, 400)
     const payload = { imageBase64: base64, mimeType, tipo }
     const resposta = c.env.GEMINI_API_KEY
-      ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT }] },
-            contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
-            generationConfig: { response_mime_type: 'application/json' },
-          }),
-        })
+      ? await (async () => {
+          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
+          let aiRes: Response | null = null
+          let attempts = 0
+          const maxAttempts = 3
+          while (attempts < maxAttempts) {
+            aiRes = await fetch(apiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT }] },
+                contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
+                generationConfig: { response_mime_type: 'application/json' },
+              }),
+            })
+            if (aiRes.status !== 503) break
+            attempts++
+            if (attempts < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 2000 * attempts))
+          }
+          return aiRes
+        })()
       : c.env.SUPABASE_URL && c.env.SUPABASE_ANON_KEY
         ? await fetch(`${c.env.SUPABASE_URL.replace(/\/$/, '')}/functions/v1/demonstrativo-ocr`, {
             method: 'POST',
