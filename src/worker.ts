@@ -4889,26 +4889,51 @@ async function isMeetingManager(c: Context<{ Bindings: Bindings }>, user: Colabo
 
 app.get('/api/interno/aerodromos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const q = (c.req.query('q') || '').trim().toUpperCase(); const termo = `%${q}%`
-  const rows = await portalDb(c).prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE ?1 OR upper(nome) LIKE ?1) ORDER BY designativo_icao").bind(termo).all()
+  const q = (c.req.query('q') || '').trim(); const termo = `%${q}%`
+  const rows = await portalDb(c).prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE upper(?1) OR upper(nome) LIKE upper(?1)) ORDER BY designativo_icao").bind(termo).all()
   return c.json({ aerodromos: rows.results })
 })
-app.post('/api/interno/aerodromos', async c => {
+type AerodromoPayload = { nome?: string; designativo_icao?: string; coordenadas?: string | null }
+function validarAerodromo(body: AerodromoPayload) {
+  const nome = String(body.nome || '').trim()
+  const icao = String(body.designativo_icao || '').trim().toUpperCase()
+  const coordenadas = typeof body.coordenadas === 'string' ? body.coordenadas.trim() || null : null
+  return { nome, icao, coordenadas }
+}
+async function autorizarGestaoAerodromo(c: Context<{ Bindings: Bindings }>) {
   const user = await shareBrasilUser(c)
-  if (!user || !(await isMeetingManager(c, user))) return c.json({ error: 'permissao_necessaria' }, 403)
-  const body = await c.req.json<{ nome?: string; designativo_icao?: string; coordenadas?: string }>().catch(() => ({} as any)); const nome = body.nome?.trim() || ''; const icao = body.designativo_icao?.trim().toUpperCase() || ''
+  return user && await isMeetingManager(c, user)
+}
+app.post('/api/interno/aerodromos', async c => {
+  if (!(await autorizarGestaoAerodromo(c))) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<AerodromoPayload>().catch(() => ({} as AerodromoPayload)); const { nome, icao, coordenadas } = validarAerodromo(body)
   if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
-  const id = uuid(); await portalDb(c).prepare('INSERT INTO aerodromo (id, nome, designativo_icao, coordenadas) VALUES (?, ?, ?, ?)').bind(id, nome, icao, body.coordenadas?.trim() || null).run()
-  return c.json({ id, nome, designativo_icao: icao, coordenadas: body.coordenadas?.trim() || null }, 201)
+  const id = uuid()
+  try {
+    await portalDb(c).prepare('INSERT INTO aerodromo (id, nome, designativo_icao, coordenadas) VALUES (?, ?, ?, ?)').bind(id, nome, icao, coordenadas).run()
+  } catch (error) {
+    if (String(error).toLowerCase().includes('unique')) return c.json({ error: 'designativo_icao_ja_cadastrado' }, 409)
+    throw error
+  }
+  return c.json({ id, nome, designativo_icao: icao, coordenadas }, 201)
 })
-app.patch('/api/interno/aerodromos/:id', async c => {
-  const user = await shareBrasilUser(c); if (!user || !(await isMeetingManager(c, user))) return c.json({ error: 'permissao_necessaria' }, 403)
-  const body = await c.req.json<{ nome?: string; designativo_icao?: string; coordenadas?: string }>().catch(() => ({} as any)); const nome = body.nome?.trim() || ''; const icao = body.designativo_icao?.trim().toUpperCase() || ''
+const atualizarAerodromo = async (c: Context<{ Bindings: Bindings }>) => {
+  if (!(await autorizarGestaoAerodromo(c))) return c.json({ error: 'permissao_necessaria' }, 403)
+  const body = await c.req.json<AerodromoPayload>().catch(() => ({} as AerodromoPayload)); const { nome, icao, coordenadas } = validarAerodromo(body)
   if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
-  const result = await portalDb(c).prepare('UPDATE aerodromo SET nome = ?, designativo_icao = ?, coordenadas = ? WHERE id = ?').bind(nome, icao, body.coordenadas?.trim() || null, c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
-})
+  try {
+    const result = await portalDb(c).prepare('UPDATE aerodromo SET nome = ?, designativo_icao = ?, coordenadas = ? WHERE id = ?').bind(nome, icao, coordenadas, c.req.param('id')).run()
+    if (!result.meta.changes) return c.notFound()
+  } catch (error) {
+    if (String(error).toLowerCase().includes('unique')) return c.json({ error: 'designativo_icao_ja_cadastrado' }, 409)
+    throw error
+  }
+  return c.json({ id: c.req.param('id'), nome, designativo_icao: icao, coordenadas, success: true })
+}
+app.patch('/api/interno/aerodromos/:id', atualizarAerodromo)
+app.put('/api/interno/aerodromos/:id', atualizarAerodromo)
 app.delete('/api/interno/aerodromos/:id', async c => {
-  const user = await shareBrasilUser(c); if (!user || !(await isMeetingManager(c, user))) return c.json({ error: 'permissao_necessaria' }, 403)
+  if (!(await autorizarGestaoAerodromo(c))) return c.json({ error: 'permissao_necessaria' }, 403)
   const result = await portalDb(c).prepare('DELETE FROM aerodromo WHERE id = ?').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
 })
 
