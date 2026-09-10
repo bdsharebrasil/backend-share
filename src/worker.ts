@@ -5951,6 +5951,13 @@ app.post('/api/interno/emails', async c => {
       else erroAnexo = `anexo_${prefix}_indisponivel:${rawId}`
       continue
     }
+    if (prefix === 'relatorio_pdf') {
+      const row = await db.prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(rawId).first<any>().catch(() => null)
+      const object = row?.pdf_path ? await shareBrasilBucket(c).get(row.pdf_path) : null
+      if (object) anexos.push({ filename: `${row.numero_relatorio || rawId}.pdf`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/pdf' })
+      else erroAnexo = `anexo_relatorio_pdf_indisponivel:${rawId}`
+      continue
+    }
     const table = prefix === 'recibo' ? 'recibo_anexos' : prefix === 'relatorio' ? 'relatorio_despesa_viagem_anexos' : ''
     if (!table) continue
     const row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
