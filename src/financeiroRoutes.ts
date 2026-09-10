@@ -20,6 +20,9 @@ import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } f
 
 type Bindings = {
   SHARE_DB: D1Database
+  GEMINI_API_KEY?: string
+  SUPABASE_URL?: string
+  SUPABASE_ANON_KEY?: string
   FILES?: R2Bucket
   SHARE_FILES?: R2Bucket
   R2_PUBLIC_URL?: string
@@ -608,6 +611,59 @@ financeiroRoutes.post('/reembolsos', async (c) => {
   }
 })
 
+const DEMONSTRATIVO_IA_PROMPT = `Você é um extrator de dados de demonstrativos de tarifas aeronáuticas brasileiros (INFRAERO, DECEA e tarifas de pouso). Leia o arquivo enviado e devolva EXCLUSIVAMENTE JSON válido, sem markdown, no formato:
+{
+  "numero_documento": string|null,
+  "competencia": string|null,
+  "data_faturamento": string|null,
+  "aeronave_matricula": string|null,
+  "cliente_nome": string|null,
+  "valor_total": number|null,
+  "itens": [{ "data": "DD/MM/AAAA", "hora": string|null, "operacao": string|null, "origem": string|null, "destino": string|null, "matricula": string|null, "valor": number }]
+}
+Regras: converta valores brasileiros para número decimal; inclua todas as operações na ordem original; use null quando não houver o campo; itens nunca pode ser null.`
+
+function normalizarBase64(value: unknown): string {
+  return String(value ?? '').replace(/^data:[^;]+;base64,/i, '').replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/')
+}
+
+financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
+  try {
+    const body = await c.req.json<{ imageBase64?: string; image?: string; mimeType?: string; tipo?: string }>().catch(() => ({} as { imageBase64?: string; image?: string; mimeType?: string; tipo?: string }))
+    const base64 = normalizarBase64(body.imageBase64 ?? body.image)
+    const mimeType = String(body.mimeType || 'application/pdf').trim().toLowerCase()
+    const tipo = String(body.tipo || 'INFRAERO').trim().toUpperCase()
+    if (base64.length < 100) return c.json({ error: 'arquivo_invalido' }, 400)
+    if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) return c.json({ error: 'tipo_arquivo_nao_suportado' }, 400)
+    const payload = { imageBase64: base64, mimeType, tipo }
+    const resposta = c.env.GEMINI_API_KEY
+      ? await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT }] },
+            contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
+            generationConfig: { response_mime_type: 'application/json' },
+          }),
+        })
+      : c.env.SUPABASE_URL && c.env.SUPABASE_ANON_KEY
+        ? await fetch(`${c.env.SUPABASE_URL.replace(/\/$/, '')}/functions/v1/demonstrativo-ocr`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', apikey: c.env.SUPABASE_ANON_KEY, Authorization: c.req.header('Authorization') || '' },
+            body: JSON.stringify(payload),
+          })
+        : null
+    if (!resposta) return c.json({ error: 'servico_de_leitura_ia_nao_configurado' }, 503)
+    if (!resposta.ok) return c.json({ error: 'falha_na_leitura_por_ia', details: await resposta.text() }, 502)
+    const json = await resposta.json<{ candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; dados_extraidos?: Record<string, unknown> }>()
+    if (json.dados_extraidos) return c.json({ sucesso: true, persistido: false, tipo, dados_extraidos: json.dados_extraidos })
+    const texto = String(json.candidates?.[0]?.content?.parts?.[0]?.text || '{}').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim()
+    let dados: Record<string, unknown>
+    try { dados = JSON.parse(texto) as Record<string, unknown> } catch { return c.json({ error: 'formato_invalido_retornado_pela_ia' }, 422) }
+    return c.json({ sucesso: true, persistido: false, tipo, dados_extraidos: dados })
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.post('/recibos', async (c) => {
   try {
     const body = await c.req.json<Record<string, unknown>>()
@@ -625,6 +681,43 @@ financeiroRoutes.post('/recibos', async (c) => {
   } catch (error) {
     return errorResponse(c, error)
   }
+})
+
+financeiroRoutes.post('/recibos/gerar-demonstrativo', async (c) => {
+  try {
+    const body = await c.req.json<{ grupos?: Array<Record<string, unknown>> }>().catch(() => ({} as { grupos?: Array<Record<string, unknown>> }))
+    const grupos = Array.isArray(body.grupos) ? body.grupos : []
+    if (!grupos.length) return c.json({ error: 'nenhum_cotista_para_gerar' }, 400)
+    const recibos: Record<string, unknown>[] = []
+    for (const grupo of grupos) {
+      const valorCentavos = Number(grupo.valor_centavos ?? 0)
+      if (!String(grupo.cotista_id ?? '').trim() || !Number.isInteger(valorCentavos) || valorCentavos <= 0) return c.json({ error: 'grupo_de_recibo_invalido' }, 400)
+      const resultado = await emitirReciboReembolso(c.env.SHARE_DB, {
+        tipo_recibo: 'recibo_reembolso',
+        aeronave_id: grupo.aeronave_id,
+        pagador_tipo: 'cotista_aeronave',
+        pagador_id: grupo.cotista_id,
+        nome_pagador: grupo.nome_pagador,
+        documento_pagador: grupo.documento_pagador,
+        endereco_pagador: grupo.endereco_pagador,
+        cidade_pagador: grupo.cidade_pagador,
+        uf_pagador: grupo.uf_pagador,
+        recebedor_nome: 'SHARE BRASIL SERVICOS AEROPORTUARIOS',
+        valor_centavos: valorCentavos,
+        descricao: grupo.descricao,
+        data_emissao: grupo.data_emissao,
+        data_vencimento: grupo.data_vencimento,
+        categoria_movimentacao_id: grupo.categoria_movimentacao_id,
+        categoria_nome: grupo.categoria_nome,
+        grupo_categoria: grupo.grupo_categoria || 'DESPESAS REEMBOLSÁVEIS',
+        numero_documento_anexo: grupo.numero_documento_anexo,
+        observacoes: grupo.observacoes,
+        idempotency_key: grupo.idempotency_key,
+      }, c.get('userId') || null)
+      recibos.push(resultado.recibo as Record<string, unknown>)
+    }
+    return c.json({ recibos }, 201)
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.get('/recibos', async (c) => {

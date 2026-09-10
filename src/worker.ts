@@ -35,6 +35,7 @@ type Bindings = {
   WINSOCK_AUTH_HEADER?: string
   WINSOCK_AUTH_PREFIX?: string
   ANTHROPIC_API_KEY: string
+  GEMINI_API_KEY?: string
   ALLOWED_ORIGINS?: string
   TELEGRAM_BOT_TOKEN?: string
   CLIENT_SESSION_SECRET?: string
