@@ -146,20 +146,20 @@ async function alocarNumeroReciboSaida(db: D1Database, cotistaId: string, dataEm
   const codigo = String(codigoInformado ?? cotista?.codigo_cliente ?? 'CLI').trim().toUpperCase() || 'CLI'
   const anoCompleto = dataEmissao.slice(0, 4)
   const anoCurto = anoCompleto.slice(-2)
-  const anoCadastrado = await db.prepare('SELECT ano FROM sequencia_numeros_recibo_saida WHERE codigo_cliente = ? AND ano IN (?, ?) ORDER BY CASE WHEN ano = ? THEN 0 ELSE 1 END LIMIT 1').bind(codigo, anoCompleto, anoCurto, anoCompleto).first<{ ano: string }>()
+  const anoCadastrado = await db.prepare('SELECT ano, proximo_numero FROM sequencia_numeros_recibo_saida WHERE codigo_cliente = ? AND ano IN (?, ?) ORDER BY CASE WHEN ano = ? THEN 0 ELSE 1 END LIMIT 1').bind(codigo, anoCompleto, anoCurto, anoCompleto).first<{ ano: string; proximo_numero: number | null }>()
   const ano = anoCadastrado?.ano ?? anoCompleto
-  const existentes = await listar(db, 'SELECT numero_recibo FROM recibos_saida WHERE numero_recibo LIKE ?', `REC-${codigo}%/${anoCurto}`)
-  const maiorExistente = existentes.reduce((maior, row) => {
-    const match = String(row.numero_recibo ?? '').match(new RegExp(`^REC-${codigo}(\\d+)/${anoCurto}$`))
-    return Math.max(maior, match ? Number(match[1]) : 0)
-  }, 0)
-  const proximoNumero = Math.max(maiorExistente + 1, 101)
+  // Recibos de saída têm uma sequência própria, independente de
+  // sequencia_numeros_recibos. A sequência começa em 1 e deve respeitar o
+  // próximo número já gravado para o código/ano, sem aplicar o piso 101 ou
+  // recalcular com base em números antigos da tabela de recibos.
+  const proximoConfigurado = Math.max(Number(anoCadastrado?.proximo_numero || 1), 1)
+  const proximoNumero = proximoConfigurado
   const sequencia = await db.prepare(`
     INSERT INTO sequencia_numeros_recibo_saida (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
     VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET proximo_numero = ?
+    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET cotista_aeronave_id = excluded.cotista_aeronave_id, proximo_numero = excluded.proximo_numero
     RETURNING proximo_numero - 1 AS numero
-  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, proximoNumero, proximoNumero).first<{ numero: number }>()
+  `).bind(crypto.randomUUID(), cotistaId, codigo, ano, proximoNumero + 1).first<{ numero: number }>()
   if (!sequencia) throw new Error('falha_ao_gerar_sequencia_recibo_saida')
   return `REC-${codigo}${String(sequencia.numero).padStart(3, '0')}/${anoCurto}`
 }
