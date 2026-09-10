@@ -95,13 +95,14 @@ async function selectCotistas(db: D1Database, report: ReportRow): Promise<{ kind
   let result: D1Result<CotistaRow>
   if (kind === 'HOLDING') {
     const selected = await db.prepare('SELECT holding_id FROM hold_socios WHERE id = ?1 LIMIT 1').bind(text(report.socio_id)).first<{ holding_id: string | null }>()
-    if (!text(selected?.holding_id)) throw new Error('holding_do_socio_nao_encontrada')
+    const holdingId = text(selected?.holding_id)
+    if (!holdingId) throw new Error('holding_do_socio_nao_encontrada')
     result = await db.prepare(`SELECT ca.id, ca.socio_id, hs.holding_id, ca.percentual_sociedade,
           COALESCE(hs.nome, ca.codigo_cliente) AS nome
        FROM cotista_aeronave ca
        INNER JOIN hold_socios hs ON hs.id = ca.socio_id
        WHERE ca.aeronave_id = ?1 AND hs.holding_id = ?2
-       ORDER BY ca.id`).bind(text(report.aeronave_id), selected.holding_id).all<CotistaRow>()
+       ORDER BY ca.id`).bind(text(report.aeronave_id), holdingId).all<CotistaRow>()
   } else {
     result = await db.prepare(`SELECT ca.id, ca.socio_id, NULL AS holding_id, ca.percentual_sociedade,
           COALESCE(cl.razao_social, ca.codigo_cliente) AS nome

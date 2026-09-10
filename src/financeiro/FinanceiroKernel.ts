@@ -2014,6 +2014,7 @@ async function issueReceiptInternal(
   const ano = input.data_emissao.slice(0, 4)
   const numero = existingReceiptId ? text(body.numero_recibo) : await allocateReceiptNumber(db, cotistaId, codigo, ano)
   if (!numero) throw new FinanceError('Número do recibo não encontrado', 'numero_recibo_ausente', 500)
+  let financeiroCriado: Row | null = null
   try {
   if (!existingReceiptId) {
     await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
@@ -2060,7 +2061,6 @@ async function issueReceiptInternal(
       LIMIT 1
     `).bind(input.categoria_movimentacao_id, input.categoria_movimentacao_id).first<{ nome: string | null }>())?.nome,
   )
-  let financeiroCriado: Row | null = null
   const financeiro = financeiroCriado = await buildFinance(db, schema, {
     ...comando,
     categoria_nome: categoriaNome,
