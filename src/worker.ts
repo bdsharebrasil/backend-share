@@ -4247,6 +4247,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
     if (body.aprovado) await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id, pos === 1 ? 'tripulante_1' : 'tripulante_2')
+    if (!body.aprovado) await notifyReportRejection(c, updated, String(body.observacoes || '').trim(), colaborador.id)
     const requiredSecond = despesasRelatorioViagem(updated?.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/\s/g, '_') === 'tripulante_2')
     if (body.aprovado && updated?.status_aprovacao_tripulante === 'aprovado' && (!requiredSecond || updated?.status_aprovacao_tripulante_2 === 'aprovado')) await c.env.SHARE_DB.prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run()
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
@@ -5298,6 +5299,18 @@ async function notifyTask(c: Context<{ Bindings: Bindings }>, taskId: string, re
   for (const recipient of unique) {
     await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, status || null).run()
   }
+}
+
+async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report: any, reason: string, rejectedBy: string): Promise<void> {
+  const db = c.env.SHARE_DB
+  const recipients = await db.prepare(`SELECT id FROM user_profiles WHERE lower(trim(COALESCE(departamento, ''))) IN ('financeiro', 'administrativo', 'ctm') AND id <> ?1 AND (status IS NULL OR lower(status) IN ('ativo', 'active'))`).bind(rejectedBy).all<{ id: string }>()
+  const uniqueRecipients = [...new Set((recipients.results || []).map((item) => item.id).filter(Boolean))]
+  if (!uniqueRecipients.length) return
+  const taskId = uuid()
+  const numero = String(report.numero_relatorio || report.id)
+  const mensagem = `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
+  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero}`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
+  for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, 'ajuste_necessario').run()
 }
 
 app.get('/api/sharebrasil/tarefas/usuarios', async c => {
