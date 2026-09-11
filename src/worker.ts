@@ -6055,9 +6055,23 @@ app.post('/api/interno/emails', async c => {
     }
     const table = prefix === 'recibo' ? 'recibo_anexos' : prefix === 'relatorio' ? 'relatorio_despesa_viagem_anexos' : ''
     if (!table) continue
-    const row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
-    if (!row) continue
-    const bucket = shareBrasilBucket(c); const object = bucket ? await bucket.get(row.caminho_arquivo) : null; if (!object) continue
+    let row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
+
+    // O fluxo de programação pode receber o ID do recibo quando o PDF foi
+    // persistido em url_recibo sem uma linha correspondente em recibo_anexos.
+    // Resolve também esse formato legado para que o e-mail não seja enviado
+    // sem o recibo selecionado.
+    if (!row && prefix === 'recibo') {
+      row = await db.prepare("SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM recibo_anexos WHERE recibo_id = ?1 AND (UPPER(COALESCE(finalidade, '')) = 'PDF' OR tipo_arquivo = 'application/pdf') ORDER BY criado_em DESC LIMIT 1").bind(rawId).first<any>().catch(() => null)
+    }
+    if (!row && prefix === 'recibo') {
+      const recibo = await db.prepare('SELECT id, url_recibo, numero_recibo FROM recibos WHERE id = ?1').bind(rawId).first<any>().catch(() => null)
+      const caminho = chaveStorageDeUrl(recibo?.url_recibo)
+      if (caminho) row = { nome_arquivo: `${recibo?.numero_recibo || rawId}.pdf`, caminho_arquivo: caminho, tipo_arquivo: 'application/pdf' }
+    }
+    if (!row) { erroAnexo = `anexo_${prefix}_nao_encontrado:${rawId}`; continue }
+    const bucket = shareBrasilBucket(c); const object = bucket ? await bucket.get(chaveStorageDeUrl(row.caminho_arquivo)) : null
+    if (!object) { erroAnexo = `anexo_${prefix}_indisponivel:${rawId}`; continue }
     anexos.push({ filename: row.nome_arquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: row.tipo_arquivo || 'application/octet-stream' })
   }
   const arquivosLocais = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : []).filter((file): file is File => file instanceof File && !!file.size)
