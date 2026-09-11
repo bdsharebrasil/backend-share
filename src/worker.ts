@@ -4174,15 +4174,11 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     if (!relatorio) return c.notFound()
     if (statusRelatorioViagem(relatorio.status) !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
     if (!despesasRelatorioViagem(relatorio.despesas).some((item: any) => Number(item?.valor ?? item?.amount) > 0)) return c.json({ error: 'relatorio_sem_despesas' }, 400)
-    const numero = await gerarNumeroRelatorioViagem(
-      db,
-      String(relatorio.cliente_id || ''),
-      relatorio.socio_id ? String(relatorio.socio_id) : null,
-      String(relatorio.aeronave_id || ''),
-      String(relatorio.data_inicio || ''),
-      id,
-    )
-    await db.prepare("UPDATE relatorio_despesa_viagem SET numero_relatorio = ?1, status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(numero, id).run()
+    const numero = String(relatorio.numero_relatorio || '').trim()
+    if (!numero) return c.json({ error: 'numero_relatorio_obrigatorio' }, 409)
+    // O número é reservado na criação do rascunho e deve permanecer imutável.
+    // Nunca gere outro número na finalização, pois outros rascunhos podem ter sido criados depois.
+    await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(id).run()
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:finalizar]', error?.message || error)
