@@ -1918,7 +1918,8 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // programação após o envio, materializamos o lançamento Share e o restante
   // do fluxo financeiro.
   if (!text(receiptInicial.lancamento_id)) await finalizarRecibo(db, receiptId, userId)
-  const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id
+  const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id,
+      l.categoria_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome
     FROM recibos r LEFT JOIN lancamentos l ON l.id = r.lancamento_id
     WHERE r.id = ? AND r.tipo_recibo = 'recibo_reembolso' LIMIT 1`).bind(receiptId).first<Row>()
   if (!receipt || !text(receipt.share_lancamento_id)) throw new FinanceError('Recibo de reembolso não encontrado', 'recibo_reembolso_nao_encontrado', 404)
@@ -1954,7 +1955,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     }, ['id', 'valor_centavos']),
     insertStatement(db, schema, 'contas_apagar', {
       id: id(), data_vencimento: vencimento, valor_centavos: amount, descricao: receipt.descricao || 'Reembolso de despesa',
-      categoria_id: nullableText(body.categoria_id ?? receipt.categoria_id), categoria_nome: nullableText(body.categoria_nome ?? receipt.categoria_nome ?? 'REEMBOLSO'),
+      categoria_id: nullableText(receipt.share_categoria_id), categoria_nome: nullableText(receipt.share_categoria_nome ?? 'REEMBOLSO'),
       aeronave_id: receipt.aeronave_id, cotista_id: cotistaId, lancamentos_id: receipt.share_lancamento_id,
       boleto_url: nullableText(body.boleto_url), nf_url: nullableText(body.nf_url), origem_tipo: 'RECIBO_REEMBOLSO',
       idempotency_key: `conta-pagar-recibo-reembolso:${receiptId}`, status: 'EM_ABERTO', criado_por: userId,
