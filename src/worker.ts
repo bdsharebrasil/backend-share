@@ -4601,11 +4601,15 @@ async function marcarEmailEnviadoParaOrigens(
     let movimentoIds: string[] = []
 
     if (prefix === 'recibo') {
-      const anexo = await db.prepare('SELECT recibo_id FROM recibo_anexos WHERE id = ?1').bind(rawId).first<{ recibo_id: string | null }>()
-      if (anexo?.recibo_id) {
-        const row = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?1').bind(anexo.recibo_id).first<{ lancamento_id: string | null }>()
-        if (row?.lancamento_id) lancamentoIds.push(row.lancamento_id)
-      }
+      // Aceita recibo:<id do recibo> e recibo:<id do anexo>.
+      const reciboDireto = await db.prepare('SELECT id, lancamento_id FROM recibos WHERE id = ?1').bind(rawId).first<{ id: string; lancamento_id: string | null }>()
+      const anexo = reciboDireto ? null : await db.prepare('SELECT recibo_id FROM recibo_anexos WHERE id = ?1').bind(rawId).first<{ recibo_id: string | null }>()
+      const reciboId = reciboDireto?.id ?? anexo?.recibo_id ?? null
+      const lancamentoId = reciboDireto?.lancamento_id ?? (reciboId
+        ? (await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?1').bind(reciboId).first<{ lancamento_id: string | null }>())?.lancamento_id
+        : null)
+      if (reciboId) await db.prepare("UPDATE recibos SET status = 'EMAIL_ENVIADO' WHERE id = ?1 AND status <> 'CANCELADO'").bind(reciboId).run()
+      if (lancamentoId) lancamentoIds.push(lancamentoId)
     } else if (prefix === 'recibo_saida') {
       const row = await db.prepare('SELECT lancamentos_id FROM recibos_saida WHERE id = ?1').bind(rawId).first<{ lancamentos_id: string | null }>()
       if (row?.lancamentos_id) lancamentoIds.push(row.lancamentos_id)
