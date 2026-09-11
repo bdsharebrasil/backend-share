@@ -192,6 +192,7 @@ const OPTIONAL_SCHEMA_COLUMNS = new Set([
   'comprovante_url', 'observacoes', 'anexos_json', 'criado_por', 'origem_tipo',
   'origem_id', 'colaborador_ref_id', 'nf_saida_id', 'lancamentos_id', 'lancamento_id',
   'lancamento_cliente_id', 'movimentos_holding_id', 'movimento_holding_id',
+  'numero_nf', 'url_nf',
   'periodicidade', 'tipo_rateio', 'percentual_sociedade', 'percentual_uso',
   'valor_total_centavos', 'valor_rateado_centavos', 'valor_pago_real_centavos',
   'valor_total', 'valor_rateado', 'descricao_despesa', 'categoria_custo_id',
@@ -466,6 +467,7 @@ type AllocationLine = {
   socioId: string | null
   holdingId: string | null
   percentual: number
+  percentualSociedade: number
   valorCentavos: number
   pagoPor: string | null
   pagoDiretamente: boolean
@@ -489,6 +491,7 @@ function allocationLines(body: Row): AllocationLine[] {
         socioId: nullableText(body.socio_id),
         holdingId: nullableText(body.holding_id),
         percentual: 100,
+        percentualSociedade: 100,
         valorCentavos: asPositiveCents(body.valor_centavos),
         pagoPor: nullableText(body.pago_por),
         pagoDiretamente: asFlag(
@@ -504,6 +507,7 @@ function allocationLines(body: Row): AllocationLine[] {
     socioId: nullableText(line.socio_id),
     holdingId: nullableText(line.holding_id),
     percentual: Number(line.percentual ?? line.percentual_sociedade ?? 0),
+    percentualSociedade: Number(line.percentual_sociedade ?? line.percentual ?? 0),
     valorCentavos:
       line.valor_centavos != null
         ? asPositiveCents(line.valor_centavos)
@@ -677,26 +681,29 @@ function clientAllocationStatements(
             command.categoria_nome ?? command.categoria,
           ),
           tipo_rateio: upper(command.tipo_rateio || 'FIXO'),
-          percentual_sociedade: line.percentual,
+          percentual_sociedade: line.percentualSociedade,
           percentual_uso: line.percentual,
           valor_total_centavos: amount,
           valor_rateado_centavos: line.valorCentavos,
           valor_total: amount / 100,
           valor_rateado: line.valorCentavos / 100,
-          pago_por_cotista_id: line.pagoPor,
-          pago_por: line.pagoPor,
+          pago_por_cotista_id: line.pagoPor || (line.pagoDiretamente ? line.cotistaId : null),
+          pago_por: line.pagoPor || (line.pagoDiretamente ? line.cotistaId : null),
           pago_diretamente: line.pagoDiretamente ? 1 : 0,
-          status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
-          data_pagamento: line.pagoDiretamente ? command.data : null,
+          status: 'EM_ABERTO',
+          data_pagamento: null,
           descricao_despesa: command.descricao,
           observacoes: nullableText(command.observacoes),
+          anexos_json: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return JSON.stringify(anexos.filter((anexo: Row) => !anexo.cotista_id || anexo.cotista_id === line.cotistaId)) })(),
+          numero_nf: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return anexos.find((anexo: Row) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')?.numero || null })(),
+          url_nf: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return anexos.find((anexo: Row) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')?.url || null })(),
           criado_por: userId,
         },
         ['id', 'cotista_id', 'aeronave_id'],
       ),
     ]
 
-    if (line.pagoDiretamente) {
+    if (false && line.pagoDiretamente) {
       const pagadorCotistaId = line.pagoPor || line.cotistaId
       statements.push(
         insertStatement(
@@ -919,13 +926,13 @@ export async function createExpense(
           valor_centavos: amount,
           valor_total: amount / 100,
           valor: amount / 100,
-          status: 'PAGO',
+          status: 'EM_ABERTO',
           data_lancamento: command.data,
           data_emissao: command.data,
-          data_pagamento: command.data,
+          data_pagamento: null,
           pago_diretamente: 1,
           reembolsavel: 0,
-          reembolso_quitado: 1,
+          reembolso_quitado: 0,
           origem_tipo: 'DESPESA',
           origem_id: lancamentoId,
           idempotency_key: command.idempotency_key,
@@ -953,7 +960,7 @@ export async function createExpense(
       rateio_ids: rateioIds,
       conta_pagar_id: null,
       valor_centavos: amount,
-      status: 'PAGO',
+      status: 'EM_ABERTO',
       idempotent: false,
     }
   }

@@ -927,12 +927,35 @@ financeiroRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => {
   ])
   return c.json({ recibos, relatorios, abastecimentos })
 })
+financeiroRoutes.post('/envios-pagamento/anexos', async (c) => {
+  const arquivo = (await c.req.formData()).get('arquivo') as unknown
+  if (!(arquivo instanceof File) || !arquivo.size) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  if (arquivo.size > 25 * 1024 * 1024) return c.json({ error: 'arquivo_excede_25mb' }, 413)
+  if (!/^application\/pdf$|^image\//.test(arquivo.type)) return c.json({ error: 'somente_imagem_ou_pdf_permitido' }, 415)
+  const bucket = c.env.SHARE_FILES || c.env.FILES
+  if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+  const userId = c.get('userId') || 'interno'
+  const safeName = arquivo.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+  const key = `share/nf-boletos-clients/${userId}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${safeName}`
+  await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
+  const publicUrl = c.env.R2_PUBLIC_URL ? `${c.env.R2_PUBLIC_URL.replace(/\/$/, '')}/${key}` : `${new URL(c.req.url).origin}/api/financeiro/envios-pagamento/anexos/arquivo?key=${encodeURIComponent(key)}`
+  return c.json({ key, url: publicUrl }, 201)
+})
+financeiroRoutes.get('/envios-pagamento/anexos/arquivo', async (c) => {
+  const key = c.req.query('key')
+  const bucket = c.env.SHARE_FILES || c.env.FILES
+  if (!key || !bucket || !key.startsWith('share/nf-boletos-clients/')) return c.notFound()
+  const object = await bucket.get(key)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'inline' } })
+})
 
 financeiroRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) => {
   const result = await c.env.SHARE_DB.prepare(`
     SELECT ca.id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.codigo_cliente,
            ca.percentual_sociedade,
            COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, 'Cotista não identificado') AS nome,
+           COALESCE(cl.email_principal, hs.email_principal) AS email,
            CASE WHEN ca.socio_id IS NOT NULL THEN 1 ELSE 0 END AS eh_holding
       FROM cotista_aeronave ca
       LEFT JOIN cliente cl ON cl.id = ca.cliente_id
