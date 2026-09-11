@@ -3228,6 +3228,8 @@ function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, de
   const partida = String(body.aerodromo_partida || '').trim().toUpperCase()
   const chegada = String(body.aerodromo_chegada || '').trim().toUpperCase()
   const data = diarioDate(body.data_registro)
+  const natureza = String(body.natureza_voo || '').trim()
+  const rateioIgual = natureza === 'TR - Traslado' || natureza === 'VT - Voo Teste'
   const tempoVoo = diarioNumber(body.tempo_voo)
   const tempoTotal = diarioNumber(body.tempo_total, tempoVoo)
   const consumoHora = diarioNumber(aeronave?.consumo_combustivel)
@@ -3235,7 +3237,7 @@ function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, de
   const consumoTotal = diarioNumber(body.consumo_combustivel_total, Number((tempoTotal * consumoHora).toFixed(2)))
   const row: Record<string, unknown> = {
     numero_voo: body.numero_voo?.trim() || null, jornada_id: body.jornada_id?.trim() || null, diario_mes_id: defaults.diarioMesId || body.diario_mes_id,
-    aeronave_id: body.aeronave_id, cliente_id: body.cliente_id || null, holding_id: body.holding_id || null, socio_id: body.socio_id || null, voo_emprestado: diarioBoolean(body.voo_emprestado), socio_tomador_emprestimo_id: body.socio_tomador_emprestimo_id || null, cliente_tomador_emprestimo_id: body.cliente_tomador_emprestimo_id || null,
+    aeronave_id: body.aeronave_id, cliente_id: rateioIgual ? null : body.cliente_id || null, holding_id: rateioIgual ? null : body.holding_id || null, socio_id: rateioIgual ? null : body.socio_id || null, voo_emprestado: diarioBoolean(body.voo_emprestado), socio_tomador_emprestimo_id: body.socio_tomador_emprestimo_id || null, cliente_tomador_emprestimo_id: body.cliente_tomador_emprestimo_id || null,
     data_registro: data, aerodromo_partida: partida, aerodromo_chegada: chegada, trecho: body.trecho?.trim() || `${partida} X ${chegada}`,
     pic_canac: String(body.pic_canac || '').trim().toUpperCase(), pic_nome: body.pic_nome?.trim() || null, sic_canac: body.sic_canac?.trim()?.toUpperCase() || null, sic_nome: body.sic_nome?.trim() || null, tripulacao_checkin_hora: body.tripulacao_checkin_hora || null,
     tempo_ac: body.tempo_ac || null, tempo_dep: body.tempo_dep || null, tempo_pou: body.tempo_pou || null, tempo_cor: body.tempo_cor || null, tempo_ifr: diarioNumber(body.tempo_ifr), tempo_voo: tempoVoo, tempo_total: tempoTotal,
