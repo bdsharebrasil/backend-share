@@ -909,7 +909,7 @@ financeiroRoutes.get('/envios-pagamento/opcoes', async (c) => {
   const db = c.env.SHARE_DB
   const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
   const [fornecedores, aeronaves, categorias, categoriasCliente] = await Promise.all([
-    read('SELECT id, COALESCE(apelido, razao_social, nome) AS label FROM fornecedores_favoritos ORDER BY label'),
+    read('SELECT id, COALESCE(apelido, nome_completo) AS label FROM fornecedores_favoritos ORDER BY label'),
     read('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro'),
     read('SELECT id, nome, grupo_categoria, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_share ORDER BY nome'),
     read('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
@@ -917,7 +917,16 @@ financeiroRoutes.get('/envios-pagamento/opcoes', async (c) => {
   return c.json({ fornecedores, aeronaves, voos: [], categorias, categorias_cliente: categoriasCliente })
 })
 
-financeiroRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => c.json({ recibos: [], relatorios: [], abastecimentos: [] }))
+financeiroRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => {
+  const db = c.env.SHARE_DB
+  const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
+  const [recibos, relatorios, abastecimentos] = await Promise.all([
+    read(`SELECT r.id, r.numero_recibo, r.descricao, r.descricao AS descricao_servico, r.data_emissao, COALESCE(a.id, r.id) AS anexo_id, a.nome_arquivo, a.tipo_arquivo, COALESCE(r.url_recibo, '/api/financeiro/recibos/anexos/' || a.id || '/arquivo') AS arquivo_url FROM recibos r LEFT JOIN recibo_anexos a ON a.recibo_id = r.id AND (UPPER(COALESCE(a.finalidade, '')) = 'PDF' OR a.tipo_arquivo = 'application/pdf') WHERE a.id IS NOT NULL OR r.url_recibo IS NOT NULL ORDER BY r.data_emissao DESC, r.numero_recibo LIMIT 300`),
+    read(`SELECT r.id, r.numero_voo, r.numero_relatorio, COALESCE(r.pdf_url, '/api/financeiro/relatorios-despesa-viagem/' || r.id || '/pdf') AS arquivo_url, r.id AS anexo_id, 'relatorio.pdf' AS nome_arquivo, 'application/pdf' AS tipo_arquivo FROM relatorio_despesa_viagem r WHERE r.pdf_path IS NOT NULL OR r.pdf_url IS NOT NULL ORDER BY r.criado_em DESC, r.numero_relatorio LIMIT 300`),
+    read(`SELECT a.id, a.numero_voo, a.trecho, a.data, a.numero_comanda, a.numero_nf, a.local, a.comanda_url, a.nota_url, a.boleto_url, ar.matricula_registro, COALESCE(cl.razao_social, hs.nome, a.cliente_id, a.socio_id, 'Cotista não informado') AS cotista_nome FROM abastecimentos a LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN cliente cl ON cl.id = a.cliente_id LEFT JOIN hold_socios hs ON hs.id = a.socio_id WHERE a.comanda_url IS NOT NULL OR a.nota_url IS NOT NULL OR a.boleto_url IS NOT NULL ORDER BY a.data DESC, a.numero_voo LIMIT 300`),
+  ])
+  return c.json({ recibos, relatorios, abastecimentos })
+})
 
 financeiroRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) => {
   const result = await c.env.SHARE_DB.prepare(`
