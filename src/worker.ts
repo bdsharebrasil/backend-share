@@ -3148,7 +3148,19 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
     LEFT JOIN aerodromo adg ON upper(adg.designativo_icao) = upper(l.aerodromo_chegada)
     WHERE l.diario_mes_id = ?1
     ORDER BY date(l.data_registro), l.numero_sequencial, l.id`).bind(diarioMes.id).all<any>()
-  const horasCotistas = await db.prepare(`SELECT COALESCE(l.socio_id, l.cliente_id) AS cotista_id, COALESCE(s.nome, c.razao_social, c.proprietario, 'Cotista não identificado') AS cotista_nome, COALESCE(SUM(l.tempo_voo), 0) AS horas_voo FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.diario_mes_id = ?1 GROUP BY COALESCE(l.socio_id, l.cliente_id), COALESCE(s.nome, c.razao_social, c.proprietario) ORDER BY horas_voo DESC`).bind(diarioMes.id).all()
+  const horasCotistas = await db.prepare(`SELECT
+      CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(l.socio_id, l.cliente_id, l.holding_id) END AS cotista_id,
+      CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(s.nome, h.nome, c.razao_social, c.proprietario, 'Cotista não identificado') END AS cotista_nome,
+      COALESCE(SUM(l.tempo_voo), 0) AS horas_voo
+    FROM lancamentos_diario_bordo l
+    LEFT JOIN cliente c ON c.id = l.cliente_id
+    LEFT JOIN holdings h ON h.id = l.holding_id
+    LEFT JOIN hold_socios s ON s.id = l.socio_id
+    WHERE l.diario_mes_id = ?1
+    GROUP BY
+      CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(l.socio_id, l.cliente_id, l.holding_id) END,
+      CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(s.nome, h.nome, c.razao_social, c.proprietario, 'Cotista não identificado') END
+    ORDER BY horas_voo DESC`).bind(diarioMes.id).all()
   const horasEmprestadas = await db.prepare(`SELECT COALESCE(SUM(e.horas_emprestadas - COALESCE(e.horas_devolvidas, 0)), 0) AS horas_total, COUNT(*) AS quantidade FROM emprestimos_aeronave e LEFT JOIN lancamentos_diario_bordo l ON l.id = e.lancamento_diario_id WHERE l.diario_mes_id = ?1`).bind(diarioMes.id).first<any>()
   return c.json({ aeronave, diario_mes: diarioMes, lancamentos: lancamentos.results, meses_disponiveis: meses.results, horas_cotistas: horasCotistas.results, horas_emprestadas: { horas_total: Number(horasEmprestadas?.horas_total || 0), quantidade: Number(horasEmprestadas?.quantidade || 0) } })
 })
