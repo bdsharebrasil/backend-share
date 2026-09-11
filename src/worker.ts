@@ -6019,6 +6019,8 @@ app.post('/api/interno/emails', async c => {
   const copias = emailArray(body.cc).filter((email) => !destinatarios.includes(email))
   const todosDestinatarios = [...destinatarios, ...copias]
   const assunto = String(body.assunto || '').trim(); const mensagem = [String(body.mensagem || '').trim(), String(body.dados_bancarios || '').trim()].filter(Boolean).join('\n\n'); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
+  const referencias = Array.isArray(body.referencias) ? body.referencias.map(String) : (() => { try { const parsed = JSON.parse(String(body.referencias || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
+  const origens = [...new Set([...referencias, ...ids])]
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
@@ -6072,9 +6074,9 @@ app.post('/api/interno/emails', async c => {
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   if (status === 'enviado') {
-    await marcarEmailEnviadoParaOrigens(c, ids, id).catch(error => { log.error('[interno/emails] origem não atualizada após envio', error) })
+    await marcarEmailEnviadoParaOrigens(c, origens, id).catch(error => { log.error('[interno/emails] origem não atualizada após envio', error) })
   }
-  const [primeiroPrefix, primeiroRawId] = (ids[0] || '').includes(':') ? ids[0].split(':', 2) : [null, null]
+  const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
   await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run().catch(error => { log.error('[interno/emails] histórico não gravado', error) })
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
