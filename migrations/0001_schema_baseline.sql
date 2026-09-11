@@ -1181,7 +1181,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "documentos_cotista"(
         REFERENCES user_profiles(id)
         ON DELETE SET NULL
 )'), ('CREATE TABLE email_templates (id TEXT PRIMARY KEY NOT NULL, tipo TEXT NOT NULL, assunto TEXT NOT NULL, corpo_html TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'), ('CREATE TABLE "emails_enviados"(
-  id TEXT,
+  id TEXT PRIMARY KEY,
   assunto TEXT,
   mensagem TEXT,
   destinatarios TEXT,
@@ -1783,7 +1783,9 @@ numero_demonstrativo TEXT,
   origem_tipo TEXT,
 
 
-  idempotency_key TEXT
+  idempotency_key TEXT,
+  email_enviado_em TEXT,
+  email_enviado_id TEXT REFERENCES emails_enviados(id)
 )'), ('CREATE TABLE lancamentos_diario_bordo (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   numero_sequencial INTEGER,
@@ -1998,7 +2000,9 @@ numero_demonstrativo TEXT,
   observacoes TEXT,
   criado_por TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  email_enviado_em TEXT,
+  email_enviado_id TEXT REFERENCES emails_enviados(id)
 )'), ('CREATE TABLE notas_fiscais_saida (
     id TEXT PRIMARY KEY NOT NULL,
     numero TEXT NOT NULL,
