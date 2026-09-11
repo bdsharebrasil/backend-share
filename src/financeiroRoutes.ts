@@ -533,15 +533,22 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const db = c.env.SHARE_DB
     const [receber, pagar, movimentacoes, emailsEnviados] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
-      listar(db, "SELECT id, lancamentos_id, valor_centavos, status FROM contas_apagar WHERE status <> 'CANCELADO'"),
+      listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
       listar(db, 'SELECT * FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
       listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
+    const hoje = new Date().toISOString().slice(0, 10)
+    const contaPendente = (row: Record<string, unknown>) => {
+      const status = String(row.status ?? '').toUpperCase()
+      const vencida = Boolean(row.data_vencimento) && String(row.data_vencimento).slice(0, 10) < hoje
+      return status === 'EM_ABERTO' || status === 'PENDENTE' || status === 'ATRASADO' || status === 'VENCIDO' || (vencida && !['PAGO', 'CANCELADO', 'RECEBIDO'].includes(status))
+    }
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
-    const totalPago = pagar.filter((row) => row.status === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
+    const totalPago = pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const movimentacoesComFornecedor = await enriquecerFornecedores(db, movimentacoes)
-    const contasEmAberto = new Set(pagar.filter((row) => String(row.status).toUpperCase() === 'EM_ABERTO').flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
-    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: pagar.filter((row) => row.status === 'EM_ABERTO').length, pagamentos_confirmados: pagar.filter((row) => row.status === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: contasEmAberto.has(String(row.id)) })), emails_enviados: emailsEnviados })
+    const contasPendentes = pagar.filter(contaPendente)
+    const contasEmAberto = new Set(contasPendentes.flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
+    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))) })), emails_enviados: emailsEnviados })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -745,6 +752,10 @@ financeiroRoutes.get('/recibos', async (c) => {
   const recibos = result.results ?? []
   const cotistaIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cotista_aeronave').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
   const reciboIds = recibos.map((row) => String(row.id ?? '')).filter(Boolean)
+  const contasProgramadas = reciboIds.length
+    ? await listar(db, `SELECT c.id AS conta_pagar_id, l.origem_id AS recibo_id FROM contas_apagar c INNER JOIN lancamentos l ON l.id = c.lancamentos_id WHERE c.status <> 'CANCELADO' AND l.origem_tipo IN ('RECIBO', 'RECIBO_REEMBOLSO') AND l.origem_id IN (${reciboIds.map(() => '?').join(', ')})`, ...reciboIds)
+    : []
+  const contaProgramadaPorRecibo = new Map(contasProgramadas.map((row) => [String(row.recibo_id), String(row.conta_pagar_id)]))
   const cotistas = cotistaIds.length
     ? await listar(db, `SELECT ca.id, ca.cliente_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, COALESCE(cl.cnpj, hs.cpf) AS documento, COALESCE(cl.endereco, hs.endereco) AS endereco, COALESCE(cl.cidade, hs.cidade) AS cidade, COALESCE(cl.uf, hs.uf) AS uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id IN (${cotistaIds.map(() => '?').join(', ')}) OR ca.cliente_id IN (${cotistaIds.map(() => '?').join(', ')})`, ...cotistaIds, ...cotistaIds)
     : []
@@ -773,6 +784,8 @@ financeiroRoutes.get('/recibos', async (c) => {
       cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? recibo.cidade_pagador ?? null : recibo.cidade_pagador ?? null,
       uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? recibo.uf_pagador ?? null : recibo.uf_pagador ?? null,
       rateio_linhas: rateiosPorRecibo.get(String(recibo.id)) ?? [],
+      conta_pagar_id: contaProgramadaPorRecibo.get(String(recibo.id)) ?? null,
+      despesa_programada: contaProgramadaPorRecibo.has(String(recibo.id)),
     }
   }) })
 })
