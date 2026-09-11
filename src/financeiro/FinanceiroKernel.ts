@@ -1715,6 +1715,7 @@ export async function processFinanceQueue(
 }
 
 async function createReimbursementFinance(db: Database, schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
+  const receiptMeta = await db.prepare('SELECT numero_recibo, url_recibo FROM recibos WHERE id = ? LIMIT 1').bind(receiptId).first<{ numero_recibo: string | null; url_recibo: string | null }>()
   const categoriaShare = await db.prepare(`
     SELECT id FROM categoria_movimentacao_share
      WHERE id = ? OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%' OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
@@ -1751,6 +1752,8 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       pago_diretamente: 0,
       reembolsavel: 1,
       reembolso_quitado: 0,
+      numero_recibo: nullableText(receiptMeta?.numero_recibo),
+      url_recibo: nullableText(receiptMeta?.url_recibo),
       origem_tipo: 'RECIBO_REEMBOLSO',
       origem_id: receiptId,
       idempotency_key: `recibo-reembolso:${receiptId}`,
@@ -1945,6 +1948,11 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'CLIENTE', valor_centavos: amount, valor_total: amount / 100,
       valor: amount / 100, status: 'AGUARDANDO_REEMBOLSO', data_lancamento: data, data_emissao: data,
       data_vencimento: vencimento, pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
+      categoria_cliente_id: nullableText(body.categoria_id),
+      categoria_nome: nullableText(body.categoria_nome ?? 'REEMBOLSO'),
+      periodicidade: nullableText(body.periodicidade),
+      numero_recibo: nullableText(receipt.numero_recibo),
+      url_recibo: nullableText(receipt.url_recibo),
       origem_tipo: 'RECIBO_REEMBOLSO', origem_id: reimbursementId, criado_por: userId,
     }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
     insertStatement(db, schema, 'contas_areceber', {
@@ -1962,6 +1970,8 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     }, ['id', 'data_vencimento', 'valor_centavos', 'lancamentos_id']),
     linkStatement(db, schema, 'RECIBO', receiptId, 'LANCAMENTO', clientLancamentoId, 'RECIBO_LANCAMENTO_CLIENTE', userId),
     linkStatement(db, schema, 'LANCAMENTO', text(receipt.share_lancamento_id), 'CONTA_A_RECEBER', contaReceberId, 'REEMBOLSO_CONTA_RECEBER', userId),
+    db.prepare('UPDATE lancamentos SET periodicidade = ?, numero_recibo = COALESCE(numero_recibo, ?), url_recibo = COALESCE(url_recibo, ?) WHERE id = ?')
+      .bind(nullableText(body.periodicidade), nullableText(receipt.numero_recibo), nullableText(receipt.url_recibo), receipt.share_lancamento_id),
     auditStatement(db, schema, 'reembolsos', reimbursementId, 'PROGRAMACAO_REEMBOLSO', userId, null, amount, nullableText(body.observacoes), `programar-recibo-reembolso:${receiptId}`),
   ]
   await db.batch(statements)
