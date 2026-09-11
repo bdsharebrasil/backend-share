@@ -5925,7 +5925,7 @@ app.get('/api/interno/emails', async c => {
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM recibo_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, local, numero_comanda, numero_nf, comanda_url, nota_url, boleto_url FROM abastecimentos WHERE comanda_url IS NOT NULL OR nota_url IS NOT NULL OR boleto_url IS NOT NULL ORDER BY data DESC LIMIT 200").all().catch(() => ({ results: [] })),
-    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados WHERE enviado_por = ?1 ORDER BY criado_em DESC LIMIT 100").bind(user.id).all(),
+    db.prepare("SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, enviado_por, referencia_tipo, referencia_id, criado_em FROM emails_enviados WHERE enviado_por = ?1 ORDER BY criado_em DESC LIMIT 100").bind(user.id).all(),
   ])
   const contatos: any[] = []
   for (const row of (clientes.results as any[])) {
