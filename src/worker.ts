@@ -75,7 +75,7 @@ interface HotelReservationHotel {
 
 type WorkerSchemaRequirement = { table: string; columns?: string[] }
 async function validateWorkerSchema(c: Context<{ Bindings: Bindings }>, requirements: WorkerSchemaRequirement[]): Promise<void> {
-  const db=portalDb(c); const missing:string[]=[]
+  const db=c.env.SHARE_DB; const missing:string[]=[]
   for (const r of requirements) { const q=await db.prepare(`SELECT name FROM pragma_table_info(?)`).bind(r.table).all<{name:string}>().catch(()=>({results:[] as {name:string}[]})); const cols=new Set((q.results||[]).map(x=>String(x.name))); if(!cols.size){missing.push(`tabela ${r.table}`);continue} for(const col of r.columns||[]) if(!cols.has(col)) missing.push(`${r.table}.${col}`) }
   if(missing.length) throw new Error(`Schema incompatível; aplique a migration D1 correspondente. Ausências: ${missing.join(', ')}`)
 }
@@ -1019,7 +1019,7 @@ async function authenticatedColaborador(c: Context<{ Bindings: Bindings }>): Pro
   if (!(await requireAuthenticatedUser(c))) return null
   const claims = extractSupabaseClaims(c)
   if (!claims) return null
-  return portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
+  return c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
 }
 
 async function authenticatedColaboradorToken(c: Context<{ Bindings: Bindings }>, token: string): Promise<Colaborador | null> {
@@ -1031,7 +1031,7 @@ async function authenticatedColaboradorToken(c: Context<{ Bindings: Bindings }>,
   if (!response?.ok) return null
   const claims = claimsFromBearerToken(normalizedToken)
   if (!claims) return null
-  return portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
+  return c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
 }
 
 function colaboradorExtensao(file: File): string {
@@ -1522,7 +1522,7 @@ app.get('/api/aerodromos', async (c) => {
   const query = (c.req.query('q') ?? '').trim().toUpperCase()
   try {
     const termo = `%${query}%`
-    const result = await portalDb(c).prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE ?1 OR upper(nome) LIKE ?1) ORDER BY designativo_icao").bind(termo).all<{ id: string; nome: string; designativo_icao: string; coordenadas: string | null }>()
+    const result = await c.env.SHARE_DB.prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE ?1 OR upper(nome) LIKE ?1) ORDER BY designativo_icao").bind(termo).all<{ id: string; nome: string; designativo_icao: string; coordenadas: string | null }>()
     const aerodromos = result.results.map(item => ({
       id: item.designativo_icao.trim().toUpperCase(),
       label: `${item.designativo_icao.trim().toUpperCase()} · ${item.nome}`,
@@ -1737,13 +1737,13 @@ app.get('/api/flightplan', async (c) => {
     let aircraftData: any = null
     if (aircraftId) {
       try {
-        aircraftData = await portalDb(c).prepare(`SELECT a.id, a.fabricante, a.modelo, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, a.performance_aeronave_id, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
+        aircraftData = await c.env.SHARE_DB.prepare(`SELECT a.id, a.fabricante, a.modelo, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, a.performance_aeronave_id, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
           FROM aeronave a
           LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
           WHERE a.id = ?1`).bind(aircraftId).first()
       } catch (error: any) {
         log.warn(`[flightplan] performance_aeronave indisponível: ${error.message}`)
-        aircraftData = await portalDb(c).prepare('SELECT id, fabricante, modelo, tipo_aeronave, consumo_combustivel, velocidade_cruzeiro FROM aeronave WHERE id = ?1').bind(aircraftId).first()
+        aircraftData = await c.env.SHARE_DB.prepare('SELECT id, fabricante, modelo, tipo_aeronave, consumo_combustivel, velocidade_cruzeiro FROM aeronave WHERE id = ?1').bind(aircraftId).first()
       }
     }
     const speed = requestedSpeed || numericValue(aircraftData?.performance_velocidade_cruzeiro_kt) || numericValue(aircraftData?.velocidade_cruzeiro) || 120
@@ -1881,7 +1881,7 @@ app.post('/api/upload', async (c) => {
     })
 
     const code = shortCode()
-    await portalDb(c).prepare('INSERT INTO short_links (code, r2_key) VALUES (?, ?)')
+    await c.env.SHARE_DB.prepare('INSERT INTO short_links (code, r2_key) VALUES (?, ?)')
       .bind(code, key)
       .run()
 
@@ -1901,7 +1901,7 @@ app.get('/r/:code', async (c) => {
   await garantirTabelasAuxiliares(c)
   const code = c.req.param('code')
   try {
-    const row = await portalDb(c).prepare('SELECT r2_key FROM short_links WHERE code = ?')
+    const row = await c.env.SHARE_DB.prepare('SELECT r2_key FROM short_links WHERE code = ?')
       .bind(code)
       .first<{ r2_key: string }>()
 
@@ -1929,7 +1929,7 @@ app.get('/api/templates', async (c) => {
   const authOk = (await requireAuthenticatedUser(c)) || (await checkInternalAuth(c))
   if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
   try {
-    const { results } = await portalDb(c).prepare(
+    const { results } = await c.env.SHARE_DB.prepare(
       'SELECT id, tipo, assunto, corpo_html, created_at FROM email_templates ORDER BY tipo'
     ).all()
     return c.json(results)
@@ -1944,7 +1944,7 @@ app.get('/api/template/:tipo', async (c) => {
   if (!authOk) return c.json({ error: 'Não autorizado' }, 401)
   const tipo = c.req.param('tipo')
   try {
-    const row = await portalDb(c).prepare(
+    const row = await c.env.SHARE_DB.prepare(
       'SELECT id, tipo, assunto, corpo_html FROM email_templates WHERE tipo = ? LIMIT 1'
     ).bind(tipo).first()
     return c.json(row || null)
@@ -1961,7 +1961,7 @@ app.post('/api/templates', async (c) => {
     if (!tipo || !assunto || !corpo_html) return c.json({ error: 'Campos obrigatórios faltando' }, 400)
 
     const id = uuid()
-    await portalDb(c).prepare(
+    await c.env.SHARE_DB.prepare(
       'INSERT INTO email_templates (id, tipo, assunto, corpo_html) VALUES (?, ?, ?, ?)'
     ).bind(id, tipo, assunto, corpo_html).run()
 
@@ -1977,7 +1977,7 @@ app.put('/api/templates/:id', async (c) => {
   try {
     const id = c.req.param('id')
     const { assunto, corpo_html } = await c.req.json()
-    await portalDb(c).prepare(
+    await c.env.SHARE_DB.prepare(
       'UPDATE email_templates SET assunto = ?, corpo_html = ? WHERE id = ?'
     ).bind(assunto, corpo_html, id).run()
     return c.json({ ok: true })
@@ -1996,7 +1996,7 @@ function gerarEmailColaborador(nome: string, sobrenome?: string): string {
   return `${primeiro}${ultimo ? `.${ultimo}` : ''}@sharebrasil.com.br`
 }
 async function gerarEmailEnvioColaborador(c: Context<{ Bindings: Bindings }>, nome: string): Promise<string> {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const partes = nome.trim().split(/\s+/)
   const candidatoBase = gerarEmailColaborador(nome)
   const existe = await db.prepare('SELECT id FROM user_profiles WHERE lower(email_envio) = lower(?1) OR lower(email) = lower(?1) LIMIT 1').bind(candidatoBase).first()
@@ -2090,7 +2090,7 @@ app.post('/api/send-email', async (c) => {
     const data = await resp.json()
     const status = resp.ok ? 'enviado' : 'erro'
 
-    await portalDb(c).prepare(
+    await c.env.SHARE_DB.prepare(
       `INSERT INTO email_envios
          (id, tipo, reference_type, reference_id, destinatario, assunto, status, erro_mensagem, enviado_por)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -2124,8 +2124,8 @@ app.get('/api/email-envios', async (c) => {
   const referenceId = c.req.query('reference_id')
   try {
     const query = referenceId
-      ? portalDb(c).prepare('SELECT * FROM email_envios WHERE reference_id = ? ORDER BY created_at DESC').bind(referenceId)
-      : portalDb(c).prepare('SELECT * FROM email_envios ORDER BY created_at DESC LIMIT 100')
+      ? c.env.SHARE_DB.prepare('SELECT * FROM email_envios WHERE reference_id = ? ORDER BY created_at DESC').bind(referenceId)
+      : c.env.SHARE_DB.prepare('SELECT * FROM email_envios ORDER BY created_at DESC LIMIT 100')
     const { results } = await query.all()
     return c.json(results)
   } catch (e: any) {
@@ -2159,7 +2159,7 @@ function anexosMensagemPublicos(valor: unknown) {
 }
 
 async function prepararEstadosMensagens(c: Context<{ Bindings: Bindings }>, usuarioId: string) {
-  await portalDb(c).prepare(`
+  await c.env.SHARE_DB.prepare(`
     INSERT OR IGNORE INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida)
     SELECT id, ?, CASE WHEN remetente_id = ? THEN 'remetente' ELSE 'destinatario' END,
       CASE WHEN remetente_id = ? THEN 1 ELSE lida END
@@ -2176,7 +2176,7 @@ async function listarMensagensPasta(c: Context<{ Bindings: Bindings }>, usuarioI
     enviadas: "e.papel = 'remetente' AND e.excluida = 0",
     arquivo: 'e.arquivada = 1 AND e.excluida = 0',
   }
-  const result = await portalDb(c).prepare(`
+  const result = await c.env.SHARE_DB.prepare(`
     SELECT m.id, m.remetente_id, m.destinatario_id, m.assunto, m.conteudo, m.criado_em, m.anexos_mensagens,
       e.papel, e.lida, e.favorita, e.arquivada, e.excluida,
       COALESCE(NULLIF(trim(rem.nome_exibicao), ''), NULLIF(trim(rem.nome_completo), ''), rem.email, m.remetente_id) AS remetente_nome,
@@ -2200,7 +2200,7 @@ app.get('/api/mensagens/usuarios', async (c) => {
   if (!user) return c.json({ error: 'Não autorizado' }, 401)
   const usuarioId = user.id
   try {
-    const { results } = await portalDb(c).prepare(
+    const { results } = await c.env.SHARE_DB.prepare(
       "SELECT id, COALESCE(NULLIF(trim(nome_exibicao),''), NULLIF(trim(nome_completo),''), email) AS nome, email, departamento FROM user_profiles WHERE id <> ?1 AND lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY nome"
     ).bind(usuarioId).all()
     return c.json({ usuarios: results })
@@ -2223,7 +2223,7 @@ app.post('/api/mensagens', async (c) => {
     if (!destinatarioId || !conteudo) return c.json({ error: 'destinatario_id e conteudo são obrigatórios' }, 400)
     if (destinatarioId === remetenteId) return c.json({ error: 'destinatario_invalido' }, 400)
 
-    const destinatario = await portalDb(c).prepare("SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(destinatarioId).first<{ id: string }>()
+    const destinatario = await c.env.SHARE_DB.prepare("SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(destinatarioId).first<{ id: string }>()
     if (!destinatario) return c.json({ error: 'destinatario_nao_encontrado' }, 404)
 
     const arquivos = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : [])
@@ -2238,10 +2238,10 @@ app.post('/api/mensagens', async (c) => {
       const caminho = await salvarArquivoShareBrasil(c, remetenteId, arquivo, `anexo_mensagens/${id}`)
       anexos.push({ id: anexoId, nome_arquivo: arquivo.name, caminho_arquivo: caminho, tipo_arquivo: arquivo.type || 'application/octet-stream', tamanho_arquivo: arquivo.size })
     }
-    await portalDb(c).batch([
-      portalDb(c).prepare('INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo, anexos_mensagens) VALUES (?, ?, ?, ?, ?, ?)').bind(id, remetenteId, destinatarioId, String(body.assunto || '').trim() || null, conteudoFinal, JSON.stringify(anexos)),
-      portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'remetente', 1)").bind(id, remetenteId),
-      portalDb(c).prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'destinatario', 0)").bind(id, destinatarioId),
+    await c.env.SHARE_DB.batch([
+      c.env.SHARE_DB.prepare('INSERT INTO mensagens (id, remetente_id, destinatario_id, assunto, conteudo, anexos_mensagens) VALUES (?, ?, ?, ?, ?, ?)').bind(id, remetenteId, destinatarioId, String(body.assunto || '').trim() || null, conteudoFinal, JSON.stringify(anexos)),
+      c.env.SHARE_DB.prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'remetente', 1)").bind(id, remetenteId),
+      c.env.SHARE_DB.prepare("INSERT INTO mensagens_usuario (mensagem_id, usuario_id, papel, lida) VALUES (?, ?, 'destinatario', 0)").bind(id, destinatarioId),
     ])
 
     return c.json({ success: true, id, destinatario_id: destinatarioId, anexos: anexosMensagemPublicos(anexos), message: 'Mensagem enviada com sucesso' }, 201)
@@ -2287,7 +2287,7 @@ app.get('/api/mensagens/unread-count', async (c) => {
   const usuarioId = user.id
   try {
     await prepararEstadosMensagens(c, usuarioId)
-    const result = await portalDb(c).prepare("SELECT COUNT(*) AS unread FROM mensagens_usuario WHERE usuario_id = ?1 AND papel = 'destinatario' AND lida = 0 AND excluida = 0 AND arquivada = 0").bind(usuarioId).first<{ unread: number }>()
+    const result = await c.env.SHARE_DB.prepare("SELECT COUNT(*) AS unread FROM mensagens_usuario WHERE usuario_id = ?1 AND papel = 'destinatario' AND lida = 0 AND excluida = 0 AND arquivada = 0").bind(usuarioId).first<{ unread: number }>()
     return c.json({ unread: Number(result?.unread || 0) })
   } catch (e: any) {
     log.error('[mensagens:unread-count]', e.message)
@@ -2302,7 +2302,7 @@ app.patch('/api/mensagens/:id/estado', async (c) => {
   const mensagemId = c.req.param('id')
   try {
     await prepararEstadosMensagens(c, usuarioId)
-    const estado = await portalDb(c).prepare('SELECT mensagem_id FROM mensagens_usuario WHERE mensagem_id = ?1 AND usuario_id = ?2').bind(mensagemId, usuarioId).first()
+    const estado = await c.env.SHARE_DB.prepare('SELECT mensagem_id FROM mensagens_usuario WHERE mensagem_id = ?1 AND usuario_id = ?2').bind(mensagemId, usuarioId).first()
     if (!estado) return c.json({ error: 'Mensagem não encontrada ou sem permissão' }, 404)
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const campos: string[] = []
@@ -2312,7 +2312,7 @@ app.patch('/api/mensagens/:id/estado', async (c) => {
     }
     if (!campos.length) return c.json({ error: 'nenhuma_atualizacao' }, 400)
     campos.push('atualizado_em = CURRENT_TIMESTAMP')
-    await portalDb(c).prepare(`UPDATE mensagens_usuario SET ${campos.join(', ')} WHERE mensagem_id = ? AND usuario_id = ?`).bind(...valores, mensagemId, usuarioId).run()
+    await c.env.SHARE_DB.prepare(`UPDATE mensagens_usuario SET ${campos.join(', ')} WHERE mensagem_id = ? AND usuario_id = ?`).bind(...valores, mensagemId, usuarioId).run()
     return c.json({ success: true, mensagem_id: mensagemId })
   } catch (e: any) {
     log.error('[mensagens:estado]', e.message)
@@ -2328,14 +2328,14 @@ app.get('/api/mensagens/:id', async (c) => {
   const id = c.req.param('id')
   try {
     await prepararEstadosMensagens(c, usuarioId)
-    const msg = await portalDb(c).prepare(`
+    const msg = await c.env.SHARE_DB.prepare(`
       SELECT m.*, e.papel, e.lida, e.favorita, e.arquivada, e.excluida
       FROM mensagens m INNER JOIN mensagens_usuario e ON e.mensagem_id = m.id AND e.usuario_id = ?
       WHERE m.id = ? AND e.excluida = 0
     `).bind(usuarioId, id).first<any>()
     if (!msg) return c.json({ error: 'Mensagem não encontrada' }, 404)
     if (msg.papel === 'destinatario' && !msg.lida) {
-      await portalDb(c).prepare('UPDATE mensagens_usuario SET lida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ?').bind(id, usuarioId).run()
+      await c.env.SHARE_DB.prepare('UPDATE mensagens_usuario SET lida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ?').bind(id, usuarioId).run()
       msg.lida = 1
     }
     msg.anexos = anexosMensagemPublicos(msg.anexos_mensagens)
@@ -2355,7 +2355,7 @@ app.delete('/api/mensagens/:id', async (c) => {
   const id = c.req.param('id')
   try {
     await prepararEstadosMensagens(c, usuarioId)
-    const res = await portalDb(c).prepare('UPDATE mensagens_usuario SET excluida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ? AND excluida = 0').bind(id, usuarioId).run()
+    const res = await c.env.SHARE_DB.prepare('UPDATE mensagens_usuario SET excluida = 1, atualizado_em = CURRENT_TIMESTAMP WHERE mensagem_id = ? AND usuario_id = ? AND excluida = 0').bind(id, usuarioId).run()
     if (!res.meta.changes) return c.json({ error: 'Mensagem não encontrada ou sem permissão' }, 404)
     return c.json({ success: true, message: 'Mensagem movida para a lixeira' })
   } catch (e: any) {
@@ -2368,7 +2368,7 @@ app.get('/api/mensagens/:id/anexos/:anexoId', async (c) => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'Não autorizado' }, 401)
   const mensagemId = c.req.param('id')
-  const mensagemComAnexos = await portalDb(c).prepare(`
+  const mensagemComAnexos = await c.env.SHARE_DB.prepare(`
     SELECT m.anexos_mensagens
     FROM mensagens m
     INNER JOIN mensagens_usuario mu ON mu.mensagem_id = m.id AND mu.usuario_id = ?1 AND mu.excluida = 0
@@ -2655,10 +2655,6 @@ const PORTAL_SESSION_TTL = 8 * 60 * 60
 // O workerd em produção limita PBKDF2 a 100.000 iterações.
 const PORTAL_PBKDF2_ITERATIONS = 100_000
 
-function portalDb(c: Context<{ Bindings: Bindings }>): D1Database {
-  return c.env.SHARE_DB
-}
-
 async function garantirTabelasAuxiliares(c: Context<{ Bindings: Bindings }>): Promise<void> {
   // mensagens_usuario tem chave composta (mensagem_id, usuario_id), não uma
   // coluna id. email_templates não pertence ao schema atual de mensagens.
@@ -2749,7 +2745,7 @@ async function portalClientId(c: Context<{ Bindings: Bindings }>, user: PortalUs
 }
 
 async function portalContext(c: Context<{ Bindings: Bindings }>, user: PortalUser) {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const clienteId = await portalClientId(c, user)
   const [cliente, socio, participacoes] = await Promise.all([
     clienteId
@@ -2766,7 +2762,7 @@ async function portalContext(c: Context<{ Bindings: Bindings }>, user: PortalUse
 
 async function portalTelegram(c: Context<{ Bindings: Bindings }>, message: string): Promise<void> {
   if (!c.env.TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN não configurado')
-  const company = await portalDb(c).prepare('SELECT telegram_chat_id FROM empresa ORDER BY criado_em LIMIT 1').first<{ telegram_chat_id: string | null }>()
+  const company = await c.env.SHARE_DB.prepare('SELECT telegram_chat_id FROM empresa ORDER BY criado_em LIMIT 1').first<{ telegram_chat_id: string | null }>()
   const chatId = company?.telegram_chat_id?.trim()
   if (!chatId) throw new Error('telegram_chat_id não configurado')
   const response = await fetch(`https://api.telegram.org/bot${encodeURIComponent(c.env.TELEGRAM_BOT_TOKEN)}/sendMessage`, {
@@ -2795,7 +2791,7 @@ function diasDoPeriodo(dataInicio: string, dataFim: string): number {
 app.get('/api/colaborador/perfil', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [pagamentos, documentos, funcoes, ferias, aprovacoesRelatorios] = await Promise.all([
     db.prepare("SELECT id, descricao, NULL AS competencia, COALESCE(data_pagamento, data_emissao, data_vencimento) AS data_pagamento, ROUND(valor_centavos / 100.0, 2) AS valor, status, observacoes FROM lancamentos WHERE (pago_por = ?1 OR criado_por = ?1) AND lower(status) <> 'cancelado' ORDER BY date(COALESCE(data_pagamento, data_emissao, data_vencimento)) DESC, criado_em DESC").bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] pagamentos indisponíveis', error); return { results: [] } }),
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] documentos indisponíveis', error); return { results: [] } }),
@@ -2836,8 +2832,8 @@ app.patch('/api/colaborador/perfil', async c => {
   const updates = fields.filter(field => body[field] !== undefined).map(field => ({ field, value: body[field] === null ? null : String(body[field]).trim() }))
   if (updates.length === 0) return c.json({ perfil: colaborador })
   const assignments = updates.map(({ field }) => `${field} = ?`).join(', ')
-  await portalDb(c).prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
-  const updated = await portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(colaborador.id).first<Colaborador>()
+  await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
+  const updated = await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(colaborador.id).first<Colaborador>()
   return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 } })
 })
 
@@ -2861,7 +2857,7 @@ app.post('/api/colaborador/foto', async c => {
   const file = fileValue as File
   try {
     const key = await salvarArquivoColaborador(c, colaborador.id, file, 'avatar_profiles')
-    await portalDb(c).prepare('UPDATE user_profiles SET url_avatar = ?, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?').bind(key, colaborador.id).run()
+    await c.env.SHARE_DB.prepare('UPDATE user_profiles SET url_avatar = ?, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?').bind(key, colaborador.id).run()
     return c.json({ foto_url: '/api/colaborador/foto' })
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_foto' }, 400)
@@ -2871,7 +2867,7 @@ app.post('/api/colaborador/foto', async c => {
 app.get('/api/colaborador/documentos', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all()
+  const result = await c.env.SHARE_DB.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all()
   return c.json(result.results.map(row => documentoColaborador(row as Record<string, unknown>)))
 })
 
@@ -2887,7 +2883,7 @@ app.post('/api/colaborador/documentos', async c => {
   try {
     const key = await salvarArquivoColaborador(c, colaborador.id, file, 'documentos_colaboradores')
     const id = uuid()
-    await portalDb(c).prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, file.name, key, file.type, file.size, colaborador.id, categoria).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, file.name, key, file.type, file.size, colaborador.id, categoria).run()
     return c.json({ id, tipo_documento: categoria, nome_arquivo: file.name, status: 'em_analise', arquivo_url: `/api/colaborador/documentos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_documento' }, 400)
@@ -2897,7 +2893,7 @@ app.post('/api/colaborador/documentos', async c => {
 app.get('/api/colaborador/documentos/:id/arquivo', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const documento = await portalDb(c).prepare('SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), colaborador.id).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()
+  const documento = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), colaborador.id).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()
   if (!documento) return c.notFound()
   const object = await bucketParaChaveColaborador(c, documento.caminho_arquivo).get(documento.caminho_arquivo)
   if (!object) return c.notFound()
@@ -2908,7 +2904,7 @@ app.get('/api/colaborador/documentos/:id/arquivo', async c => {
 app.get('/api/colaborador/ferias', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all()
+  const result = await c.env.SHARE_DB.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all()
   return c.json(result.results)
 })
 
@@ -2920,10 +2916,10 @@ app.post('/api/colaborador/ferias', async c => {
   const dataFim = body?.data_fim?.trim() || ''
   const quantidadeDias = diasDoPeriodo(dataInicio, dataFim)
   if (!quantidadeDias || quantidadeDias > 30) return c.json({ error: 'periodo_de_ferias_invalido' }, 400)
-  const saldo = await portalDb(c).prepare("SELECT COALESCE(SUM(quantidade_dias), 0) AS total FROM solicitacoes_ferias WHERE colaborador_id = ?1 AND status IN ('solicitada', 'aprovada')").bind(colaborador.id).first<{ total: number }>()
+  const saldo = await c.env.SHARE_DB.prepare("SELECT COALESCE(SUM(quantidade_dias), 0) AS total FROM solicitacoes_ferias WHERE colaborador_id = ?1 AND status IN ('solicitada', 'aprovada')").bind(colaborador.id).first<{ total: number }>()
   if (Number(saldo?.total || 0) + quantidadeDias > 30) return c.json({ error: 'saldo_de_ferias_insuficiente' }, 409)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO solicitacoes_ferias (id, colaborador_id, data_inicio, data_fim, quantidade_dias, observacoes) VALUES (?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, dataInicio, dataFim, quantidadeDias, body?.observacoes?.trim() || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO solicitacoes_ferias (id, colaborador_id, data_inicio, data_fim, quantidade_dias, observacoes) VALUES (?, ?, ?, ?, ?, ?)').bind(id, colaborador.id, dataInicio, dataFim, quantidadeDias, body?.observacoes?.trim() || null).run()
   return c.json({ id, data_inicio: dataInicio, data_fim: dataFim, quantidade_dias: quantidadeDias, status: 'solicitada' }, 201)
 })
 
@@ -2935,11 +2931,11 @@ app.post('/api/portal/login', async c => {
     const senha = body?.senha || ''
     if (!login || !senha) return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
 
-    const row = await portalDb(c).prepare('SELECT id, login, senha, nome_exibicao, url_avatar, cliente_id, socio_id FROM user_cliente WHERE lower(login) = ?1 LIMIT 1').bind(login).first<PortalUser & { senha: string }>()
+    const row = await c.env.SHARE_DB.prepare('SELECT id, login, senha, nome_exibicao, url_avatar, cliente_id, socio_id FROM user_cliente WHERE lower(login) = ?1 LIMIT 1').bind(login).first<PortalUser & { senha: string }>()
     const verification = row ? await portalVerifyPassword(senha, row.senha) : null
     if (!row || !verification?.valid) return c.json({ error: 'credenciais_invalidas' }, 401)
     if (Boolean(row.cliente_id) === Boolean(row.socio_id)) return c.json({ error: 'vinculo_usuario_invalido' }, 409)
-    if (verification.legacy) await portalDb(c).prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(senha), row.id).run()
+    if (verification.legacy) await c.env.SHARE_DB.prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(senha), row.id).run()
 
     const user: PortalUser = { id: row.id, login: row.login, nome_exibicao: row.nome_exibicao, url_avatar: row.url_avatar, cliente_id: row.cliente_id, socio_id: row.socio_id }
     return c.json({ user, ...(await portalCreateSession(user, c)) })
@@ -2966,7 +2962,7 @@ app.get('/api/portal/contexto', async c => {
 app.get('/api/portal/aerodromos', async c => {
   const query = (c.req.query('q') || '').trim().toLowerCase()
   const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
-  const result = await portalDb(c).prepare("SELECT id, nome, designativo_icao FROM aerodromo WHERE lower(nome) LIKE ?1 ESCAPE '\\' OR lower(designativo_icao) LIKE ?1 ESCAPE '\\' ORDER BY designativo_icao LIMIT 50").bind(pattern).all<{ id: string; nome: string; designativo_icao: string }>()
+  const result = await c.env.SHARE_DB.prepare("SELECT id, nome, designativo_icao FROM aerodromo WHERE lower(nome) LIKE ?1 ESCAPE '\\' OR lower(designativo_icao) LIKE ?1 ESCAPE '\\' ORDER BY designativo_icao LIMIT 50").bind(pattern).all<{ id: string; nome: string; designativo_icao: string }>()
   return c.json({ aerodromos: result.results })
 })
 
@@ -2974,8 +2970,8 @@ app.get('/api/portal/disponibilidade', async c => {
   const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
   const to = c.req.query('ate') || from
   const [aircraft, reservations] = await Promise.all([
-    portalDb(c).prepare("SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, status FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
-    portalDb(c).prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
+    c.env.SHARE_DB.prepare("SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, status FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
+    c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
   ])
   return c.json({ from, to, aeronave: aircraft.results, reservas: reservations.results })
 })
@@ -2984,7 +2980,7 @@ app.get('/api/portal/solicitacoes', async c => {
   const user = await portalSession(c)
   const clientId = user ? await portalClientId(c, user) : null
   if (!clientId) return c.json([])
-  const result = await portalDb(c).prepare("SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.cliente_id = ?1 ORDER BY s.criado_em DESC").bind(clientId).all()
+  const result = await c.env.SHARE_DB.prepare("SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.cliente_id = ?1 ORDER BY s.criado_em DESC").bind(clientId).all()
   return c.json(result.results)
 })
 
@@ -2994,11 +2990,11 @@ app.post('/api/portal/solicitacoes', async c => {
   if (!clientId) return c.json({ error: 'cliente_nao_vinculado' }, 409)
   const body = await c.req.json<Record<string, unknown>>().catch(() => null)
   if (!body || !body.aeronave_id || !body.origem || !body.destino || !body.data_agendada) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
-  const aircraft = await portalDb(c).prepare("SELECT id, status FROM aeronave WHERE id = ?1").bind(String(body.aeronave_id)).first<{ id: string; status: string }>()
+  const aircraft = await c.env.SHARE_DB.prepare("SELECT id, status FROM aeronave WHERE id = ?1").bind(String(body.aeronave_id)).first<{ id: string; status: string }>()
   if (!aircraft || aircraft.status.toLowerCase() !== 'ativa') return c.json({ error: 'aeronave_indisponivel' }, 409)
   const id = crypto.randomUUID()
-  await portalDb(c).prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), String(body.data_agendada), body.horario_previsto_agendamento ? String(body.horario_previsto_agendamento) : null, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
-  const row = await portalDb(c).prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
+  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), String(body.data_agendada), body.horario_previsto_agendamento ? String(body.horario_previsto_agendamento) : null, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
+  const row = await c.env.SHARE_DB.prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
   let notificationSent = true
   try {
     await portalTelegram(c, portalTelegramText(row || { ...body, id }, user?.nome_exibicao || 'Cliente'))
@@ -3026,13 +3022,13 @@ app.get('/api/interno/dashboard/operacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const dataReferencia = c.req.query('data') || new Date().toISOString().slice(0, 10)
   const [resumo, solicitacoes] = await Promise.all([
-    portalDb(c).prepare(`SELECT
+    c.env.SHARE_DB.prepare(`SELECT
       SUM(CASE WHEN date(data_agendada) = ?1 THEN 1 ELSE 0 END) AS voos_hoje,
       SUM(CASE WHEN status = 'pendente' THEN 1 ELSE 0 END) AS pendencias,
       COUNT(*) AS reservas_abertas
       FROM solicitacoes_reserva_voo
       WHERE date(data_agendada) >= ?1 AND status IN ('pendente', 'aprovada')`).bind(dataReferencia).first<Record<string, number>>(),
-    portalDb(c).prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, hs.nome AS socio_nome, COALESCE((SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.socio_id = s.socio_id AND ca.codigo_cliente IS NOT NULL AND (ca.aeronave_id = s.aeronave_id OR s.aeronave_id IS NULL) ORDER BY CASE WHEN ca.aeronave_id = s.aeronave_id THEN 0 ELSE 1 END LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo
+    c.env.SHARE_DB.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, hs.nome AS socio_nome, COALESCE((SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.socio_id = s.socio_id AND ca.codigo_cliente IS NOT NULL AND (ca.aeronave_id = s.aeronave_id OR s.aeronave_id IS NULL) ORDER BY CASE WHEN ca.aeronave_id = s.aeronave_id THEN 0 ELSE 1 END LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo
       FROM solicitacoes_reserva_voo s
       LEFT JOIN cliente c ON c.id = s.cliente_id
       LEFT JOIN hold_socios hs ON hs.id = s.socio_id
@@ -3041,7 +3037,7 @@ app.get('/api/interno/dashboard/operacoes', async c => {
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em
       LIMIT 50`).bind(dataReferencia).all(),
   ])
-  const aeronavesAtivas = await portalDb(c).prepare("SELECT COUNT(*) AS total FROM aeronave WHERE lower(status) = 'ativa'").first<{ total: number }>()
+  const aeronavesAtivas = await c.env.SHARE_DB.prepare("SELECT COUNT(*) AS total FROM aeronave WHERE lower(status) = 'ativa'").first<{ total: number }>()
   return c.json({ data_referencia: dataReferencia, resumo: { voos_hoje: Number(resumo?.voos_hoje || 0), pendencias: Number(resumo?.pendencias || 0), reservas_abertas: Number(resumo?.reservas_abertas || 0), aeronave_ativas: Number(aeronavesAtivas?.total || 0) }, solicitacoes: solicitacoes.results })
 })
 
@@ -3064,7 +3060,7 @@ function diarioBoolean(value: unknown): number {
 }
 
 async function recalcularDiarioMes(c: Context<{ Bindings: Bindings }>, diarioMesId: string): Promise<void> {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const diario = await db.prepare('SELECT id, celula_anterior_ttotal, celula_prox_revisao_ttotal, celula_anterior_tvoo, celula_prox_revisao_tvoo FROM diario_mes WHERE id = ?1').bind(diarioMesId).first<any>()
   if (!diario) return
   const totais = await db.prepare(`SELECT COALESCE(SUM(tempo_total), 0) AS tempo_total, COALESCE(SUM(tempo_voo), 0) AS tempo_voo
@@ -3083,7 +3079,7 @@ async function recalcularDiarioMes(c: Context<{ Bindings: Bindings }>, diarioMes
 
 app.get('/api/interno/diario-bordo/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [clientes, holdings, socios, tripulacao, freelancers, aerodromos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente, proprietario FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, proprietario FROM holdings WHERE COALESCE(ativo, 1) = 1 ORDER BY nome").all(),
@@ -3099,7 +3095,7 @@ app.get('/api/interno/diario-bordo/resumo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const ano = Number(c.req.query('ano') || new Date().getFullYear())
   if (!Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'ano_invalido' }, 400)
-  const rows = await portalDb(c).prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.consumo_combustivel,
+  const rows = await c.env.SHARE_DB.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.consumo_combustivel,
       COALESCE((SELECT SUM(l.tempo_total) FROM lancamentos_diario_bordo l WHERE l.aeronave_id = a.id AND strftime('%Y', l.data_registro) = ?1), 0) AS horas_ano,
       COALESCE(dm.celula_atual_ttotal, 0) AS celula_atual_ttotal,
       COALESCE(dm.celula_prox_revisao_ttotal, 0) AS celula_prox_revisao_ttotal,
@@ -3119,7 +3115,7 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
   const mes = Number(c.req.query('mes') || new Date().getMonth() + 1)
   if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
   if (!Number.isInteger(ano) || !Number.isInteger(mes) || mes < 1 || mes > 12) return c.json({ error: 'periodo_invalido' }, 400)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   await garantirTabelaAbastecimentos(c)
   const aeronave = await db.prepare('SELECT id, matricula_registro, fabricante, modelo, status, consumo_combustivel, base FROM aeronave WHERE id = ?1').bind(aeronaveId).first<any>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
@@ -3174,7 +3170,7 @@ app.post('/api/interno/diario-bordo/mes', async c => {
   const modoCelula = body.modo_celula === 'tvoo' ? 'tvoo' : body.modo_celula === 'tempo_total' ? 'tempo_total' : null
   if (!aeronaveId || !Number.isInteger(ano) || ano < 2000 || ano > 2100 || !Number.isInteger(mes) || mes < 1 || mes > 12) return c.json({ error: 'aeronave_e_periodo_obrigatorios' }, 400)
   if (!modoCelula) return c.json({ error: 'modo_celula_invalido' }, 400)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const aeronave = await db.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
   const existing = await db.prepare('SELECT id FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<{ id: string }>()
@@ -3205,10 +3201,10 @@ app.patch('/api/interno/diario-bordo/mes/:id', async c => {
   }
   const updates = Object.keys(allowed).filter(field => body[field] !== undefined)
   if (updates.length === 0) return c.json({ error: 'nenhum_campo_informado' }, 400)
-  const result = await portalDb(c).prepare(`UPDATE diario_mes SET ${updates.map(field => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...updates.map(field => allowed[field](body[field])), id).run()
+  const result = await c.env.SHARE_DB.prepare(`UPDATE diario_mes SET ${updates.map(field => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...updates.map(field => allowed[field](body[field])), id).run()
   if (!result.meta.changes) return c.notFound()
   await recalcularDiarioMes(c, id)
-  const updated = await portalDb(c).prepare('SELECT * FROM diario_mes WHERE id = ?1').bind(id).first()
+  const updated = await c.env.SHARE_DB.prepare('SELECT * FROM diario_mes WHERE id = ?1').bind(id).first()
   return c.json(updated)
 })
 
@@ -3219,15 +3215,15 @@ const DIARIO_LANCAMENTO_FIELDS = [
 async function nomeAerodromoDiario(c: Context<{ Bindings: Bindings }>, valor: string): Promise<string> {
   const codigo = String(valor || '').trim().toUpperCase()
   if (!codigo) return codigo
-  const item = await portalDb(c).prepare('SELECT nome FROM aerodromo WHERE upper(designativo_icao) = ?1 LIMIT 1').bind(codigo).first<{ nome: string }>()
+  const item = await c.env.SHARE_DB.prepare('SELECT nome FROM aerodromo WHERE upper(designativo_icao) = ?1 LIMIT 1').bind(codigo).first<{ nome: string }>()
   return item?.nome?.trim() || codigo
 }
 async function nomeTripulantePorCanac(c: Context<{ Bindings: Bindings }>, canac: string): Promise<string | null> {
   const codigo = String(canac || '').trim().toUpperCase()
   if (!codigo) return null
-  const tripulante = await portalDb(c).prepare('SELECT nome_completo FROM tripulacao WHERE upper(canac) = ?1 LIMIT 1').bind(codigo).first<{ nome_completo: string | null }>()
+  const tripulante = await c.env.SHARE_DB.prepare('SELECT nome_completo FROM tripulacao WHERE upper(canac) = ?1 LIMIT 1').bind(codigo).first<{ nome_completo: string | null }>()
   if (tripulante?.nome_completo) return tripulante.nome_completo
-  const freelancer = await portalDb(c).prepare('SELECT nome_completo FROM tripulacao_freelancer WHERE upper(canac) = ?1 LIMIT 1').bind(codigo).first<{ nome_completo: string | null }>()
+  const freelancer = await c.env.SHARE_DB.prepare('SELECT nome_completo FROM tripulacao_freelancer WHERE upper(canac) = ?1 LIMIT 1').bind(codigo).first<{ nome_completo: string | null }>()
   return freelancer?.nome_completo || null
 }
 
@@ -3271,7 +3267,7 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const diarioMesId = String(body.diario_mes_id || '').trim()
   const data = diarioDate(body.data_registro)
   if (!aeronaveId || !diarioMesId || !/^\d{4}-\d{2}-\d{2}$/.test(data) || !body.aerodromo_partida?.trim() || !body.aerodromo_chegada?.trim() || !body.pic_canac?.trim() || !body.natureza_voo?.trim()) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [aeronave, diario] = await Promise.all([
     db.prepare('SELECT id, consumo_combustivel FROM aeronave WHERE id = ?1').bind(aeronaveId).first<any>(),
     db.prepare('SELECT id, aeronave_id, ano, mes, fechado, celula_atual_ttotal, celula_atual_tvoo FROM diario_mes WHERE id = ?1').bind(diarioMesId).first<any>(),
@@ -3300,7 +3296,7 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const id = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const current = await db.prepare(`SELECT l.*, dm.fechado, dm.ano AS diario_ano, dm.mes AS diario_mes FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1`).bind(id).first<any>()
   if (!current) return c.notFound()
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
@@ -3324,10 +3320,10 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
 app.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const id = c.req.param('id')
-  const current = await portalDb(c).prepare('SELECT l.diario_mes_id, dm.fechado FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1').bind(id).first<{ diario_mes_id: string; fechado: number }>()
+  const current = await c.env.SHARE_DB.prepare('SELECT l.diario_mes_id, dm.fechado FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1').bind(id).first<{ diario_mes_id: string; fechado: number }>()
   if (!current) return c.notFound()
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
-  const result = await portalDb(c).prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).run()
   if (!result.meta.changes) return c.notFound()
   await recalcularDiarioMes(c, current.diario_mes_id)
   return c.json({ success: true })
@@ -3344,9 +3340,9 @@ type TripulanteDisponivel = {
 }
 
 async function buscarTripulante(c: Context<{ Bindings: Bindings }>, id: string): Promise<TripulanteDisponivel | null> {
-  const tripulante = await portalDb(c).prepare('SELECT id, nome_completo, canac, status, tipo_licenca FROM tripulacao WHERE id = ?1').bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
+  const tripulante = await c.env.SHARE_DB.prepare('SELECT id, nome_completo, canac, status, tipo_licenca FROM tripulacao WHERE id = ?1').bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
   if (tripulante) return { ...tripulante, origem: 'tripulacao' }
-  const freelancer = await portalDb(c).prepare('SELECT id, nome_completo, canac, status, NULL AS tipo_licenca FROM tripulacao_freelancer WHERE id = ?1').bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
+  const freelancer = await c.env.SHARE_DB.prepare('SELECT id, nome_completo, canac, status, NULL AS tipo_licenca FROM tripulacao_freelancer WHERE id = ?1').bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
   return freelancer ? { ...freelancer, origem: 'freelancer' } : null
 }
 
@@ -3368,10 +3364,10 @@ async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>
   if (!tripulante) return 'tripulante_nao_encontrado'
   if (tripulante.origem === 'freelancer') return null
   const hoje = new Date().toISOString().slice(0, 10)
-  const habilitacoes = await portalDb(c).prepare('SELECT tipo_habilitacao, data_validade, validade_cma FROM habilitacoes_tripulante WHERE tripulacao_id = ?1').bind(tripulanteId).all<{ tipo_habilitacao: string; data_validade: string | null; validade_cma: string | null }>()
+  const habilitacoes = await c.env.SHARE_DB.prepare('SELECT tipo_habilitacao, data_validade, validade_cma FROM habilitacoes_tripulante WHERE tripulacao_id = ?1').bind(tripulanteId).all<{ tipo_habilitacao: string; data_validade: string | null; validade_cma: string | null }>()
   const cma = habilitacoes.results.find((item) => item.validade_cma)
   if (!cma?.validade_cma || cma.validade_cma < hoje) return 'cma_vencido_ou_nao_cadastrado'
-  const aeronave = await portalDb(c).prepare('SELECT numero_motores, modelo FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ numero_motores: number | null; modelo: string }>()
+  const aeronave = await c.env.SHARE_DB.prepare('SELECT numero_motores, modelo FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ numero_motores: number | null; modelo: string }>()
   if (Number(aeronave?.numero_motores || 0) >= 2) {
     const mlte = habilitacoes.results.find((item) => /(^|[^A-Z])MLTE([^A-Z]|$)/i.test(item.tipo_habilitacao || '') && (!item.data_validade || item.data_validade >= hoje))
     if (!mlte) return 'habilitacao_mlte_necessaria'
@@ -3381,7 +3377,7 @@ async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>
 
 app.get('/api/interno/tripulacao/gestao', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [tripulantes, habilitacoes, freelancers, aeronave] = await Promise.all([
     db.prepare(`SELECT t.id, t.user_id, t.canac, t.nome_completo, t.status, t.tipo_licenca, up.email, up.telefone, up.url_avatar, up.departamento FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id ORDER BY t.nome_completo`).all(),
     db.prepare('SELECT * FROM habilitacoes_tripulante ORDER BY data_validade, validade_cma').all(),
@@ -3394,7 +3390,7 @@ app.get('/api/interno/tripulacao/gestao', async c => {
 app.patch('/api/interno/tripulacao/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ canac?: string; nome_completo?: string; status?: string; tipo_licenca?: string }>().catch(() => ({} as any))
-  const result = await portalDb(c).prepare('UPDATE tripulacao SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), status = COALESCE(?3, status), tipo_licenca = COALESCE(?4, tipo_licenca) WHERE id = ?5').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.status?.trim() || null, body.tipo_licenca?.trim() || null, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE tripulacao SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), status = COALESCE(?3, status), tipo_licenca = COALESCE(?4, tipo_licenca) WHERE id = ?5').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.status?.trim() || null, body.tipo_licenca?.trim() || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -3403,17 +3399,17 @@ app.post('/api/interno/tripulacao/:id/habilitacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string; classe_cma?: string; validade_cma?: string; fs_rh?: string }>().catch(() => ({} as any))
   if (!body.tipo_habilitacao?.trim()) return c.json({ error: 'tipo_habilitacao_obrigatorio' }, 400)
-  const tripulante = await portalDb(c).prepare('SELECT id FROM tripulacao WHERE id = ?1').bind(c.req.param('id')).first()
+  const tripulante = await c.env.SHARE_DB.prepare('SELECT id FROM tripulacao WHERE id = ?1').bind(c.req.param('id')).first()
   if (!tripulante) return c.notFound()
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO habilitacoes_tripulante (id, tripulacao_id, tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.tipo_habilitacao.trim(), body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO habilitacoes_tripulante (id, tripulacao_id, tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.tipo_habilitacao.trim(), body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null).run()
   return c.json({ id, ...body }, 201)
 })
 
 app.patch('/api/interno/tripulacao/habilitacoes/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string | null; classe_cma?: string | null; validade_cma?: string | null; fs_rh?: string | null }>().catch(() => ({} as any))
-  const result = await portalDb(c).prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = COALESCE(?1, tipo_habilitacao), data_validade = ?2, classe_cma = ?3, validade_cma = ?4, fs_rh = ?5 WHERE id = ?6').bind(body.tipo_habilitacao?.trim() || null, body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = COALESCE(?1, tipo_habilitacao), data_validade = ?2, classe_cma = ?3, validade_cma = ?4, fs_rh = ?5 WHERE id = ?6').bind(body.tipo_habilitacao?.trim() || null, body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -3423,14 +3419,14 @@ app.post('/api/interno/tripulacao-freelancer', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
   if (!body.nome_completo?.trim() || !body.canac?.trim()) return c.json({ error: 'nome_e_canac_obrigatorios' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO tripulacao_freelancer (id, canac, nome_completo, data_nascimento, url_avatar, status, rg, cpf, endereco, cidade, uf, telefone, aeronave_id, observacao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.canac.trim(), body.nome_completo.trim(), body.data_nascimento || null, body.url_avatar || null, body.status || 'ativo', body.rg || null, body.cpf || null, body.endereco || null, body.cidade || null, body.uf || null, body.telefone || null, body.aeronave_id || null, body.observacao || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO tripulacao_freelancer (id, canac, nome_completo, data_nascimento, url_avatar, status, rg, cpf, endereco, cidade, uf, telefone, aeronave_id, observacao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.canac.trim(), body.nome_completo.trim(), body.data_nascimento || null, body.url_avatar || null, body.status || 'ativo', body.rg || null, body.cpf || null, body.endereco || null, body.cidade || null, body.uf || null, body.telefone || null, body.aeronave_id || null, body.observacao || null).run()
   return c.json({ id, ...body, origem: 'freelancer' }, 201)
 })
 
 app.patch('/api/interno/tripulacao-freelancer/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
-  const result = await portalDb(c).prepare('UPDATE tripulacao_freelancer SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), telefone = ?3, aeronave_id = ?4, observacao = ?5, status = COALESCE(?6, status) WHERE id = ?7').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.telefone || null, body.aeronave_id || null, body.observacao || null, body.status || null, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE tripulacao_freelancer SET canac = COALESCE(?1, canac), nome_completo = COALESCE(?2, nome_completo), telefone = ?3, aeronave_id = ?4, observacao = ?5, status = COALESCE(?6, status) WHERE id = ?7').bind(body.canac?.trim() || null, body.nome_completo?.trim() || null, body.telefone || null, body.aeronave_id || null, body.observacao || null, body.status || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -3442,7 +3438,7 @@ app.get('/api/interno/tripulacao/horas', async c => {
   const fim = c.req.query('fim') || (/^\d{4}-\d{2}$/.test(mes || '') ? `${mes}-31` : '2999-12-31')
   const aircraft = c.req.query('aeronave_id') || ''
   const query = aircraft ? 'SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE date(l.data_registro) BETWEEN ?1 AND ?2 AND l.aeronave_id = ?3 ORDER BY date(l.data_registro) DESC' : 'SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE date(l.data_registro) BETWEEN ?1 AND ?2 ORDER BY date(l.data_registro) DESC'
-  const result = aircraft ? await portalDb(c).prepare(query).bind(inicio, fim, aircraft).all<any>() : await portalDb(c).prepare(query).bind(inicio, fim).all<any>()
+  const result = aircraft ? await c.env.SHARE_DB.prepare(query).bind(inicio, fim, aircraft).all<any>() : await c.env.SHARE_DB.prepare(query).bind(inicio, fim).all<any>()
   const totals = new Map<string, any>(); const voos = result.results.map((row: any) => ({ id: row.id, data_registro: row.data_registro, matricula_registro: row.matricula_registro, pic_canac: row.pic_canac, pic_nome: row.pic_nome, sic_canac: row.sic_canac, sic_nome: row.sic_nome, tempo_voo: Number(row.tempo_voo || row.tempo_total || 0), horas_diurnas: Number(row.horas_diurnas || 0), horas_noturnas: Number(row.horas_noturnas || 0), tempo_ifr: Number(row.tempo_ifr || 0) }))
   const add = (canac: string | null, nome: string | null, role: 'PIC' | 'SIC', row: any) => { if (!canac && !nome) return; const key = `${role}:${canac || nome}`; const current = totals.get(key) || { canac: canac || null, nome: nome || canac || 'Tripulante', funcao: role, horas_totais: 0, horas_pic: 0, horas_sic: 0, horas_diurnas: 0, horas_noturnas: 0, horas_ifr: 0, voos: 0 }; current.horas_totais += row.tempo_voo; current[`horas_${role.toLowerCase()}`] += row.tempo_voo; current.horas_diurnas += row.horas_diurnas; current.horas_noturnas += row.horas_noturnas; current.horas_ifr += row.tempo_ifr; current.voos += 1; totals.set(key, current) }
   for (const row of voos) { add(row.pic_canac, row.pic_nome, 'PIC', row); add(row.sic_canac, row.sic_nome, 'SIC', row) }
@@ -3453,7 +3449,7 @@ app.get('/api/interno/tripulacao/horas', async c => {
 app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
-  const rows = await portalDb(c).prepare(`SELECT id, numero_voo, adep, ades, data_voo, eobt, payload_json, criado_em AS created_at FROM planos_voo ORDER BY criado_em DESC LIMIT 50`).all<any>()
+  const rows = await c.env.SHARE_DB.prepare(`SELECT id, numero_voo, adep, ades, data_voo, eobt, payload_json, criado_em AS created_at FROM planos_voo ORDER BY criado_em DESC LIMIT 50`).all<any>()
   return c.json(rows.results.map(row => ({ ...row, payload: JSON.parse(row.payload_json) })))
 })
 
@@ -3469,14 +3465,14 @@ app.post('/api/interno/planos-voo', async c => {
   const numeroVoo = body?.numero_voo ? String(body.numero_voo).trim() : null
   const dataVoo = body?.data_voo ? String(body.data_voo).trim() : null
   const eobt = body?.eobt ? String(body.eobt).trim() : null
-  await portalDb(c).prepare(`INSERT INTO planos_voo (id, numero_voo, adep, ades, data_voo, eobt, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+  await c.env.SHARE_DB.prepare(`INSERT INTO planos_voo (id, numero_voo, adep, ades, data_voo, eobt, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, numeroVoo, adep, ades, dataVoo, eobt, JSON.stringify(body)).run()
   return c.json({ id, created_at: new Date().toISOString() }, 201)
 })
 
 app.get('/api/interno/agendamento/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [clientes, socios, aeronave, vinculos] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome").all(),
@@ -3494,7 +3490,7 @@ app.get('/api/interno/agendamento', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const inicio = c.req.query('inicio') || new Date().toISOString().slice(0, 10)
   const fim = c.req.query('fim') || inicio.slice(0, 7) + '-31'
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [agendamentos, aeronave, tripulacao, freelancers, disponibilidades] = await Promise.all([
     db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id, c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, cae.codigo_cliente, c.codigo_cliente, ca.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status
       FROM solicitacoes_reserva_voo s
@@ -3553,7 +3549,7 @@ app.post('/api/interno/agendamento/disponibilidade', async c => {
   const tripulante = await buscarTripulante(c, tripulanteId)
   if (!tripulante) return c.json({ error: 'tripulante_nao_encontrado' }, 404)
   const id = uuid()
-  await portalDb(c).prepare(`INSERT INTO escala_tripulacao (id, tripulacao_id, data_inicio, data_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?)`)
+  await c.env.SHARE_DB.prepare(`INSERT INTO escala_tripulacao (id, tripulacao_id, data_inicio, data_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?)`)
     .bind(id, tripulante.id, dataInicio, dataFim, status, body?.observacoes?.trim() || null).run()
   return c.json({ id, ...body, tripulante_origem: tripulante.origem, tripulante_nome: tripulante.nome_completo }, 201)
 })
@@ -3574,10 +3570,10 @@ app.post('/api/interno/agendamento', async c => {
   const fimMs = Date.parse(`${dataFim}T00:00:00Z`)
   const diasDuracao = Math.floor((fimMs - inicioMs) / 86_400_000) + 1
   if (!Number.isFinite(diasDuracao) || diasDuracao < 1) return c.json({ error: 'periodo_invalido' }, 400)
-  const aeronave = await portalDb(c).prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string }>()
+  const aeronave = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string }>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_disponivel' }, 409)
-  const cliente = body?.cliente_id ? await portalDb(c).prepare('SELECT id, codigo_cliente FROM cliente WHERE id = ?1').bind(body.cliente_id).first<{ id: string; codigo_cliente: string | null }>() : null
-  const socio = body?.socio_id ? await portalDb(c).prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; cotista_id: string; holding_id: string | null }>() : null
+  const cliente = body?.cliente_id ? await c.env.SHARE_DB.prepare('SELECT id, codigo_cliente FROM cliente WHERE id = ?1').bind(body.cliente_id).first<{ id: string; codigo_cliente: string | null }>() : null
+  const socio = body?.socio_id ? await c.env.SHARE_DB.prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; cotista_id: string; holding_id: string | null }>() : null
   if (!cliente && !socio) return c.json({ error: 'cliente_ou_socio_obrigatorio' }, 400)
   if (cliente && socio) return c.json({ error: 'selecione_cliente_ou_socio' }, 400)
   const clienteId = cliente?.id || null
@@ -3586,13 +3582,13 @@ app.post('/api/interno/agendamento', async c => {
   if (clienteEmprestimoId && socioEmprestimoId) return c.json({ error: 'selecione_apenas_um_cedente' }, 400)
   if (clienteEmprestimoId && clienteEmprestimoId === clienteId) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
   if (socioEmprestimoId && socioEmprestimoId === socio?.id) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
-  const cedenteCliente = clienteEmprestimoId ? await portalDb(c).prepare('SELECT id FROM cliente WHERE id = ?1').bind(clienteEmprestimoId).first<{ id: string }>() : null
-  const cedenteSocio = socioEmprestimoId ? await portalDb(c).prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(socioEmprestimoId).first<{ id: string; cotista_id: string; holding_id: string | null }>() : null
+  const cedenteCliente = clienteEmprestimoId ? await c.env.SHARE_DB.prepare('SELECT id FROM cliente WHERE id = ?1').bind(clienteEmprestimoId).first<{ id: string }>() : null
+  const cedenteSocio = socioEmprestimoId ? await c.env.SHARE_DB.prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(socioEmprestimoId).first<{ id: string; cotista_id: string; holding_id: string | null }>() : null
   if (clienteEmprestimoId && !cedenteCliente) return c.json({ error: 'cliente_emprestimo_nao_encontrado' }, 400)
   if (socioEmprestimoId && !cedenteSocio) return c.json({ error: 'socio_emprestimo_nao_encontrado' }, 400)
-  const vinculoTitular = await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteId, socio?.id || null).first<{ codigo_cliente: string }>()
+  const vinculoTitular = await c.env.SHARE_DB.prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteId, socio?.id || null).first<{ codigo_cliente: string }>()
   const vinculoCedente = clienteEmprestimoId || socioEmprestimoId
-    ? await portalDb(c).prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteEmprestimoId || null, socioEmprestimoId).first<{ codigo_cliente: string }>()
+    ? await c.env.SHARE_DB.prepare('SELECT codigo_cliente FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) AND codigo_cliente IS NOT NULL LIMIT 1').bind(aeronaveId, clienteEmprestimoId || null, socioEmprestimoId).first<{ codigo_cliente: string }>()
     : null
   const codigoCliente = (vinculoTitular?.codigo_cliente || vinculoCedente?.codigo_cliente || '').trim().toUpperCase()
   if (!codigoCliente) return c.json({ error: 'aeronave_sem_codigo_cotista' }, 409)
@@ -3607,7 +3603,7 @@ app.post('/api/interno/agendamento', async c => {
     if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
   }
   const id = uuid()
-  await portalDb(c).prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, cliente_emprestimo_id, socio_emprestimo_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  await c.env.SHARE_DB.prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, cliente_emprestimo_id, socio_emprestimo_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, clienteId, socio?.id || null, clienteEmprestimoId, socioEmprestimoId, aeronaveId, vooEmprestado, origem, destino, dataAgendada, body?.horario_previsto_agendamento?.trim() || null, diasDuracao, Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, null, null, null, null).run()
   return c.json({ id, status: 'pendente', numero_voo: null }, 201)
 })
@@ -3617,7 +3613,7 @@ app.delete('/api/interno/agendamento/:id', async c => {
   await garantirTabelaDisponibilidadeTripulacao(c)
   const id = c.req.param('id').trim()
   if (!id) return c.json({ error: 'agendamento_id_obrigatorio' }, 400)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const agendamento = await db.prepare('SELECT cliente_id, socio_id, status, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<{ cliente_id: string | null; socio_id: string | null; status: string | null; numero_voo: string | null }>()
   if (!agendamento) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
   await db.prepare('DELETE FROM escala_tripulacao WHERE solicitacao_id = ?1').bind(id).run().catch(() => undefined)
@@ -3640,9 +3636,9 @@ async function garantirTabelaChecklist(c: Context<{ Bindings: Bindings }>) {
 app.get('/api/interno/agendamento/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaChecklist(c)
-  const row = await portalDb(c).prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
+  const row = await c.env.SHARE_DB.prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
   if (!row) return c.json(null)
-  const alertas = row.alerta_id ? await portalDb(c).prepare('SELECT alerta1, alerta2, alerta3, alerta4, alerta5, alerta6, alerta7, alerta8, alerta9, alerta10 FROM alerta_checklist WHERE id = ?').bind(row.alerta_id).first<any>() : null
+  const alertas = row.alerta_id ? await c.env.SHARE_DB.prepare('SELECT alerta1, alerta2, alerta3, alerta4, alerta5, alerta6, alerta7, alerta8, alerta9, alerta10 FROM alerta_checklist WHERE id = ?').bind(row.alerta_id).first<any>() : null
   const alertasMap = Object.fromEntries(Object.entries(alertas || {}).filter(([key, value]) => key.startsWith('alerta') && String(value || '').trim()).map(([key, value]) => [key.replace(/^alerta/, ''), String(value).trim()]))
   return c.json({
     ...row,
@@ -3654,13 +3650,13 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaChecklist(c); await garantirTabelaAbastecimentos(c)
   const idAgendamento = c.req.param('id')
-  const agendamento = await portalDb(c).prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>()
+  const agendamento = await c.env.SHARE_DB.prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>()
   if (!agendamento) return c.notFound()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
   const userId = extractSupabaseUserId(c)
-  const executor = userId ? await portalDb(c).prepare('SELECT COALESCE(nome_exibicao, nome_completo, email) AS nome FROM user_profiles WHERE id=?').bind(userId).first<{ nome: string }>() : null
+  const executor = userId ? await c.env.SHARE_DB.prepare('SELECT COALESCE(nome_exibicao, nome_completo, email) AS nome FROM user_profiles WHERE id=?').bind(userId).first<{ nome: string }>() : null
   const userName = executor?.nome || userId || 'Usuário não identificado'
-  const existente = await portalDb(c).prepare('SELECT id, abastecimento_id, alerta_id FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null; alerta_id: string | null }>()
+  const existente = await c.env.SHARE_DB.prepare('SELECT id, abastecimento_id, alerta_id FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null; alerta_id: string | null }>()
   const status = body.status || 'concluido'
   const precisaAbastecer = body.abastecimento?.necessita_abastecer === true || body.abastecimento?.necessita_abastecer === 'sim'
   const alertas = Object.entries(body.alertas || {}).filter(([, texto]) => String(texto || '').trim()).map(([item, texto]) => `${item}: ${String(texto).trim()}`).slice(0, 10)
@@ -3673,7 +3669,7 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   if (precisaAbastecer && a.data && a.local && Number(a.litros) > 0) {
     let pagador = { cliente_id: a.cliente_id || agendamento.cliente_id || null, socio_id: a.socio_id || agendamento.socio_id || null }
     if (a.lancamento_diario_id) {
-      const trecho = await portalDb(c).prepare('SELECT cliente_id, socio_id FROM lancamentos_diario_bordo WHERE id = ?1 AND aeronave_id = ?2').bind(a.lancamento_diario_id, agendamento.aeronave_id).first<{ cliente_id: string | null; socio_id: string | null }>()
+      const trecho = await c.env.SHARE_DB.prepare('SELECT cliente_id, socio_id FROM lancamentos_diario_bordo WHERE id = ?1 AND aeronave_id = ?2').bind(a.lancamento_diario_id, agendamento.aeronave_id).first<{ cliente_id: string | null; socio_id: string | null }>()
       if (!trecho) return c.json({ error: 'trecho_diario_invalido', detail: 'O último trecho informado não pertence à aeronave deste agendamento.' }, 400)
       pagador = { cliente_id: trecho.cliente_id, socio_id: trecho.socio_id }
     }
@@ -3682,10 +3678,10 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
     const valores = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
     const valoresInsert = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, prazoDias || null, prazoEm]
     if (abastecimentoId) {
-      await portalDb(c).prepare(`UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, litros=?, valor_unitario=?, valor_total=?, desconto=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, lancamento_diario_id=?, voo_emprestado=?, numero_voo=?, prazo_envio_cliente_dias=?, prazo_envio_cliente_em=? WHERE id=?`).bind(...valores, abastecimentoId).run()
+      await c.env.SHARE_DB.prepare(`UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, litros=?, valor_unitario=?, valor_total=?, desconto=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, lancamento_diario_id=?, voo_emprestado=?, numero_voo=?, prazo_envio_cliente_dias=?, prazo_envio_cliente_em=? WHERE id=?`).bind(...valores, abastecimentoId).run()
     } else {
       abastecimentoId = uuid()
-      await portalDb(c).prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo, prazo_envio_cliente_dias, prazo_envio_cliente_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(abastecimentoId, ...valoresInsert).run()
+      await c.env.SHARE_DB.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo, prazo_envio_cliente_dias, prazo_envio_cliente_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(abastecimentoId, ...valoresInsert).run()
     }
   } else if (status === 'concluido' && precisaAbastecer) {
     return c.json({ error: 'abastecimento_incompleto', detail: 'Salve os dados do abastecimento antes de concluir o checklist.' }, 400)
@@ -3695,16 +3691,16 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   if (alertas.length) {
     const campos = alertas.map((_, index) => `alerta${index + 1}`).join(', ')
     const marks = alertas.map(() => '?').join(', ')
-    if (existente?.alerta_id) await portalDb(c).prepare(`UPDATE alerta_checklist SET ${alertas.map((_, index) => `alerta${index + 1} = ?`).join(', ')}, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`).bind(...alertas, alertaId).run()
-    else await portalDb(c).prepare(`INSERT INTO alerta_checklist (id, checklists_pre_voo_id, ${campos}) VALUES (?, ?, ${marks})`).bind(alertaId, existente?.id || null, ...alertas).run()
+    if (existente?.alerta_id) await c.env.SHARE_DB.prepare(`UPDATE alerta_checklist SET ${alertas.map((_, index) => `alerta${index + 1} = ?`).join(', ')}, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`).bind(...alertas, alertaId).run()
+    else await c.env.SHARE_DB.prepare(`INSERT INTO alerta_checklist (id, checklists_pre_voo_id, ${campos}) VALUES (?, ?, ${marks})`).bind(alertaId, existente?.id || null, ...alertas).run()
   }
   const precisaValor = precisaAbastecer ? 1 : 0
   const concluidoEm = status === 'concluido' ? new Date().toISOString() : null
   if (existente) {
-    await portalDb(c).prepare('UPDATE checklists_pre_voo SET executado_por=?, executado_por_nome=?, respostas=?, observacoes=?, abastecimento_id=?, precisa_abastecer=?, nivel_oleo=?, alerta_id=?, status=?, concluido_em=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, existente.id).run()
+    await c.env.SHARE_DB.prepare('UPDATE checklists_pre_voo SET executado_por=?, executado_por_nome=?, respostas=?, observacoes=?, abastecimento_id=?, precisa_abastecer=?, nivel_oleo=?, alerta_id=?, status=?, concluido_em=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, existente.id).run()
     return c.json({ id: existente.id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId })
   }
-  const id = uuid(); if (alertaId) await portalDb(c).prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(id, alertaId).run(); await portalDb(c).prepare('INSERT INTO checklists_pre_voo (id, solicitacao_id, aeronave_id, cliente_id, executado_por, executado_por_nome, respostas, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em, numero_voo, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, agendamento.aeronave_id || null, agendamento.cliente_id || null, userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, agendamento.numero_voo || null, userId).run()
+  const id = uuid(); if (alertaId) await c.env.SHARE_DB.prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(id, alertaId).run(); await c.env.SHARE_DB.prepare('INSERT INTO checklists_pre_voo (id, solicitacao_id, aeronave_id, cliente_id, executado_por, executado_por_nome, respostas, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em, numero_voo, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, agendamento.aeronave_id || null, agendamento.cliente_id || null, userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, agendamento.numero_voo || null, userId).run()
   return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
 })
 
@@ -3725,25 +3721,25 @@ function normalizarHorarioJornada(data: string, valor: unknown): string | null {
 }
 app.get('/api/interno/agendamento/:id/jornada', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401); await garantirTabelaJornadas(c)
-  const jornada = await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
-  if (!jornada) return c.json(null); const pernas = await portalDb(c).prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ? ORDER BY numero').bind(jornada.id).all<any>(); return c.json({ ...jornada, pernas: pernas.results })
+  const jornada = await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
+  if (!jornada) return c.json(null); const pernas = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ? ORDER BY numero').bind(jornada.id).all<any>(); return c.json({ ...jornada, pernas: pernas.results })
 })
 app.post('/api/interno/agendamento/:id/jornada', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401); await garantirTabelaJornadas(c); const idSolicitacao=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const voo=await portalDb(c).prepare('SELECT aeronave_id, piloto_id, data_agendada FROM solicitacoes_reserva_voo WHERE id=?').bind(idSolicitacao).first<any>(); if(!voo) return c.notFound()
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401); await garantirTabelaJornadas(c); const idSolicitacao=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const voo=await c.env.SHARE_DB.prepare('SELECT aeronave_id, piloto_id, data_agendada FROM solicitacoes_reserva_voo WHERE id=?').bind(idSolicitacao).first<any>(); if(!voo) return c.notFound()
   const data=String(body.data||voo.data_agendada||''); const acionamento=normalizarHorarioJornada(data, body.horario_acionamento); if(!/^\d{4}-\d{2}-\d{2}$/.test(data)||!acionamento) return c.json({error:'data_e_acionamento_obrigatorios'},400)
-  const apresentacao=normalizarHorarioJornada(data, body.horario_apresentacao) || new Date(new Date(acionamento).getTime()-30*60000).toISOString(); const corteInicio=normalizarHorarioJornada(data, body.horario_corte_inicio); const id=uuid(); const numero=await portalDb(c).prepare('SELECT COALESCE(MAX(numero_jornada),0)+1 AS proximo FROM jornadas_voo WHERE solicitacao_id=?').bind(idSolicitacao).first<{ proximo: number }>(); await portalDb(c).prepare('INSERT INTO jornadas_voo (id, solicitacao_id, aeronave_id, numero_jornada, data_jornada, apresentacao_em, inicio_em, minutos_pos_corte, status, observacoes, criado_por, tripulante_id, data, horario_acionamento, horario_apresentacao, horario_corte_inicio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id,idSolicitacao,voo.aeronave_id,Number(numero?.proximo||1),data,apresentacao,acionamento,45,'em_rota',body.observacoes||null,extractSupabaseUserId(c),body.tripulante_id||voo.piloto_id||null,data,acionamento,apresentacao,corteInicio).run(); return c.json({id,status:'em_rota',data,horario_acionamento:acionamento,horario_apresentacao:apresentacao,pernas:[]},201)
+  const apresentacao=normalizarHorarioJornada(data, body.horario_apresentacao) || new Date(new Date(acionamento).getTime()-30*60000).toISOString(); const corteInicio=normalizarHorarioJornada(data, body.horario_corte_inicio); const id=uuid(); const numero=await c.env.SHARE_DB.prepare('SELECT COALESCE(MAX(numero_jornada),0)+1 AS proximo FROM jornadas_voo WHERE solicitacao_id=?').bind(idSolicitacao).first<{ proximo: number }>(); await c.env.SHARE_DB.prepare('INSERT INTO jornadas_voo (id, solicitacao_id, aeronave_id, numero_jornada, data_jornada, apresentacao_em, inicio_em, minutos_pos_corte, status, observacoes, criado_por, tripulante_id, data, horario_acionamento, horario_apresentacao, horario_corte_inicio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id,idSolicitacao,voo.aeronave_id,Number(numero?.proximo||1),data,apresentacao,acionamento,45,'em_rota',body.observacoes||null,extractSupabaseUserId(c),body.tripulante_id||voo.piloto_id||null,data,acionamento,apresentacao,corteInicio).run(); return c.json({id,status:'em_rota',data,horario_acionamento:acionamento,horario_apresentacao:apresentacao,pernas:[]},201)
 })
 app.patch('/api/interno/jornadas/:id', async c => {
-  if (!(await requireShareInternal(c))) return c.json({error:'internal_auth_required'},401); await garantirTabelaJornadas(c); const id=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const atual=await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first<any>(); if(!atual) return c.notFound(); const fim=body.horario_corte_final||atual.horario_corte_final; if(body.status==='encerrada' && !fim) return c.json({error:'corte_final_obrigatorio'},400); if(body.status==='encerrada' && minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim)>540) return c.json({error:'limite_jornada_9_horas_excedido',detail:'A jornada ultrapassa o limite de 9 horas.'},409); if (body.status === 'encerrada' && atual.tripulante_id) { const db=portalDb(c); const minutos= minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim); const semana=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND date(data)>=date(?,'-6 days') AND date(data)<=date(?)").bind(atual.tripulante_id,atual.data,atual.data).first<any>(); const mes=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND strftime('%Y-%m',data)=strftime('%Y-%m',?)").bind(atual.tripulante_id,atual.data).first<any>(); if(Number(semana?.minutos||0)+minutos>2640) return c.json({error:'limite_jornada_semanal_excedido',detail:'O tripulante ultrapassaria 44 horas na semana.'},409); if(Number(mes?.minutos||0)+minutos>10560) return c.json({error:'limite_jornada_mensal_excedido',detail:'O tripulante ultrapassaria 176 horas no mês.'},409); } await portalDb(c).prepare('UPDATE jornadas_voo SET horario_acionamento=?, horario_apresentacao=?, horario_corte_inicio=?, horario_corte_final=?, data=?, status=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(body.horario_acionamento||atual.horario_acionamento,body.horario_apresentacao||atual.horario_apresentacao,body.horario_corte_inicio||atual.horario_corte_inicio,fim,body.data||atual.data,body.status||atual.status,body.observacoes||atual.observacoes,id).run(); return c.json(await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first())
+  if (!(await requireShareInternal(c))) return c.json({error:'internal_auth_required'},401); await garantirTabelaJornadas(c); const id=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const atual=await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first<any>(); if(!atual) return c.notFound(); const fim=body.horario_corte_final||atual.horario_corte_final; if(body.status==='encerrada' && !fim) return c.json({error:'corte_final_obrigatorio'},400); if(body.status==='encerrada' && minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim)>540) return c.json({error:'limite_jornada_9_horas_excedido',detail:'A jornada ultrapassa o limite de 9 horas.'},409); if (body.status === 'encerrada' && atual.tripulante_id) { const db=c.env.SHARE_DB; const minutos= minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim); const semana=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND date(data)>=date(?,'-6 days') AND date(data)<=date(?)").bind(atual.tripulante_id,atual.data,atual.data).first<any>(); const mes=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND strftime('%Y-%m',data)=strftime('%Y-%m',?)").bind(atual.tripulante_id,atual.data).first<any>(); if(Number(semana?.minutos||0)+minutos>2640) return c.json({error:'limite_jornada_semanal_excedido',detail:'O tripulante ultrapassaria 44 horas na semana.'},409); if(Number(mes?.minutos||0)+minutos>10560) return c.json({error:'limite_jornada_mensal_excedido',detail:'O tripulante ultrapassaria 176 horas no mês.'},409); } await c.env.SHARE_DB.prepare('UPDATE jornadas_voo SET horario_acionamento=?, horario_apresentacao=?, horario_corte_inicio=?, horario_corte_final=?, data=?, status=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(body.horario_acionamento||atual.horario_acionamento,body.horario_apresentacao||atual.horario_apresentacao,body.horario_corte_inicio||atual.horario_corte_inicio,fim,body.data||atual.data,body.status||atual.status,body.observacoes||atual.observacoes,id).run(); return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first())
 })
 app.post('/api/interno/jornadas/:id/pernas', async c => {
-  if (!(await requireShareInternal(c))) return c.json({error:'internal_auth_required'},401); await garantirTabelaJornadas(c); const id=c.req.param('id'); const jornada=await portalDb(c).prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first<any>(); if(!jornada) return c.notFound(); const b=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const data=String(b.data||jornada.data); if(data!==String(jornada.data) && !b.virada_hora) return c.json({error:'perna_data_diferente_jornada',detail:'Uma nova perna precisa ocorrer no mesmo dia da jornada, salvo virada de hora autorizada.'},409); if(!b.origem||!b.destino||!b.horario_ac||!b.horario_dep) return c.json({error:'origem_destino_ac_dep_obrigatorios'},400); const last=await portalDb(c).prepare('SELECT COALESCE(MAX(numero),0) n FROM pernas_jornada_voo WHERE jornada_id=?').bind(id).first<any>(); const pernaId=uuid(); await portalDb(c).prepare('INSERT INTO pernas_jornada_voo (id,jornada_id,numero,origem,destino,horario_ac,horario_dep,horario_pouso,horario_corte,status) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(pernaId,id,Number(last?.n||0)+1,b.origem,b.destino,b.horario_ac,b.horario_dep,b.horario_pouso||null,b.horario_corte||null,b.horario_corte?'pousado':'em_voo').run(); return c.json({id:pernaId,status:b.horario_corte?'pousado':'em_voo'},201)
+  if (!(await requireShareInternal(c))) return c.json({error:'internal_auth_required'},401); await garantirTabelaJornadas(c); const id=c.req.param('id'); const jornada=await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first<any>(); if(!jornada) return c.notFound(); const b=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const data=String(b.data||jornada.data); if(data!==String(jornada.data) && !b.virada_hora) return c.json({error:'perna_data_diferente_jornada',detail:'Uma nova perna precisa ocorrer no mesmo dia da jornada, salvo virada de hora autorizada.'},409); if(!b.origem||!b.destino||!b.horario_ac||!b.horario_dep) return c.json({error:'origem_destino_ac_dep_obrigatorios'},400); const last=await c.env.SHARE_DB.prepare('SELECT COALESCE(MAX(numero),0) n FROM pernas_jornada_voo WHERE jornada_id=?').bind(id).first<any>(); const pernaId=uuid(); await c.env.SHARE_DB.prepare('INSERT INTO pernas_jornada_voo (id,jornada_id,numero,origem,destino,horario_ac,horario_dep,horario_pouso,horario_corte,status) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(pernaId,id,Number(last?.n||0)+1,b.origem,b.destino,b.horario_ac,b.horario_dep,b.horario_pouso||null,b.horario_corte||null,b.horario_corte?'pousado':'em_voo').run(); return c.json({id:pernaId,status:b.horario_corte?'pousado':'em_voo'},201)
 })
 app.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const perna = await portalDb(c).prepare('SELECT * FROM pernas_jornada_voo WHERE id = ? AND jornada_id = ?').bind(c.req.param('pernaId'), c.req.param('jornadaId')).first<any>()
+  const perna = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ? AND jornada_id = ?').bind(c.req.param('pernaId'), c.req.param('jornadaId')).first<any>()
   if (!perna) return c.notFound()
   const campos: Record<string, string> = { origem: 'origem', destino: 'destino', horario_ac: 'horario_ac', horario_dep: 'horario_dep', horario_pouso: 'horario_pouso', horario_corte: 'horario_corte' }
   const updates = Object.entries(campos).filter(([campo]) => body[campo] !== undefined)
@@ -3751,22 +3747,22 @@ app.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
   const valores = updates.map(([campo]) => body[campo] || null)
   const horarioCorte = body.horario_corte !== undefined ? body.horario_corte || null : perna.horario_corte
   const status = body.status || (horarioCorte ? 'pousado' : perna.status)
-  await portalDb(c).prepare(`UPDATE pernas_jornada_voo SET ${updates.map(([, coluna]) => `${coluna} = ?`).join(', ')}, status = ? WHERE id = ? AND jornada_id = ?`).bind(...valores, status, perna.id, c.req.param('jornadaId')).run()
-  return c.json(await portalDb(c).prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?').bind(perna.id).first())
+  await c.env.SHARE_DB.prepare(`UPDATE pernas_jornada_voo SET ${updates.map(([, coluna]) => `${coluna} = ?`).join(', ')}, status = ? WHERE id = ? AND jornada_id = ?`).bind(...valores, status, perna.id, c.req.param('jornadaId')).run()
+  return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?').bind(perna.id).first())
 })
 app.get('/api/interno/solicitacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaChecklist(c)
   const status = c.req.query('status')
   const query = status ? "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.status = ?1 ORDER BY s.data_agendada" : "SELECT s.*, c.razao_social AS cliente_razao_social, c.codigo_cliente, a.matricula_registro, a.modelo, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id ORDER BY s.data_agendada"
-  const result = status ? await portalDb(c).prepare(query).bind(status).all() : await portalDb(c).prepare(query).all()
+  const result = status ? await c.env.SHARE_DB.prepare(query).bind(status).all() : await c.env.SHARE_DB.prepare(query).all()
   return c.json(result.results)
 })
 
 app.post('/api/interno/seguranca/migrar-senhas', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const rows = await portalDb(c).prepare("SELECT id, senha FROM user_cliente WHERE senha NOT LIKE 'pbkdf2_sha256$%'").all<{ id: string; senha: string }>()
-  for (const row of rows.results) await portalDb(c).prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(row.senha), row.id).run()
+  const rows = await c.env.SHARE_DB.prepare("SELECT id, senha FROM user_cliente WHERE senha NOT LIKE 'pbkdf2_sha256$%'").all<{ id: string; senha: string }>()
+  for (const row of rows.results) await c.env.SHARE_DB.prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(row.senha), row.id).run()
   return c.json({ success: true, migrated: rows.results.length })
 })
 
@@ -3774,7 +3770,7 @@ async function garantirTabelaSequenciaVoos(c: Context<{ Bindings: Bindings }>): 
   await validateWorkerSchema(c, [{table:'voo_sequencia_cotista',columns:['cotista_key','ultimo_numero']}])
 }
 async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, cotistaKey: string): Promise<string> {
-  const sequence = await portalDb(c).prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
+  const sequence = await c.env.SHARE_DB.prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
     ON CONFLICT(cotista_key) DO UPDATE SET ultimo_numero = ultimo_numero + 1
     RETURNING ultimo_numero`).bind(cotistaKey).first<{ ultimo_numero: number }>()
   if (!sequence) throw new Error('flight_sequence_not_initialized')
@@ -3792,7 +3788,7 @@ function portalLoanFlightNumber(clientCode: string, registration: string | null 
   return `${codigo}-${portalAircraftSuffix(registration)}${String(sequence).padStart(3, '0')}/${ano}`
 }
 async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, registration: string | null | undefined, cotistaKey: string): Promise<string> {
-  const sequence = await portalDb(c).prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
+  const sequence = await c.env.SHARE_DB.prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
     ON CONFLICT(cotista_key) DO UPDATE SET ultimo_numero = ultimo_numero + 1
     RETURNING ultimo_numero`).bind(cotistaKey).first<{ ultimo_numero: number }>()
   if (!sequence) throw new Error('flight_sequence_not_initialized')
@@ -3805,7 +3801,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   await garantirComplianceTripulacao(c)
   const id = c.req.param('id')
   await garantirTabelaSequenciaVoos(c)
-  const reservation = await portalDb(c).prepare(`SELECT s.*, a.matricula_registro
+  const reservation = await c.env.SHARE_DB.prepare(`SELECT s.*, a.matricula_registro
     FROM solicitacoes_reserva_voo s
     LEFT JOIN aeronave a ON a.id = s.aeronave_id
     WHERE s.id = ?1`).bind(id).first<{ status: string; cliente_id: string | null; socio_id: string | null; matricula_registro: string | null; aeronave_id: string; cliente_emprestimo_id: string | null; socio_emprestimo_id: string | null; voo_emprestado: string | null }>()
@@ -3836,7 +3832,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
          AND (ca.socio_id = ?1 OR ca.cliente_id = ?2)
        ORDER BY CASE WHEN ca.socio_id = ?1 THEN 0 WHEN ca.cliente_id = ?2 THEN 1 ELSE 2 END
        LIMIT 1`
-  const cotistaStatement = portalDb(c).prepare(cotistaQuery)
+  const cotistaStatement = c.env.SHARE_DB.prepare(cotistaQuery)
   const cotista = isLoan
     ? await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id).first<{ codigo_cliente: string; socio_id: string | null }>()
     : await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id, reservation.aeronave_id).first<{ codigo_cliente: string; socio_id: string | null }>()
@@ -3845,7 +3841,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   const flightNumber = isLoan
     ? await portalLoanFlightSequence(c, cotista.codigo_cliente, reservation.matricula_registro, cotistaKey)
     : await portalFlightSequence(c, cotista.codigo_cliente, cotistaKey)
-  await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, piloto.id, copiloto?.id || null, id).run()
+  await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(flightNumber, piloto.id, copiloto?.id || null, id).run()
   return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: flightNumber, piloto, copiloto })
 })
 
@@ -3853,7 +3849,7 @@ app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ motivo_rejeicao?: string }>().catch(() => ({} as { motivo_rejeicao?: string }))
   if (!body.motivo_rejeicao?.trim()) return c.json({ error: 'motivo_rejeicao_obrigatorio' }, 400)
-  const result = await portalDb(c).prepare("UPDATE solicitacoes_reserva_voo SET status = 'reprovada', motivo_rejeicao = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'").bind(body.motivo_rejeicao.trim(), c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'reprovada', motivo_rejeicao = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'").bind(body.motivo_rejeicao.trim(), c.req.param('id')).run()
   if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
   return c.json({ success: true, status: 'reprovada', solicitacao_id: c.req.param('id') })
 })
@@ -3867,7 +3863,7 @@ async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) 
 }
 
 async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindings }>) {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS sequencia_relatorios_despesa_viagem (
       codigo_cotista TEXT NOT NULL,
@@ -3938,7 +3934,7 @@ async function gerarNumeroRelatorioViagem(
 }
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const row = await db.prepare(`SELECT r.*,
       CASE WHEN r.socio_id IS NOT NULL
         THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
@@ -3983,7 +3979,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const [clientes, aeronaves, tripulantes, categorias, socios, voos] = await Promise.all([
       db.prepare("SELECT id, razao_social, codigo_cliente, holding FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
@@ -4009,7 +4005,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const rows = await portalDb(c).prepare(`SELECT r.*,
+    const rows = await c.env.SHARE_DB.prepare(`SELECT r.*,
         CASE WHEN r.socio_id IS NOT NULL
           THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
           ELSE COALESCE(NULLIF(c.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), NULLIF(h_socio.nome, ''), NULLIF(h_relacao.nome, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
@@ -4085,7 +4081,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) return c.json({ error: 'datas_obrigatorias' }, 400)
     if (dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
 
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>()
     const id = uuid()
     const socioId = body.socio_id ? String(body.socio_id) : null
@@ -4127,7 +4123,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const atual = await db.prepare('SELECT id, status FROM relatorio_despesa_viagem WHERE id = ?1').bind(id).first<{ id: string; status: string }>()
     if (!atual) return c.notFound()
     const statusAtual = statusRelatorioViagem(atual.status)
@@ -4173,7 +4169,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const relatorio = await buscarRelatorioViagemComNomes(c, id)
     if (!relatorio) return c.notFound()
     if (statusRelatorioViagem(relatorio.status) !== 'rascunho') return c.json({ error: 'relatorio_ja_finalizado' }, 409)
@@ -4210,7 +4206,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     if (statusRelatorioViagem(relatorio.status) === 'rascunho') return c.json({ error: 'relatorio_precisa_ser_finalizado' }, 409)
     const tripulanteId = pos === 1 ? relatorio.tripulacao_id : relatorio.tripulante_id_2
     if (!tripulanteId) return c.json({ error: 'tripulante_nao_informado' }, 400)
-    await portalDb(c).prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = ?, ${sentColumn} = CURRENT_TIMESTAMP, status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(token, id).run()
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = ?, ${sentColumn} = CURRENT_TIMESTAMP, status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(token, id).run()
     const frontendOrigin = c.req.header('origin') || new URL(c.req.url).origin
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id), token, link: `${frontendOrigin}/aprovar-relatorio?token=${encodeURIComponent(token)}` })
   } catch (error: any) {
@@ -4222,7 +4218,7 @@ app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const token = c.req.param('token')
-    const row = await portalDb(c).prepare(`SELECT r.*, a.matricula_registro AS aeronave_matricula,
+    const row = await c.env.SHARE_DB.prepare(`SELECT r.*, a.matricula_registro AS aeronave_matricula,
       CASE WHEN r.token_aprovacao_tripulante_1 = ?1 THEN 1 ELSE 2 END AS tripulante_pos
       FROM relatorio_despesa_viagem r LEFT JOIN aeronave a ON a.id = r.aeronave_id
       WHERE r.token_aprovacao_tripulante_1 = ?1 OR r.token_aprovacao_tripulante_2 = ?1 LIMIT 1`).bind(token).first<any>()
@@ -4238,7 +4234,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     const id = c.req.param('id')
     const body = await c.req.json<{ tripulante_pos?: 1 | 2; aprovado?: boolean; observacoes?: string }>().catch(() => ({} as any))
     const pos = body.tripulante_pos === 2 ? 2 : 1
-    const report = await portalDb(c).prepare(`SELECT r.*, t1.user_id AS user1_id, t2.user_id AS user2_id FROM relatorio_despesa_viagem r LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2 WHERE r.id = ?1`).bind(id).first<any>()
+    const report = await c.env.SHARE_DB.prepare(`SELECT r.*, t1.user_id AS user1_id, t2.user_id AS user2_id FROM relatorio_despesa_viagem r LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2 WHERE r.id = ?1`).bind(id).first<any>()
     if (!report) return c.notFound()
     if ((pos === 1 ? report.user1_id : report.user2_id) !== colaborador.id) return c.json({ error: 'tripulante_nao_autorizado_para_este_relatorio' }, 403)
     if (body.aprovado === undefined) return c.json({ error: 'decisao_obrigatoria' }, 400)
@@ -4247,19 +4243,19 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     const dateColumn = pos === 1 ? 'aprovado_tripulante_1_em' : 'aprovado_tripulante_2_em'
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
     const decision = body.aprovado ? 'aprovado' : 'reprovado'
-    await portalDb(c).prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.observacoes?.trim() || null, decision, id).run()
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.observacoes?.trim() || null, decision, id).run()
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
-    if (body.aprovado) await sincronizarRelatorioViagemFinanceiro(portalDb(c), updated, colaborador.id, pos === 1 ? 'tripulante_1' : 'tripulante_2')
+    if (body.aprovado) await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id, pos === 1 ? 'tripulante_1' : 'tripulante_2')
     const requiredSecond = despesasRelatorioViagem(updated?.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/\s/g, '_') === 'tripulante_2')
-    if (body.aprovado && updated?.status_aprovacao_tripulante === 'aprovado' && (!requiredSecond || updated?.status_aprovacao_tripulante_2 === 'aprovado')) await portalDb(c).prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run()
+    if (body.aprovado && updated?.status_aprovacao_tripulante === 'aprovado' && (!requiredSecond || updated?.status_aprovacao_tripulante_2 === 'aprovado')) await c.env.SHARE_DB.prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run()
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:aprovacao-direta]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_decidir_aprovacao' }, 400) }
 })
 app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare(`SELECT r.id, r.numero_relatorio, r.total_valor, r.total_cliente, r.aeronave_id,
+  const row = await c.env.SHARE_DB.prepare(`SELECT r.id, r.numero_relatorio, r.total_valor, r.total_cliente, r.aeronave_id,
     a.matricula_registro AS aeronave_matricula, r.cliente_id, r.socio_id, r.pdf_url, r.status
     FROM relatorio_despesa_viagem r LEFT JOIN aeronave a ON a.id = r.aeronave_id WHERE r.id = ?`).bind(c.req.param('id')).first<any>()
   if (!row) return c.notFound()
@@ -4272,11 +4268,11 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
   try {
     const id = c.req.param('id'); const body = await c.req.json<{ data_vencimento?: string; periodicidade?: string; tipo_rateio?: string }>().catch(() => ({} as any))
     if (!body.data_vencimento) return c.json({ error: 'data_vencimento_obrigatoria' }, 400)
-    const report = await portalDb(c).prepare('SELECT * FROM relatorio_despesa_viagem WHERE id = ?').bind(id).first<any>()
+    const report = await c.env.SHARE_DB.prepare('SELECT * FROM relatorio_despesa_viagem WHERE id = ?').bind(id).first<any>()
     if (!report) return c.notFound()
     if (report.status !== 'aprovado') return c.json({ error: 'aguarde_aprovacao_de_todos_os_tripulantes' }, 409)
     if (!report.pdf_path) return c.json({ error: 'pdf_obrigatorio_antes_do_envio' }, 409)
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const cotista = await db.prepare(`SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1
       AND ((?2 IS NOT NULL AND socio_id = ?2) OR (?3 IS NOT NULL AND cliente_id = ?3)) LIMIT 1`)
       .bind(report.aeronave_id, report.socio_id || null, report.cliente_id || null).first<{ id: string }>()
@@ -4311,21 +4307,21 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
     const body = await c.req.json<{ aprovado?: boolean; motivo?: string }>().catch(() => ({} as { aprovado?: boolean; motivo?: string }))
     if (body.aprovado === undefined) return c.json({ error: 'decisao_obrigatoria' }, 400)
     if (!body.aprovado && !String(body.motivo || '').trim()) return c.json({ error: 'motivo_obrigatorio_para_rejeicao' }, 400)
-    const row = await portalDb(c).prepare(`SELECT * FROM relatorio_despesa_viagem WHERE token_aprovacao_tripulante_1 = ?1 OR token_aprovacao_tripulante_2 = ?1 LIMIT 1`).bind(token).first<any>()
+    const row = await c.env.SHARE_DB.prepare(`SELECT * FROM relatorio_despesa_viagem WHERE token_aprovacao_tripulante_1 = ?1 OR token_aprovacao_tripulante_2 = ?1 LIMIT 1`).bind(token).first<any>()
     if (!row) return c.json({ error: 'link_invalido_ou_expirado' }, 404)
     const pos = row.token_aprovacao_tripulante_1 === token ? 1 : 2
     const statusColumn = pos === 1 ? 'status_aprovacao_tripulante' : 'status_aprovacao_tripulante_2'
     const dateColumn = pos === 1 ? 'aprovado_tripulante_1_em' : 'aprovado_tripulante_2_em'
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
     const decision = body.aprovado ? 'aprovado' : 'reprovado'
-    await portalDb(c).prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.motivo?.trim() || null, decision, row.id).run()
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.motivo?.trim() || null, decision, row.id).run()
     if (body.aprovado) {
       const updated = await buscarRelatorioViagemComNomes(c, row.id)
       if (!updated) return c.notFound()
-      await sincronizarRelatorioViagemFinanceiro(portalDb(c), updated, extractSupabaseUserId(c), pos === 1 ? 'tripulante_1' : 'tripulante_2')
+      await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, extractSupabaseUserId(c), pos === 1 ? 'tripulante_1' : 'tripulante_2')
       const requiredSecond = despesasRelatorioViagem(updated?.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/\s/g, '_') === 'tripulante_2')
       const allApproved = updated?.status_aprovacao_tripulante === 'aprovado' && (!requiredSecond || updated?.status_aprovacao_tripulante_2 === 'aprovado')
-      if (allApproved) await portalDb(c).prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(row.id).run()
+      if (allApproved) await c.env.SHARE_DB.prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(row.id).run()
     }
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, row.id), aprovado: body.aprovado })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:aprovacao-publica]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_decidir_aprovacao' }, 400) }
@@ -4335,7 +4331,7 @@ app.delete('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const result = await portalDb(c).prepare("DELETE FROM relatorio_despesa_viagem WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(c.req.param('id')).run()
+    const result = await c.env.SHARE_DB.prepare("DELETE FROM relatorio_despesa_viagem WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(c.req.param('id')).run()
     if (!result.meta.changes) return c.json({ error: 'somente_rascunhos_podem_ser_excluidos' }, 409)
     return c.json({ success: true })
   } catch (error: any) {
@@ -4350,7 +4346,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/anexos', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const idRelatorio = c.req.param('id')
-    const relatorio = await portalDb(c).prepare('SELECT id FROM relatorio_despesa_viagem WHERE id = ?1').bind(idRelatorio).first<{ id: string }>()
+    const relatorio = await c.env.SHARE_DB.prepare('SELECT id FROM relatorio_despesa_viagem WHERE id = ?1').bind(idRelatorio).first<{ id: string }>()
     if (!relatorio) return c.notFound()
     const form = await c.req.formData()
     const file = form.get('arquivo') as unknown
@@ -4360,7 +4356,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/anexos', async c => {
     const anexoId = uuid()
     const key = await salvarArquivoShareBrasil(c, user.id, file, `share/relatorio_despesa_viagem/anexos_notas/${idRelatorio}/${anexoId}`)
     const urlArquivo = `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(idRelatorio)}/anexos/${encodeURIComponent(anexoId)}/arquivo`
-    await portalDb(c).prepare(`INSERT INTO relatorio_despesa_viagem_anexos
+    await c.env.SHARE_DB.prepare(`INSERT INTO relatorio_despesa_viagem_anexos
       (id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, caminho_arquivo, url_arquivo, tipo_arquivo, tamanho_arquivo)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(anexoId, idRelatorio, indiceDespesa, file.name, key, urlArquivo, file.type || null, file.size).run()
     return c.json({ anexo: { id: anexoId, relatorio_despesa_viagem_id: idRelatorio, indice_despesa: indiceDespesa, nome_arquivo: file.name, caminho_arquivo: key, url_arquivo: urlArquivo, tipo_arquivo: file.type || null, tamanho_arquivo: file.size } }, 201)
@@ -4375,7 +4371,7 @@ app.delete('/api/financeiro/relatorios-despesa-viagem/:id/anexos/:anexoId', asyn
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const anexo = await db.prepare('SELECT id, caminho_arquivo FROM relatorio_despesa_viagem_anexos WHERE id = ?1 AND relatorio_despesa_viagem_id = ?2').bind(c.req.param('anexoId'), c.req.param('id')).first<{ id: string; caminho_arquivo: string }>()
     if (!anexo) return c.notFound()
     await db.prepare('DELETE FROM relatorio_despesa_viagem_anexos WHERE id = ?1').bind(anexo.id).run()
@@ -4391,7 +4387,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/anexos/:anexoId/arquivo',
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
-    const anexo = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM relatorio_despesa_viagem_anexos WHERE id = ?1 AND relatorio_despesa_viagem_id = ?2').bind(c.req.param('anexoId'), c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
+    const anexo = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM relatorio_despesa_viagem_anexos WHERE id = ?1 AND relatorio_despesa_viagem_id = ?2').bind(c.req.param('anexoId'), c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
     if (!anexo) return c.notFound()
     const object = await shareBrasilBucket(c).get(anexo.caminho_arquivo)
     if (!object) return c.notFound()
@@ -4408,7 +4404,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
-    const db = portalDb(c)
+    const db = c.env.SHARE_DB
     const relatorio = await db.prepare('SELECT id, numero_relatorio, matricula_aeronave, pdf_path FROM relatorio_despesa_viagem WHERE id = ?1').bind(id).first<any>()
     if (!relatorio) return c.notFound()
     const form = await c.req.formData()
@@ -4431,7 +4427,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
 app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const row = await portalDb(c).prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(c.req.param('id')).first<{ pdf_path: string | null; numero_relatorio: string }>()
+    const row = await c.env.SHARE_DB.prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(c.req.param('id')).first<{ pdf_path: string | null; numero_relatorio: string }>()
     if (!row?.pdf_path) return c.notFound()
     const object = await shareBrasilBucket(c).get(row.pdf_path)
     if (!object) return c.notFound()
@@ -4464,7 +4460,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
 app.get('/api/interno/abastecimentos/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaAbastecimentos(c)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const aeronaveId = c.req.query('aeronave_id') || ''
   const [clientes, socios, aeronave, fornecedores, diarios] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
@@ -4480,7 +4476,7 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
 
 app.get('/api/fornecedores-favoritos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const fornecedores = await portalDb(c).prepare('SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo), nome_completo').all()
+  const fornecedores = await c.env.SHARE_DB.prepare('SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo), nome_completo').all()
   return c.json(fornecedores.results || [])
 })
 
@@ -4489,7 +4485,7 @@ app.post('/api/interno/abastecimentos/fornecedores', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => null)
   if (!body?.nome_completo?.trim()) return c.json({ error: 'nome_fornecedor_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO fornecedores_favoritos (id, nome_completo, endereco, cidade, uf, codigo_icao, pessoa_contato, preco_avgas, preco_jet, telefone, documento, apelido, conta_pagamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome_completo.trim(), body.endereco || null, body.cidade || null, body.uf || null, body.codigo_icao || null, body.pessoa_contato || null, Number(body.preco_avgas || 0), Number(body.preco_jet || 0), body.telefone || null, body.documento || null, body.apelido || null, body.conta_pagamento || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO fornecedores_favoritos (id, nome_completo, endereco, cidade, uf, codigo_icao, pessoa_contato, preco_avgas, preco_jet, telefone, documento, apelido, conta_pagamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome_completo.trim(), body.endereco || null, body.cidade || null, body.uf || null, body.codigo_icao || null, body.pessoa_contato || null, Number(body.preco_avgas || 0), Number(body.preco_jet || 0), body.telefone || null, body.documento || null, body.apelido || null, body.conta_pagamento || null).run()
   return c.json({ id, success: true }, 201)
 })
 
@@ -4497,13 +4493,13 @@ app.patch('/api/interno/abastecimentos/fornecedores/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
   if (!String(body.nome_completo || '').trim()) return c.json({ error: 'nome_fornecedor_obrigatorio' }, 400)
-  const result = await portalDb(c).prepare('UPDATE fornecedores_favoritos SET nome_completo = ?, apelido = ?, cidade = ?, uf = ?, codigo_icao = ?, telefone = ?, preco_avgas = ?, preco_jet = ?, pessoa_contato = ?, conta_pagamento = ? WHERE id = ?').bind(String(body.nome_completo).trim(), body.apelido || null, body.cidade || null, body.uf || null, body.codigo_icao || null, body.telefone || null, Number(body.preco_avgas || 0), Number(body.preco_jet || 0), body.pessoa_contato || null, body.conta_pagamento || null, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE fornecedores_favoritos SET nome_completo = ?, apelido = ?, cidade = ?, uf = ?, codigo_icao = ?, telefone = ?, preco_avgas = ?, preco_jet = ?, pessoa_contato = ?, conta_pagamento = ? WHERE id = ?').bind(String(body.nome_completo).trim(), body.apelido || null, body.cidade || null, body.uf || null, body.codigo_icao || null, body.telefone || null, Number(body.preco_avgas || 0), Number(body.preco_jet || 0), body.pessoa_contato || null, body.conta_pagamento || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true, id: c.req.param('id') })
 })
 app.delete('/api/interno/abastecimentos/fornecedores/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const result = await portalDb(c).prepare('DELETE FROM fornecedores_favoritos WHERE id = ?').bind(c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM fornecedores_favoritos WHERE id = ?').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -4520,7 +4516,7 @@ app.get('/api/interno/abastecimentos', async c => {
   if (valorMin && Number.isFinite(Number(valorMin))) { conditions.push(`a.valor_total >= ?${index++}`); binds.push(Number(valorMin)) }
   if (valorMax && Number.isFinite(Number(valorMax))) { conditions.push(`a.valor_total <= ?${index++}`); binds.push(Number(valorMax)) }
   if (busca) { conditions.push(`(lower(COALESCE(a.local, '')) LIKE ?${index} OR lower(COALESCE(a.trecho, '')) LIKE ?${index} OR lower(COALESCE(a.numero_comanda, '')) LIKE ?${index} OR lower(COALESCE(a.numero_nf, '')) LIKE ?${index})`); binds.push(`%${busca.toLowerCase()}%`); index++ }
-  const result = await portalDb(c).prepare(`SELECT a.*, c.razao_social AS cliente_nome, s.nome AS socio_nome, ar.matricula_registro, ar.fabricante, ar.modelo, f.nome_completo AS fornecedor_nome, f.apelido AS fornecedor_apelido, u.nome_completo AS criado_por_nome FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN fornecedores_favoritos f ON f.id = a.fornecedor_id LEFT JOIN user_profiles u ON u.id = a.criado_por WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`).bind(...binds).all()
+  const result = await c.env.SHARE_DB.prepare(`SELECT a.*, c.razao_social AS cliente_nome, s.nome AS socio_nome, ar.matricula_registro, ar.fabricante, ar.modelo, f.nome_completo AS fornecedor_nome, f.apelido AS fornecedor_apelido, u.nome_completo AS criado_por_nome FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN fornecedores_favoritos f ON f.id = a.fornecedor_id LEFT JOIN user_profiles u ON u.id = a.criado_por WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`).bind(...binds).all()
   return c.json({ abastecimentos: result.results })
 })
 
@@ -4532,7 +4528,7 @@ app.post('/api/interno/abastecimentos', async c => {
   const data = String(body?.data || '').trim(); const local = String(body?.local || '').trim()
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !local) return c.json({ error: 'data_e_local_obrigatorios' }, 400)
   const id = uuid(); const litros = Number(body?.litros || 0); const valorUnitario = Number(body?.valor_unitario || 0); const valorTotal = Number(body?.valor_total ?? litros * valorUnitario)
-  await portalDb(c).prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, forma_pagamento, data_vencimento_boleto, criado_por, lancamento_diario_id, data_pagamento, banco, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  await c.env.SHARE_DB.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, forma_pagamento, data_vencimento_boleto, criado_por, lancamento_diario_id, data_pagamento, banco, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, body?.cliente_id || null, body?.socio_id || null, body?.aeronave_id || null, data, body?.tipo_combustivel || null, body?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, Number.isFinite(litros) ? litros : 0, Number.isFinite(valorUnitario) ? valorUnitario : 0, Number.isFinite(valorTotal) ? valorTotal : 0, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, authenticated?.id || extractSupabaseUserId(c) || null, body?.lancamento_diario_id || null, body?.data_pagamento || null, body?.banco || null, body?.voo_emprestado ? 1 : 0, body?.numero_voo || null).run()
   return c.json({ id, success: true }, 201)
 })
@@ -4540,13 +4536,13 @@ app.post('/api/interno/abastecimentos', async c => {
 app.patch('/api/interno/abastecimentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaAbastecimentos(c); const body = await c.req.json<Record<string, any>>().catch(() => ({} as any)); const id = c.req.param('id')
-  const result = await portalDb(c).prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, data_pagamento = ?, banco = ?, voo_emprestado = ?, numero_voo = ? WHERE id = ?`).bind(body.cliente_id || null, body.socio_id || null, body.aeronave_id || null, body.data, body.tipo_combustivel || null, body.trecho || null, body.local, body.numero_comanda || null, body.numero_nf || null, Number(body.litros || 0), Number(body.valor_unitario || 0), Number(body.valor_total || 0), body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, body.lancamento_diario_id || null, body.data_pagamento || null, body.banco || null, body.voo_emprestado ? 1 : 0, body.numero_voo || null, id).run()
+  const result = await c.env.SHARE_DB.prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, data_pagamento = ?, banco = ?, voo_emprestado = ?, numero_voo = ? WHERE id = ?`).bind(body.cliente_id || null, body.socio_id || null, body.aeronave_id || null, body.data, body.tipo_combustivel || null, body.trecho || null, body.local, body.numero_comanda || null, body.numero_nf || null, Number(body.litros || 0), Number(body.valor_unitario || 0), Number(body.valor_total || 0), body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, body.lancamento_diario_id || null, body.data_pagamento || null, body.banco || null, body.voo_emprestado ? 1 : 0, body.numero_voo || null, id).run()
   if (!result.meta.changes) return c.notFound(); return c.json({ success: true, id })
 })
 
 app.delete('/api/interno/abastecimentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const result = await portalDb(c).prepare('DELETE FROM abastecimentos WHERE id = ?1').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM abastecimentos WHERE id = ?1').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
 })
 
 app.post('/api/interno/abastecimentos/:id/arquivo', async c => {
@@ -4560,14 +4556,14 @@ app.post('/api/interno/abastecimentos/:id/arquivo', async c => {
   const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
   const arquivoUrl = new URL(`/api/interno/abastecimentos/${encodeURIComponent(id)}/arquivo/${tipo}`, c.req.url)
   arquivoUrl.searchParams.set('key', objectKey)
-  await portalDb(c).prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(arquivoUrl.toString(), id).run()
+  await c.env.SHARE_DB.prepare(`UPDATE abastecimentos SET ${column} = ? WHERE id = ?`).bind(arquivoUrl.toString(), id).run()
   return c.json({ success: true, caminho_arquivo: objectKey, url: arquivoUrl.toString() })
 })
 
 app.get('/api/interno/abastecimentos/:id/arquivo/:tipo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const tipo = c.req.param('tipo'); const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'
-  const row = await portalDb(c).prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?`).bind(c.req.param('id')).first<{ caminho: string | null }>(); if (!row?.caminho) return c.notFound()
+  const row = await c.env.SHARE_DB.prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?`).bind(c.req.param('id')).first<{ caminho: string | null }>(); if (!row?.caminho) return c.notFound()
   let objectKey = row.caminho
   try { const storedUrl = new URL(row.caminho); objectKey = storedUrl.searchParams.get('key') || row.caminho } catch { /* compatibilidade com registros antigos que armazenavam a chave */ }
   const object = await shareBrasilBucket(c).get(objectKey); if (!object) return c.notFound(); return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `inline; filename="${objectKey.split('/').pop() || 'abastecimento'}"` } })
@@ -4590,7 +4586,7 @@ async function marcarEmailEnviadoParaOrigens(
   ids: string[],
   emailId: string,
 ): Promise<void> {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const agora = new Date().toISOString()
 
   for (const referencia of ids) {
@@ -4705,7 +4701,7 @@ app.get('/api/sharebrasil/ponto', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const { inicio, fim } = shareBrasilMonth(c.req.query('mes'))
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const [lancamentos, anexos, justificativas, correcoes] = await Promise.all([
     db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND date(data_entrada) BETWEEN ?2 AND ?3 ORDER BY data_entrada DESC').bind(user.id, inicio, fim).all(),
     db.prepare('SELECT * FROM lancamento_ponto_anexos WHERE user_id = ?1 AND date(data_entrada) BETWEEN ?2 AND ?3 ORDER BY criado_em DESC').bind(user.id, inicio, fim).all(),
@@ -4732,7 +4728,7 @@ app.post('/api/sharebrasil/ponto/marcar', async c => {
   }
   const target = columns[acao]
   if (!target) return c.json({ error: 'acao_invalida' }, 400)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   let row = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
   if (!row) {
     const id = uuid()
@@ -4752,7 +4748,7 @@ app.post('/api/sharebrasil/ponto/correcao', async c => {
   const body = await c.req.json<{ data_entrada?: string; lancamento_ponto_id?: string; tipo_correcao?: string; tempo_original?: string; tempo_corrigido?: string; justificativa?: string }>().catch(() => ({} as any))
   if (!body.data_entrada || !body.tipo_correcao || !body.tempo_corrigido || !body.justificativa?.trim()) return c.json({ error: 'campos_obrigatorios' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO solicitacoes_correcao_ponto (id, user_id, data_entrada, lancamento_ponto_id, tipo_correcao, tempo_original, tempo_corrigido, justificativa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, user.id, body.data_entrada, body.lancamento_ponto_id || null, body.tipo_correcao, body.tempo_original || null, body.tempo_corrigido, body.justificativa.trim()).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO solicitacoes_correcao_ponto (id, user_id, data_entrada, lancamento_ponto_id, tipo_correcao, tempo_original, tempo_corrigido, justificativa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, user.id, body.data_entrada, body.lancamento_ponto_id || null, body.tipo_correcao, body.tempo_original || null, body.tempo_corrigido, body.justificativa.trim()).run()
   return c.json({ id, status: 'pending' }, 201)
 })
 
@@ -4768,10 +4764,10 @@ app.post('/api/sharebrasil/ponto/justificativa', async c => {
   const fileValue = form.get('arquivo') as unknown
   try {
     if (fileValue && typeof fileValue === 'object' && 'size' in fileValue && Number(fileValue.size) > 0) key = await salvarArquivoShareBrasil(c, user.id, fileValue as File, 'anexos_ponto')
-    await portalDb(c).prepare('INSERT INTO justificativa_ausencia (id, id_usuario, data_registro, justificativa, url_documento) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, data, justificativa, key).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO justificativa_ausencia (id, id_usuario, data_registro, justificativa, url_documento) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, data, justificativa, key).run()
     if (key) {
-      const lancamento = await portalDb(c).prepare('SELECT id FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<{ id: string }>()
-      await portalDb(c).prepare('INSERT INTO lancamento_ponto_anexos (id, lancamento_ponto_id, user_id, data_entrada, caminho_arquivo, nome_arquivo, tipo_arquivo, tipo_justificativa, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uuid(), lancamento?.id || null, user.id, data, key, (fileValue as File).name, (fileValue as File).type || null, 'medical', justificativa).run()
+      const lancamento = await c.env.SHARE_DB.prepare('SELECT id FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<{ id: string }>()
+      await c.env.SHARE_DB.prepare('INSERT INTO lancamento_ponto_anexos (id, lancamento_ponto_id, user_id, data_entrada, caminho_arquivo, nome_arquivo, tipo_arquivo, tipo_justificativa, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uuid(), lancamento?.id || null, user.id, data, key, (fileValue as File).name, (fileValue as File).type || null, 'medical', justificativa).run()
     }
     return c.json({ id, status: 'pendente', url_documento: key }, 201)
   } catch (error: any) {
@@ -4782,7 +4778,7 @@ app.post('/api/sharebrasil/ponto/justificativa', async c => {
 app.get('/api/sharebrasil/ponto/anexos/:id/arquivo', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM lancamento_ponto_anexos WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM lancamento_ponto_anexos WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
   if (!row) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
   if (!object) return c.notFound()
@@ -4792,7 +4788,7 @@ app.get('/api/sharebrasil/ponto/anexos/:id/arquivo', async c => {
 app.get('/api/sharebrasil/documentos/pastas', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT * FROM pastas_documentos ORDER BY nome').all()
+  const result = await c.env.SHARE_DB.prepare('SELECT * FROM pastas_documentos ORDER BY nome').all()
   return c.json(result.results)
 })
 
@@ -4802,7 +4798,7 @@ app.post('/api/sharebrasil/documentos/pastas', async c => {
   const body = await c.req.json<{ nome?: string; pasta_pai_id?: string }>().catch(() => ({} as any))
   if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO pastas_documentos (id, nome, pasta_pai_id, criado_por) VALUES (?, ?, ?, ?)').bind(id, body.nome.trim(), body.pasta_pai_id || null, user.id).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO pastas_documentos (id, nome, pasta_pai_id, criado_por) VALUES (?, ?, ?, ?)').bind(id, body.nome.trim(), body.pasta_pai_id || null, user.id).run()
   return c.json({ id, nome: body.nome.trim(), pasta_pai_id: body.pasta_pai_id || null }, 201)
 })
 
@@ -4810,7 +4806,7 @@ app.get('/api/sharebrasil/documentos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const pastaId = c.req.query('pasta_id') || null
-  const result = pastaId ? await portalDb(c).prepare('SELECT * FROM documentos_internos WHERE pasta_id = ?1 ORDER BY criado_em DESC').bind(pastaId).all() : await portalDb(c).prepare('SELECT * FROM documentos_internos ORDER BY criado_em DESC').all()
+  const result = pastaId ? await c.env.SHARE_DB.prepare('SELECT * FROM documentos_internos WHERE pasta_id = ?1 ORDER BY criado_em DESC').bind(pastaId).all() : await c.env.SHARE_DB.prepare('SELECT * FROM documentos_internos ORDER BY criado_em DESC').all()
   return c.json(result.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/documentos/${item.id}/arquivo` })))
 })
 
@@ -4825,8 +4821,8 @@ app.post('/api/sharebrasil/documentos', async c => {
   try {
     const key = await salvarArquivoShareBrasil(c, user.id, file, 'documentos_internos')
     const id = uuid()
-    await portalDb(c).prepare('INSERT INTO documentos_internos (id, pasta_id, nome, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, pastaId, file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
-    const documento = await portalDb(c).prepare('SELECT id, pasta_id, nome, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, criado_em FROM documentos_internos WHERE id = ?').bind(id).first()
+    await c.env.SHARE_DB.prepare('INSERT INTO documentos_internos (id, pasta_id, nome, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, pastaId, file.name, key, file.type || 'application/octet-stream', file.size, user.id).run()
+    const documento = await c.env.SHARE_DB.prepare('SELECT id, pasta_id, nome, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, criado_em FROM documentos_internos WHERE id = ?').bind(id).first()
     return c.json({ ...documento, arquivo_url: `/api/sharebrasil/documentos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_documento' }, 400)
@@ -4836,7 +4832,7 @@ app.post('/api/sharebrasil/documentos', async c => {
 app.get('/api/sharebrasil/documentos/:id/arquivo', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome, tipo_arquivo FROM documentos_internos WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome: string; tipo_arquivo: string }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, nome, tipo_arquivo FROM documentos_internos WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome: string; tipo_arquivo: string }>()
   if (!row) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
   if (!object) return c.notFound()
@@ -4846,14 +4842,14 @@ app.get('/api/sharebrasil/documentos/:id/arquivo', async c => {
 app.get('/api/sharebrasil/senhas', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT id, titulo, site, login, observacoes, criado_por, criado_em, atualizado_em, setor FROM senhas ORDER BY titulo').all()
+  const result = await c.env.SHARE_DB.prepare('SELECT id, titulo, site, login, observacoes, criado_por, criado_em, atualizado_em, setor FROM senhas ORDER BY titulo').all()
   return c.json(result.results)
 })
 
 app.get('/api/sharebrasil/senhas/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare('SELECT id, titulo, site, login, senha, observacoes, criado_por, criado_em, atualizado_em, setor FROM senhas WHERE id = ?1').bind(c.req.param('id')).first()
+  const row = await c.env.SHARE_DB.prepare('SELECT id, titulo, site, login, senha, observacoes, criado_por, criado_em, atualizado_em, setor FROM senhas WHERE id = ?1').bind(c.req.param('id')).first()
   if (!row) return c.notFound()
   return c.json(row)
 })
@@ -4864,7 +4860,7 @@ app.post('/api/sharebrasil/senhas', async c => {
   const body = await c.req.json<{ titulo?: string; site?: string; login?: string; senha?: string; observacoes?: string; setor?: string }>().catch(() => ({} as any))
   if (!body.titulo?.trim() || !body.site?.trim() || !body.login?.trim() || !body.senha) return c.json({ error: 'campos_obrigatorios' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO senhas (id, titulo, site, login, senha, observacoes, criado_por, setor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.titulo.trim(), body.site.trim(), body.login.trim(), body.senha, body.observacoes?.trim() || null, user.id, body.setor?.trim() || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO senhas (id, titulo, site, login, senha, observacoes, criado_por, setor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.titulo.trim(), body.site.trim(), body.login.trim(), body.senha, body.observacoes?.trim() || null, user.id, body.setor?.trim() || null).run()
   return c.json({ id, titulo: body.titulo.trim() }, 201)
 })
 
@@ -4872,7 +4868,7 @@ app.patch('/api/sharebrasil/senhas/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<{ titulo?: string; site?: string; login?: string; senha?: string; observacoes?: string; setor?: string }>().catch(() => ({} as any))
-  const result = await portalDb(c).prepare('UPDATE senhas SET titulo = COALESCE(?, titulo), site = COALESCE(?, site), login = COALESCE(?, login), senha = COALESCE(?, senha), observacoes = ?, setor = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.titulo?.trim() || null, body.site?.trim() || null, body.login?.trim() || null, body.senha || null, body.observacoes?.trim() || null, body.setor?.trim() || null, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE senhas SET titulo = COALESCE(?, titulo), site = COALESCE(?, site), login = COALESCE(?, login), senha = COALESCE(?, senha), observacoes = ?, setor = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.titulo?.trim() || null, body.site?.trim() || null, body.login?.trim() || null, body.senha || null, body.observacoes?.trim() || null, body.setor?.trim() || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -4880,7 +4876,7 @@ app.patch('/api/sharebrasil/senhas/:id', async c => {
 app.delete('/api/sharebrasil/senhas/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('DELETE FROM senhas WHERE id = ?1').bind(c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM senhas WHERE id = ?1').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -4888,7 +4884,7 @@ app.delete('/api/sharebrasil/senhas/:id', async c => {
 app.get('/api/sharebrasil/contatos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT * FROM agenda_contatos ORDER BY nome').all()
+  const result = await c.env.SHARE_DB.prepare('SELECT * FROM agenda_contatos ORDER BY nome').all()
   return c.json(result.results)
 })
 
@@ -4898,7 +4894,7 @@ app.post('/api/sharebrasil/contatos', async c => {
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
   if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome.trim(), body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome.trim(), body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null).run()
   return c.json({ id }, 201)
 })
 
@@ -4906,7 +4902,7 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
-  const result = await portalDb(c).prepare('UPDATE agenda_contatos SET nome = COALESCE(?, nome), telefone = ?, email = ?, empresa = ?, cargo = ?, observacoes = ?, endereco = ?, uf = ?, cidade = ?, categoria = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.nome?.trim() || null, body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE agenda_contatos SET nome = COALESCE(?, nome), telefone = ?, email = ?, empresa = ?, cargo = ?, observacoes = ?, endereco = ?, uf = ?, cidade = ?, categoria = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.nome?.trim() || null, body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -4914,7 +4910,7 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
 app.delete('/api/sharebrasil/contatos/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -4925,7 +4921,7 @@ async function garantirForeignKeyCotistas(c: Context<{ Bindings: Bindings }>) {
 app.get('/api/sharebrasil/clientes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   await garantirForeignKeyCotistas(c).catch((error) => log.error('[clientes] migração de cotistas ignorada:', error?.message || error))
   const [clientes, holdings, socios, vinculos, documentos, documentosSocios, aeronave] = await Promise.all([
     db.prepare('SELECT * FROM cliente ORDER BY razao_social').all().catch(() => ({ results: [] as any[] })),
@@ -4946,7 +4942,7 @@ app.post('/api/sharebrasil/holdings', async c => {
   const nome = String(body.nome || '').trim()
   if (!nome) return c.json({ error: 'nome_holding_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO holdings (id, nome, conta_bancaria, ativo) VALUES (?, ?, ?, 1)').bind(id, nome, body.conta_bancaria || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO holdings (id, nome, conta_bancaria, ativo) VALUES (?, ?, ?, 1)').bind(id, nome, body.conta_bancaria || null).run()
   return c.json({ id, nome }, 201)
 })
 app.post('/api/sharebrasil/holdings/:id/socios', async c => {
@@ -4955,10 +4951,10 @@ app.post('/api/sharebrasil/holdings/:id/socios', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const nome = String(body.nome || '').trim(); const cpf = String(body.cpf || '').trim()
   if (!nome || !cpf) return c.json({ error: 'nome_e_cpf_obrigatorios' }, 400)
-  const holding = await portalDb(c).prepare('SELECT id FROM holdings WHERE id = ?1 AND ativo = 1').bind(c.req.param('id')).first()
+  const holding = await c.env.SHARE_DB.prepare('SELECT id FROM holdings WHERE id = ?1 AND ativo = 1').bind(c.req.param('id')).first()
   if (!holding) return c.notFound()
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO hold_socios (id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, holding_id) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, nome, cpf, body.email_principal || null, JSON.stringify(body.emails || []), body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone || null, body.observacoes || null, c.req.param('id')).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO hold_socios (id, cotista_id, nome, cpf, email_principal, emails, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone, observacoes, holding_id) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, nome, cpf, body.email_principal || null, JSON.stringify(body.emails || []), body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone || null, body.observacoes || null, c.req.param('id')).run()
   return c.json({ id, holding_id: c.req.param('id'), nome }, 201)
 })
 app.post('/api/sharebrasil/socios/:id/aeronave', async c => {
@@ -4969,7 +4965,7 @@ app.post('/api/sharebrasil/socios/:id/aeronave', async c => {
   if (!body.aeronave_id) return c.json({ error: 'aeronave_obrigatoria' }, 400)
   if (!Number.isFinite(percentual) || percentual < 0 || percentual > 100) return c.json({ error: 'percentual_invalido' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO cotista_aeronave (id, socio_id, aeronave_id, percentual_sociedade) VALUES (?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, percentual).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, socio_id, aeronave_id, percentual_sociedade) VALUES (?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, percentual).run()
   return c.json({ id }, 201)
 })
 app.post('/api/sharebrasil/clientes', async c => {
@@ -4983,15 +4979,15 @@ app.post('/api/sharebrasil/clientes', async c => {
     : Number(body.percentual_sociedade)
   if (aeronaveId && (!Number.isFinite(percentual) || percentual < 0 || percentual > 100)) return c.json({ error: 'percentual_invalido' }, 400)
   if (aeronaveId) {
-    const aeronave = await portalDb(c).prepare('SELECT id FROM aeronave WHERE id = ?1 AND status <> ?2').bind(aeronaveId, 'inativa').first()
+    const aeronave = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1 AND status <> ?2').bind(aeronaveId, 'inativa').first()
     if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 400)
   }
   const id = uuid()
   const statements = [
-    portalDb(c).prepare('INSERT INTO cliente (id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, status, holding, codigo_cliente, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.razao_social.trim(), body.cnpj || null, body.inscricao_estadual || null, body.proprietario || null, body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone_cliente || null, body.telefone_outro || null, body.email_principal || null, JSON.stringify(body.emails || []), body.status || 'ativo', body.holding ? 1 : 0, body.codigo_cliente || null, body.observacoes || null),
+    c.env.SHARE_DB.prepare('INSERT INTO cliente (id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, status, holding, codigo_cliente, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.razao_social.trim(), body.cnpj || null, body.inscricao_estadual || null, body.proprietario || null, body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone_cliente || null, body.telefone_outro || null, body.email_principal || null, JSON.stringify(body.emails || []), body.status || 'ativo', body.holding ? 1 : 0, body.codigo_cliente || null, body.observacoes || null),
   ]
-  if (aeronaveId) statements.push(portalDb(c).prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(uuid(), id, aeronaveId, percentual, body.codigo_cliente || null))
-  await portalDb(c).batch(statements)
+  if (aeronaveId) statements.push(c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(uuid(), id, aeronaveId, percentual, body.codigo_cliente || null))
+  await c.env.SHARE_DB.batch(statements)
   return c.json({ id, aeronave_id: aeronaveId, percentual_sociedade: aeronaveId ? percentual : null }, 201)
 })
 
@@ -5001,7 +4997,7 @@ app.patch('/api/sharebrasil/clientes/:id', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const fields = ['razao_social','cnpj','inscricao_estadual','proprietario','endereco','cidade','uf','contato_financeiro','telefone_financeiro','telefone_cliente','telefone_outro','email_principal','status','codigo_cliente','observacoes']
   const values = fields.map((field) => body[field] ?? null)
-  const result = await portalDb(c).prepare(`UPDATE cliente SET ${fields.map((field) => `${field} = COALESCE(?, ${field})`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...values, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare(`UPDATE cliente SET ${fields.map((field) => `${field} = COALESCE(?, ${field})`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...values, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -5014,7 +5010,7 @@ app.patch('/api/sharebrasil/socios/:id', async c => {
   const provided = fields.filter((field) => body[field] !== undefined)
   if (!provided.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   const values = provided.map((field) => body[field] ?? null)
-  const result = await portalDb(c).prepare(`UPDATE hold_socios SET ${provided.map((field) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...values, c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare(`UPDATE hold_socios SET ${provided.map((field) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...values, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -5024,7 +5020,7 @@ app.post('/api/sharebrasil/clientes/:id/aeronave', async c => {
   const body = await c.req.json<{ aeronave_id?: string; percentual_sociedade?: number; codigo_cliente?: string }>().catch(() => ({} as any))
   if (!body.aeronave_id) return c.json({ error: 'aeronave_obrigatoria' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, Number(body.percentual_sociedade || 100), body.codigo_cliente || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, Number(body.percentual_sociedade || 100), body.codigo_cliente || null).run()
   return c.json({ id }, 201)
 })
 
@@ -5038,7 +5034,7 @@ app.post('/api/sharebrasil/clientes/:id/logo', async c => {
   if (!file.type.startsWith('image/')) return c.json({ error: 'logo_deve_ser_imagem' }, 415)
   try {
     const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_cliente/avatar_logo/${c.req.param('id')}`)
-    await portalDb(c).prepare('UPDATE cliente SET url_logo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(key, c.req.param('id')).run()
+    await c.env.SHARE_DB.prepare('UPDATE cliente SET url_logo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(key, c.req.param('id')).run()
     return c.json({ url_logo: `/api/sharebrasil/clientes/${c.req.param('id')}/logo/arquivo` })
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_logo' }, 400)
@@ -5048,7 +5044,7 @@ app.post('/api/sharebrasil/clientes/:id/logo', async c => {
 app.get('/api/sharebrasil/clientes/:id/logo/arquivo', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare('SELECT url_logo FROM cliente WHERE id = ?1').bind(c.req.param('id')).first<{ url_logo: string | null }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT url_logo FROM cliente WHERE id = ?1').bind(c.req.param('id')).first<{ url_logo: string | null }>()
   if (!row?.url_logo) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.url_logo)
   if (!object) return c.notFound()
@@ -5066,7 +5062,7 @@ app.post('/api/sharebrasil/clientes/:id/documentos', async c => {
     const categoria = categoriaDocumentoCliente(form.get('categoria'))
     const key = await salvarArquivoShareBrasil(c, user.id, file, `documentos_cliente/${categoria}/${c.req.param('id')}`)
     const id = uuid()
-    await portalDb(c).prepare('INSERT INTO documentos_cliente (id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), file.name, key, file.type || 'application/octet-stream', file.size, user.id, categoria).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO documentos_cliente (id, cliente_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), file.name, key, file.type || 'application/octet-stream', file.size, user.id, categoria).run()
     return c.json({ id, arquivo_url: `/api/sharebrasil/clientes/documentos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_documento_cliente' }, 400)
@@ -5076,7 +5072,7 @@ app.post('/api/sharebrasil/clientes/:id/documentos', async c => {
 app.get('/api/sharebrasil/clientes/documentos/:id/arquivo', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM documentos_cliente WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM documentos_cliente WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string }>()
   if (!row) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
   if (!object) return c.notFound()
@@ -5088,7 +5084,7 @@ app.get('/api/sharebrasil/clientes/documentos/:id/arquivo', async c => {
 app.post('/api/sharebrasil/socios/:id/documentos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const socio = await db.prepare('SELECT id, cotista_id, holding_id FROM hold_socios WHERE id = ?1').bind(c.req.param('id')).first<{ id: string; cotista_id: string; holding_id: string | null }>()
   if (!socio) return c.notFound()
   const form = await c.req.formData()
@@ -5109,7 +5105,7 @@ app.post('/api/sharebrasil/socios/:id/documentos', async c => {
 app.get('/api/sharebrasil/socios/documentos/:id/arquivo', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM documentos_socio WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, nome_arquivo, tipo_arquivo FROM documentos_socio WHERE id = ?1').bind(c.req.param('id')).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string }>()
   if (!row) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
   if (!object) return c.notFound()
@@ -5123,14 +5119,14 @@ function isTaskManager(user: Colaborador): boolean {
 
 async function isMeetingManager(c: Context<{ Bindings: Bindings }>, user: Colaborador): Promise<boolean> {
   if (isTaskManager(user)) return true
-  const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(funcao, ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster') LIMIT 1").bind(user.id).first()
+  const result = await c.env.SHARE_DB.prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(funcao, ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster') LIMIT 1").bind(user.id).first()
   return Boolean(result)
 }
 
 app.get('/api/interno/aerodromos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const q = (c.req.query('q') || '').trim(); const termo = `%${q}%`
-  const rows = await portalDb(c).prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE upper(?1) OR upper(nome) LIKE upper(?1)) ORDER BY designativo_icao").bind(termo).all()
+  const rows = await c.env.SHARE_DB.prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE (?1 = '%%' OR upper(designativo_icao) LIKE upper(?1) OR upper(nome) LIKE upper(?1)) ORDER BY designativo_icao").bind(termo).all()
   return c.json({ aerodromos: rows.results })
 })
 type AerodromoPayload = { nome?: string; designativo_icao?: string; coordenadas?: string | null }
@@ -5150,7 +5146,7 @@ app.post('/api/interno/aerodromos', async c => {
   if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
   const id = uuid()
   try {
-    await portalDb(c).prepare('INSERT INTO aerodromo (id, nome, designativo_icao, coordenadas) VALUES (?, ?, ?, ?)').bind(id, nome, icao, coordenadas).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO aerodromo (id, nome, designativo_icao, coordenadas) VALUES (?, ?, ?, ?)').bind(id, nome, icao, coordenadas).run()
   } catch (error) {
     if (String(error).toLowerCase().includes('unique')) return c.json({ error: 'designativo_icao_ja_cadastrado' }, 409)
     throw error
@@ -5162,7 +5158,7 @@ const atualizarAerodromo = async (c: Context<{ Bindings: Bindings }>) => {
   const body = await c.req.json<AerodromoPayload>().catch(() => ({} as AerodromoPayload)); const { nome, icao, coordenadas } = validarAerodromo(body)
   if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
   try {
-    const result = await portalDb(c).prepare('UPDATE aerodromo SET nome = ?, designativo_icao = ?, coordenadas = ? WHERE id = ?').bind(nome, icao, coordenadas, c.req.param('id')).run()
+    const result = await c.env.SHARE_DB.prepare('UPDATE aerodromo SET nome = ?, designativo_icao = ?, coordenadas = ? WHERE id = ?').bind(nome, icao, coordenadas, c.req.param('id')).run()
     if (!result.meta.changes) return c.notFound()
   } catch (error) {
     if (String(error).toLowerCase().includes('unique')) return c.json({ error: 'designativo_icao_ja_cadastrado' }, 409)
@@ -5174,18 +5170,18 @@ app.patch('/api/interno/aerodromos/:id', atualizarAerodromo)
 app.put('/api/interno/aerodromos/:id', atualizarAerodromo)
 app.delete('/api/interno/aerodromos/:id', async c => {
   if (!(await autorizarGestaoAerodromo(c))) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await portalDb(c).prepare('DELETE FROM aerodromo WHERE id = ?').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM aerodromo WHERE id = ?').bind(c.req.param('id')).run(); if (!result.meta.changes) return c.notFound(); return c.json({ success: true })
 })
 
 async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Colaborador): Promise<boolean> {
-  const result = await portalDb(c).prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'financeiro_master', 'gestor_master', 'rh_master', 'rh') LIMIT 1").bind(user.id).first()
+  const result = await c.env.SHARE_DB.prepare("SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'financeiro_master', 'gestor_master', 'rh_master', 'rh') LIMIT 1").bind(user.id).first()
   return Boolean(result)
 }
 
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await portalDb(c).prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
+  const result = await c.env.SHARE_DB.prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
   return c.json(result.results)
 })
 
@@ -5204,38 +5200,38 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   if (!authResponse.ok || !authData.id) return c.json({ error: authData.msg || authData.message || 'nao_foi_possivel_criar_usuario_supabase' }, authResponse.status === 422 ? 409 : 502)
   const id = String(authData.id)
   try {
-    await portalDb(c).prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
+    await c.env.SHARE_DB.prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
     const funcao = String(body.funcao || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')
-    await portalDb(c).prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, funcao).run()
-    await portalDb(c).prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || body.departamento || null, body.telefone || null, null, emailEnvio).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, funcao).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || body.departamento || null, body.telefone || null, null, emailEnvio).run()
   } catch (error) {
-    await portalDb(c).prepare('DELETE FROM usuarios_funcoes WHERE user_id = ?1').bind(id).run().catch(() => undefined)
-    await portalDb(c).prepare('DELETE FROM user_profiles WHERE id = ?1').bind(id).run().catch(() => undefined)
+    await c.env.SHARE_DB.prepare('DELETE FROM usuarios_funcoes WHERE user_id = ?1').bind(id).run().catch(() => undefined)
+    await c.env.SHARE_DB.prepare('DELETE FROM user_profiles WHERE id = ?1').bind(id).run().catch(() => undefined)
     await fetch(`${c.env.SUPABASE_URL}/auth/v1/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}` } }).catch(() => undefined)
     log.error('[gestao-colaborador] falha ao inserir perfil ou função D1:', error)
     return c.json({ error: 'usuario_criado_no_supabase_mas_falha_ao_salvar_perfil_d1' }, 500)
   }
-  return c.json(await portalDb(c).prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
+  return c.json(await c.env.SHARE_DB.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
 })
 
 app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const id = c.req.param('id'); const current = await portalDb(c).prepare('SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
+  const id = c.req.param('id'); const current = await c.env.SHARE_DB.prepare('SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!current) return c.notFound()
   const fields = ['nome_completo', 'nome_exibicao', 'telefone', 'cidade', 'uf', 'data_nascimento', 'data_admissao', 'cpf', 'rg', 'canac', 'departamento', 'status']
   const updates = fields.filter(field => body[field] !== undefined)
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
-  await portalDb(c).prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
-  return c.json(await portalDb(c).prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
+  await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
+  return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
 })
 
 app.get('/api/gestor/gestao-colaborador/:id/ficha', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
   const id = c.req.param('id')
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const perfil = await db.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, endereco, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!perfil) return c.notFound()
   const [documentos, funcoes, ferias, recebimentos, lancamentos] = await Promise.all([
@@ -5252,7 +5248,7 @@ app.get('/api/gestor/ferias', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
   const inicio = c.req.query('inicio') || new Date().toISOString().slice(0, 10)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const registros = await db.prepare(`SELECT f.id, f.colaborador_id, f.data_inicio, f.data_fim, f.quantidade_dias, f.status, f.observacoes, f.motivo_reprovacao, f.aprovado_em, f.criado_em, p.nome_completo, p.nome_exibicao, p.email, p.departamento, p.data_admissao
     FROM solicitacoes_ferias f LEFT JOIN user_profiles p ON p.id = f.colaborador_id
     ORDER BY CASE f.status WHEN 'solicitada' THEN 1 WHEN 'aprovada' THEN 2 ELSE 3 END, date(f.data_inicio), p.nome_completo`).all().catch(() => ({ results: [] }))
@@ -5274,7 +5270,7 @@ app.patch('/api/gestor/ferias/:id', async c => {
   if (!['aprovada', 'reprovada', 'cancelada'].includes(status)) return c.json({ error: 'status_de_ferias_invalido' }, 400)
   if (status === 'reprovada' && !String(body.motivo_reprovacao || '').trim()) return c.json({ error: 'motivo_reprovacao_obrigatorio' }, 400)
   const id = c.req.param('id')
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const atual = await db.prepare('SELECT id, status FROM solicitacoes_ferias WHERE id = ?1').bind(id).first<{ id: string; status: string }>()
   if (!atual) return c.notFound()
   if (atual.status !== 'solicitada' && status !== 'cancelada') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
@@ -5292,13 +5288,13 @@ async function visibleTask(c: Context<{ Bindings: Bindings }>, user: Colaborador
   const sql = manager
     ? 'SELECT * FROM tarefas WHERE id = ?1 AND origem = \'KANBAN\''
     : 'SELECT * FROM tarefas WHERE id = ?1 AND origem = \'KANBAN\' AND (criado_por = ?2 OR publico = 1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(atribuido_para, \'[]\')) WHERE json_each.value = ?2))'
-  return manager ? portalDb(c).prepare(sql).bind(id).first() : portalDb(c).prepare(sql).bind(id, user.id).first()
+  return manager ? c.env.SHARE_DB.prepare(sql).bind(id).first() : c.env.SHARE_DB.prepare(sql).bind(id, user.id).first()
 }
 
 async function notifyTask(c: Context<{ Bindings: Bindings }>, taskId: string, recipients: string[], mensagem: string, status?: string): Promise<void> {
   const unique = [...new Set(recipients.filter(Boolean))]
   if (!unique.length) return
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   for (const recipient of unique) {
     await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, status || null).run()
   }
@@ -5307,7 +5303,7 @@ async function notifyTask(c: Context<{ Bindings: Bindings }>, taskId: string, re
 app.get('/api/sharebrasil/tarefas/usuarios', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !isTaskManager(user)) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await portalDb(c).prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, departamento FROM user_profiles WHERE status IS NULL OR lower(status) IN ('ativo', 'active') ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
+  const result = await c.env.SHARE_DB.prepare("SELECT id, nome_completo, nome_exibicao, email, tipo_user, departamento FROM user_profiles WHERE status IS NULL OR lower(status) IN ('ativo', 'active') ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
   return c.json(result.results)
 })
 
@@ -5318,14 +5314,14 @@ app.get('/api/sharebrasil/tarefas', async c => {
   const sql = manager
     ? "SELECT * FROM tarefas WHERE origem = 'KANBAN' ORDER BY CASE status WHEN 'ABERTO' THEN 1 WHEN 'EM_ANDAMENTO' THEN 2 WHEN 'CONCLUIDA' THEN 3 ELSE 4 END, prazo IS NULL, prazo, criado_em DESC"
     : "SELECT * FROM tarefas WHERE origem = 'KANBAN' AND (criado_por = ?1 OR publico = 1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(atribuido_para, '[]')) WHERE json_each.value = ?1)) ORDER BY prazo IS NULL, prazo, criado_em DESC"
-  const tasks = manager ? await portalDb(c).prepare(sql).all() : await portalDb(c).prepare(sql).bind(user.id).all()
+  const tasks = manager ? await c.env.SHARE_DB.prepare(sql).all() : await c.env.SHARE_DB.prepare(sql).bind(user.id).all()
   const taskIds = tasks.results.map((row: any) => row.id)
   const comments: any[] = []
   for (const taskId of taskIds) {
-    const result = await portalDb(c).prepare('SELECT c.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS usuario_nome FROM tarefas_comentarios c LEFT JOIN user_profiles u ON u.id = c.usuario_id WHERE c.tarefa_id = ?1 ORDER BY c.criado_em ASC').bind(taskId).all()
+    const result = await c.env.SHARE_DB.prepare('SELECT c.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS usuario_nome FROM tarefas_comentarios c LEFT JOIN user_profiles u ON u.id = c.usuario_id WHERE c.tarefa_id = ?1 ORDER BY c.criado_em ASC').bind(taskId).all()
     comments.push(...result.results)
   }
-  const notifications = await portalDb(c).prepare('SELECT * FROM tarefas_notificacoes WHERE user_id = ?1 ORDER BY criado_em DESC LIMIT 50').bind(user.id).all()
+  const notifications = await c.env.SHARE_DB.prepare('SELECT * FROM tarefas_notificacoes WHERE user_id = ?1 ORDER BY criado_em DESC LIMIT 50').bind(user.id).all()
   return c.json({ tarefas: tasks.results.map((task: any) => ({ ...task, atribuido_para: JSON.parse(task.atribuido_para || '[]'), comentarios: comments.filter((item) => item.tarefa_id === task.id) })), notificacoes: notifications.results })
 })
 
@@ -5337,7 +5333,7 @@ app.post('/api/sharebrasil/tarefas', async c => {
   const assigned = Array.isArray(body.atribuido_para) ? body.atribuido_para : []
   if ((assigned.length || body.publico) && !isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master_pode_atribuir' }, 403)
   const id = uuid(); const publico = body.publico ? 1 : 0; const assignedJson = jsonArray(assigned)
-  await portalDb(c).prepare("INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, prazo, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', ?, ?, ?, ?, 'KANBAN', ?, 0)").bind(id, body.titulo.trim(), body.descricao?.trim() || null, body.prioridade || 'MEDIA', user.id, body.prazo || null, publico, assignedJson).run()
+  await c.env.SHARE_DB.prepare("INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, prazo, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', ?, ?, ?, ?, 'KANBAN', ?, 0)").bind(id, body.titulo.trim(), body.descricao?.trim() || null, body.prioridade || 'MEDIA', user.id, body.prazo || null, publico, assignedJson).run()
   await notifyTask(c, id, assigned, `Nova tarefa atribuída: ${body.titulo.trim()}`)
   return c.json({ id, titulo: body.titulo.trim(), status: 'ABERTO', publico, atribuido_para: assigned }, 201)
 })
@@ -5352,7 +5348,7 @@ app.patch('/api/sharebrasil/tarefas/:id', async c => {
   if ((body.atribuido_para !== undefined || body.publico !== undefined) && !isTaskManager(user)) return c.json({ error: 'somente_admin_ou_gestor_master_pode_atribuir' }, 403)
   const status = body.status || task.status
   const progress = body.progresso == null ? (status === 'CONCLUIDA' ? 100 : task.progresso) : Math.max(0, Math.min(100, Number(body.progresso)))
-  await portalDb(c).prepare('UPDATE tarefas SET titulo = COALESCE(?, titulo), descricao = COALESCE(?, descricao), status = ?, prioridade = COALESCE(?, prioridade), prazo = ?, progresso = ?, publico = COALESCE(?, publico), atribuido_para = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.titulo?.trim() || null, body.descricao?.trim() || null, status, body.prioridade || null, body.prazo === undefined ? task.prazo : body.prazo, progress, body.publico === undefined ? null : (body.publico ? 1 : 0), jsonArray(assigned), task.id).run()
+  await c.env.SHARE_DB.prepare('UPDATE tarefas SET titulo = COALESCE(?, titulo), descricao = COALESCE(?, descricao), status = ?, prioridade = COALESCE(?, prioridade), prazo = ?, progresso = ?, publico = COALESCE(?, publico), atribuido_para = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.titulo?.trim() || null, body.descricao?.trim() || null, status, body.prioridade || null, body.prazo === undefined ? task.prazo : body.prazo, progress, body.publico === undefined ? null : (body.publico ? 1 : 0), jsonArray(assigned), task.id).run()
   if (status === 'CONCLUIDA' && task.status !== 'CONCLUIDA' && task.criado_por && task.criado_por !== user.id) await notifyTask(c, task.id, [task.criado_por], `A tarefa foi concluída: ${task.titulo}`, 'CONCLUIDA')
   if (body.atribuido_para) await notifyTask(c, task.id, assigned, `A tarefa foi atualizada: ${body.titulo || task.titulo}`)
   return c.json({ success: true, status, progresso: progress, atribuido_para: assigned })
@@ -5366,7 +5362,7 @@ app.post('/api/sharebrasil/tarefas/:id/comentarios', async c => {
   const body = await c.req.json<{ comentario?: string }>().catch(() => ({} as any))
   if (!body.comentario?.trim()) return c.json({ error: 'comentario_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO tarefas_comentarios (id, tarefa_id, usuario_id, comentario) VALUES (?, ?, ?, ?)').bind(id, task.id, user.id, body.comentario.trim()).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO tarefas_comentarios (id, tarefa_id, usuario_id, comentario) VALUES (?, ?, ?, ?)').bind(id, task.id, user.id, body.comentario.trim()).run()
   const recipients = [task.criado_por, ...JSON.parse(task.atribuido_para || '[]')].filter((recipient: string) => recipient && recipient !== user.id)
   await notifyTask(c, task.id, recipients, `Novo comentário na tarefa: ${task.titulo}`)
   return c.json({ id, tarefa_id: task.id, comentario: body.comentario.trim() }, 201)
@@ -5375,7 +5371,7 @@ app.post('/api/sharebrasil/tarefas/:id/comentarios', async c => {
 app.patch('/api/sharebrasil/notificacoes/:id/lida', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('UPDATE tarefas_notificacoes SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
+  const result = await c.env.SHARE_DB.prepare('UPDATE tarefas_notificacoes SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -5383,7 +5379,7 @@ app.patch('/api/sharebrasil/notificacoes/:id/lida', async c => {
 app.get('/api/sharebrasil/calendario/categorias', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('SELECT * FROM categorias_calendario WHERE usuario_id = ?1 ORDER BY nome').bind(user.id).all()
+  const result = await c.env.SHARE_DB.prepare('SELECT * FROM categorias_calendario WHERE usuario_id = ?1 ORDER BY nome').bind(user.id).all()
   return c.json(result.results)
 })
 
@@ -5393,7 +5389,7 @@ app.post('/api/sharebrasil/calendario/categorias', async c => {
   const body = await c.req.json<{ nome?: string; cor?: string }>().catch(() => ({} as any))
   if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO categorias_calendario (id, usuario_id, nome, cor) VALUES (?, ?, ?, ?)').bind(id, user.id, body.nome.trim(), body.cor || '#2fb9a7').run()
+  await c.env.SHARE_DB.prepare('INSERT INTO categorias_calendario (id, usuario_id, nome, cor) VALUES (?, ?, ?, ?)').bind(id, user.id, body.nome.trim(), body.cor || '#2fb9a7').run()
   return c.json({ id, nome: body.nome.trim(), cor: body.cor || '#2fb9a7' }, 201)
 })
 
@@ -5401,7 +5397,7 @@ app.get('/api/sharebrasil/calendario', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const inicio = c.req.query('inicio') || '1900-01-01'; const fim = c.req.query('fim') || '2999-12-31'
-  const result = await portalDb(c).prepare("SELECT l.*, c.nome AS categoria_nome, c.cor AS categoria_cor FROM lembretes_calendario l LEFT JOIN categorias_calendario c ON c.id = l.cor_categoria_id WHERE l.data BETWEEN ?1 AND ?2 AND (l.visibilidade = 'TODOS' OR l.usuario_id = ?3) ORDER BY l.data, l.hora").bind(inicio, fim, user.id).all()
+  const result = await c.env.SHARE_DB.prepare("SELECT l.*, c.nome AS categoria_nome, c.cor AS categoria_cor FROM lembretes_calendario l LEFT JOIN categorias_calendario c ON c.id = l.cor_categoria_id WHERE l.data BETWEEN ?1 AND ?2 AND (l.visibilidade = 'TODOS' OR l.usuario_id = ?3) ORDER BY l.data, l.hora").bind(inicio, fim, user.id).all()
   return c.json(result.results)
 })
 
@@ -5412,9 +5408,9 @@ app.post('/api/sharebrasil/calendario', async c => {
   if (!body.titulo?.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(body.data || '')) return c.json({ error: 'titulo_e_data_obrigatorios' }, 400)
   const visibility = body.visibilidade === 'TODOS' ? 'TODOS' : 'PRIVADO'
   const calendarId = uuid(); const taskId = uuid()
-  await portalDb(c).prepare("INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, prazo, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'MEDIA', ?, ?, ?, 'CALENDARIO', ?, 0)").bind(taskId, body.titulo.trim(), body.descricao?.trim() || null, user.id, body.data, visibility === 'TODOS' ? 1 : 0, jsonArray([user.id])).run()
-  await portalDb(c).prepare('INSERT INTO lembretes_calendario (id, usuario_id, titulo, descricao, data, hora, visibilidade, cor_categoria_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(calendarId, user.id, body.titulo.trim(), body.descricao?.trim() || null, body.data, body.hora || null, visibility, body.cor_categoria_id || null).run()
-  const users = visibility === 'TODOS' ? await portalDb(c).prepare("SELECT id FROM user_profiles WHERE status IS NULL OR lower(status) IN ('ativo', 'active')").all() : { results: [{ id: user.id }] }
+  await c.env.SHARE_DB.prepare("INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, prazo, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'MEDIA', ?, ?, ?, 'CALENDARIO', ?, 0)").bind(taskId, body.titulo.trim(), body.descricao?.trim() || null, user.id, body.data, visibility === 'TODOS' ? 1 : 0, jsonArray([user.id])).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO lembretes_calendario (id, usuario_id, titulo, descricao, data, hora, visibilidade, cor_categoria_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(calendarId, user.id, body.titulo.trim(), body.descricao?.trim() || null, body.data, body.hora || null, visibility, body.cor_categoria_id || null).run()
+  const users = visibility === 'TODOS' ? await c.env.SHARE_DB.prepare("SELECT id FROM user_profiles WHERE status IS NULL OR lower(status) IN ('ativo', 'active')").all() : { results: [{ id: user.id }] }
   await notifyTask(c, taskId, users.results.map((item: any) => item.id), `Novo evento no calendário: ${body.titulo.trim()}`)
   return c.json({ id: calendarId, titulo: body.titulo.trim(), data: body.data, hora: body.hora || null, visibilidade: visibility }, 201)
 })
@@ -5437,7 +5433,7 @@ app.get('/api/sharebrasil/hoteis', async c => {
   const busca = (c.req.query('q') || '').trim()
   const ordem = c.req.query('ordem') === 'cidade' ? 'cidade, nome' : c.req.query('ordem') === 'estrelas' ? 'estrelas DESC, nome' : 'nome'
   const query = busca ? `SELECT * FROM hoteis WHERE nome LIKE ?1 OR cidade LIKE ?1 OR contato_comercial LIKE ?1 OR email LIKE ?1 ORDER BY ${ordem}` : `SELECT * FROM hoteis ORDER BY ${ordem}`
-  const result = busca ? await portalDb(c).prepare(query).bind(`%${busca}%`).all() : await portalDb(c).prepare(query).all()
+  const result = busca ? await c.env.SHARE_DB.prepare(query).bind(`%${busca}%`).all() : await c.env.SHARE_DB.prepare(query).all()
   return c.json(result.results.map(row => hotelPayload(row as Record<string, any>)))
 })
 
@@ -5450,8 +5446,8 @@ app.post('/api/sharebrasil/hoteis', async c => {
   const nome = String(body.nome || '').trim()
   if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare(`INSERT INTO hoteis (id, nome, telefone, endereco, uf, cidade, preco_single, preco_duplo, estrelas, convenio, email, telefone_reservas, contato_comercial, telefone_comercial, email_comercial, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, nome, body.telefone || null, body.endereco || null, body.uf || null, body.cidade || null, body.preco_single == null || body.preco_single === '' ? null : Number(body.preco_single), body.preco_duplo == null || body.preco_duplo === '' ? null : Number(body.preco_duplo), Math.max(0, Math.min(5, Math.trunc(Number(body.estrelas) || 0))), body.convenio ? 1 : 0, body.email || null, body.telefone_reservas || null, body.contato_comercial || null, body.telefone_comercial || null, body.email_comercial || null, body.observacoes || null).run()
-  return c.json(hotelPayload(await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(id).first<Record<string, any>>() || { id, nome }), 201)
+  await c.env.SHARE_DB.prepare(`INSERT INTO hoteis (id, nome, telefone, endereco, uf, cidade, preco_single, preco_duplo, estrelas, convenio, email, telefone_reservas, contato_comercial, telefone_comercial, email_comercial, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, nome, body.telefone || null, body.endereco || null, body.uf || null, body.cidade || null, body.preco_single == null || body.preco_single === '' ? null : Number(body.preco_single), body.preco_duplo == null || body.preco_duplo === '' ? null : Number(body.preco_duplo), Math.max(0, Math.min(5, Math.trunc(Number(body.estrelas) || 0))), body.convenio ? 1 : 0, body.email || null, body.telefone_reservas || null, body.contato_comercial || null, body.telefone_comercial || null, body.email_comercial || null, body.observacoes || null).run()
+  return c.json(hotelPayload(await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(id).first<Record<string, any>>() || { id, nome }), 201)
 })
 
 app.patch('/api/sharebrasil/hoteis/:id', async c => {
@@ -5460,11 +5456,11 @@ app.patch('/api/sharebrasil/hoteis/:id', async c => {
   if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const current = await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
+  const current = await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
   if (!current) return c.notFound()
   const value = (key: string) => body[key] === undefined ? current[key] : body[key]
-  await portalDb(c).prepare('UPDATE hoteis SET nome=?, telefone=?, endereco=?, uf=?, cidade=?, preco_single=?, preco_duplo=?, estrelas=?, convenio=?, email=?, telefone_reservas=?, contato_comercial=?, telefone_comercial=?, email_comercial=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(String(value('nome') || '').trim(), value('telefone') || null, value('endereco') || null, value('uf') || null, value('cidade') || null, value('preco_single') === '' || value('preco_single') == null ? null : Number(value('preco_single')), value('preco_duplo') === '' || value('preco_duplo') == null ? null : Number(value('preco_duplo')), Math.max(0, Math.min(5, Math.trunc(Number(value('estrelas')) || 0))), value('convenio') ? 1 : 0, value('email') || null, value('telefone_reservas') || null, value('contato_comercial') || null, value('telefone_comercial') || null, value('email_comercial') || null, value('observacoes') || null, current.id).run()
-  return c.json(hotelPayload(await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(current.id).first<Record<string, any>>() || current))
+  await c.env.SHARE_DB.prepare('UPDATE hoteis SET nome=?, telefone=?, endereco=?, uf=?, cidade=?, preco_single=?, preco_duplo=?, estrelas=?, convenio=?, email=?, telefone_reservas=?, contato_comercial=?, telefone_comercial=?, email_comercial=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(String(value('nome') || '').trim(), value('telefone') || null, value('endereco') || null, value('uf') || null, value('cidade') || null, value('preco_single') === '' || value('preco_single') == null ? null : Number(value('preco_single')), value('preco_duplo') === '' || value('preco_duplo') == null ? null : Number(value('preco_duplo')), Math.max(0, Math.min(5, Math.trunc(Number(value('estrelas')) || 0))), value('convenio') ? 1 : 0, value('email') || null, value('telefone_reservas') || null, value('contato_comercial') || null, value('telefone_comercial') || null, value('email_comercial') || null, value('observacoes') || null, current.id).run()
+  return c.json(hotelPayload(await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(current.id).first<Record<string, any>>() || current))
 })
 
 app.delete('/api/sharebrasil/hoteis/:id', async c => {
@@ -5472,7 +5468,7 @@ app.delete('/api/sharebrasil/hoteis/:id', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
-  const result = await portalDb(c).prepare('DELETE FROM hoteis WHERE id = ?1').bind(c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM hoteis WHERE id = ?1').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -5482,7 +5478,7 @@ app.post('/api/sharebrasil/hoteis/:id/reservar', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaHoteis(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const hotel = await portalDb(c).prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
+  const hotel = await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
   if (!hotel) return c.notFound()
   const destinatario = String(hotel.email || hotel.email_comercial || '').trim()
   if (!destinatario) return c.json({ error: 'hotel_sem_email' }, 422)
@@ -5492,7 +5488,7 @@ app.post('/api/sharebrasil/hoteis/:id/reservar', async c => {
   const emailResponse = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [destinatario], reply_to: body.hospede_email || undefined, subject: `Solicitação de reserva — ${hotel.nome} (${checkin} a ${checkout})`, html: `<h2>Solicitação de reserva</h2><p><strong>Hotel:</strong> ${escapeHtml(hotel.nome)}</p><p><strong>Check-in:</strong> ${escapeHtml(checkin)}</p><p><strong>Check-out:</strong> ${escapeHtml(checkout)}</p><p><strong>Quarto:</strong> ${escapeHtml(body.tipo_quarto || 'Não informado')}</p><p><strong>Hóspede:</strong> ${escapeHtml(hospede)}</p><p><strong>Telefone:</strong> ${escapeHtml(telefone)}</p><p><strong>Quantidade:</strong> ${escapeHtml(quantidade)}</p><p><strong>Observações:</strong> ${escapeHtml(body.observacoes || '—')}</p>` }) })
   if (!emailResponse.ok) return c.json({ error: 'falha_ao_enviar_email' }, 502)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO reservas_hoteis (id, hotel_id, criado_por, data_checkin, data_checkout, tipo_quarto, quantidade_hospedes, hospede_nome, hospede_telefone, hospede_email, observacoes, destinatario_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, hotel.id, user.id, checkin, checkout, body.tipo_quarto || null, quantidade, hospede, telefone, body.hospede_email || null, body.observacoes || null, destinatario).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO reservas_hoteis (id, hotel_id, criado_por, data_checkin, data_checkout, tipo_quarto, quantidade_hospedes, hospede_nome, hospede_telefone, hospede_email, observacoes, destinatario_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, hotel.id, user.id, checkin, checkout, body.tipo_quarto || null, quantidade, hospede, telefone, body.hospede_email || null, body.observacoes || null, destinatario).run()
   return c.json({ success: true, id, destinatario_email: destinatario }, 201)
 })
 
@@ -5511,7 +5507,7 @@ app.get('/api/sharebrasil/centro-treinamento/materiais', async c => {
   await ensureTrainingTables(c)
   const categoria = (c.req.query('categoria') || '').trim().toUpperCase()
   const query = categoria ? 'SELECT * FROM manual_tutoriais WHERE publicado = 1 AND upper(categoria) = ?1 ORDER BY ordem, criado_em DESC' : 'SELECT * FROM manual_tutoriais WHERE publicado = 1 ORDER BY categoria, ordem, criado_em DESC'
-  const result = categoria ? await portalDb(c).prepare(query).bind(categoria).all() : await portalDb(c).prepare(query).all()
+  const result = categoria ? await c.env.SHARE_DB.prepare(query).bind(categoria).all() : await c.env.SHARE_DB.prepare(query).all()
   return c.json(result.results.map(row => trainingPayload(row as Record<string, any>)))
 })
 
@@ -5546,8 +5542,8 @@ app.post('/api/sharebrasil/centro-treinamento/materiais', async c => {
       tamanhoArquivo = file.size
     }
     const id = uuid()
-    await portalDb(c).prepare('INSERT INTO manual_tutoriais (id, titulo, descricao, video_url, conteudo_html, categoria, ordem, criado_por, tema, arquivo_url, tipo_arquivo, tamanho_arquivo, publicado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(id, titulo, descricao, videoUrl, conteudoHtml, categoria, Number.isFinite(ordem) ? ordem : 0, user.id, tema, arquivoUrl, tipoArquivo, tamanhoArquivo).run()
-    const row = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(id).first<Record<string, any>>()
+    await c.env.SHARE_DB.prepare('INSERT INTO manual_tutoriais (id, titulo, descricao, video_url, conteudo_html, categoria, ordem, criado_por, tema, arquivo_url, tipo_arquivo, tamanho_arquivo, publicado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(id, titulo, descricao, videoUrl, conteudoHtml, categoria, Number.isFinite(ordem) ? ordem : 0, user.id, tema, arquivoUrl, tipoArquivo, tamanhoArquivo).run()
+    const row = await c.env.SHARE_DB.prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(id).first<Record<string, any>>()
     return c.json(trainingPayload(row || { id, titulo, descricao, categoria }), 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_material' }, 400)
@@ -5560,12 +5556,12 @@ app.patch('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
   if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
   const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
-  const current = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
+  const current = await c.env.SHARE_DB.prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
   if (!current) return c.notFound()
   const categoria = body.categoria == null ? current.categoria : String(body.categoria).toUpperCase()
   if (!['TUTORIAL', 'TREINAMENTO'].includes(categoria)) return c.json({ error: 'categoria_invalida' }, 400)
-  await portalDb(c).prepare('UPDATE manual_tutoriais SET titulo = ?, descricao = ?, categoria = ?, tema = ?, video_url = ?, conteudo_html = ?, ordem = ?, publicado = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(String(body.titulo ?? current.titulo).trim(), String(body.descricao ?? current.descricao).trim(), categoria, body.tema == null ? current.tema : String(body.tema), body.video_url == null ? current.video_url : String(body.video_url), body.conteudo_html == null ? current.conteudo_html : String(body.conteudo_html), Number(body.ordem ?? current.ordem) || 0, body.publicado == null ? current.publicado : (body.publicado ? 1 : 0), current.id).run()
-  const row = await portalDb(c).prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(current.id).first<Record<string, any>>()
+  await c.env.SHARE_DB.prepare('UPDATE manual_tutoriais SET titulo = ?, descricao = ?, categoria = ?, tema = ?, video_url = ?, conteudo_html = ?, ordem = ?, publicado = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(String(body.titulo ?? current.titulo).trim(), String(body.descricao ?? current.descricao).trim(), categoria, body.tema == null ? current.tema : String(body.tema), body.video_url == null ? current.video_url : String(body.video_url), body.conteudo_html == null ? current.conteudo_html : String(body.conteudo_html), Number(body.ordem ?? current.ordem) || 0, body.publicado == null ? current.publicado : (body.publicado ? 1 : 0), current.id).run()
+  const row = await c.env.SHARE_DB.prepare('SELECT * FROM manual_tutoriais WHERE id = ?1').bind(current.id).first<Record<string, any>>()
   return c.json(trainingPayload(row || current))
 })
 
@@ -5574,9 +5570,9 @@ app.delete('/api/sharebrasil/centro-treinamento/materiais/:id', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
-  const row = await portalDb(c).prepare('SELECT arquivo_url FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT arquivo_url FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null }>()
   if (!row) return c.notFound()
-  await portalDb(c).prepare('DELETE FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).run()
+  await c.env.SHARE_DB.prepare('DELETE FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).run()
   if (row.arquivo_url) await shareBrasilBucket(c).delete(row.arquivo_url).catch(() => undefined)
   return c.json({ success: true })
 })
@@ -5585,7 +5581,7 @@ app.get('/api/sharebrasil/centro-treinamento/materiais/:id/arquivo', async c => 
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await ensureTrainingTables(c)
-  const row = await portalDb(c).prepare('SELECT arquivo_url, tipo_arquivo, titulo FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null; tipo_arquivo: string | null; titulo: string }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT arquivo_url, tipo_arquivo, titulo FROM manual_tutoriais WHERE id = ?1').bind(c.req.param('id')).first<{ arquivo_url: string | null; tipo_arquivo: string | null; titulo: string }>()
   if (!row?.arquivo_url) return c.notFound()
   const object = await shareBrasilBucket(c).get(row.arquivo_url)
   if (!object) return c.notFound()
@@ -5597,7 +5593,7 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await ensureTrainingTables(c)
   const filtro = await isMeetingManager(c, user) ? '' : "WHERE r.status = 'ATIVA'"
-  const result = await portalDb(c).prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por ${filtro} ORDER BY r.criado_em DESC`).all()
+  const result = await c.env.SHARE_DB.prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por ${filtro} ORDER BY r.criado_em DESC`).all()
   return c.json(result.results)
 })
 
@@ -5606,7 +5602,7 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes/encerradas', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
-  const result = await portalDb(c).prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por WHERE r.status = 'ENCERRADA' ORDER BY r.encerrado_em DESC, r.criado_em DESC`).all()
+  const result = await c.env.SHARE_DB.prepare(`SELECT r.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email) AS criado_por_nome FROM centro_reunioes r LEFT JOIN user_profiles u ON u.id = r.criado_por WHERE r.status = 'ENCERRADA' ORDER BY r.encerrado_em DESC, r.criado_em DESC`).all()
   return c.json(result.results)
 })
 
@@ -5619,7 +5615,7 @@ app.post('/api/sharebrasil/centro-treinamento/reunioes', async c => {
   const titulo = body.titulo?.trim() || ''
   if (!titulo) return c.json({ error: 'titulo_obrigatorio' }, 400)
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO centro_reunioes (id, titulo, descricao, criado_por) VALUES (?, ?, ?, ?)').bind(id, titulo, body.descricao?.trim() || null, user.id).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO centro_reunioes (id, titulo, descricao, criado_por) VALUES (?, ?, ?, ?)').bind(id, titulo, body.descricao?.trim() || null, user.id).run()
   return c.json({ id, titulo, descricao: body.descricao?.trim() || null, status: 'ATIVA' }, 201)
 })
 
@@ -5628,7 +5624,7 @@ app.post('/api/sharebrasil/centro-treinamento/reunioes/:id/encerrar', async c =>
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
-  await portalDb(c).prepare("UPDATE centro_reunioes SET status = 'ENCERRADA', encerrado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(c.req.param('id')).run()
+  await c.env.SHARE_DB.prepare("UPDATE centro_reunioes SET status = 'ENCERRADA', encerrado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(c.req.param('id')).run()
   return c.json({ success: true })
 })
 
@@ -5637,7 +5633,7 @@ app.delete('/api/sharebrasil/centro-treinamento/reunioes/:id', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   if (!(await isMeetingManager(c, user))) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await ensureTrainingTables(c)
-  const result = await portalDb(c).prepare("DELETE FROM centro_reunioes WHERE id = ?1 AND status = 'ENCERRADA'").bind(c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare("DELETE FROM centro_reunioes WHERE id = ?1 AND status = 'ENCERRADA'").bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.json({ error: 'sala_nao_encerrada_ou_nao_encontrada' }, 409)
   return c.json({ success: true })
 })
@@ -5659,7 +5655,7 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes/:id/ws', async c => {
   const user = await authenticatedColaboradorToken(c, token)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await ensureTrainingTables(c)
-  const room = await portalDb(c).prepare("SELECT id, criado_por FROM centro_reunioes WHERE id = ?1 AND status = 'ATIVA'").bind(c.req.param('id')).first<{ id: string; criado_por: string }>()
+  const room = await c.env.SHARE_DB.prepare("SELECT id, criado_por FROM centro_reunioes WHERE id = ?1 AND status = 'ATIVA'").bind(c.req.param('id')).first<{ id: string; criado_por: string }>()
   if (!room) return c.notFound()
   const roomId = c.env.MEETING_ROOMS.idFromName(c.req.param('id'))
   const stub = c.env.MEETING_ROOMS.get(roomId)
@@ -5675,14 +5671,14 @@ app.get('/api/sharebrasil/centro-treinamento/reunioes/:id/ws', async c => {
 app.get('/api/colaborador/recados/departamentos', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare("SELECT DISTINCT trim(departamento) AS departamento FROM user_profiles WHERE departamento IS NOT NULL AND trim(departamento) <> '' ORDER BY departamento").all()
+  const result = await c.env.SHARE_DB.prepare("SELECT DISTINCT trim(departamento) AS departamento FROM user_profiles WHERE departamento IS NOT NULL AND trim(departamento) <> '' ORDER BY departamento").all()
   return c.json(result.results)
 })
 
 app.get('/api/colaborador/recados', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare("SELECT r.id, r.criado_em, r.atualizado_em, r.autor_id, r.mensagem, r.fixado, r.departamento_id, r.lido_por, COALESCE(a.nome_exibicao, a.nome_completo, a.email) AS autor_nome, uf.funcao AS departamento FROM recados r LEFT JOIN user_profiles a ON a.id = r.autor_id LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?1, '')) ORDER BY r.fixado DESC, r.criado_em DESC LIMIT 100").bind(user.departamento || null).all()
+  const result = await c.env.SHARE_DB.prepare("SELECT r.id, r.criado_em, r.atualizado_em, r.autor_id, r.mensagem, r.fixado, r.departamento_id, r.lido_por, COALESCE(a.nome_exibicao, a.nome_completo, a.email) AS autor_nome, uf.funcao AS departamento FROM recados r LEFT JOIN user_profiles a ON a.id = r.autor_id LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?1, '')) ORDER BY r.fixado DESC, r.criado_em DESC LIMIT 100").bind(user.departamento || null).all()
   return c.json(result.results.map((item: any) => ({ ...item, fixado: Boolean(item.fixado), lido: JSON.parse(item.lido_por || '[]').includes(user.id), pode_excluir: item.autor_id === user.id })))
 })
 
@@ -5694,19 +5690,19 @@ app.post('/api/colaborador/recados', async c => {
   let departamentoId: string | null = null
   const departamento = body.departamento?.trim()
   if (departamento) {
-    const target = await portalDb(c).prepare('SELECT id FROM usuarios_funcoes WHERE lower(funcao) = lower(?1) LIMIT 1').bind(departamento).first<{ id: string }>()
+    const target = await c.env.SHARE_DB.prepare('SELECT id FROM usuarios_funcoes WHERE lower(funcao) = lower(?1) LIMIT 1').bind(departamento).first<{ id: string }>()
     if (!target) return c.json({ error: 'departamento_nao_encontrado' }, 400)
     departamentoId = target.id
   }
   const id = uuid()
-  await portalDb(c).prepare('INSERT INTO recados (id, autor_id, mensagem, fixado, departamento_id) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, body.mensagem.trim(), body.fixado ? 1 : 0, departamentoId).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO recados (id, autor_id, mensagem, fixado, departamento_id) VALUES (?, ?, ?, ?, ?)').bind(id, user.id, body.mensagem.trim(), body.fixado ? 1 : 0, departamentoId).run()
   return c.json({ id, mensagem: body.mensagem.trim(), departamento: departamento || null, fixado: Boolean(body.fixado) }, 201)
 })
 
 app.delete('/api/colaborador/recados/:id', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await portalDb(c).prepare('DELETE FROM recados WHERE id = ?1 AND autor_id = ?2').bind(c.req.param('id'), user.id).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM recados WHERE id = ?1 AND autor_id = ?2').bind(c.req.param('id'), user.id).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
@@ -5714,11 +5710,11 @@ app.delete('/api/colaborador/recados/:id', async c => {
 app.patch('/api/colaborador/recados/:id/lido', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare("SELECT r.id, r.lido_por FROM recados r LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.id = ?1 AND (r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?2, '')))").bind(c.req.param('id'), user.departamento || null).first<{ id: string; lido_por: string }>()
+  const row = await c.env.SHARE_DB.prepare("SELECT r.id, r.lido_por FROM recados r LEFT JOIN usuarios_funcoes uf ON uf.id = r.departamento_id WHERE r.id = ?1 AND (r.departamento_id IS NULL OR lower(COALESCE(uf.funcao, '')) = lower(COALESCE(?2, '')))").bind(c.req.param('id'), user.departamento || null).first<{ id: string; lido_por: string }>()
   if (!row) return c.notFound()
   const readers = JSON.parse(row.lido_por || '[]') as unknown
   const lidoPor = Array.isArray(readers) ? [...new Set([...readers.filter((item): item is string => typeof item === 'string'), user.id])] : [user.id]
-  await portalDb(c).prepare('UPDATE recados SET lido_por = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(lidoPor), row.id).run()
+  await c.env.SHARE_DB.prepare('UPDATE recados SET lido_por = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(lidoPor), row.id).run()
   return c.json({ success: true, lido: true })
 })
 
@@ -5790,8 +5786,8 @@ function regraFinanceira(tipo: string, grupoInformado?: string) {
 async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body: Record<string, any>, user: any, lancamentoId: string | null, regra: ReturnType<typeof regraFinanceira>) {
   if (!regra.rateio) return null
   const id = uuid(); const cotistas = Array.isArray(body.cotista_ids) && body.cotista_ids.length ? body.cotista_ids : [body.cotista_id]
-  const valor = Number(body.valor); const aeronave = body.aeronave_id ? await portalDb(c).prepare('SELECT matricula_registro FROM aeronave WHERE id=?').bind(body.aeronave_id).first<any>() : null
-  const rows = await portalDb(c).prepare(`SELECT ca.id, ca.socio_id, hs.holding_id, hs.cotista_id, ca.percentual_sociedade, COALESCE(cl.razao_social, hs.nome) nome FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id IN (${cotistas.map(() => '?').join(',')})`).bind(...cotistas).all<any>()
+  const valor = Number(body.valor); const aeronave = body.aeronave_id ? await c.env.SHARE_DB.prepare('SELECT matricula_registro FROM aeronave WHERE id=?').bind(body.aeronave_id).first<any>() : null
+  const rows = await c.env.SHARE_DB.prepare(`SELECT ca.id, ca.socio_id, hs.holding_id, hs.cotista_id, ca.percentual_sociedade, COALESCE(cl.razao_social, hs.nome) nome FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id IN (${cotistas.map(() => '?').join(',')})`).bind(...cotistas).all<any>()
   if (!rows.results.length) throw new Error('cotistas_invalidos_para_aeronave')
   const linhasInformadas = Array.isArray(body.rateio_linhas) ? body.rateio_linhas : []
   const percentuais = new Map(linhasInformadas.map((linha: any) => [String(linha.cotista_id), Math.max(0, Number(linha.percentual) || 0)]))
@@ -5807,7 +5803,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
     const pct = cotistas.length === 1 ? 100 : percentuaisNormalizados[index];
     const valorTotalCentavos = Math.round(valor * 100);
     const valorRateadoCentavos = Math.round(valor * pct / 100 * 100);
-    await inserirLinhaDinamica(portalDb(c), 'rateio_despesas', {
+    await inserirLinhaDinamica(c.env.SHARE_DB, 'rateio_despesas', {
       id: rateioLinhaId,
       lancamento_id: lancamentoId,
       aeronave_id: body.aeronave_id,
@@ -5834,7 +5830,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
     });
 
     if (regra.pagoDiretamente) {
-      await inserirLinhaDinamica(portalDb(c), 'rateio_pagamentos', {
+      await inserirLinhaDinamica(c.env.SHARE_DB, 'rateio_pagamentos', {
         id: uuid(),
         rateio_id: rateioLinhaId,
         recibo_id: body.recibo_id || null,
@@ -5858,7 +5854,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
     for (const [index, row] of (rows.results as any[]).entries()) if (row.holding_id && row.socio_id) {
       const movimentoId = uuid();
       const pct = cotistas.length === 1 ? 100 : percentuaisNormalizados[index];
-      await inserirMovimentoHolding(portalDb(c), {
+      await inserirMovimentoHolding(c.env.SHARE_DB, {
         id: movimentoId, holding_id: row.holding_id, socio_id: row.socio_id,
         cotista_id: row.cotista_id || row.id, aeronave_id: body.aeronave_id || null,
         data_movimento: body.data_despesa || new Date().toISOString().slice(0, 10),
@@ -5868,7 +5864,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
         pago_diretamente: 1, status: 'PAGO_DIRETAMENTE', observacoes: body.observacoes || null,
         criado_por: user.id,
       })
-      await inserirRateioHolding(portalDb(c), {
+      await inserirRateioHolding(c.env.SHARE_DB, {
         id: uuid(), movimento_holding_id: movimentoId, holding_id: row.holding_id, socio_id: row.socio_id,
         cotista_id: row.cotista_id || row.id, categoria_nome: body.categoria_nome || regra.grupo,
         categoria_id: body.categoria_id || null, aeronave_id: body.aeronave_id || null,
@@ -5884,6 +5880,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
 
 // ─── Financeiro: central de e-mail ───────────────────────────────────────────
 async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
+  await c.env.SHARE_DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_enviados_id_unique ON emails_enviados(id)').run()
   await validateWorkerSchema(c, [{table:'user_profiles',columns:['id','email_envio']},{table:'assinaturas_email',columns:['id']},{table:'emails_enviados',columns:['id']}])
 }
 function emailArray(value: unknown): string[] {
@@ -5921,7 +5918,7 @@ function carimboAssinaturaHtml(dataEmissaoISO: string): string {
 app.get('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   await garantirTabelaEmails(c)
   const [clientes, socios, recibos, relatorios, abastecimentos, historico] = await Promise.all([
     db.prepare("SELECT id, razao_social, email_principal, emails FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
@@ -5950,7 +5947,7 @@ function normalizarChaveDepartamento(valor: unknown) {
   return String(valor || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: any) {
-  const rows = await portalDb(c).prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
+  const rows = await c.env.SHARE_DB.prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
   const departamento = normalizarChaveDepartamento(user.departamentos_email)
   const row = (rows.results || []).find((item: any) => normalizarChaveDepartamento(item?.nome) === departamento) || {}
   return {
@@ -5974,13 +5971,13 @@ app.patch('/api/minha-assinatura', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const nome = String(body.nome || '').trim()
   if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
-  await portalDb(c).prepare('UPDATE user_profiles SET email_envio = ? WHERE id = ?').bind(nome, user.id).run()
+  await c.env.SHARE_DB.prepare('UPDATE user_profiles SET email_envio = ? WHERE id = ?').bind(nome, user.id).run()
   return c.json(await assinaturaOperacional(c, { ...user, email_envio: nome }))
 })
 app.get('/api/interno/emails/contas-bancarias', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const rows = await portalDb(c).prepare('SELECT * FROM contas_bancarias ORDER BY banco').all<any>().catch(() => ({ results: [] as any[] }))
+  const rows = await c.env.SHARE_DB.prepare('SELECT * FROM contas_bancarias ORDER BY banco').all<any>().catch(() => ({ results: [] as any[] }))
   const contas = (rows.results || []).map((row: any) => {
     const banco = campoDepartamento(row, ['banco', 'nome_banco', 'instituicao'])
     const agencia = campoDepartamento(row, ['agencia', 'agencia_numero', 'numero_agencia']) || null
@@ -5999,7 +5996,7 @@ ${linhas.join('\n\n')}` }
 app.patch('/api/interno/emails/contas-bancarias/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const db = portalDb(c); const id = c.req.param('id')
+  const db = c.env.SHARE_DB; const id = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const columns = await db.prepare("SELECT name FROM pragma_table_info('contas_bancarias')").all<any>().catch(() => ({ results: [] as any[] }))
   const existentes = new Set((columns.results || []).map((row: any) => String(row.name)))
@@ -6025,7 +6022,7 @@ app.post('/api/interno/emails', async c => {
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
-  const db = portalDb(c); const anexos: any[] = []; let erroAnexo: string | null = null
+  const db = c.env.SHARE_DB; const anexos: any[] = []; let erroAnexo: string | null = null
   for (const id of ids.slice(0, 10)) {
     const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
     if (prefix === 'abastecimento') {
@@ -6073,11 +6070,13 @@ app.post('/api/interno/emails', async c => {
     const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
+  const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run()
   if (status === 'enviado') {
+    // A FK de lancamentos.email_enviado_id exige que o registro pai exista
+    // antes da atualização do lançamento.
     await marcarEmailEnviadoParaOrigens(c, origens, id).catch(error => { log.error('[interno/emails] origem não atualizada após envio', error) })
   }
-  const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run().catch(error => { log.error('[interno/emails] histórico não gravado', error) })
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
 })
@@ -6122,7 +6121,7 @@ function regraFinanceiraRecibo(beneficiarioTipo: 'cliente' | 'colaborador', reem
 async function proximoNumeroRecibo(c: Context<{ Bindings: Bindings }>, codigo: string, cotistaAeronaveId?: string, dataEmissao?: string): Promise<string> {
   const ano = /^\d{4}-\d{2}-\d{2}/.test(dataEmissao || '') ? Number(String(dataEmissao).slice(0, 4)) : new Date().getFullYear()
   const codigoCliente = String(codigo || 'SHARE').trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'SHARE'
-  const row = await portalDb(c).prepare(`INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
+  const row = await c.env.SHARE_DB.prepare(`INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
     VALUES (?1, ?2, ?3, ?4, 2) ON CONFLICT(codigo_cliente, ano) DO UPDATE SET
     proximo_numero = sequencia_numeros_recibos.proximo_numero + 1,
     cotista_aeronave_id = COALESCE(excluded.cotista_aeronave_id, sequencia_numeros_recibos.cotista_aeronave_id)
@@ -6137,7 +6136,7 @@ async function proximoNumeroReciboSaida(
   const ano = /^\d{4}-\d{2}-\d{2}/.test(dataEmissao) ? Number(dataEmissao.slice(0, 4)) : new Date().getFullYear()
   const codigoCliente = String(codigo || 'CLI').trim().toUpperCase()
   const id = uuid()
-  const row = await portalDb(c).prepare(`
+  const row = await c.env.SHARE_DB.prepare(`
     INSERT INTO sequencia_numeros_recibo_saida (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
     VALUES (?1, ?2, ?3, ?4, 2)
     ON CONFLICT(codigo_cliente, ano) DO UPDATE SET
@@ -6149,7 +6148,7 @@ async function proximoNumeroReciboSaida(
   return { numero: `${codigoCliente}-${row.numero}/${ano}`, sequenciaId: row.id }
 }
 async function buscarCategoriasRecibo(c: Context<{ Bindings: Bindings }>) {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   for (const tabela of ['categoria_movimentacao_share', 'categorias_caixa_share']) {
     const rows = await db.prepare(`SELECT * FROM ${tabela}`).all<any>().catch(() => ({ results: [] as any[] }))
     const categorias = rows.results
@@ -6303,7 +6302,7 @@ function normalizarTipoRateioD1(value: unknown): string {
 }
 
 async function contextoNfSaida(c: Context<{ Bindings: Bindings }>, cotistaId: string) {
-  return portalDb(c).prepare(`SELECT ca.id cotista_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,hs.holding_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente,'CLI') codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,COALESCE(cl.cnpj,hs.cpf) documento,COALESCE(cl.endereco,hs.endereco) endereco,COALESCE(cl.cidade,hs.cidade) cidade,COALESCE(cl.uf,hs.uf) uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?1`).bind(cotistaId).first<any>()
+  return c.env.SHARE_DB.prepare(`SELECT ca.id cotista_id,ca.aeronave_id,ca.cliente_id,ca.socio_id,hs.holding_id,COALESCE(ca.codigo_cliente,cl.codigo_cliente,'CLI') codigo_cliente,COALESCE(cl.razao_social,hs.nome) nome,COALESCE(cl.cnpj,hs.cpf) documento,COALESCE(cl.endereco,hs.endereco) endereco,COALESCE(cl.cidade,hs.cidade) cidade,COALESCE(cl.uf,hs.uf) uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.id=?1`).bind(cotistaId).first<any>()
 }
 
 async function gerarFinanceiroNfSaida(
@@ -6313,7 +6312,7 @@ async function gerarFinanceiroNfSaida(
   origem: 'nf_saida' | 'recibo_saida',
   documentoId: string,
 ) {
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const valor = Number(body.valor ?? body.valor_total)
   if (!(valor > 0)) throw new Error('valor_invalido')
 
@@ -6479,7 +6478,7 @@ const parseJsonOr = (value: unknown, fallback: unknown) => {
 app.get('/api/interno/agendamento/:id/peso-balanceamento', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaFichaPeso(c)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const id = c.req.param('id')
   const reserva = await db.prepare(`SELECT s.id, s.aeronave_id, s.numero_voo, s.data_agendada, s.origem, s.destino, s.numero_passageiros, s.piloto_id, s.copiloto_id,
       a.matricula_registro, a.modelo, a.fabricante
@@ -6503,7 +6502,7 @@ app.get('/api/interno/agendamento/:id/peso-balanceamento', async c => {
 app.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaFichaPeso(c)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const solicitacaoId = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => null)
   if (!body) return c.json({ error: 'payload_invalido' }, 400)
@@ -6652,13 +6651,13 @@ app.get('/api/sharebrasil/aeronaves', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const status = String(c.req.query('status') || '').trim().toLowerCase()
   const filtro = status === 'inativa' ? " WHERE lower(COALESCE(a.status, 'ativa')) IN ('inativa', 'cancelada')" : status === 'todas' ? '' : " WHERE lower(COALESCE(a.status, 'ativa')) NOT IN ('inativa', 'cancelada')"
-  const rows = await portalDb(c).prepare(`SELECT a.*, p.categoria AS performance_categoria, p.teto_servico_ft AS performance_teto_servico_ft, p.nivel_cruzeiro_min_ft AS performance_nivel_cruzeiro_min_ft, p.nivel_cruzeiro_max_ft AS performance_nivel_cruzeiro_max_ft, p.aprovado_rvsm AS performance_aprovado_rvsm, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))${filtro} ORDER BY a.matricula_registro`).all()
+  const rows = await c.env.SHARE_DB.prepare(`SELECT a.*, p.categoria AS performance_categoria, p.teto_servico_ft AS performance_teto_servico_ft, p.nivel_cruzeiro_min_ft AS performance_nivel_cruzeiro_min_ft, p.nivel_cruzeiro_max_ft AS performance_nivel_cruzeiro_max_ft, p.aprovado_rvsm AS performance_aprovado_rvsm, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))${filtro} ORDER BY a.matricula_registro`).all()
   return c.json({ aeronaves: rows.results || [] })
 })
 app.get('/api/sharebrasil/aeronaves/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const row = await portalDb(c).prepare(`SELECT a.*, p.id AS performance_id, p.categoria AS performance_categoria, p.modelo AS performance_modelo, p.teto_servico_ft AS performance_teto_servico_ft, p.nivel_cruzeiro_min_ft AS performance_nivel_cruzeiro_min_ft, p.nivel_cruzeiro_max_ft AS performance_nivel_cruzeiro_max_ft, p.aprovado_rvsm AS performance_aprovado_rvsm, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1)) WHERE a.id = ?`).bind(c.req.param('id')).first()
+  const row = await c.env.SHARE_DB.prepare(`SELECT a.*, p.id AS performance_id, p.categoria AS performance_categoria, p.modelo AS performance_modelo, p.teto_servico_ft AS performance_teto_servico_ft, p.nivel_cruzeiro_min_ft AS performance_nivel_cruzeiro_min_ft, p.nivel_cruzeiro_max_ft AS performance_nivel_cruzeiro_max_ft, p.aprovado_rvsm AS performance_aprovado_rvsm, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1)) WHERE a.id = ?`).bind(c.req.param('id')).first()
   if (!row) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
   return c.json({ aeronave: row })
 })
@@ -6670,7 +6669,7 @@ app.post('/api/sharebrasil/aeronaves', async c => {
   const fabricante = String(body.fabricante || '').trim()
   const modelo = String(body.modelo || '').trim()
   if (!matricula || !fabricante || !modelo) return c.json({ error: 'matricula_fabricante_modelo_obrigatorios' }, 400)
-  const db = portalDb(c)
+  const db = c.env.SHARE_DB
   const existente = await db.prepare('SELECT id FROM aeronave WHERE upper(matricula_registro) = ? LIMIT 1').bind(matricula).first()
   if (existente) return c.json({ error: 'matricula_ja_cadastrada' }, 409)
   const aeronaveId = uuid()
@@ -6703,7 +6702,7 @@ const CTM_READ_TABLES: Record<string, { table: string; order?: string }> = {
 }
 async function ctmRead(c: Context<{ Bindings: Bindings }>, table: string, where = '', params: unknown[] = []) {
   try {
-    return await portalDb(c).prepare(`SELECT * FROM ${table}${where}`).bind(...params).all<any>()
+    return await c.env.SHARE_DB.prepare(`SELECT * FROM ${table}${where}`).bind(...params).all<any>()
   } catch (error) {
     log.error(`[ctm] leitura falhou em ${table}`, error)
     return { results: [] as any[] }
