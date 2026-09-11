@@ -1926,11 +1926,14 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // O e-mail pode ter sido enviado antes ou depois da criação dos lançamentos.
   // O histórico é opcional e não pode interromper a programação financeira.
   const emailInfo = await db.prepare(
-      `SELECT id FROM emails_enviados
-       WHERE referencia_tipo = 'recibo'
-         AND referencia_id = ?1
-         AND status = 'enviado'
-       ORDER BY criado_em DESC LIMIT 1`,
+      `SELECT e.id FROM emails_enviados e
+       LEFT JOIN recibo_anexos a
+         ON a.id = e.referencia_id
+        AND e.referencia_tipo = 'recibo'
+       WHERE e.status = 'enviado'
+         AND e.referencia_tipo = 'recibo'
+         AND (e.referencia_id = ?1 OR a.recibo_id = ?1)
+       ORDER BY e.criado_em DESC LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id,
       l.categoria_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome
