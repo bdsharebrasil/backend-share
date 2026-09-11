@@ -4585,6 +4585,65 @@ function shareBrasilBucket(c: Context<{ Bindings: Bindings }>): R2Bucket {
 function shareBrasilFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
 }
+async function marcarEmailEnviadoParaOrigens(
+  c: Context<{ Bindings: Bindings }>,
+  ids: string[],
+  emailId: string,
+): Promise<void> {
+  const db = portalDb(c)
+  const agora = new Date().toISOString()
+
+  for (const referencia of ids) {
+    const [prefix, rawId] = referencia.includes(':') ? referencia.split(':', 2) : [referencia, '']
+    if (!rawId) continue
+
+    let lancamentoIds: string[] = []
+    let movimentoIds: string[] = []
+
+    if (prefix === 'recibo') {
+      const row = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?1').bind(rawId).first<{ lancamento_id: string | null }>()
+      if (row?.lancamento_id) lancamentoIds.push(row.lancamento_id)
+    } else if (prefix === 'recibo_saida') {
+      const row = await db.prepare('SELECT lancamentos_id FROM recibos_saida WHERE id = ?1').bind(rawId).first<{ lancamentos_id: string | null }>()
+      if (row?.lancamentos_id) lancamentoIds.push(row.lancamentos_id)
+    } else if (prefix === 'nf_saida') {
+      const row = await db.prepare('SELECT id FROM lancamentos WHERE origem_tipo = ? AND origem_id = ?').bind('NF_SAIDA', rawId).first<{ id: string }>()
+      if (row?.id) lancamentoIds.push(row.id)
+    } else if (prefix === 'relatorio' || prefix === 'relatorio_pdf') {
+      const vinculos = await db.prepare(
+        `SELECT destino_tipo, destino_id FROM financeiro_vinculos
+         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1`
+      ).bind(rawId).all<{ destino_tipo: string; destino_id: string }>()
+      for (const v of vinculos.results || []) {
+        if (v.destino_tipo === 'LANCAMENTO') lancamentoIds.push(v.destino_id)
+        if (v.destino_tipo === 'MOVIMENTO_HOLDING') movimentoIds.push(v.destino_id)
+      }
+    } else if (prefix === 'envio_despesa') {
+      const row = await db.prepare('SELECT id, lancamento_id, movimentos_holding_id FROM envio_despesas WHERE id = ?1').bind(rawId).first<any>()
+      if (row) {
+        await db.prepare(`UPDATE envio_despesas SET email_enviado = 1, email_enviado_em = ?, email_id = ? WHERE id = ?`)
+          .bind(agora, emailId, row.id).run()
+        if (row.lancamento_id) lancamentoIds.push(row.lancamento_id)
+        if (row.movimentos_holding_id) movimentoIds.push(row.movimentos_holding_id)
+      }
+    }
+
+    for (const lid of lancamentoIds) {
+      await db.prepare(`UPDATE lancamentos SET email_enviado_em = COALESCE(email_enviado_em, ?) WHERE id = ?`).bind(agora, lid).run()
+      await db.prepare(
+        `INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
+         VALUES (?, 'EMAIL', ?, 'LANCAMENTO', ?, 'EMAIL_ENVIADO')`
+      ).bind(uuid(), emailId, lid).run()
+    }
+    for (const mid of movimentoIds) {
+      await db.prepare(`UPDATE movimentos_holding SET email_enviado_em = COALESCE(email_enviado_em, ?) WHERE id = ?`).bind(agora, mid).run()
+      await db.prepare(
+        `INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
+         VALUES (?, 'EMAIL', ?, 'MOVIMENTO_HOLDING', ?, 'EMAIL_ENVIADO')`
+      ).bind(uuid(), emailId, mid).run()
+    }
+  }
+}
 const DOCUMENTOS_CLIENTE_CATEGORIAS: Record<string, string> = {
   'avatar_logo': 'avatar_logo',
   'cartao-cnpj': 'cartao-cnpj',
@@ -5993,17 +6052,10 @@ app.post('/api/interno/emails', async c => {
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   if (status === 'enviado') {
-    for (const referencia of ids.filter((item) => item.startsWith('recibo_saida:'))) {
-      const reciboId = referencia.slice('recibo_saida:'.length)
-      const recibo = await db.prepare('SELECT lancamentos_id FROM recibos_saida WHERE id = ?').bind(reciboId).first<{ lancamentos_id: string | null }>().catch(() => null)
-      const principalId = String(recibo?.lancamentos_id ?? '').trim()
-      const cliente = principalId ? await db.prepare('SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = ? LIMIT 1').bind(principalId, 'CLIENTE').first<{ id: string }>().catch(() => null) : null
-      for (const lancamentoId of [principalId, cliente?.id].filter(Boolean)) {
-        await db.prepare(`UPDATE lancamentos SET observacoes = CASE WHEN COALESCE(observacoes, '') = '' THEN ? ELSE observacoes || '\n' || ? END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind('E-mail do recibo: enviado', 'E-mail do recibo: enviado', lancamentoId).run()
-      }
-    }
+    await marcarEmailEnviadoParaOrigens(c, ids, id)
   }
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id).run()
+  const [primeiroPrefix, primeiroRawId] = (ids[0] || '').includes(':') ? ids[0].split(':', 2) : [null, null]
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run()
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
 })
