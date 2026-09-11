@@ -1926,9 +1926,11 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     // Nesse caso, copia o carimbo para o lançamento recém-criado.
     const emailInfo = await db.prepare(
       `SELECT id FROM emails_enviados
-       WHERE referencia_tipo = 'recibo' AND referencia_id = ?1 AND status = 'enviado'
+       WHERE referencia_tipo = 'recibo'
+         AND status = 'enviado'
+         AND (referencia_id = ?1 OR instr(COALESCE(anexos, ''), ?2) > 0)
        ORDER BY criado_em DESC LIMIT 1`,
-    ).bind(receiptId).first<{ id: string }>()
+    ).bind(receiptId, `recibo:${receiptId}`).first<{ id: string }>()
     if (emailInfo?.id) {
       const novo = await db.prepare(
         'SELECT lancamento_id FROM recibos WHERE id = ?1',
