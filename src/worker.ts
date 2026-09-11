@@ -4601,15 +4601,31 @@ async function marcarEmailEnviadoParaOrigens(
     let movimentoIds: string[] = []
 
     if (prefix === 'recibo') {
-      const row = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?1').bind(rawId).first<{ lancamento_id: string | null }>()
-      if (row?.lancamento_id) lancamentoIds.push(row.lancamento_id)
+      const anexo = await db.prepare('SELECT recibo_id FROM recibo_anexos WHERE id = ?1').bind(rawId).first<{ recibo_id: string | null }>()
+      if (anexo?.recibo_id) {
+        const row = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?1').bind(anexo.recibo_id).first<{ lancamento_id: string | null }>()
+        if (row?.lancamento_id) lancamentoIds.push(row.lancamento_id)
+      }
     } else if (prefix === 'recibo_saida') {
       const row = await db.prepare('SELECT lancamentos_id FROM recibos_saida WHERE id = ?1').bind(rawId).first<{ lancamentos_id: string | null }>()
       if (row?.lancamentos_id) lancamentoIds.push(row.lancamentos_id)
     } else if (prefix === 'nf_saida') {
-      const row = await db.prepare('SELECT id FROM lancamentos WHERE origem_tipo = ? AND origem_id = ?').bind('NF_SAIDA', rawId).first<{ id: string }>()
-      if (row?.id) lancamentoIds.push(row.id)
-    } else if (prefix === 'relatorio' || prefix === 'relatorio_pdf') {
+      const conta = await db.prepare('SELECT lancamentos_id, movimentos_id FROM contas_areceber WHERE nf_saida_id = ?1 LIMIT 1').bind(rawId).first<{ lancamentos_id: string | null; movimentos_id: string | null }>()
+      if (conta?.lancamentos_id) lancamentoIds.push(conta.lancamentos_id)
+      if (conta?.movimentos_id) movimentoIds.push(conta.movimentos_id)
+    } else if (prefix === 'relatorio') {
+      const anexo = await db.prepare('SELECT relatorio_despesa_viagem_id FROM relatorio_despesa_viagem_anexos WHERE id = ?1').bind(rawId).first<{ relatorio_despesa_viagem_id: string | null }>()
+      if (anexo?.relatorio_despesa_viagem_id) {
+        const vinculos = await db.prepare(
+          `SELECT destino_tipo, destino_id FROM financeiro_vinculos
+           WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1`
+        ).bind(anexo.relatorio_despesa_viagem_id).all<{ destino_tipo: string; destino_id: string }>()
+        for (const v of vinculos.results || []) {
+          if (v.destino_tipo === 'LANCAMENTO') lancamentoIds.push(v.destino_id)
+          if (v.destino_tipo === 'MOVIMENTO_HOLDING') movimentoIds.push(v.destino_id)
+        }
+      }
+    } else if (prefix === 'relatorio_pdf') {
       const vinculos = await db.prepare(
         `SELECT destino_tipo, destino_id FROM financeiro_vinculos
          WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1`
