@@ -533,14 +533,15 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const db = c.env.SHARE_DB
     const [receber, pagar, movimentacoes, emailsEnviados] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
-      listar(db, "SELECT valor_centavos, status FROM contas_apagar WHERE status <> 'CANCELADO'"),
+      listar(db, "SELECT id, lancamentos_id, valor_centavos, status FROM contas_apagar WHERE status <> 'CANCELADO'"),
       listar(db, 'SELECT * FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
       listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const totalPago = pagar.filter((row) => row.status === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const movimentacoesComFornecedor = await enriquecerFornecedores(db, movimentacoes)
-    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: pagar.filter((row) => row.status === 'EM_ABERTO').length, pagamentos_confirmados: pagar.filter((row) => row.status === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100 })), emails_enviados: emailsEnviados })
+    const contasEmAberto = new Set(pagar.filter((row) => String(row.status).toUpperCase() === 'EM_ABERTO').flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
+    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: pagar.filter((row) => row.status === 'EM_ABERTO').length, pagamentos_confirmados: pagar.filter((row) => row.status === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: contasEmAberto.has(String(row.id)) })), emails_enviados: emailsEnviados })
   } catch (error) { return errorResponse(c, error) }
 })
 
