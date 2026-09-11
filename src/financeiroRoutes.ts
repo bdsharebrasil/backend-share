@@ -47,7 +47,11 @@ function errorResponse(c: any, error: unknown) {
     )
   }
 
-  console.error('[financeiro]', error)
+  console.error(
+    '[financeiro]',
+    error instanceof Error ? error.message : String(error),
+    error,
+  )
   return c.json(
     {
       error: 'falha_ao_processar_financeiro',
@@ -831,9 +835,12 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
     const existing = await c.env.SHARE_DB.prepare(`SELECT id FROM contas_apagar WHERE lancamentos_id = ? AND status <> 'CANCELADO' LIMIT 1`).bind(lancamentoId).first<{ id: string }>()
     const existingRateio = await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_despesas WHERE origem_id = ? AND origem_tipo = 'RECIBO' LIMIT 1`).bind(reciboId).first<{ id: string }>().catch(() => null)
-    if (existingRateio) {
+    const existingRateioHold = existingRateio
+      ? null
+      : await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_hold WHERE origem_id = ? AND origem_tipo = 'RECIBO' LIMIT 1`).bind(reciboId).first<{ id: string }>().catch(() => null)
+    if (existingRateio || existingRateioHold) {
       if (existing?.id && body.boleto_url) await c.env.SHARE_DB.prepare('UPDATE contas_apagar SET boleto_url = ? WHERE id = ?').bind(String(body.boleto_url), existing.id).run()
-      return c.json({ ok: true, conta_pagar_id: existing?.id ?? null, rateio_ids: [existingRateio.id], idempotent: true })
+      return c.json({ ok: true, conta_pagar_id: existing?.id ?? null, rateio_ids: [existingRateio?.id ?? existingRateioHold!.id], idempotent: true })
     }
     const aeronaveId = String(body.aeronave_id ?? lancamento.aeronave_id ?? receipt.aeronave_id ?? '').trim()
     const dataVencimento = String(body.data_vencimento ?? lancamento.data_vencimento ?? receipt.data_vencimento ?? lancamento.data_emissao ?? receipt.data_emissao ?? '').trim()
