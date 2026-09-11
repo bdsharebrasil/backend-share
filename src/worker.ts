@@ -6018,7 +6018,7 @@ app.post('/api/interno/emails', async c => {
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
-  await garantirTabelaEmails(c)
+  await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
   const db = portalDb(c); const anexos: any[] = []; let erroAnexo: string | null = null
   for (const id of ids.slice(0, 10)) {
     const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
@@ -6028,7 +6028,7 @@ app.post('/api/interno/emails', async c => {
       if (row?.caminho) {
         let key = row.caminho
         try { key = new URL(row.caminho).searchParams.get('key') || key } catch { /* chave legada */ }
-        const object = await shareBrasilBucket(c).get(key)
+        const bucket = shareBrasilBucket(c); const object = bucket ? await bucket.get(key) : null
         if (object) anexos.push({ filename: key.split('/').pop() || `abastecimento-${tipoAbastecimento}`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/octet-stream' })
       }
       continue
@@ -6038,14 +6038,14 @@ app.post('/api/interno/emails', async c => {
       const column = prefix === 'nf_saida' ? 'arquivo_pdf_url' : 'pdf_url'
       const row = await db.prepare(`SELECT ${column} AS arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
       const key = chaveStorageDeUrl(row?.arquivo)
-      const object = key ? await shareBrasilBucket(c).get(key) : null
+      const bucket = shareBrasilBucket(c); const object = key && bucket ? await bucket.get(key) : null
       if (object) anexos.push({ filename: `${prefix}-${rawId}.pdf`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/pdf' })
       else erroAnexo = `anexo_${prefix}_indisponivel:${rawId}`
       continue
     }
     if (prefix === 'relatorio_pdf') {
       const row = await db.prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(rawId).first<any>().catch(() => null)
-      const object = row?.pdf_path ? await shareBrasilBucket(c).get(row.pdf_path) : null
+      const bucket = shareBrasilBucket(c); const object = row?.pdf_path && bucket ? await bucket.get(row.pdf_path) : null
       if (object) anexos.push({ filename: `${row.numero_relatorio || rawId}.pdf`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/pdf' })
       else erroAnexo = `anexo_relatorio_pdf_indisponivel:${rawId}`
       continue
@@ -6054,7 +6054,7 @@ app.post('/api/interno/emails', async c => {
     if (!table) continue
     const row = await db.prepare(`SELECT nome_arquivo, caminho_arquivo, tipo_arquivo FROM ${table} WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
     if (!row) continue
-    const object = await shareBrasilBucket(c).get(row.caminho_arquivo); if (!object) continue
+    const bucket = shareBrasilBucket(c); const object = bucket ? await bucket.get(row.caminho_arquivo) : null; if (!object) continue
     anexos.push({ filename: row.nome_arquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: row.tipo_arquivo || 'application/octet-stream' })
   }
   const arquivosLocais = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : []).filter((file): file is File => file instanceof File && !!file.size)
@@ -6068,10 +6068,10 @@ app.post('/api/interno/emails', async c => {
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   if (status === 'enviado') {
-    await marcarEmailEnviadoParaOrigens(c, ids, id)
+    await marcarEmailEnviadoParaOrigens(c, ids, id).catch(error => { log.error('[interno/emails] origem não atualizada após envio', error) })
   }
   const [primeiroPrefix, primeiroRawId] = (ids[0] || '').includes(':') ? ids[0].split(':', 2) : [null, null]
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run()
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run().catch(error => { log.error('[interno/emails] histórico não gravado', error) })
   if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
   return c.json({ success: true, id }, 201)
 })

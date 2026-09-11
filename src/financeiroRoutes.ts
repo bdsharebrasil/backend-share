@@ -896,7 +896,12 @@ financeiroRoutes.post('/recibos/:id/reembolso', async (c) => {
 
 financeiroRoutes.post('/envios-pagamento', async (c) => {
   try {
-    const input = validatePaymentRequest(await c.req.json())
+    let input
+    try {
+      input = validatePaymentRequest(await c.req.json())
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : 'dados_de_envio_invalidos', code: 'dados_de_envio_invalidos' }, 400)
+    }
     return c.json(await createPaymentRequest(c.env.SHARE_DB, input, c.get('userId') || null), 201)
   } catch (error) { return errorResponse(c, error) }
 })
