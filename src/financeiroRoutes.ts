@@ -992,7 +992,7 @@ financeiroRoutes.post('/envios-pagamento/:id/converter', async (c) => {
   try {
     const request = await c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
     if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
-    if (request.status !== 'APROVADO' && request.status !== 'CONVERTIDO') return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
+    if (!['PENDENTE', 'APROVADO', 'EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
     return c.json(await convertPaymentRequest(c.env.SHARE_DB, request, createExpense, c.get('userId') || null))
   } catch (error) { return errorResponse(c, error) }
 })
