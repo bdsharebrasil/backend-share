@@ -824,7 +824,7 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     if (!receiptInicial) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     if (String(receiptInicial.status).toUpperCase() !== 'EMAIL_ENVIADO') return c.json({ error: 'recibo_precisa_ser_enviado_por_email' }, 409)
     await programarReciboReembolso(c.env.SHARE_DB, reciboId, { ...body, data_vencimento: body.data_vencimento }, c.get('userId') || null)
-    const receipt = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id, aeronave_id, tipo_caixa, status, valor, descricao, data_emissao, data_vencimento, categoria_movimentacao_id, categoria_nome, grupo_categoria, url_recibo FROM recibos WHERE id = ?`).bind(reciboId).first<Record<string, unknown>>()
+    const receipt = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id, aeronave_id, tipo_caixa, status, valor, descricao, data_emissao, data_vencimento, categoria_movimentacao_id, grupo_categoria, url_recibo FROM recibos WHERE id = ?`).bind(reciboId).first<Record<string, unknown>>()
     if (!receipt) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     const lancamentoVinculadoId = String(receipt.lancamento_id ?? '').trim()
     const lancamento = lancamentoVinculadoId
