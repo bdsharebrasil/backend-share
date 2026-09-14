@@ -569,8 +569,11 @@ financeiroRoutes.get('/dashboard/financeiro/movimentacoes', async (c) => {
     ]
     const pastas = new Map<string, { id: string; nome: string; quantidade: number; voos: Map<string, { numero_voo: string; quantidade: number; despesas: Record<string, unknown>[] }> }>()
     for (const row of rows) {
+      // A tela representa apenas despesas vinculadas a um voo. Registros sem
+      // número de voo não podem aparecer como uma pasta/voo artificial.
+      const numeroVoo = String(row.numero_voo || '').trim()
+      if (!numeroVoo) continue
       const nome = String(row.cotista_nome || 'Cotista não informado').trim() || 'Cotista não informado'
-      const numeroVoo = String(row.numero_voo || 'Sem número de voo').trim() || 'Sem número de voo'
       const pastaId = nome.toLocaleLowerCase()
       let pasta = pastas.get(pastaId)
       if (!pasta) { pasta = { id: pastaId, nome, quantidade: 0, voos: new Map() }; pastas.set(pastaId, pasta) }
