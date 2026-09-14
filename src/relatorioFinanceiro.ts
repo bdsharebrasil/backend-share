@@ -273,6 +273,13 @@ export async function sincronizarRelatorioViagemFinanceiro(
 ): Promise<{ idempotent: boolean; destinos: Array<{ tipo: string; id: string }> }> {
   const reportId = text(report.id)
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
+  const expenses = expensesFromReport(report)
+  if (!expenses.length) throw new Error('relatorio_sem_despesas')
+  const grouped = new Map<Payer, Array<Record<string, any>>>()
+  for (const expense of expenses) {
+    const payer = normalizePayer(expense.pago_por ?? expense.paid_by)
+    grouped.set(payer, [...(grouped.get(payer) || []), expense])
+  }
   const existing = payerOnly
     ? await db.prepare(`SELECT id AS destino_id, 'LANCAMENTO' AS destino_tipo
         FROM lancamentos WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
@@ -281,18 +288,24 @@ export async function sincronizarRelatorioViagemFinanceiro(
         FROM financeiro_vinculos
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
         ORDER BY criado_em`).bind(reportId).all<{ destino_tipo: string; destino_id: string }>()
-  if ((existing.results || []).length) return { idempotent: true, destinos: (existing.results || []).map((item) => ({ tipo: item.destino_tipo, id: item.destino_id })) }
-
-  const expenses = expensesFromReport(report)
-  if (!expenses.length) throw new Error('relatorio_sem_despesas')
-  const { kind, rows } = await selectCotistas(db, report)
-  const grouped = new Map<Payer, Array<Record<string, any>>>()
-  for (const expense of expenses) {
-    const payer = normalizePayer(expense.pago_por ?? expense.paid_by)
-    const current = grouped.get(payer) || []
-    current.push(expense)
-    grouped.set(payer, current)
+  if ((existing.results || []).length) {
+    for (const [payer, payerExpenses] of grouped.entries()) {
+      if (payerOnly && payer !== payerOnly) continue
+      const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
+      const description = `${payerDescription(report, payer)}${categoryDescription(payerExpenses) ? ` · ${categoryDescription(payerExpenses)}` : ''}`.slice(0, 240)
+      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?
+        WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
+        .bind(amountCentavos, description, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
+      if (payer === 'tripulante_1' || payer === 'tripulante_2') {
+        await db.prepare(`UPDATE contas_apagar SET valor_centavos = ?, descricao = ?
+          WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
+          .bind(amountCentavos, description, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}:CONTA_PAGAR`).run()
+      }
+    }
+    return { idempotent: true, destinos: (existing.results || []).map((item) => ({ tipo: item.destino_tipo, id: item.destino_id })) }
   }
+
+  const { kind, rows } = await selectCotistas(db, report)
   const statements: D1PreparedStatement[] = []
   const destinos: Array<{ tipo: string; id: string }> = []
   const fallbackDate = dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))
