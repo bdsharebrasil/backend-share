@@ -1050,13 +1050,19 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     const reciboId = c.req.param('id')
     const recibo = await c.env.SHARE_DB.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
     if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
-    if (!['CRIADO', 'PDF_PENDENTE', 'ANEXO_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF'].includes(String(recibo.status).toUpperCase())) return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
+    // Permite regenerar o PDF de um recibo já emitido sem criar novo recibo.
+    if (!['CRIADO', 'PDF_PENDENTE', 'ANEXO_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF', 'EMITIDO'].includes(String(recibo.status).toUpperCase())) return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
     const bytes = new Uint8Array(await arquivo.arrayBuffer())
     if (bytes.length < 5 || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') return c.json({ error: 'conteudo_pdf_invalido' }, 400)
-    const anexoId = crypto.randomUUID()
+    const anexoExistente = await c.env.SHARE_DB.prepare("SELECT id FROM recibo_anexos WHERE recibo_id = ? AND (UPPER(COALESCE(finalidade, '')) = 'PDF' OR tipo_arquivo = 'application/pdf') ORDER BY rowid DESC LIMIT 1").bind(reciboId).first<{ id: string }>()
+    const anexoId = anexoExistente?.id || crypto.randomUUID()
     const key = `share/recibos/recibos-gerados/${reciboId}.pdf`
     await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } })
-    await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
+    if (anexoExistente) {
+      await c.env.SHARE_DB.prepare('UPDATE recibo_anexos SET nome_arquivo = ?, caminho_arquivo = ?, tipo_arquivo = ?, tamanho_arquivo = ?, enviado_por = ?, finalidade = ? WHERE id = ?').bind(arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, 'PDF', anexoId).run()
+    } else {
+      await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
+    }
     const pdfUrl = `/api/financeiro/recibos/anexos/${anexoId}/arquivo`
     await c.env.SHARE_DB.prepare('UPDATE recibos SET url_recibo = ? WHERE id = ?').bind(pdfUrl, reciboId).run()
     await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO' WHERE id = ?").bind(reciboId).run()

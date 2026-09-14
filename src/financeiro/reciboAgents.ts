@@ -92,6 +92,9 @@ export async function allocateReceiptNumber(db: D1Database, cotistaId: string | 
 }
 
 export async function createReceiptRecord(db: D1Database, input: ReceiptInput, id: string, number: string, userId: string | null): Promise<void> {
+  const recebedorNome = input.tipo_recibo === 'recibo_reembolso'
+    ? 'SHARE BRASIL SERVICOS AEROPORTUARIOS'
+    : input.recebedor_nome
   await db.prepare(`
     INSERT INTO recibos (
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
@@ -106,7 +109,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.cidade_pagador, input.uf_pagador, input.valor_centavos, input.descricao,
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     input.pagador_tipo === 'cotista_aeronave' ? 'cliente' : 'share',
-    input.categoria_movimentacao_id, input.grupo_categoria, input.recebedor_nome,
+    input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
     input.observacoes, userId,
   ).run()
 }
