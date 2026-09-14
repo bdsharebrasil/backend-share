@@ -552,6 +552,36 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.get('/dashboard/financeiro/movimentacoes', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const [abastecimentos, recibos, reembolsos, relatorios] = await Promise.all([
+      listar(db, `SELECT a.id, a.numero_voo, a.data, a.numero_nf, a.numero_comanda, a.valor_total, a.status, a.observacao AS descricao, 'abastecimento' AS origem, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, a.cliente_id, a.socio_id, 'Cotista não informado') AS cotista_nome, 'CLIENTE' AS tipo_caixa FROM abastecimentos a LEFT JOIN cliente cl ON cl.id = a.cliente_id LEFT JOIN hold_socios hs ON hs.id = a.socio_id LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = a.aeronave_id AND (ca.cliente_id = a.cliente_id OR ca.socio_id = a.socio_id) ORDER BY date(a.data) DESC, a.id DESC LIMIT 1000`),
+      listar(db, `SELECT r.id, NULL AS numero_voo, r.data_emissao AS data, COALESCE(r.numero_documento_anexo, r.numero_recibo) AS numero_doc, r.descricao, r.valor, r.status, r.tipo_caixa, 'recibo' AS origem, COALESCE(cl.razao_social, hs.nome, r.nome_pagador, 'Cotista não informado') AS cotista_nome FROM recibos r LEFT JOIN cliente cl ON cl.id = r.pagador_id AND r.pagador_tipo = 'cotista_aeronave' LEFT JOIN hold_socios hs ON hs.id = r.pagador_id AND r.pagador_tipo = 'cotista_aeronave' ORDER BY date(r.data_emissao) DESC, r.id DESC LIMIT 1000`),
+      listar(db, `SELECT r.id, NULL AS numero_voo, r.criado_em AS data, NULL AS numero_doc, 'Reembolso' AS descricao, r.valor_centavos, r.status, 'CLIENTE' AS tipo_caixa, 'reembolso' AS origem, COALESCE(cl.razao_social, hs.nome, r.cotista_id, 'Cotista não informado') AS cotista_nome FROM reembolsos r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY date(r.criado_em) DESC, r.id DESC LIMIT 1000`),
+      listar(db, `SELECT r.id, r.numero_voo, r.data_inicio AS data, r.numero_relatorio AS numero_doc, 'Relatório de despesa de viagem' AS descricao, r.total_valor AS valor, r.status, 'CLIENTE' AS tipo_caixa, 'relatorio_despesa_viagem' AS origem, CASE WHEN r.socio_id IS NOT NULL THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente) ELSE COALESCE(NULLIF(cl.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), ca.codigo_cliente) END AS cotista_nome FROM relatorio_despesa_viagem r LEFT JOIN cliente cl ON cl.id = r.cliente_id LEFT JOIN holdings h ON h.id = r.cliente_id LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id) OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id))) LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id) LEFT JOIN holdings hs_holding ON hs_holding.id = hs.holding_id ORDER BY date(r.data_inicio) DESC, r.id DESC LIMIT 1000`),
+    ])
+    const rows: Record<string, unknown>[] = [
+      ...abastecimentos.map((row): Record<string, unknown> => ({ ...row, valor: Number(row.valor_total || 0), numero_doc: row.numero_nf || row.numero_comanda || null })),
+      ...recibos.map((row): Record<string, unknown> => ({ ...row, valor: Number(row.valor || 0) / 100 })),
+      ...reembolsos.map((row): Record<string, unknown> => ({ ...row, valor: Number(row.valor_centavos || 0) / 100 })),
+      ...relatorios.map((row): Record<string, unknown> => ({ ...row, valor: Number(row.valor || 0) })),
+    ]
+    const pastas = new Map<string, { id: string; nome: string; quantidade: number; voos: Map<string, { numero_voo: string; quantidade: number; despesas: Record<string, unknown>[] }> }>()
+    for (const row of rows) {
+      const nome = String(row.cotista_nome || 'Cotista não informado').trim() || 'Cotista não informado'
+      const numeroVoo = String(row.numero_voo || 'Sem número de voo').trim() || 'Sem número de voo'
+      const pastaId = nome.toLocaleLowerCase()
+      let pasta = pastas.get(pastaId)
+      if (!pasta) { pasta = { id: pastaId, nome, quantidade: 0, voos: new Map() }; pastas.set(pastaId, pasta) }
+      let voo = pasta.voos.get(numeroVoo)
+      if (!voo) { voo = { numero_voo: numeroVoo, quantidade: 0, despesas: [] }; pasta.voos.set(numeroVoo, voo) }
+      voo.despesas.push({ ...row, email: 'NÃO INFORMADO', valor: Number(row.valor || 0), data: row.data || null }); voo.quantidade += 1; pasta.quantidade += 1
+    }
+    return c.json({ pastas: [...pastas.values()].map((pasta) => ({ ...pasta, voos: [...pasta.voos.values()] })) })
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.get('/cotista/dashboard', async (c) => {
   try {
     const rows = await listar(c.env.SHARE_DB, `
