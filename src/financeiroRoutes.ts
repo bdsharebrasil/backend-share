@@ -758,23 +758,26 @@ financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
     const payload = { imageBase64: base64, mimeType, tipo }
     const resposta = c.env.GEMINI_API_KEY
       ? await (async () => {
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
+          const modelos = ['gemini-flash-latest', 'gemini-2.5-flash']
           let aiRes: Response | null = null
-          let attempts = 0
           const maxAttempts = 3
-          while (attempts < maxAttempts) {
-            aiRes = await fetch(apiUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT }] },
-                contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
-                generationConfig: { response_mime_type: 'application/json' },
-              }),
-            })
-            if (aiRes.status !== 503) break
-            attempts++
-            if (attempts < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 2000 * attempts))
+          for (const modelo of modelos) {
+            let attempts = 0
+            while (attempts < maxAttempts) {
+              const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
+              aiRes = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT }] },
+                  contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
+                  generationConfig: { response_mime_type: 'application/json' },
+                }),
+              })
+              if (aiRes.status !== 503) return aiRes
+              attempts++
+              if (attempts < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 2000 * attempts))
+            }
           }
           return aiRes
         })()
