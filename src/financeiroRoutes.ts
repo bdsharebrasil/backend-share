@@ -758,7 +758,7 @@ financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
     const payload = { imageBase64: base64, mimeType, tipo }
     const resposta = c.env.GEMINI_API_KEY
       ? await (async () => {
-          const modelos = ['gemini-flash-latest', 'gemini-2.5-flash']
+          const modelos = ['gemini-flash-latest', 'gemini-3.6-flash']
           let aiRes: Response | null = null
           const maxAttempts = 3
           for (const modelo of modelos) {
