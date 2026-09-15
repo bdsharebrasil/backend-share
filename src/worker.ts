@@ -6133,7 +6133,10 @@ app.post('/api/interno/emails', async c => {
     anexos.push({ filename: row.nome_arquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: row.tipo_arquivo || 'application/octet-stream' })
   }
   const arquivosLocais = (Array.isArray(body.arquivos) ? body.arquivos : body.arquivos ? [body.arquivos] : []).filter((file): file is File => file instanceof File && !!file.size)
-  for (const file of arquivosLocais.slice(0, 10)) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
+  // Preserve every file selected in the multipart request. The frontend sends
+  // repeated `arquivos` fields, so truncating here silently dropped attachments
+  // after the tenth one (and made multi-image uploads incomplete).
+  for (const file of arquivosLocais) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
   const id = uuid(); let status = erroAnexo ? 'erro' : 'enviado'; let erro: string | null = erroAnexo
   const assinaturaAtual = await assinaturaOperacional(c, user)
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())

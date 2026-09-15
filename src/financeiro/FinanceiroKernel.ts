@@ -503,7 +503,9 @@ function allocationLines(body: Row): AllocationLine[] {
 
   const amount = asPositiveCents(body.valor_centavos)
   const lines = supplied.map((line: Row) => ({
-    cotistaId: text(line.cotista_id ?? line.cotista_aeronave_id),
+    // Rateios de holding são identificados pelo sócio, enquanto rateios de
+    // cliente usam o cotista_aeronave. O mesmo comando atende os dois fluxos.
+    cotistaId: text(line.cotista_id ?? line.cotista_aeronave_id ?? line.socio_id),
     socioId: nullableText(line.socio_id),
     holdingId: nullableText(line.holding_id),
     percentual: Number(line.percentual ?? line.percentual_sociedade ?? 0),
@@ -812,7 +814,11 @@ export async function createExpense(
   )
   const reembolsavel = asFlag(command.reembolsavel)
   const amount = asPositiveCents(command.valor_centavos)
-  await validateAllocationLines(db, command, lines, amount)
+  // A validação por cotista_aeronave é exclusiva do fluxo de cliente. No
+  // holding, as linhas são validadas por socio_id em holdingAllocationStatements.
+  if (context?.kind !== 'HOLDING') {
+    await validateAllocationLines(db, command, lines, amount)
+  }
 
   if (context?.kind === 'HOLDING') {
     if (!lines.length && !text(command.recibo_id)) {
