@@ -1071,6 +1071,29 @@ financeiroRoutes.post('/recibos/anexos', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.post('/recibos/demonstrativo', async (c) => {
+  try {
+    await validateFinanceSchema(c.env.SHARE_DB)
+    const bucket = storage(c)
+    if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+    const form = await c.req.parseBody()
+    const arquivo = form.arquivo
+    if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+    if (arquivo.size <= 0 || (arquivo.type && arquivo.type !== 'application/pdf')) return c.json({ error: 'arquivo_pdf_invalido' }, 400)
+    const reciboId = String(form.recibo_id || '').trim() || null
+    if (reciboId) {
+      const recibo = await c.env.SHARE_DB.prepare('SELECT id FROM recibos WHERE id = ?').bind(reciboId).first<{ id: string }>()
+      if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    }
+    const id = crypto.randomUUID()
+    const safeName = (arquivo.name || 'demonstrativo-rateado.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')
+    const key = `share/recibos/demonstrativos/${reciboId || 'avulso'}-${id}-${safeName}`
+    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: 'application/pdf' } })
+    await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, arquivo.name || safeName, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'DEMONSTRATIVO').run()
+    return c.json({ id, recibo_id: reciboId, caminho_arquivo: key, url: `/api/financeiro/recibos/anexos/${id}/arquivo`, nome_arquivo: arquivo.name || safeName, tipo_arquivo: 'application/pdf', tamanho_arquivo: arquivo.size }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
   try {
     await validateFinanceSchema(c.env.SHARE_DB)
