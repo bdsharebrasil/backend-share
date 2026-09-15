@@ -655,7 +655,11 @@ financeiroRoutes.post('/reembolsos', async (c) => {
   }
 })
 
-const DEMONSTRATIVO_IA_PROMPT = `Você é um extrator de dados de demonstrativos de tarifas aeronáuticas brasileiros (INFRAERO, DECEA e tarifas de pouso). Leia o arquivo enviado e devolva EXCLUSIVAMENTE JSON válido, sem markdown, no formato:
+const DEMONSTRATIVO_IA_PROMPT = `Você é um EXTRATOR DE DADOS estritamente fiel de demonstrativos/faturas de tarifas aeroportuárias e de navegação aérea brasileiras (INFRAERO — tarifa de pouso; DECEA — tarifa de navegação aérea).
+
+Sua única tarefa é TRANSCREVER o que está escrito no documento. Você NÃO conhece a operação da aeronave, não sabe quem é o cotista/dono do avião, e não sabe a rota que o avião fez. NÃO adivinhe, NÃO infira, NÃO complete nada que não esteja literalmente no documento.
+
+FORMATO DE SAÍDA — responda EXCLUSIVAMENTE com este JSON, sem markdown, sem comentários, sem texto fora do JSON:
 {
   "numero_documento": string|null,
   "competencia": string|null,
@@ -663,9 +667,81 @@ const DEMONSTRATIVO_IA_PROMPT = `Você é um extrator de dados de demonstrativos
   "aeronave_matricula": string|null,
   "cliente_nome": string|null,
   "valor_total": number|null,
-  "itens": [{ "data": "DD/MM/AAAA", "hora": string|null, "operacao": string|null, "origem": string|null, "destino": string|null, "matricula": string|null, "valor": number }]
+  "itens": [
+    {
+      "data": "YYYY-MM-DD",
+      "hora": "HH:MM"|null,
+      "operacao": string|null,
+      "origem": null,
+      "destino": null,
+      "matricula": string|null,
+      "valor": number
+    }
+  ]
 }
-Regras: converta valores brasileiros para número decimal; inclua todas as operações na ordem original; use null quando não houver o campo; itens nunca pode ser null.`
+
+REGRAS OBRIGATÓRIAS POR ITEM:
+1. "data": data do evento da tarifa, SEMPRE em YYYY-MM-DD (converta DD/MM/AAAA quando for o caso).
+2. "hora": horário exato no formato HH:MM (24h). Se não houver horário no documento, use null — nunca invente.
+3. "operacao": código ICAO de 4 letras do AERÓDROMO ONDE A TARIFA FOI GERADA (o aeroporto emissor, ex: SBCY, SBGL). É o MESMO código para todas as linhas do demonstrativo — repita-o em todos os itens.
+4. "valor": número decimal puro (float), sem "R$", sem separador de milhar, com ponto decimal. Ex: "R$ 1.234,56" vira 1234.56.
+5. "matricula": matrícula da aeronave se aparecer na linha; senão null.
+
+REGRAS DE NEGÓCIO — OBRIGATÓRIAS:
+- INFRAERO (tarifa de pouso) é cobrada por POUSO, no aeródromo onde o avião ATERRISSOU. O documento NÃO mostra de onde o avião veio nem para onde foi.
+- DECEA também é emitida por aeródromo/evento, sem indicar origem/destino do voo.
+- Por isso "origem" e "destino" DEVEM ficar sempre null. Não tente preenchê-los. A ligação com o trecho voado (origem/destino) e o cotista responsável é feita por outro sistema, cruzando com o diário de bordo — isso NÃO é sua função.
+- NUNCA escreva nome de cotista, cliente, sócio ou proprietário nos itens, mesmo que veja anotação manuscrita no documento sugerindo isso. Ignore.
+- NUNCA invente, arredonde ou corrija valores — apenas converta o formato numérico do que está escrito.
+- "itens" nunca pode ser null/omitido; se não houver linha legível, retorne [].
+- Inclua TODAS as linhas do documento, na ordem em que aparecem.
+- Campo ausente no documento → null (nunca repita o rótulo da coluna como valor).`
+
+type ItemExtraidoBruto = Record<string, unknown>
+
+function paraNumeroDemonstrativo(valor: unknown): number | null {
+  if (typeof valor === 'number' && Number.isFinite(valor)) return valor
+  if (typeof valor !== 'string') return null
+  const limpo = valor
+    .replace(/R\$\s?/gi, '')
+    .trim()
+    .replace(/\.(?=\d{3}(?:\D|$))/g, '')
+    .replace(',', '.')
+  const numero = Number(limpo)
+  return Number.isFinite(numero) ? numero : null
+}
+
+function paraDataIsoDemonstrativo(valor: unknown): string {
+  const texto = String(valor ?? '').trim()
+  if (!texto) return ''
+  const brasileira = texto.match(/^(\d{2})\/(\d{2})\/(\d{4})/)
+  if (brasileira) return `${brasileira[3]}-${brasileira[2]}-${brasileira[1]}`
+  const iso = texto.match(/^\d{4}-\d{2}-\d{2}/)
+  return iso ? iso[0] : texto
+}
+
+function normalizarItensDemonstrativo(dados: Record<string, unknown>): Record<string, unknown> {
+  const itensBrutos = Array.isArray(dados.itens) ? (dados.itens as ItemExtraidoBruto[]) : []
+  const itens = itensBrutos.map((item) => ({
+    ...item,
+    data: paraDataIsoDemonstrativo(item.data),
+    hora: item.hora ? String(item.hora).slice(0, 5) : null,
+    operacao: item.operacao ? String(item.operacao).trim().toUpperCase() : null,
+    origem: null,
+    destino: null,
+    matricula: item.matricula ? String(item.matricula).trim().toUpperCase() : null,
+    valor: paraNumeroDemonstrativo(item.valor) ?? 0,
+  }))
+  const somaItens = Math.round(itens.reduce((total, item) => total + (Number(item.valor) || 0), 0) * 100) / 100
+  const valorTotal = paraNumeroDemonstrativo(dados.valor_total)
+  const precisaRevisaoManual = valorTotal !== null && Math.abs(somaItens - valorTotal) > 0.01
+  return {
+    ...dados,
+    valor_total: valorTotal,
+    itens,
+    _meta: { soma_itens: somaItens, precisa_revisao_manual: precisaRevisaoManual },
+  }
+}
 
 function normalizarBase64(value: unknown): string {
   return String(value ?? '').replace(/^data:[^;]+;base64,/i, '').replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/')
@@ -712,11 +788,11 @@ financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
     if (!resposta) return c.json({ error: 'servico_de_leitura_ia_nao_configurado' }, 503)
     if (!resposta.ok) return c.json({ error: 'falha_na_leitura_por_ia', details: await resposta.text() }, 502)
     const json = await resposta.json<{ candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; dados_extraidos?: Record<string, unknown> }>()
-    if (json.dados_extraidos) return c.json({ sucesso: true, persistido: false, tipo, dados_extraidos: json.dados_extraidos })
+    if (json.dados_extraidos) return c.json({ sucesso: true, persistido: false, tipo, dados_extraidos: normalizarItensDemonstrativo(json.dados_extraidos) })
     const texto = String(json.candidates?.[0]?.content?.parts?.[0]?.text || '{}').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim()
     let dados: Record<string, unknown>
     try { dados = JSON.parse(texto) as Record<string, unknown> } catch { return c.json({ error: 'formato_invalido_retornado_pela_ia' }, 422) }
-    return c.json({ sucesso: true, persistido: false, tipo, dados_extraidos: dados })
+    return c.json({ sucesso: true, persistido: false, tipo, dados_extraidos: normalizarItensDemonstrativo(dados) })
   } catch (error) { return errorResponse(c, error) }
 })
 
