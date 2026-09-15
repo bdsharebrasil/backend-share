@@ -758,7 +758,7 @@ financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
     const payload = { imageBase64: base64, mimeType, tipo }
     const resposta = c.env.GEMINI_API_KEY
       ? await (async () => {
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
+          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
           let aiRes: Response | null = null
           let attempts = 0
           const maxAttempts = 3
