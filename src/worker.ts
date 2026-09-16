@@ -5930,9 +5930,23 @@ async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
   await c.env.SHARE_DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_enviados_id_unique ON emails_enviados(id)').run()
   await validateWorkerSchema(c, [{table:'user_profiles',columns:['id','email_envio']},{table:'assinaturas_email',columns:['id']},{table:'emails_enviados',columns:['id']}])
 }
+function normalizarEmail(valor: unknown): string | null {
+  const email = String(valor ?? '').trim().replace(/^['"\s]+|['"\s]+$/g, '').replace(/[;,]+$/g, '').trim().toLowerCase()
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null
+}
 function emailArray(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean)
-  try { const parsed = JSON.parse(String(value || '[]')); return Array.isArray(parsed) ? parsed.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean) : [] } catch { return [] }
+  const texto = String(value ?? '').trim()
+  let valores: unknown[]
+  if (Array.isArray(value)) valores = value
+  else {
+    try {
+      const parsed = JSON.parse(texto || '[]')
+      valores = Array.isArray(parsed) ? parsed : typeof parsed === 'string' ? parsed.split(/[;,\s]+/) : []
+    } catch {
+      valores = texto.replace(/^\[|\]$/g, '').split(/[;,\s]+/)
+    }
+  }
+  return [...new Set(valores.map(normalizarEmail).filter((item): item is string => Boolean(item)))]
 }
 function arrayBufferBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer); let binary = ''
@@ -5969,7 +5983,7 @@ app.get('/api/interno/emails', async c => {
   await garantirTabelaEmails(c)
   const [clientes, socios, recibos, relatorios, abastecimentos, historico] = await Promise.all([
     db.prepare("SELECT id, razao_social, email_principal, emails FROM cliente WHERE lower(COALESCE(status,'ativo')) = 'ativo' ORDER BY razao_social").all(),
-    db.prepare("SELECT id, nome, email_principal, cotista_id, holding_id FROM hold_socios WHERE email_principal IS NOT NULL AND trim(email_principal) <> '' ORDER BY nome").all(),
+    db.prepare("SELECT id, nome, email_principal, emails, cotista_id, holding_id FROM hold_socios WHERE (email_principal IS NOT NULL AND trim(email_principal) <> '') OR (emails IS NOT NULL AND trim(emails) <> '') ORDER BY nome").all(),
     // Recibos gerados pela IA podem ter o PDF referenciado em recibos.url_recibo
     // mesmo quando a linha de recibo_anexos não está disponível para a central.
     // Partir de recibos garante que eles apareçam no seletor de e-mail; quando
@@ -5982,10 +5996,9 @@ app.get('/api/interno/emails', async c => {
   ])
   const contatos: any[] = []
   for (const row of (clientes.results as any[])) {
-    const emails = [row.email_principal, ...emailArray(row.emails)]
-    for (const email of [...new Set(emails.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))]) contatos.push({ id: `${row.id}:${email}`, nome: row.razao_social, email, tipo: 'cliente', cliente_id: row.id })
+    for (const email of emailArray([row.email_principal, ...emailArray(row.emails)])) contatos.push({ id: `${row.id}:${email}`, nome: row.razao_social, email, tipo: 'cliente', cliente_id: row.id })
   }
-  for (const row of (socios.results as any[])) contatos.push({ id: `socio:${row.id}`, nome: row.nome, email: String(row.email_principal).trim().toLowerCase(), tipo: 'socio', cotista_id: row.cotista_id, holding_id: row.holding_id || null })
+  for (const row of (socios.results as any[])) for (const email of emailArray([row.email_principal, ...emailArray(row.emails)])) contatos.push({ id: `socio:${row.id}:${email}`, nome: row.nome, email, tipo: 'socio', cotista_id: row.cotista_id, holding_id: row.holding_id || null })
   const anexosAbastecimento = (abastecimentos.results as any[]).flatMap((row) => ([['comanda_url', 'Comanda'], ['nota_url', 'Nota fiscal'], ['boleto_url', 'Boleto']] as const).filter(([campo]) => row[campo]).map(([campo, titulo]) => ({ id: `abastecimento:${row.id}:${campo.replace('_url', '')}`, nome: `${titulo} · ${row.numero_comanda || row.numero_nf || row.local || 'Abastecimento'}`, origem: 'abastecimento', tipo_arquivo: null, tamanho_arquivo: null, arquivo_url: row[campo] })))
   const anexos = [...(recibos.results as any[]).map((row) => ({ id: `recibo:${row.id}`, nome: row.nome_arquivo || `${row.numero_recibo || row.recibo_id}.pdf`, origem: 'recibo', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/recibos/anexos/${row.id}/arquivo` })), ...(relatorios.results as any[]).map((row) => ({ id: `relatorio:${row.id}`, nome: row.nome_arquivo, origem: 'relatorio_despesa_viagem', tipo_arquivo: row.tipo_arquivo, tamanho_arquivo: row.tamanho_arquivo, arquivo_url: `/api/financeiro/relatorios-despesa-viagem/anexos/${row.id}/arquivo` })), ...anexosAbastecimento]
   return c.json({ contatos, anexos, historico: (historico.results as any[]).map((row) => ({ ...row, destinatarios: emailArray(row.destinatarios), quantidade_anexos: emailArray(row.anexos).length })) })
