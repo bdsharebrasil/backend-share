@@ -6266,13 +6266,13 @@ app.post('/api/interno/emails', async c => {
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   const assinaturaAtual = await assinaturaOperacional(c, user)
-  const remetenteConfigurado = String(c.env.EMAIL_FROM || '').trim()
+  const remetenteConfigurado = enderecoEmail(c.env.EMAIL_FROM) || ''
   const emailFromDepartamento = enderecoEmail(assinaturaAtual.email)
   // Um departamento pode conter um remetente antigo ou de domínio não
   // verificado no Resend. Nesse caso, use o remetente global verificado em vez
   // de enviar um payload que o provedor certamente rejeitará.
   const emailFrom = emailFromDepartamento && dominioEmail(emailFromDepartamento) === dominioEmail(remetenteConfigurado)
-    ? (assinaturaAtual.email || remetenteConfigurado)
+    ? emailFromDepartamento
     : remetenteConfigurado
   if (!c.env.RESEND_API_KEY || !emailFrom) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
@@ -6347,7 +6347,7 @@ app.post('/api/interno/emails', async c => {
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
   const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
   if (!erroAnexo) {
-    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: emailFrom.includes('<') ? emailFrom : `${assinaturaAtual.nome} <${emailFrom}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
+    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: emailFrom, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
