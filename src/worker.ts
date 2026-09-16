@@ -5232,7 +5232,7 @@ async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Co
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await c.env.SHARE_DB.prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
+  const result = await c.env.SHARE_DB.prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
   return c.json(result.results)
 })
 
@@ -5243,6 +5243,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   const email = String(body.email || '').trim().toLowerCase()
   const senha = String(body.senha || '')
   const nome = String(body.nome_completo || '').trim()
+  const departamento = String(body.departamentos_email || body.departamento || '').trim()
   if (!email || !/^\S+@\S+\.\S+$/.test(email) || senha.length < 6 || !nome) return c.json({ error: 'nome_email_e_senha_validos_sao_obrigatorios' }, 400)
   const emailEnvio = await gerarEmailEnvioColaborador(c, nome)
   if (!c.env.SUPABASE_URL || !c.env.SUPABASE_SERVICE_ROLE_KEY) return c.json({ error: 'supabase_admin_nao_configurado' }, 503)
@@ -5251,10 +5252,12 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   if (!authResponse.ok || !authData.id) return c.json({ error: authData.msg || authData.message || 'nao_foi_possivel_criar_usuario_supabase' }, authResponse.status === 422 ? 409 : 502)
   const id = String(authData.id)
   try {
-    await c.env.SHARE_DB.prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo', 'colaborador', ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, body.departamento || null).run()
-    const funcao = String(body.funcao || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')
-    await c.env.SHARE_DB.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, funcao).run()
-    await c.env.SHARE_DB.prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || body.departamento || null, body.telefone || null, null, emailEnvio).run()
+    const db = c.env.SHARE_DB
+    await db.batch([
+      db.prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, 'ativo', 'colaborador', departamento || null, departamento || null),
+      db.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, String(body.funcao || departamento || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')),
+      db.prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || departamento || null, body.telefone || null, null, emailEnvio),
+    ])
   } catch (error) {
     await c.env.SHARE_DB.prepare('DELETE FROM usuarios_funcoes WHERE user_id = ?1').bind(id).run().catch(() => undefined)
     await c.env.SHARE_DB.prepare('DELETE FROM user_profiles WHERE id = ?1').bind(id).run().catch(() => undefined)
@@ -5262,7 +5265,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
     log.error('[gestao-colaborador] falha ao inserir perfil ou função D1:', error)
     return c.json({ error: 'usuario_criado_no_supabase_mas_falha_ao_salvar_perfil_d1' }, 500)
   }
-  return c.json(await c.env.SHARE_DB.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
+  return c.json(await c.env.SHARE_DB.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
 })
 
 app.patch('/api/gestor/gestao-colaborador/:id', async c => {
@@ -5271,7 +5274,7 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const id = c.req.param('id'); const current = await c.env.SHARE_DB.prepare('SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!current) return c.notFound()
-  const fields = ['nome_completo', 'nome_exibicao', 'telefone', 'cidade', 'uf', 'data_nascimento', 'data_admissao', 'cpf', 'rg', 'canac', 'departamento', 'status']
+  const fields = ['nome_completo', 'nome_exibicao', 'telefone', 'cidade', 'uf', 'data_nascimento', 'data_admissao', 'cpf', 'rg', 'canac', 'departamento', 'departamentos_email', 'status']
   const updates = fields.filter(field => body[field] !== undefined)
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
