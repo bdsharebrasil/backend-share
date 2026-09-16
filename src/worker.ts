@@ -993,6 +993,7 @@ type Colaborador = {
   pix: string | null
   tipo_user: string | null
   departamento: string | null
+  departamentos_email?: string | null
   cliente_id: string | null
 }
 
@@ -6057,14 +6058,17 @@ function normalizarChaveDepartamento(valor: unknown) {
 }
 async function assinaturaOperacional(c: Context<{ Bindings: Bindings }>, user: any) {
   const rows = await c.env.SHARE_DB.prepare('SELECT * FROM departamentos_email').all<any>().catch(() => ({ results: [] as any[] }))
-  const departamento = normalizarChaveDepartamento(user.departamentos_email)
-  const row = (rows.results || []).find((item: any) => normalizarChaveDepartamento(item?.nome) === departamento) || {}
+  // O perfil pode guardar o nome ou o id do departamento, conforme a versão
+  // do cadastro. Aceitar os dois evita cair silenciosamente no remetente global.
+  const departamento = normalizarChaveDepartamento(user.departamentos_email || user.departamento)
+  const row = (rows.results || []).find((item: any) => [item?.id, item?.nome].some((valor) => normalizarChaveDepartamento(valor) === departamento)) || {}
   return {
     nome: String(user.email_envio || user.nome_completo || ASSINATURA_EMPRESA_OPERACIONAL),
     cargo: campoDepartamento(row, ['nome']),
+    email: campoDepartamento(row, ['email_from']) || undefined,
     telefone: campoDepartamento(row, ['telefone_padrao']),
     endereco: campoDepartamento(row, ['endereco_padrao']),
-    logo_url: campoDepartamento(row, ['logo_url', 'logo', 'url_logo']) || null,
+    logo_url: campoDepartamento(row, ['logo_url_padrao', 'logo_url', 'logo', 'url_logo']) || null,
   }
 }
 app.get('/api/minha-assinatura', async c => {
@@ -6129,7 +6133,9 @@ app.post('/api/interno/emails', async c => {
   const origens = [...new Set([...referencias, ...ids])]
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
-  if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
+  const assinaturaAtual = await assinaturaOperacional(c, user)
+  const emailFrom = assinaturaAtual.email || c.env.EMAIL_FROM || ''
+  if (!c.env.RESEND_API_KEY || !emailFrom) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
   const db = c.env.SHARE_DB; const anexos: any[] = []; let erroAnexo: string | null = null
   for (const id of ids.slice(0, 10)) {
@@ -6199,11 +6205,10 @@ app.post('/api/interno/emails', async c => {
       anexosDetalhes.push({ nome_arquivo: anexo.filename, tipo_arquivo: anexo.content_type || 'application/octet-stream', tamanho_bytes: buffer.byteLength, key })
     }
   }
-  const assinaturaAtual = await assinaturaOperacional(c, user)
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
   const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
   if (!erroAnexo) {
-    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM.includes('<') ? c.env.EMAIL_FROM : `${assinaturaAtual.nome} <${c.env.EMAIL_FROM}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
+    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: emailFrom.includes('<') ? emailFrom : `${assinaturaAtual.nome} <${emailFrom}>`, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
