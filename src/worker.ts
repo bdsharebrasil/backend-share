@@ -5231,6 +5231,29 @@ async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Co
   return Boolean(result)
 }
 
+async function sincronizarTripulacaoColaborador(c: Context<{ Bindings: Bindings }>, userId: string, body: Record<string, any> = {}) {
+  const db = c.env.SHARE_DB
+  const perfil = await db.prepare('SELECT id, nome_completo, canac, status, departamento FROM user_profiles WHERE id = ?1').bind(userId).first<any>()
+  if (!perfil) return
+  const funcao = String(body.funcao || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+  const departamento = String(body.departamento || body.departamentos_email || perfil.departamento || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+  const funcaoAtual = await db.prepare("SELECT funcao FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY criado_em DESC LIMIT 1").bind(userId).first<{ funcao: string }>().catch(() => null)
+  const ehTripulante = [funcao, departamento, String(funcaoAtual?.funcao || '').trim().toLowerCase().replace(/[\s-]+/g, '_')].includes('tripulante')
+  const existente = await db.prepare('SELECT id FROM tripulacao WHERE user_id = ?1').bind(userId).first<{ id: string }>()
+  if (!ehTripulante) {
+    if (existente) await db.prepare("UPDATE tripulacao SET status = 'inativo' WHERE id = ?1").bind(existente.id).run()
+    return
+  }
+  const canac = String(body.canac ?? perfil.canac ?? '').trim()
+  if (!canac) throw new Error('canac_obrigatorio_para_tripulante')
+  const status = String(body.status ?? perfil.status ?? 'ativo').trim().toLowerCase() === 'inativo' ? 'inativo' : 'ativo'
+  if (existente) {
+    await db.prepare('UPDATE tripulacao SET canac = ?, nome_completo = ?, status = ? WHERE id = ?').bind(canac, perfil.nome_completo, status, existente.id).run()
+  } else {
+    await db.prepare('INSERT INTO tripulacao (id, user_id, canac, nome_completo, status) VALUES (?, ?, ?, ?, ?)').bind(uuid(), userId, canac, perfil.nome_completo, status).run()
+  }
+}
+
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
@@ -5262,6 +5285,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
       db.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, String(body.funcao || departamento || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')),
       db.prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || departamento || null, body.telefone || null, null, emailEnvio),
     ])
+    await sincronizarTripulacaoColaborador(c, id, { ...body, departamento })
   } catch (error) {
     await c.env.SHARE_DB.prepare('DELETE FROM usuarios_funcoes WHERE user_id = ?1').bind(id).run().catch(() => undefined)
     await c.env.SHARE_DB.prepare('DELETE FROM user_profiles WHERE id = ?1').bind(id).run().catch(() => undefined)
@@ -5285,6 +5309,7 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   if (!body.exame_admissional_realizado && body.exame_admissional_prazo !== undefined && !String(body.exame_admissional_prazo || '').trim()) return c.json({ error: 'prazo_do_exame_admissional_obrigatorio' }, 400)
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
+  await sincronizarTripulacaoColaborador(c, id, body)
   return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
 })
 
