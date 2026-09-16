@@ -5233,7 +5233,7 @@ async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Co
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await c.env.SHARE_DB.prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
+  const result = await c.env.SHARE_DB.prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, exame_admissional_realizado, exame_admissional_data, exame_admissional_local, exame_admissional_empresa, exame_admissional_prazo, exame_admissional_documento_id, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
   return c.json(result.results)
 })
 
@@ -5246,6 +5246,8 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   const nome = String(body.nome_completo || '').trim()
   const departamento = String(body.departamentos_email || body.departamento || '').trim()
   if (!email || !/^\S+@\S+\.\S+$/.test(email) || senha.length < 6 || !nome) return c.json({ error: 'nome_email_e_senha_validos_sao_obrigatorios' }, 400)
+  if (body.exame_admissional_realizado && (!String(body.exame_admissional_data || '').trim() || !String(body.exame_admissional_local || '').trim() || !String(body.exame_admissional_empresa || '').trim())) return c.json({ error: 'dados_do_exame_admissional_obrigatorios' }, 400)
+  if (!body.exame_admissional_realizado && !String(body.exame_admissional_prazo || '').trim()) return c.json({ error: 'prazo_do_exame_admissional_obrigatorio' }, 400)
   const emailEnvio = await gerarEmailEnvioColaborador(c, nome)
   if (!c.env.SUPABASE_URL || !c.env.SUPABASE_SERVICE_ROLE_KEY) return c.json({ error: 'supabase_admin_nao_configurado' }, 503)
   const authResponse = await fetch(`${c.env.SUPABASE_URL}/auth/v1/admin/users`, { method: 'POST', headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${c.env.SUPABASE_SERVICE_ROLE_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: senha, email_confirm: true, user_metadata: { nome_completo: nome, tipo_user: 'colaborador' } }) })
@@ -5255,7 +5257,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
   try {
     const db = c.env.SHARE_DB
     await db.batch([
-      db.prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, 'ativo', 'colaborador', departamento || null, departamento || null),
+      db.prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, exame_admissional_realizado, exame_admissional_data, exame_admissional_local, exame_admissional_empresa, exame_admissional_prazo, exame_admissional_documento_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, 'ativo', 'colaborador', departamento || null, departamento || null, body.exame_admissional_realizado ? 1 : 0, body.exame_admissional_data || null, body.exame_admissional_local || null, body.exame_admissional_empresa || null, body.exame_admissional_prazo || null, body.exame_admissional_documento_id || null),
       db.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, String(body.funcao || departamento || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')),
       db.prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || departamento || null, body.telefone || null, null, emailEnvio),
     ])
@@ -5266,7 +5268,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
     log.error('[gestao-colaborador] falha ao inserir perfil ou função D1:', error)
     return c.json({ error: 'usuario_criado_no_supabase_mas_falha_ao_salvar_perfil_d1' }, 500)
   }
-  return c.json(await c.env.SHARE_DB.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
+  return c.json(await c.env.SHARE_DB.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, exame_admissional_realizado, exame_admissional_data, exame_admissional_local, exame_admissional_empresa, exame_admissional_prazo, exame_admissional_documento_id, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1').bind(id).first(), 201)
 })
 
 app.patch('/api/gestor/gestao-colaborador/:id', async c => {
@@ -5275,8 +5277,11 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const id = c.req.param('id'); const current = await c.env.SHARE_DB.prepare('SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!current) return c.notFound()
-  const fields = ['nome_completo', 'nome_exibicao', 'telefone', 'cidade', 'uf', 'data_nascimento', 'data_admissao', 'cpf', 'rg', 'canac', 'departamento', 'departamentos_email', 'status']
+  const fields = ['nome_completo', 'nome_exibicao', 'telefone', 'cidade', 'uf', 'data_nascimento', 'data_admissao', 'cpf', 'rg', 'canac', 'departamento', 'departamentos_email', 'status', 'exame_admissional_realizado', 'exame_admissional_data', 'exame_admissional_local', 'exame_admissional_empresa', 'exame_admissional_prazo', 'exame_admissional_documento_id']
   const updates = fields.filter(field => body[field] !== undefined)
+  if (body.exame_admissional_realizado !== undefined) body.exame_admissional_realizado = body.exame_admissional_realizado ? 1 : 0
+  if (body.exame_admissional_realizado && (!String(body.exame_admissional_data || '').trim() || !String(body.exame_admissional_local || '').trim() || !String(body.exame_admissional_empresa || '').trim())) return c.json({ error: 'dados_do_exame_admissional_obrigatorios' }, 400)
+  if (!body.exame_admissional_realizado && body.exame_admissional_prazo !== undefined && !String(body.exame_admissional_prazo || '').trim()) return c.json({ error: 'prazo_do_exame_admissional_obrigatorio' }, 400)
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
   return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
