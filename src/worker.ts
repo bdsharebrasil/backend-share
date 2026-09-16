@@ -3986,9 +3986,21 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
       db.prepare('SELECT id, nome, holding_id FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
       db.prepare(`SELECT s.numero_voo, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino,
-          s.data_agendada, s.dias_duracao, a.matricula_registro
+          s.data_agendada, s.dias_duracao, s.piloto_id, s.copiloto_id,
+          COALESCE(c.razao_social, h.nome, hs.nome) AS cotista_nome,
+          hs.nome AS socio_nome,
+          COALESCE(t1.nome_completo, f1.nome_completo) AS tripulante_nome,
+          COALESCE(t2.nome_completo, f2.nome_completo) AS tripulante_nome_2,
+          a.matricula_registro
         FROM solicitacoes_reserva_voo s
         LEFT JOIN aeronave a ON a.id = s.aeronave_id
+        LEFT JOIN cliente c ON c.id = s.cliente_id
+        LEFT JOIN holdings h ON h.id = s.cliente_id
+        LEFT JOIN hold_socios hs ON hs.id = s.socio_id
+        LEFT JOIN tripulacao t1 ON t1.id = s.piloto_id
+        LEFT JOIN tripulacao_freelancer f1 ON f1.id = s.piloto_id
+        LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
+        LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
         WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
         ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC LIMIT 200`).all().catch(() => ({ results: [] })),
     ])
