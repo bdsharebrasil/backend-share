@@ -3341,7 +3341,7 @@ type TripulanteDisponivel = {
 }
 
 async function buscarTripulante(c: Context<{ Bindings: Bindings }>, id: string): Promise<TripulanteDisponivel | null> {
-  const tripulante = await c.env.SHARE_DB.prepare('SELECT id, nome_completo, canac, status, tipo_licenca FROM tripulacao WHERE id = ?1').bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
+  const tripulante = await c.env.SHARE_DB.prepare(`SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE t.id = ?1 AND lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive')`).bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
   if (tripulante) return { ...tripulante, origem: 'tripulacao' }
   const freelancer = await c.env.SHARE_DB.prepare('SELECT id, nome_completo, canac, status, NULL AS tipo_licenca FROM tripulacao_freelancer WHERE id = ?1').bind(id).first<Omit<TripulanteDisponivel, 'origem'>>()
   return freelancer ? { ...freelancer, origem: 'freelancer' } : null
@@ -3504,7 +3504,7 @@ app.get('/api/interno/agendamento', async c => {
       FROM aeronave a
       LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
       ORDER BY a.matricula_registro`).all().catch(error => { log.error('[agendamento] aeronaves indisponíveis', error); return { results: [] } }),
-    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
+    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive') ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
     db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all().catch(error => { log.error('[agendamento] freelancers indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
         CASE WHEN EXISTS (SELECT 1 FROM tripulacao t WHERE t.id = e.tripulacao_id) THEN 'tripulacao' ELSE 'freelancer' END AS tripulante_origem,
@@ -3983,8 +3983,9 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
         WHERE ativo = 1
         ORDER BY razao_social`).all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
-      db.prepare(`SELECT id, nome_completo, canac, status, 'tripulacao' AS origem FROM tripulacao
-        WHERE lower(COALESCE(status, 'ativo')) = 'ativo'
+      db.prepare(`SELECT t.id, t.nome_completo, t.canac, t.status, 'tripulacao' AS origem FROM tripulacao t
+        LEFT JOIN user_profiles up ON up.id = t.user_id
+        WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive')
         UNION ALL
         SELECT id, nome_completo, canac, status, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer
         WHERE lower(COALESCE(status, 'ativo')) = 'ativo'
