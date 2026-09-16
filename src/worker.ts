@@ -5297,8 +5297,9 @@ app.post('/api/gestor/gestao-colaborador/:id/documentos', async c => {
   try {
     const caminho = await salvarArquivoColaborador(c, userId, file, 'documentos_colaboradores')
     const id = uuid()
-    await c.env.SHARE_DB.prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, userId, file.name, caminho, file.type, file.size, user.id, categoria).run()
-    return c.json({ id, user_id: userId, nome_arquivo: file.name, caminho_arquivo: caminho, tipo_arquivo: file.type, tamanho_arquivo: file.size, categoria, arquivo_url: `/api/gestor/gestao-colaborador/${userId}/documentos/${id}/arquivo` }, 201)
+    const nomeArquivo = String(formData.get('nome_arquivo') || file.name).trim() || file.name
+    await c.env.SHARE_DB.prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, userId, nomeArquivo, caminho, file.type, file.size, user.id, categoria).run()
+    return c.json({ id, user_id: userId, nome_arquivo: nomeArquivo, caminho_arquivo: caminho, tipo_arquivo: file.type, tamanho_arquivo: file.size, categoria, arquivo_url: `/api/gestor/gestao-colaborador/${userId}/documentos/${id}/arquivo` }, 201)
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_documento' }, 400)
   }
