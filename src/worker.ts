@@ -6080,8 +6080,18 @@ async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [{table:'user_profiles',columns:['id','email_envio']},{table:'assinaturas_email',columns:['id']},{table:'emails_enviados',columns:['id']}])
 }
 function normalizarEmail(valor: unknown): string | null {
-  const email = String(valor ?? '').trim().replace(/^['"\s]+|['"\s]+$/g, '').replace(/[;,]+$/g, '').trim().toLowerCase()
+  // O Resend aceita apenas endereços ASCII. Corrige contatos cadastrados como
+  // "gestão@..." para "gestao@..." antes de montar o payload do provedor.
+  const email = String(valor ?? '').trim().replace(/^['"\s]+|['"\s]+$/g, '').replace(/[;,]+$/g, '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null
+}
+function enderecoEmail(valor: unknown): string | null {
+  const texto = String(valor ?? '').trim()
+  const entreAngulos = texto.match(/<([^>]+)>/)?.[1] || texto
+  return normalizarEmail(entreAngulos)
+}
+function dominioEmail(valor: unknown): string | null {
+  return enderecoEmail(valor)?.split('@')[1] || null
 }
 function emailArray(value: unknown): string[] {
   const texto = String(value ?? '').trim()
@@ -6256,7 +6266,14 @@ app.post('/api/interno/emails', async c => {
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
   const assinaturaAtual = await assinaturaOperacional(c, user)
-  const emailFrom = assinaturaAtual.email || c.env.EMAIL_FROM || ''
+  const remetenteConfigurado = String(c.env.EMAIL_FROM || '').trim()
+  const emailFromDepartamento = enderecoEmail(assinaturaAtual.email)
+  // Um departamento pode conter um remetente antigo ou de domínio não
+  // verificado no Resend. Nesse caso, use o remetente global verificado em vez
+  // de enviar um payload que o provedor certamente rejeitará.
+  const emailFrom = emailFromDepartamento && dominioEmail(emailFromDepartamento) === dominioEmail(remetenteConfigurado)
+    ? (assinaturaAtual.email || remetenteConfigurado)
+    : remetenteConfigurado
   if (!c.env.RESEND_API_KEY || !emailFrom) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
   const db = c.env.SHARE_DB; const anexos: any[] = []; let erroAnexo: string | null = null
@@ -6340,7 +6357,11 @@ app.post('/api/interno/emails', async c => {
     // antes da atualização do lançamento.
     await marcarEmailEnviadoParaOrigens(c, origens, id).catch(error => { log.error('[interno/emails] origem não atualizada após envio', error) })
   }
-  if (status === 'erro') return c.json({ error: 'falha_ao_enviar_email', id }, 502)
+  if (status === 'erro') {
+    let detalhe: Record<string, unknown> | null = null
+    try { detalhe = erro ? JSON.parse(erro) : null } catch { /* mantém erro bruto no histórico */ }
+    return c.json({ error: 'falha_ao_enviar_email', message: detalhe?.message || erro || 'O provedor recusou o envio.', id }, 502)
+  }
   return c.json({ success: true, id }, 201)
 })
 function chaveStorageDeUrl(valor: unknown): string {
