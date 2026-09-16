@@ -3347,17 +3347,13 @@ async function buscarTripulante(c: Context<{ Bindings: Bindings }>, id: string):
 }
 
 async function garantirTabelaDisponibilidadeTripulacao(c: Context<{ Bindings: Bindings }>) {
-  await validateWorkerSchema(c, [{table:'disponibilidade_tripulacao',columns:['id']}])
+  await validateWorkerSchema(c, [{table:'escala_tripulacao',columns:['id','tripulacao_id','data_inicio','data_fim','status']}])
 }
 
 async function garantirTabelaPlanosVoo(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [{table:'planos_voo',columns:['id']}])
 }
 
-
-async function garantirComplianceTripulacao(c: Context<{ Bindings: Bindings }>) {
-  await validateWorkerSchema(c, [{table:'compliance_tripulacao',columns:['id']}])
-}
 
 async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>, tripulanteId: string, aeronaveId: string): Promise<string | null> {
   const tripulante = await buscarTripulante(c, tripulanteId)
@@ -3557,7 +3553,6 @@ app.post('/api/interno/agendamento/disponibilidade', async c => {
 app.post('/api/interno/agendamento', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
-  await garantirComplianceTripulacao(c)
   const body = await c.req.json<{ cliente_id?: string; socio_id?: string; aeronave_id?: string; origem?: string; destino?: string; data_agendada?: string; data_fim?: string; horario_previsto_agendamento?: string; dias_duracao?: number; numero_passageiros?: number; cliente_emprestimo_id?: string; socio_emprestimo_id?: string; voo_emprestado?: string; piloto_id?: string; copiloto_id?: string; observacoes?: string }>().catch(() => null)
   const origem = body?.origem?.trim().toUpperCase() || ''
   const destino = body?.destino?.trim().toUpperCase() || ''
@@ -3798,7 +3793,6 @@ async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clie
 app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
-  await garantirComplianceTripulacao(c)
   const id = c.req.param('id')
   await garantirTabelaSequenciaVoos(c)
   const reservation = await c.env.SHARE_DB.prepare(`SELECT s.*, a.matricula_registro
