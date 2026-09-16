@@ -725,6 +725,11 @@ function paraDataIsoDemonstrativo(valor: unknown): string {
 
 function normalizarItensDemonstrativo(dados: Record<string, unknown>): Record<string, unknown> {
   const itensBrutos = Array.isArray(dados.itens) ? (dados.itens as ItemExtraidoBruto[]) : []
+  // Nos demonstrativos INFRAERO a matrícula normalmente aparece apenas no
+  // cabeçalho (como PRMDL no demonstrativo mensal), não em cada operação.
+  // Propagar esse contexto para cada item evita que o cruzamento dependa de
+  // uma repetição que não existe no documento.
+  const matriculaCabecalho = dados.aeronave_matricula ? String(dados.aeronave_matricula).trim().toUpperCase() : null
   const itens = itensBrutos.map((item) => ({
     ...item,
     data: paraDataIsoDemonstrativo(item.data),
@@ -732,7 +737,7 @@ function normalizarItensDemonstrativo(dados: Record<string, unknown>): Record<st
     operacao: item.operacao ? String(item.operacao).trim().toUpperCase() : null,
     origem: item.origem ? String(item.origem).trim().toUpperCase() : null,
     destino: item.destino ? String(item.destino).trim().toUpperCase() : null,
-    matricula: item.matricula ? String(item.matricula).trim().toUpperCase() : null,
+    matricula: item.matricula ? String(item.matricula).trim().toUpperCase() : matriculaCabecalho,
     valor: paraNumeroDemonstrativo(item.valor) ?? 0,
   }))
   const somaItens = Math.round(itens.reduce((total, item) => total + (Number(item.valor) || 0), 0) * 100) / 100
