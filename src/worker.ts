@@ -5282,6 +5282,68 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
 })
 
+app.post('/api/gestor/gestao-colaborador/:id/documentos', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const userId = c.req.param('id')
+  const colaborador = await c.env.SHARE_DB.prepare("SELECT id FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador'").bind(userId).first()
+  if (!colaborador) return c.notFound()
+  const formData = await c.req.formData()
+  const fileValue = formData.get('arquivo') as unknown
+  const categoria = String(formData.get('categoria') || 'documentos').trim() || 'documentos'
+  if (!fileValue || typeof fileValue !== 'object' || !('type' in fileValue)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const file = fileValue as File
+  if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
+  try {
+    const caminho = await salvarArquivoColaborador(c, userId, file, 'documentos_colaboradores')
+    const id = uuid()
+    await c.env.SHARE_DB.prepare('INSERT INTO documentos_usuarios (id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, userId, file.name, caminho, file.type, file.size, user.id, categoria).run()
+    return c.json({ id, user_id: userId, nome_arquivo: file.name, caminho_arquivo: caminho, tipo_arquivo: file.type, tamanho_arquivo: file.size, categoria, arquivo_url: `/api/gestor/gestao-colaborador/${userId}/documentos/${id}/arquivo` }, 201)
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_salvar_documento' }, 400)
+  }
+})
+app.get('/api/gestor/gestao-colaborador/:id/documentos/:documentoId/arquivo', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(c.req.param('documentoId'), c.req.param('id')).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()
+  if (!row) return c.notFound()
+  const object = await bucketParaChaveColaborador(c, row.caminho_arquivo).get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': row.tipo_arquivo, 'Content-Disposition': `inline; filename="${shareBrasilFileName(row.nome_arquivo)}"` } })
+})
+app.patch('/api/gestor/gestao-colaborador/:id/documentos/:documentoId', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const userId = c.req.param('id'); const documentoId = c.req.param('documentoId'); const db = c.env.SHARE_DB
+  const row = await db.prepare('SELECT * FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(documentoId, userId).first<any>()
+  if (!row) return c.notFound()
+  const formData = await c.req.formData(); const fileValue = formData.get('arquivo') as unknown
+  const categoria = formData.has('categoria') ? String(formData.get('categoria') || '').trim() || 'documentos' : row.categoria
+  let nome = row.nome_arquivo; let caminho = row.caminho_arquivo; let tipo = row.tipo_arquivo; let tamanho = row.tamanho_arquivo
+  try {
+    if (fileValue && typeof fileValue === 'object' && 'type' in fileValue) {
+      const file = fileValue as File
+      if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return c.json({ error: 'tipo_de_arquivo_nao_permitido' }, 415)
+      caminho = await salvarArquivoColaborador(c, userId, file, 'documentos_colaboradores'); nome = file.name; tipo = file.type; tamanho = file.size
+      await bucketParaChaveColaborador(c, row.caminho_arquivo).delete(row.caminho_arquivo).catch(() => undefined)
+    }
+    await db.prepare('UPDATE documentos_usuarios SET nome_arquivo = ?, caminho_arquivo = ?, tipo_arquivo = ?, tamanho_arquivo = ?, categoria = ? WHERE id = ? AND user_id = ?').bind(nome, caminho, tipo, tamanho, categoria, documentoId, userId).run()
+    return c.json(await db.prepare('SELECT id, user_id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE id = ?').bind(documentoId).first())
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'falha_ao_atualizar_documento' }, 400)
+  }
+})
+app.delete('/api/gestor/gestao-colaborador/:id/documentos/:documentoId', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const userId = c.req.param('id'); const documentoId = c.req.param('documentoId'); const db = c.env.SHARE_DB
+  const row = await db.prepare('SELECT caminho_arquivo FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(documentoId, userId).first<{ caminho_arquivo: string }>()
+  if (!row) return c.notFound()
+  await db.prepare('DELETE FROM documentos_usuarios WHERE id = ?1 AND user_id = ?2').bind(documentoId, userId).run()
+  await bucketParaChaveColaborador(c, row.caminho_arquivo).delete(row.caminho_arquivo).catch(() => undefined)
+  return c.json({ success: true, id: documentoId })
+})
 app.get('/api/gestor/gestao-colaborador/:id/ficha', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
