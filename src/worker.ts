@@ -4254,8 +4254,36 @@ app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
       FROM relatorio_despesa_viagem r LEFT JOIN aeronave a ON a.id = r.aeronave_id
       WHERE r.token_aprovacao_tripulante_1 = ?1 OR r.token_aprovacao_tripulante_2 = ?1 LIMIT 1`).bind(token).first<any>()
     if (!row) return c.json({ error: 'link_invalido_ou_expirado' }, 404)
-    return c.json({ relatorio: { ...row, despesas: despesasRelatorioViagem(row.despesas) }, tripulante_pos: row.tripulante_pos })
+    const despesas = despesasRelatorioViagem(row.despesas)
+    const valor = (item: any) => Number(item?.valor ?? item?.amount ?? 0) || 0
+    const pagador = (item: any) => String(item?.pago_por || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\s-]+/g, '_')
+    const totais = despesas.reduce((acc: { tripulante: number; cliente: number; sharebrasil: number }, item: any) => {
+      const quem = pagador(item)
+      if (quem === `tripulante_${row.tripulante_pos}` || quem === `tripulante${row.tripulante_pos}`) acc.tripulante += valor(item)
+      if (quem === 'cliente' || quem === 'client') acc.cliente += valor(item)
+      if (quem === 'share' || quem === 'sharebrasil' || quem === 'share_brasil') acc.sharebrasil += valor(item)
+      return acc
+    }, { tripulante: 0, cliente: 0, sharebrasil: 0 })
+    const anexos = await c.env.SHARE_DB.prepare('SELECT id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos WHERE relatorio_despesa_viagem_id = ?1 ORDER BY indice_despesa, criado_em').bind(row.id).all()
+    const comprovantes = (anexos.results || []).map((anexo: any) => ({ ...anexo, url_arquivo: `/api/public/relatorios-despesa-viagem/aprovacao/${encodeURIComponent(token)}/comprovantes/${encodeURIComponent(anexo.id)}` }))
+    return c.json({ relatorio: { ...row, despesas, anexos: comprovantes }, resumo: { total_a_receber: totais.tripulante, cliente_pagou: totais.cliente, share_brasil_pagou: totais.sharebrasil }, tripulante_pos: row.tripulante_pos })
   } catch (error: any) { return c.json({ error: error?.message || 'falha_ao_consultar_aprovacao' }, 400) }
+})
+
+app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token/comprovantes/:anexoId', async c => {
+  try {
+    const token = c.req.param('token')
+    const anexo = await c.env.SHARE_DB.prepare(`SELECT a.caminho_arquivo, a.nome_arquivo, a.tipo_arquivo
+      FROM relatorio_despesa_viagem_anexos a JOIN relatorio_despesa_viagem r ON r.id = a.relatorio_despesa_viagem_id
+      WHERE a.id = ?1 AND (r.token_aprovacao_tripulante_1 = ?2 OR r.token_aprovacao_tripulante_2 = ?2)`).bind(c.req.param('anexoId'), token).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
+    if (!anexo) return c.notFound()
+    const object = await shareBrasilBucket(c).get(anexo.caminho_arquivo)
+    if (!object) return c.notFound()
+    return new Response(object.body, { headers: { 'Content-Type': anexo.tipo_arquivo || 'application/octet-stream', 'Content-Disposition': `inline; filename="${shareBrasilFileName(anexo.nome_arquivo)}"` } })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:comprovante-publico]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_comprovante' }, 500)
+  }
 })
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
   const colaborador = await authenticatedColaborador(c)
