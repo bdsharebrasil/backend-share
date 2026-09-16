@@ -3975,11 +3975,16 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
     await garantirTabelaRelatorioDespesaViagem(c)
     const db = c.env.SHARE_DB
     const [clientes, aeronaves, tripulantes, categorias, socios, voos] = await Promise.all([
-      db.prepare("SELECT id, razao_social, codigo_cliente, holding FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
+      db.prepare(`SELECT id, razao_social, codigo_cliente, holding FROM cliente
+        WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado')
+        UNION ALL
+        SELECT id, nome AS razao_social, NULL AS codigo_cliente, 1 AS holding FROM holdings
+        WHERE ativo = 1
+        ORDER BY razao_social`).all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
       db.prepare("SELECT id, nome_completo, canac, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
-      db.prepare('SELECT id, nome FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
+      db.prepare('SELECT id, nome, holding_id FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
       db.prepare(`SELECT s.numero_voo, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino,
           s.data_agendada, s.dias_duracao, a.matricula_registro
         FROM solicitacoes_reserva_voo s
