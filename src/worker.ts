@@ -5226,7 +5226,7 @@ app.delete('/api/interno/aerodromos/:id', async c => {
 })
 
 async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Colaborador): Promise<boolean> {
-  const result = await c.env.SHARE_DB.prepare("SELECT 1 FROM user_profiles WHERE id = ?1 AND lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro', 'financeiro_master', 'gestor', 'gestor_master', 'rh_master', 'rh') UNION ALL SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro', 'financeiro_master', 'gestor', 'gestor_master', 'rh_master', 'rh') LIMIT 1").bind(user.id).first()
+  const result = await c.env.SHARE_DB.prepare("SELECT 1 FROM user_profiles WHERE id = ?1 AND lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro_master', 'gestor_master', 'rh') UNION ALL SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro_master', 'gestor_master', 'rh') LIMIT 1").bind(user.id).first()
   return Boolean(result)
 }
 
