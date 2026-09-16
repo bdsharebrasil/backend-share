@@ -3982,7 +3982,12 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
         WHERE ativo = 1
         ORDER BY razao_social`).all(),
       db.prepare('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro').all(),
-      db.prepare("SELECT id, nome_completo, canac, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
+      db.prepare(`SELECT id, nome_completo, canac, status, 'tripulacao' AS origem FROM tripulacao
+        WHERE lower(COALESCE(status, 'ativo')) = 'ativo'
+        UNION ALL
+        SELECT id, nome_completo, canac, status, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer
+        WHERE lower(COALESCE(status, 'ativo')) = 'ativo'
+        ORDER BY nome_completo`).all().catch(() => ({ results: [] })),
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
       db.prepare('SELECT id, nome, holding_id FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
       db.prepare(`SELECT s.numero_voo, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino,
