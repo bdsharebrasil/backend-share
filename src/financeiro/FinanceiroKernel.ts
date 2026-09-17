@@ -166,7 +166,7 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
 }
 
 const FRONTEND_CONTRACT_FIELDS = new Set([
-  'idempotency_key', 'idempotencyKey', 'reference_id', 'valor_centavos', 'valorCentavos',
+  'idempotency_key', 'idempotencyKey', 'reference_id', 'valor_centavos', 'valorCentavos', 'codigo_cliente',
   'tipo_recibo', 'rateado', 'recibo_id',
   'descricao', 'descricao_servico', 'fluxo', 'data', 'data_emissao', 'data_vencimento',
   'vencimento', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id', 'socio_id', 'holding_id',
@@ -1732,7 +1732,9 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
      WHERE id = ? OR (cliente_id = ? AND aeronave_id = ?)
      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1
   `).bind(command.cotista_aeronave_id || '', input.cliente_id || '', input.aeronave_id || '', command.cotista_aeronave_id || '').first<{ id: string }>()
-  if (!cotista?.id) throw new FinanceError('Cotista cliente não encontrado para o reembolso', 'cotista_reembolso_obrigatorio')
+  const cotistaId = cotista?.id ?? null
+  const clienteId = text(input.cliente_id || (input.pagador_tipo === 'cliente' ? input.pagador_id : '')) || null
+  if (!cotistaId && !clienteId) throw new FinanceError('Cliente ou cotista é obrigatório para o reembolso', 'pagador_reembolso_obrigatorio')
 
   const shareLancamentoId = id()
   const amount = asPositiveCents(input.valor_centavos)
@@ -1740,7 +1742,8 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
     insertStatement(db, schema, 'lancamentos', {
       id: shareLancamentoId,
       aeronave_id: input.aeronave_id,
-      cotista_aeronave_id: cotista.id,
+      cotista_aeronave_id: cotistaId,
+      cliente_id: clienteId,
       descricao: input.descricao,
       categoria_id: categoriaShare?.id ?? null,
       categoria_nome: 'REEMBOLSOS SHARE',
@@ -1815,14 +1818,14 @@ async function buildReceiptPagamento(
   receiptId: string,
   userId: string | null,
 ): Promise<Row> {
-  if (input.pagador_tipo === 'cotista_aeronave' && !text(input.pagador_id)) {
+  if (['cotista_aeronave', 'cliente'].includes(String(input.pagador_tipo)) && !text(input.pagador_id)) {
     throw new FinanceError(
-      'Cotista pagador é obrigatório para recibo de pagamento',
-      'cotista_pagador_obrigatorio',
+      'Cliente ou cotista pagador é obrigatório para recibo de pagamento',
+      'pagador_obrigatorio',
     )
   }
 
-  if (input.pagador_tipo === 'cotista_aeronave') {
+  if (['cotista_aeronave', 'cliente'].includes(String(input.pagador_tipo))) {
     return createExpense(db, {
       ...command,
       recibo_id: receiptId,
@@ -2056,10 +2059,11 @@ async function issueReceiptInternal(
     categoria_id: input.categoria_movimentacao_id,
     aeronave_id: input.aeronave_id,
     cotista_aeronave_id: input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : body.cotista_aeronave_id,
-    tipo_caixa: input.pagador_tipo === 'cotista_aeronave' ? 'CLIENTE' : 'SHARE',
+    cliente_id: input.pagador_tipo === 'cliente' ? input.pagador_id : body.cliente_id,
+    tipo_caixa: ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'CLIENTE' : 'SHARE',
     grupo_categoria: input.grupo_categoria || (input.tipo_recibo === 'recibo_reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'),
     fluxo: 'SAIDA',
-    pago_diretamente: input.tipo_recibo === 'recibo_pagamento' && input.pagador_tipo === 'cotista_aeronave',
+    pago_diretamente: input.tipo_recibo === 'recibo_pagamento' && ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo),
     reembolsavel: input.tipo_recibo === 'recibo_reembolso',
   }
   const cotistaId = text(body.cotista_aeronave_id || (input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : '')) || null

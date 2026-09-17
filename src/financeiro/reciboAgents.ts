@@ -3,7 +3,7 @@ import type { StatusRecibo } from '../../shared/financeiro-contracts'
 
 type ReceiptInput = {
   tipo_recibo: string
-  pagador_tipo: 'empresa' | 'cotista_aeronave'
+  pagador_tipo: 'empresa' | 'cotista_aeronave' | 'cliente'
   pagador_id: string
   valor_centavos: number
   categoria_movimentacao_id: string
@@ -38,7 +38,7 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
   const pagadorId = String(body.pagador_id ?? '').trim()
   const categoria = String(body.categoria_movimentacao_id ?? '').trim()
   const valor = Number(body.valor_centavos)
-  if (!['empresa', 'cotista_aeronave'].includes(pagadorTipo) || !pagadorId) throw new Error('Pagador inválido')
+  if (!['empresa', 'cotista_aeronave', 'cliente'].includes(pagadorTipo) || !pagadorId) throw new Error('Pagador inválido')
   if (!categoria) throw new Error('categoria_movimentacao_id é obrigatória')
   if (!Number.isInteger(valor) || valor <= 0) throw new Error('valor_centavos deve ser um inteiro maior que zero')
   return {
@@ -108,7 +108,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.nome_pagador, input.documento_pagador, input.endereco_pagador,
     input.cidade_pagador, input.uf_pagador, input.valor_centavos, input.descricao,
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
-    input.pagador_tipo === 'cotista_aeronave' ? 'cliente' : 'share',
+    ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
     input.observacoes, userId,
   ).run()

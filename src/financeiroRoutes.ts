@@ -878,6 +878,7 @@ financeiroRoutes.get('/recibos', async (c) => {
     : await db.prepare('SELECT * FROM recibos ORDER BY criado_em DESC LIMIT 200').all<Record<string, unknown>>()
   const recibos = result.results ?? []
   const cotistaIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cotista_aeronave').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
+  const clienteIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cliente').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
   const reciboIds = recibos.map((row) => String(row.id ?? '')).filter(Boolean)
   const contasProgramadas = reciboIds.length
     ? await listar(db, `SELECT c.id AS conta_pagar_id, l.origem_id AS recibo_id FROM contas_apagar c INNER JOIN lancamentos l ON l.id = c.lancamentos_id WHERE c.status <> 'CANCELADO' AND l.origem_tipo IN ('RECIBO', 'RECIBO_REEMBOLSO') AND l.origem_id IN (${reciboIds.map(() => '?').join(', ')})`, ...reciboIds)
@@ -892,6 +893,10 @@ financeiroRoutes.get('/recibos', async (c) => {
       if (chave) cotistaPorId.set(String(chave), row)
     }
   })
+  const clientes = clienteIds.length
+    ? await listar(db, `SELECT id, razao_social AS nome, cnpj AS documento, endereco, cidade, uf FROM cliente WHERE id IN (${clienteIds.map(() => '?').join(', ')})`, ...clienteIds)
+    : []
+  const clientePorId = new Map(clientes.map((row) => [String(row.id), row]))
   const rateios = reciboIds.length
     ? await listar(db, `SELECT rr.id, rr.recibo_id, rr.rateio_id, rr.percentual, rr.valor, rr.cotista_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cotista_nome FROM recibo_rateio rr LEFT JOIN cotista_aeronave ca ON ca.id = rr.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE rr.recibo_id IN (${reciboIds.map(() => '?').join(', ')}) ORDER BY rr.rowid`, ...reciboIds)
     : []
@@ -905,11 +910,11 @@ financeiroRoutes.get('/recibos', async (c) => {
     const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
     return {
       ...recibo,
-      nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? recibo.nome_pagador ?? null : 'Share Brasil',
-      documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? recibo.documento_pagador ?? null : recibo.documento_pagador ?? null,
-      endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? recibo.endereco_pagador ?? null : recibo.endereco_pagador ?? null,
-      cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? recibo.cidade_pagador ?? null : recibo.cidade_pagador ?? null,
-      uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? recibo.uf_pagador ?? null : recibo.uf_pagador ?? null,
+      nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? recibo.nome_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.nome ?? recibo.nome_pagador ?? null : 'Share Brasil',
+      documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? recibo.documento_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.documento ?? recibo.documento_pagador ?? null : recibo.documento_pagador ?? null,
+      endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? recibo.endereco_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.endereco ?? recibo.endereco_pagador ?? null : recibo.endereco_pagador ?? null,
+      cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? recibo.cidade_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.cidade ?? recibo.cidade_pagador ?? null : recibo.cidade_pagador ?? null,
+      uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? recibo.uf_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.uf ?? recibo.uf_pagador ?? null : recibo.uf_pagador ?? null,
       rateio_linhas: rateiosPorRecibo.get(String(recibo.id)) ?? [],
       conta_pagar_id: contaProgramadaPorRecibo.get(String(recibo.id)) ?? null,
       despesa_programada: contaProgramadaPorRecibo.has(String(recibo.id)),
@@ -921,7 +926,7 @@ financeiroRoutes.get('/recibos/opcoes', async (c) => {
   const db = c.env.SHARE_DB
   const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
   const [clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categoriasCliente] = await Promise.all([
-    read('SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status FROM cliente ORDER BY razao_social'),
+    read('SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status, codigo_cliente FROM cliente ORDER BY razao_social'),
     read("SELECT id, nome_completo, nome_exibicao, cpf, endereco, cidade, uf, email, telefone, canac, nome_banco, tipo_conta, conta_numero, agencia_numero, pix, 'user_profiles' AS origem FROM user_profiles ORDER BY nome_completo"),
     read("SELECT id, nome_completo, cpf, endereco, cidade, uf, telefone, canac, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo"),
     read('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro'),
