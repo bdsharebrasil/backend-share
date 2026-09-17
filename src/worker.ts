@@ -3766,9 +3766,10 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const destino = String(body.destino || body.aerodromo_chegada || '').trim().toUpperCase()
   const acionamento = normalizarHorarioJornada(data, body.horario_acionamento)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || !acionamento) return c.json({ error: 'data_rota_e_acionamento_obrigatorios', detail: 'Confirme a data, o aeródromo de partida, o aeródromo de chegada e o horário de acionamento.' }, 400)
-  const apresentacao = normalizarHorarioJornada(data, body.horario_apresentacao) || new Date(new Date(acionamento).getTime() - 30 * 60000).toISOString()
+  const apresentacao = normalizarHorarioJornada(data, body.horario_apresentacao)
   const corteInicio = normalizarHorarioJornada(data, body.horario_corte_inicio)
-  const horarioDep = normalizarHorarioJornada(data, body.horario_dep || body.horario_previsto_agendamento) || acionamento
+  const horarioDep = normalizarHorarioJornada(data, body.horario_dep || body.horario_previsto_agendamento)
+  if (!apresentacao || !horarioDep) return c.json({ error: 'apresentacao_e_dep_obrigatorios', detail: 'Informe a apresentação do tripulante e o horário de decolagem (DEP). O pouso (POU) pode ser registrado depois.' }, 400)
   const id = uuid()
   const numero = await c.env.SHARE_DB.prepare('SELECT COALESCE(MAX(numero_jornada), 0) + 1 AS proximo FROM jornadas_voo WHERE solicitacao_id = ?').bind(idSolicitacao).first<{ proximo: number }>()
   const tripulanteId = body.tripulante_id || voo.piloto_id || null
