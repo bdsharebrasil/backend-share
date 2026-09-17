@@ -5291,10 +5291,27 @@ app.get('/api/interno/aerodromos', async c => {
   return c.json({ aerodromos: rows.results })
 })
 type AerodromoPayload = { nome?: string; designativo_icao?: string; coordenadas?: string | null }
+const HEMISFERIOS_NEGATIVOS = new Set(['S', 'W'])
+function coordenadaDMSParaDecimal(valor: string) {
+  const original = valor.trim()
+  if (!original) return original
+  const partes = original.replace(/[º°]/g, ' ').replace(/[′']/g, ' ').replace(/[″\"]/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase().split(' ').filter(Boolean)
+  const hemisferio = partes.find(parte => /^[NSEW]$/.test(parte))
+  const numeros = partes.filter(parte => !/^[NSEW]$/.test(parte))
+  if (!hemisferio || numeros.length < 1 || numeros.length > 3 || numeros.some(parte => Number.isNaN(Number(parte)))) return original
+  const graus = Math.abs(Number(numeros[0])); const minutos = numeros.length > 1 ? Number(numeros[1]) : 0; const segundos = numeros.length > 2 ? Number(numeros[2]) : 0
+  if (minutos < 0 || minutos >= 60 || segundos < 0 || segundos >= 60) return original
+  const decimal = graus + minutos / 60 + segundos / 3600
+  return (HEMISFERIOS_NEGATIVOS.has(hemisferio) ? -decimal : decimal).toFixed(8)
+}
+function normalizarCoordenadas(valor: string) {
+  const partes = valor.split(',')
+  return partes.length === 2 ? partes.map(coordenadaDMSParaDecimal).join(',') : coordenadaDMSParaDecimal(valor)
+}
 function validarAerodromo(body: AerodromoPayload) {
   const nome = String(body.nome || '').trim()
   const icao = String(body.designativo_icao || '').trim().toUpperCase()
-  const coordenadas = typeof body.coordenadas === 'string' ? body.coordenadas.trim() || null : null
+  const coordenadas = typeof body.coordenadas === 'string' && body.coordenadas.trim() ? normalizarCoordenadas(body.coordenadas) : null
   return { nome, icao, coordenadas }
 }
 async function autorizarGestaoAerodromo(c: Context<{ Bindings: Bindings }>) {
