@@ -1131,7 +1131,21 @@ financeiroRoutes.patch('/envios-pagamento/:id', async (c) => {
   const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
   const allowed = new Set(['PENDENTE', 'APROVADO', 'CONVERTIDO', 'CANCELADO', 'EMAIL_ENVIADO'])
   if (!body.status || !allowed.has(body.status)) return c.json({ error: 'status_solicitacao_invalido' }, 400)
-  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, c.req.param('id')).run()
+  let statusFinal = body.status
+  if (body.status === 'EMAIL_ENVIADO') {
+    const request = await c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
+    if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+    // A solicitação só é considerada enviada depois de materializar o
+    // lançamento e os rateios. A conversão é idempotente, portanto o botão
+    // explícito de converter continua seguro para versões antigas do front.
+    if (request.tipo === 'reembolso' || request.tipo === 'cliente') {
+      try {
+        await convertPaymentRequest(c.env.SHARE_DB, request, createExpense, c.get('userId') || null)
+        statusFinal = 'CONVERTIDO'
+      } catch (error) { return errorResponse(c, error) }
+    }
+  }
+  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(statusFinal, c.req.param('id')).run()
   return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first().then((row) => c.json(row))
 })
 
