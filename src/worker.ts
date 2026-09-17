@@ -3812,12 +3812,22 @@ app.get('/api/interno/agendamento/:id/jornada', async c => {
   const raiz = principal.jornada_principal_id || principal.id
   const pernas = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(raiz).all<any>()
   const doVoo = (jornadas.results || []).filter((j: any) => j.numero_jornada === principal.numero_jornada)
+  const jornadaPorNumero = new Map<number, any>()
+  for (const jornada of jornadas.results || []) {
+    const numero = Number(jornada.numero_jornada)
+    const atual = jornadaPorNumero.get(numero)
+    if (!atual || jornada.funcao_tripulante === 'PIC') jornadaPorNumero.set(numero, jornada)
+  }
+  const historico = await Promise.all([...jornadaPorNumero.values()].map(async (j: any) => ({
+    ...j,
+    pernas: (await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(j.jornada_principal_id || j.id).all<any>()).results,
+  })))
   return c.json({
     ...principal,
     pernas: pernas.results,
     limites: await avaliarLimitesJornada(c, principal),
     tripulantes: await Promise.all(doVoo.map(async (j: any) => ({ ...j, limites: await avaliarLimitesJornada(c, j) }))),
-    historico: jornadas.results,
+    historico,
   })
 })
 
