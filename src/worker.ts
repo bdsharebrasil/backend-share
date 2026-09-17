@@ -3699,6 +3699,38 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
 })
 
 async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
+  const db = c.env.SHARE_DB
+  // Bancos criados antes da jornada operacional não possuem as colunas novas
+  // de compatibilidade. O D1 não oferece ADD COLUMN IF NOT EXISTS; por isso a
+  // checagem é feita antes de cada alteração e pode ser executada com segurança
+  // em todas as requisições até a migração ser aplicada no ambiente.
+  const tabelas: Record<string, Record<string, string>> = {
+    jornadas_voo: {
+      data: 'TEXT',
+      horario_acionamento: 'TEXT',
+      horario_apresentacao: 'TEXT',
+      horario_corte_inicio: 'TEXT',
+      horario_corte_final: 'TEXT',
+      tripulante_id: 'TEXT',
+      atualizado_em: 'TEXT',
+    },
+    pernas_jornada_voo: {
+      horario_ac: 'TEXT',
+      horario_dep: 'TEXT',
+      horario_pouso: 'TEXT',
+      horario_corte: 'TEXT',
+      status: "TEXT NOT NULL DEFAULT 'em_voo'",
+    },
+  }
+  for (const [tabela, colunas] of Object.entries(tabelas)) {
+    const info = await db.prepare(`PRAGMA table_info(${tabela})`).all<{ name: string }>()
+    const existentes = new Set((info.results || []).map(coluna => coluna.name))
+    for (const [coluna, definicao] of Object.entries(colunas)) {
+      if (!existentes.has(coluna)) {
+        await db.prepare(`ALTER TABLE ${tabela} ADD COLUMN ${coluna} ${definicao}`).run()
+      }
+    }
+  }
   await validateWorkerSchema(c, [{table:'jornadas_voo',columns:['id']},{table:'pernas_jornada_voo',columns:['id']}])
 }
 function minutosEntre(inicio: string | null, fim: string | null): number { if (!inicio || !fim) return 0; const a = new Date(inicio).getTime(), b = new Date(fim).getTime(); return Number.isFinite(a) && Number.isFinite(b) && b >= a ? Math.round((b-a)/60000) : 0 }
