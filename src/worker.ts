@@ -3776,7 +3776,7 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const id = uuid()
   const numero = await c.env.SHARE_DB.prepare('SELECT COALESCE(MAX(numero_jornada), 0) + 1 AS proximo FROM jornadas_voo WHERE solicitacao_id = ?').bind(idSolicitacao).first<{ proximo: number }>()
   const tripulanteId = body.tripulante_id || voo.piloto_id || null
-  await c.env.SHARE_DB.prepare('INSERT INTO jornadas_voo (id, solicitacao_id, aeronave_id, numero_jornada, data_jornada, apresentacao_em, inicio_em, minutos_pos_corte, status, observacoes, criado_por, tripulante_id, data, horario_acionamento, horario_apresentacao, horario_corte_inicio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  await c.env.SHARE_DB.prepare('INSERT INTO jornadas_voo (id, solicitacao_id, aeronave_id, numero_jornada, data_jornada, apresentacao_em, inicio_em, minutos_pos_corte, status, observacoes, criado_por, tripulante_id, data, horario_acionamento, horario_apresentacao, horario_corte_inicio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .bind(id, idSolicitacao, voo.aeronave_id, Number(numero?.proximo || 1), data, apresentacao, acionamento, 45, 'em_rota', body.observacoes || null, extractSupabaseUserId(c), tripulanteId, data, acionamento, apresentacao, corteInicio).run()
   const pernaId = uuid()
   await c.env.SHARE_DB.prepare('INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, horario_ac, horario_dep, horario_pouso, horario_corte, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
