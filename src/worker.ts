@@ -3864,6 +3864,31 @@ app.get('/api/interno/diario-bordo/preenchimento-jornada/:id', async c => {
   return c.json({ jornada_id: jornada.id, solicitacao_id: jornada.solicitacao_id, aeronave_id: jornada.aeronave_id, pernas: preenchimentos })
 })
 
+// Números de voo já usados por esta aeronave (solicitações de reserva), para o combo do
+// diário de bordo: ao escolher um numero_voo, o front recebe também os dados para preencher
+// origem/destino/PIC/SIC/cliente automaticamente.
+app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = c.req.param('aeronaveId')
+  if (!aeronaveId) return c.json({ voos: [] })
+  const rows = await c.env.SHARE_DB.prepare(`
+    SELECT s.id AS solicitacao_id, s.numero_voo, s.origem, s.destino, s.data_agendada,
+           s.cliente_id, s.socio_id, s.voo_emprestado, s.cliente_emprestimo_id, s.socio_emprestimo_id,
+           s.piloto_id, s.copiloto_id,
+           COALESCE(t.canac, f.canac) AS pic_canac, COALESCE(t.nome_completo, f.nome_completo) AS pic_nome,
+           COALESCE(t2.canac, f2.canac) AS sic_canac, COALESCE(t2.nome_completo, f2.nome_completo) AS sic_nome
+    FROM solicitacoes_reserva_voo s
+    LEFT JOIN tripulacao t ON t.id = s.piloto_id
+    LEFT JOIN tripulacao_freelancer f ON f.id = s.piloto_id
+    LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
+    LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
+    WHERE s.aeronave_id = ?1 AND s.numero_voo IS NOT NULL AND TRIM(s.numero_voo) <> ''
+    ORDER BY datetime(s.data_agendada) DESC
+    LIMIT 300
+  `).bind(aeronaveId).all<any>()
+  return c.json({ voos: rows.results || [] })
+})
+
 app.post('/api/interno/agendamento/:id/jornada', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
@@ -3880,9 +3905,18 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   if (!tripulantes.length) return c.json({ error: 'tripulante_obrigatorio' }, 400)
   if (!tripulantes.some((item: any) => item.funcao === 'PIC')) tripulantes[0].funcao = 'PIC'
   for (const item of tripulantes) {
-    const aberta = await db.prepare("SELECT id FROM jornadas_voo WHERE solicitacao_id = ?1 AND tripulante_id = ?2 AND status <> 'encerrada' LIMIT 1")
-      .bind(idSolicitacao, item.tripulante_id).first<{ id: string }>()
-    if (aberta) return c.json({ error: 'jornada_ja_iniciada', tripulante_id: item.tripulante_id, jornada_id: aberta.id }, 409)
+    // Verifica jornada aberta em QUALQUER voo (não só nesta solicitação): um tripulante não pode
+    // estar em duas jornadas simultâneas, senão os limites de 9h/44h/176h ficam furados enquanto
+    // a jornada duplicada nunca é encerrada (e por isso nunca soma nos acumulados).
+    const aberta = await db.prepare("SELECT id, solicitacao_id FROM jornadas_voo WHERE tripulante_id = ?1 AND status <> 'encerrada' LIMIT 1")
+      .bind(item.tripulante_id).first<{ id: string; solicitacao_id: string }>()
+    if (aberta) {
+      return c.json({
+        error: aberta.solicitacao_id === idSolicitacao ? 'jornada_ja_iniciada' : 'tripulante_em_jornada_outro_voo',
+        tripulante_id: item.tripulante_id, jornada_id: aberta.id, solicitacao_id: aberta.solicitacao_id,
+        detail: aberta.solicitacao_id === idSolicitacao ? undefined : 'Este tripulante já tem uma jornada em aberto em outro voo. Encerre-a antes de iniciar uma nova.',
+      }, 409)
+    }
   }
   const data = String(body.data || voo.data_agendada || '')
   const origem = String(body.origem || body.aerodromo_partida || '').trim().toUpperCase()
