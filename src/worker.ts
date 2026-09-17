@@ -4008,6 +4008,15 @@ app.post('/api/interno/jornadas/:id/pernas', async c => {
   const horarioDep = normalizarHorarioJornada(jornada.data, b.horario_dep ?? b.tempo_dep, horarioAc)
   const horarioPouso = normalizarHorarioJornada(jornada.data, b.horario_pouso ?? b.tempo_pou, horarioDep || horarioAc)
   const horarioCorte = normalizarHorarioJornada(jornada.data, b.horario_corte ?? b.tempo_cor, horarioPouso || horarioDep || horarioAc)
+  const limitesPrevistos = await avaliarLimitesJornada(c, jornada, horarioCorte || horarioPouso || horarioDep || horarioAc)
+  if (limitesPrevistos.nivel_alerta === 'excedido' && b.confirmar_excedente !== true) {
+    return c.json({
+      error: 'limite_jornada_excedido',
+      tripulante_id: jornada.tripulante_id,
+      limites: limitesPrevistos,
+      detail: 'Iniciar esta perna ultrapassa um dos limites (9h/44h/176h) do tripulante. Reenvie com confirmar_excedente para prosseguir mesmo assim.'
+    }, 409)
+  }
   const pernaId = uuid()
   const numero = Number(ultima?.n || 0) + 1
   const status = statusPerna({ horario_ac: horarioAc, horario_dep: horarioDep, horario_pouso: horarioPouso, horario_corte: horarioCorte })
