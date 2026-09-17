@@ -1228,7 +1228,19 @@ financeiroRoutes.get('/recibos/anexos/:id/arquivo', async (c) => {
   if (!object) return c.notFound()
   return c.body(await object.arrayBuffer(), 200, { 'Content-Type': row.tipo_arquivo, 'Cache-Control': 'private, max-age=3600' })
 })
-
+financeiroRoutes.get('/recibos/:id/anexo-original', async (c) => {
+  const bucket = storage(c)
+  if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+  const row = await c.env.SHARE_DB.prepare("SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM recibo_anexos WHERE recibo_id = ? AND UPPER(COALESCE(finalidade, '')) = 'ORIGINAL' ORDER BY rowid DESC LIMIT 1").bind(c.req.param('id')).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()
+  if (!row) return c.notFound()
+  const object = await bucket.get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  return c.body(await object.arrayBuffer(), 200, {
+    'Content-Type': row.tipo_arquivo || 'application/octet-stream',
+    'Content-Disposition': `inline; filename="${row.nome_arquivo.replace(/[^a-zA-Z0-9._-]/g, '_')}"`,
+    'Cache-Control': 'private, max-age=3600',
+  })
+})
 financeiroRoutes.post('/contas-apagar/:id/baixa', async (c) => {
   try {
     const result = await settlePayable(
