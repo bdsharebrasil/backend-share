@@ -3770,6 +3770,7 @@ async function acumuladoTripulante(db: D1Database, tripulanteId: string | null, 
 
 async function avaliarLimitesJornada(c: Context<{ Bindings: Bindings }>, jornada: any, fimPrevisto?: string | null) {
   const db = c.env.SHARE_DB
+  const raizId = jornada.jornada_principal_id || jornada.id
   const minutos = minutosDaJornada(jornada, fimPrevisto)
   const acumulado = await acumuladoTripulante(db, jornada.tripulante_id, jornada.data, jornada.id)
   const limiteDia = Number(jornada.limite_jornada_minutos || LIMITES_JORNADA.dia)
@@ -3777,7 +3778,7 @@ async function avaliarLimitesJornada(c: Context<{ Bindings: Bindings }>, jornada
   const limiteMes = Number(jornada.limite_mensal_minutos || LIMITES_JORNADA.mes)
   const semana = acumulado.semana + minutos
   const mes = acumulado.mes + minutos
-  const pernasAbertas = await db.prepare("SELECT COUNT(*) AS total FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo'").bind(jornada.id).first<any>()
+  const pernasAbertas = await db.prepare("SELECT COUNT(*) AS total FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo'").bind(raizId).first<any>()
   const niveis = [nivelAlertaJornada(minutos, limiteDia), nivelAlertaJornada(semana, limiteSemana), nivelAlertaJornada(mes, limiteMes)]
   const ordem = ['normal', 'atencao', 'critico', 'excedido']
   return {
@@ -3940,7 +3941,8 @@ app.patch('/api/interno/jornadas/:id', async c => {
   let nivel = atual.nivel_alerta
   if (status === 'encerrada') {
     if (!corteFinal) return c.json({ error: 'corte_final_obrigatorio' }, 400)
-    const abertas = await db.prepare("SELECT COUNT(*) AS total FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo'").bind(atual.id).first<any>()
+    const raizId = atual.jornada_principal_id || atual.id
+    const abertas = await db.prepare("SELECT COUNT(*) AS total FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo'").bind(raizId).first<any>()
     if (Number(abertas?.total || 0)) return c.json({ error: 'perna_em_voo', detail: 'Registre o pouso de todas as pernas antes de encerrar a jornada.' }, 409)
     const irmas = await db.prepare(`SELECT * FROM jornadas_voo
       WHERE (id = ?1 OR jornada_principal_id = ?1 OR jornada_principal_id = ?2)
