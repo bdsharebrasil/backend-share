@@ -3699,39 +3699,10 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
 })
 
 async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
-  const db = c.env.SHARE_DB
-  // Bancos criados antes da jornada operacional não possuem as colunas novas
-  // de compatibilidade. O D1 não oferece ADD COLUMN IF NOT EXISTS; por isso a
-  // checagem é feita antes de cada alteração e pode ser executada com segurança
-  // em todas as requisições até a migração ser aplicada no ambiente.
-  const tabelas: Record<string, Record<string, string>> = {
-    jornadas_voo: {
-      data: 'TEXT',
-      horario_acionamento: 'TEXT',
-      horario_apresentacao: 'TEXT',
-      horario_corte_inicio: 'TEXT',
-      horario_corte_final: 'TEXT',
-      tripulante_id: 'TEXT',
-      atualizado_em: 'TEXT',
-    },
-    pernas_jornada_voo: {
-      horario_ac: 'TEXT',
-      horario_dep: 'TEXT',
-      horario_pouso: 'TEXT',
-      horario_corte: 'TEXT',
-      status: "TEXT NOT NULL DEFAULT 'em_voo'",
-    },
-  }
-  for (const [tabela, colunas] of Object.entries(tabelas)) {
-    const info = await db.prepare('SELECT name FROM pragma_table_info(?)').bind(tabela).all<{ name: string }>()
-    const existentes = new Set((info.results || []).map(coluna => coluna.name))
-    for (const [coluna, definicao] of Object.entries(colunas)) {
-      if (!existentes.has(coluna)) {
-        await db.prepare(`ALTER TABLE ${tabela} ADD COLUMN ${coluna} ${definicao}`).run()
-      }
-    }
-  }
-  await validateWorkerSchema(c, [{table:'jornadas_voo',columns:['id']},{table:'pernas_jornada_voo',columns:['id']}])
+  await validateWorkerSchema(c, [
+    { table: 'jornadas_voo', columns: ['id', 'data', 'horario_acionamento', 'horario_apresentacao', 'horario_corte_inicio', 'horario_corte_final', 'tripulante_id', 'atualizado_em'] },
+    { table: 'pernas_jornada_voo', columns: ['id', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'status'] },
+  ])
 }
 function minutosEntre(inicio: string | null, fim: string | null): number { if (!inicio || !fim) return 0; const a = new Date(inicio).getTime(), b = new Date(fim).getTime(); return Number.isFinite(a) && Number.isFinite(b) && b >= a ? Math.round((b-a)/60000) : 0 }
 function normalizarHorarioJornada(data: string, valor: unknown): string | null {
@@ -3970,17 +3941,11 @@ async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) 
 }
 
 async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindings }>) {
-  const db = c.env.SHARE_DB
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS sequencia_relatorios_despesa_viagem (
-      codigo_cotista TEXT NOT NULL,
-      aeronave_id TEXT NOT NULL,
-      ano TEXT NOT NULL,
-      ultimo_numero INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (codigo_cotista, aeronave_id, ano)
-    )
-  `).run()
-  await validateWorkerSchema(c, [{table:'relatorio_despesa_viagem_anexos',columns:['id']},{table:'relatorio_despesa_viagem',columns:['id']}])
+  await validateWorkerSchema(c, [
+    { table: 'relatorio_despesa_viagem_anexos', columns: ['id'] },
+    { table: 'relatorio_despesa_viagem', columns: ['id'] },
+    { table: 'sequencia_relatorios_despesa_viagem', columns: ['codigo_cotista', 'aeronave_id', 'ano', 'ultimo_numero'] },
+  ])
 }
 
 function despesasRelatorioViagem(valor: unknown) {
@@ -4021,7 +3986,6 @@ async function gerarNumeroRelatorioViagem(
   if (!codigo) throw new Error('codigo_cotista_obrigatorio')
   if (!matricula) throw new Error('matricula_aeronave_obrigatoria')
   if (!ano) throw new Error('ano_relatorio_invalido')
-  await db.prepare(`CREATE TABLE IF NOT EXISTS sequencia_relatorios_despesa_viagem (codigo_cotista TEXT NOT NULL, aeronave_id TEXT NOT NULL, ano TEXT NOT NULL, ultimo_numero INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (codigo_cotista, aeronave_id, ano))`).run()
   const prefixo = `REL-${codigo}-`
   const sufixo = `/${ano} ${matricula}`
   const anterioresQuery = relatorioIdExcluir
@@ -6204,9 +6168,11 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
 
 // ─── Financeiro: central de e-mail ───────────────────────────────────────────
 async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
-  await c.env.SHARE_DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_enviados_id_unique ON emails_enviados(id)').run()
-  await c.env.SHARE_DB.prepare('ALTER TABLE emails_enviados ADD COLUMN anexos_detalhes TEXT').run().catch(() => undefined)
-  await validateWorkerSchema(c, [{table:'user_profiles',columns:['id','email_envio']},{table:'assinaturas_email',columns:['id']},{table:'emails_enviados',columns:['id']}])
+  await validateWorkerSchema(c, [
+    { table: 'user_profiles', columns: ['id', 'email_envio'] },
+    { table: 'assinaturas_email', columns: ['id'] },
+    { table: 'emails_enviados', columns: ['id', 'anexos_detalhes'] },
+  ])
 }
 function normalizarEmail(valor: unknown): string | null {
   // O Resend aceita apenas endereços ASCII. Corrige contatos cadastrados como
