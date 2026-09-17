@@ -65,6 +65,12 @@ function storage(c: any): R2Bucket | undefined {
   return c.env.SHARE_FILES || c.env.FILES
 }
 
+function publicStorageUrl(c: any, key: string): string {
+  const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
+  if (!publicBase) throw new Error('R2_PUBLIC_URL_nao_configurada')
+  return `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
+}
+
 async function listar(db: D1Database, sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
   const statement = db.prepare(sql)
   const result = params.length
@@ -1153,9 +1159,10 @@ financeiroRoutes.post('/recibos/anexos', async (c) => {
     if (!reciboId) return c.json({ error: 'recibo_id_obrigatorio' }, 400)
     const id = crypto.randomUUID()
     const key = `recibos/${reciboId}/original/${id}-${arquivo.name}`
+    const publicUrl = publicStorageUrl(c, key)
     await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, arquivo.name, key, arquivo.type || 'application/octet-stream', arquivo.size, c.get('userId') || null, reciboId, 'ORIGINAL').run()
-    return c.json({ id, url: `/api/financeiro/recibos/anexos/${id}/arquivo`, nome_arquivo: arquivo.name, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size }, 201)
+    return c.json({ id, url: publicUrl, nome_arquivo: arquivo.name, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -1176,9 +1183,10 @@ financeiroRoutes.post('/recibos/demonstrativo', async (c) => {
     const id = crypto.randomUUID()
     const safeName = (arquivo.name || 'demonstrativo-rateado.pdf').replace(/[^a-zA-Z0-9._-]/g, '_')
     const key = `share/recibos/demonstrativos/${reciboId || 'avulso'}-${id}-${safeName}`
+    const publicUrl = publicStorageUrl(c, key)
     await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: 'application/pdf' } })
     await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, arquivo.name || safeName, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'DEMONSTRATIVO').run()
-    return c.json({ id, recibo_id: reciboId, caminho_arquivo: key, url: `/api/financeiro/recibos/anexos/${id}/arquivo`, nome_arquivo: arquivo.name || safeName, tipo_arquivo: 'application/pdf', tamanho_arquivo: arquivo.size }, 201)
+    return c.json({ id, recibo_id: reciboId, caminho_arquivo: key, url: publicUrl, nome_arquivo: arquivo.name || safeName, tipo_arquivo: 'application/pdf', tamanho_arquivo: arquivo.size }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -1204,13 +1212,13 @@ financeiroRoutes.post('/recibos/:id/pdf', async (c) => {
     const anexoExistente = await c.env.SHARE_DB.prepare("SELECT id FROM recibo_anexos WHERE recibo_id = ? AND UPPER(COALESCE(finalidade, '')) = 'PDF' ORDER BY rowid DESC LIMIT 1").bind(reciboId).first<{ id: string }>()
     const anexoId = anexoExistente?.id || crypto.randomUUID()
     const key = `share/recibos/recibos-gerados/${reciboId}.pdf`
+    const pdfUrl = publicStorageUrl(c, key)
     await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } })
     if (anexoExistente) {
       await c.env.SHARE_DB.prepare('UPDATE recibo_anexos SET nome_arquivo = ?, caminho_arquivo = ?, tipo_arquivo = ?, tamanho_arquivo = ?, enviado_por = ?, finalidade = ? WHERE id = ?').bind(arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, 'PDF', anexoId).run()
     } else {
       await c.env.SHARE_DB.prepare('INSERT INTO recibo_anexos (id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, recibo_id, finalidade) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(anexoId, arquivo.name || `${reciboId}.pdf`, key, 'application/pdf', arquivo.size, c.get('userId') || null, reciboId, 'PDF').run()
     }
-    const pdfUrl = `/api/financeiro/recibos/anexos/${anexoId}/arquivo`
     await c.env.SHARE_DB.prepare('UPDATE recibos SET url_recibo = ? WHERE id = ?').bind(pdfUrl, reciboId).run()
     await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'EMITIDO' WHERE id = ?").bind(reciboId).run()
     // O PDF deixa o recibo pronto para envio, mas não materializa lançamentos.
