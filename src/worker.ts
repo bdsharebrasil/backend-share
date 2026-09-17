@@ -3764,11 +3764,11 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const data = String(body.data || body.data_jornada || voo.data_agendada || '')
   const origem = String(body.origem || body.aerodromo_partida || '').trim().toUpperCase()
   const destino = String(body.destino || body.aerodromo_chegada || '').trim().toUpperCase()
-  const acionamento = normalizarHorarioJornada(data, body.horario_acionamento)
+  const acionamento = normalizarHorarioJornada(data, body.horario_acionamento || body.tempo_ac)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || !acionamento) return c.json({ error: 'data_rota_e_acionamento_obrigatorios', detail: 'Confirme a data, o aeródromo de partida, o aeródromo de chegada e o horário de acionamento.' }, 400)
-  const apresentacao = normalizarHorarioJornada(data, body.horario_apresentacao)
+  const apresentacao = normalizarHorarioJornada(data, body.horario_apresentacao || body.tripulacao_checkin_hora)
   const corteInicio = normalizarHorarioJornada(data, body.horario_corte_inicio)
-  const horarioDep = normalizarHorarioJornada(data, body.horario_dep || body.horario_previsto_agendamento)
+  const horarioDep = normalizarHorarioJornada(data, body.horario_dep || body.tempo_dep || body.horario_previsto_agendamento)
   if (!apresentacao || !horarioDep) return c.json({ error: 'apresentacao_e_dep_obrigatorios', detail: 'Informe a apresentação do tripulante e o horário de decolagem (DEP). O pouso (POU) pode ser registrado depois.' }, 400)
   const id = uuid()
   const numero = await c.env.SHARE_DB.prepare('SELECT COALESCE(MAX(numero_jornada), 0) + 1 AS proximo FROM jornadas_voo WHERE solicitacao_id = ?').bind(idSolicitacao).first<{ proximo: number }>()
@@ -3814,6 +3814,8 @@ app.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
   if (!perna) return c.notFound()
   const data = String(perna.horario_ac || '').slice(0, 10) || new Date().toISOString().slice(0, 10)
   const campos: Record<string, string> = { origem: 'origem', destino: 'destino', horario_ac: 'horario_ac', horario_dep: 'horario_dep', horario_pouso: 'horario_pouso', horario_corte: 'horario_corte' }
+  const aliases: Record<string, string> = { tempo_ac: 'horario_ac', tempo_dep: 'horario_dep', tempo_pou: 'horario_pouso', tempo_cor: 'horario_corte' }
+  for (const [alias, campo] of Object.entries(aliases)) if (body[alias] !== undefined && body[campo] === undefined) body[campo] = body[alias]
   const updates = Object.entries(campos).filter(([campo]) => body[campo] !== undefined)
   if (!updates.length) return c.json({ id: perna.id, status: perna.status })
   const normalizado: Record<string, unknown> = { ...body }
