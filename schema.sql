@@ -1559,8 +1559,8 @@ id                       TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob
 
   horario_apresentacao     TEXT NOT NULL,
   horario_acionamento      TEXT,
-  horario_corte_inicio     TEXT,
-  horario_corte_final      TEXT,
+  horario_pouso     TEXT,
+  horario_corte      TEXT,
 
   minutos_pos_corte        INTEGER NOT NULL DEFAULT 45,
 
