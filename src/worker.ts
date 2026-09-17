@@ -3502,7 +3502,10 @@ app.get('/api/interno/agendamento', async c => {
   const fim = c.req.query('fim') || inicio.slice(0, 7) + '-31'
   const db = c.env.SHARE_DB
   const [agendamentos, aeronave, tripulacao, freelancers, disponibilidades] = await Promise.all([
-    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id, c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, (SELECT cae.codigo_cliente FROM cotista_aeronave cae WHERE (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id) AND cae.aeronave_id = s.aeronave_id ORDER BY cae.codigo_cliente LIMIT 1), (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id ORDER BY ca.codigo_cliente LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status
+    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
+        (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status = 'encerrada') AS jornadas_encerradas,
+        (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status <> 'encerrada') AS jornadas_abertas,
+        c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, (SELECT cae.codigo_cliente FROM cotista_aeronave cae WHERE (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id) AND cae.aeronave_id = s.aeronave_id ORDER BY cae.codigo_cliente LIMIT 1), (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id ORDER BY ca.codigo_cliente LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave, (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status
       FROM solicitacoes_reserva_voo s
       LEFT JOIN cliente c ON c.id = s.cliente_id
       LEFT JOIN hold_socios so ON so.id = s.socio_id
@@ -3997,10 +4000,8 @@ app.patch('/api/interno/jornadas/:id', async c => {
           item.id === atual.id ? (body.observacoes ?? atual.observacoes) : item.observacoes,
           limites.minutos_jornada, limites.nivel_alerta, item.id).run()
     }
-    const restantes = await db.prepare("SELECT COUNT(*) AS total FROM jornadas_voo WHERE solicitacao_id = ?1 AND status <> 'encerrada'").bind(atual.solicitacao_id).first<any>()
-    if (!Number(restantes?.total || 0)) {
-      await db.prepare("UPDATE solicitacoes_reserva_voo SET status = 'encerrada', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(atual.solicitacao_id).run()
-    }
+    // Encerrar uma jornada não finaliza o agendamento. A solicitação permanece
+    // aprovada para permitir outra jornada no mesmo número de voo.
     const atualizada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(atual.id).first<any>()
     return c.json({ ...atualizada, limites: await avaliarLimitesJornada(c, atualizada),
       tripulantes: avaliacoes.map(({ item, limites }) => ({ id: item.id, tripulante_id: item.tripulante_id, funcao: item.funcao_tripulante, limites })) })
@@ -4018,6 +4019,20 @@ app.patch('/api/interno/jornadas/:id/legacy', async c => {
   if (!(await requireShareInternal(c))) return c.json({error:'internal_auth_required'},401); await garantirTabelaJornadas(c); const id=c.req.param('id'); const body=await c.req.json<Record<string,any>>().catch(() => ({} as Record<string, any>)); const atual=await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first<any>(); if(!atual) return c.notFound(); const fim=body.horario_corte_final||atual.horario_corte_final; if(body.status==='encerrada' && !fim) return c.json({error:'corte_final_obrigatorio'},400); if(body.status==='encerrada' && minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim)>540) return c.json({error:'limite_jornada_9_horas_excedido',detail:'A jornada ultrapassa o limite de 9 horas.'},409); if (body.status === 'encerrada' && atual.tripulante_id) { const db=c.env.SHARE_DB; const minutos= minutosEntre(atual.horario_apresentacao||atual.horario_acionamento,fim); const semana=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND date(data)>=date(?,'-6 days') AND date(data)<=date(?)").bind(atual.tripulante_id,atual.data,atual.data).first<any>(); const mes=await db.prepare("SELECT COALESCE(SUM((julianday(horario_corte_final)-julianday(horario_apresentacao))*1440),0) minutos FROM jornadas_voo WHERE tripulante_id=? AND status='encerrada' AND strftime('%Y-%m',data)=strftime('%Y-%m',?)").bind(atual.tripulante_id,atual.data).first<any>(); if(Number(semana?.minutos||0)+minutos>2640) return c.json({error:'limite_jornada_semanal_excedido',detail:'O tripulante ultrapassaria 44 horas na semana.'},409); if(Number(mes?.minutos||0)+minutos>10560) return c.json({error:'limite_jornada_mensal_excedido',detail:'O tripulante ultrapassaria 176 horas no mês.'},409); } await c.env.SHARE_DB.prepare('UPDATE jornadas_voo SET horario_acionamento=?, horario_apresentacao=?, horario_corte_inicio=?, horario_corte_final=?, data=?, status=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(body.horario_acionamento||atual.horario_acionamento,body.horario_apresentacao||atual.horario_apresentacao,body.horario_corte_inicio||atual.horario_corte_inicio,fim,body.data||atual.data,body.status||atual.status,body.observacoes||atual.observacoes,id).run(); return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE id=?').bind(id).first())
 })
 */
+app.post('/api/interno/agendamento/:id/finalizar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaJornadas(c)
+  const id = c.req.param('id')
+  const agendamento = await c.env.SHARE_DB.prepare('SELECT id, status, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<any>()
+  if (!agendamento) return c.notFound()
+  if (agendamento.status === 'encerrada') return c.json({ success: true, status: 'encerrada', id, numero_voo: agendamento.numero_voo })
+  const jornadas = await c.env.SHARE_DB.prepare('SELECT status FROM jornadas_voo WHERE solicitacao_id = ?1').bind(id).all<any>()
+  if (!jornadas.results?.length) return c.json({ error: 'jornada_obrigatoria', detail: 'Registre pelo menos uma jornada antes de finalizar o agendamento.' }, 409)
+  if (jornadas.results.some((j: any) => j.status !== 'encerrada')) return c.json({ error: 'jornadas_pendentes', detail: 'Encerre todas as jornadas antes de finalizar o agendamento.' }, 409)
+  await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'encerrada', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1").bind(id).run()
+  return c.json({ success: true, status: 'encerrada', id, numero_voo: agendamento.numero_voo })
+})
+
 app.post('/api/interno/jornadas/:id/pernas', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
