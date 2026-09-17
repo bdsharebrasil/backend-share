@@ -3752,6 +3752,9 @@ function nivelAlertaJornada(minutos: number, limite: number): 'normal' | 'atenca
 }
 
 function minutosDaJornada(jornada: any, fimPrevisto?: string | null): number {
+  if (Array.isArray(jornada.pernas)) {
+    return jornada.pernas.reduce((total: number, perna: any) => total + minutosEntre(perna.horario_ac, perna.horario_corte), 0)
+  }
   const inicio = jornada.horario_apresentacao || jornada.horario_acionamento
   const fim = fimPrevisto || jornada.horario_corte_final
   if (!inicio || !fim) return 0
@@ -3995,8 +3998,10 @@ app.patch('/api/interno/jornadas/:id', async c => {
       WHERE (id = ?1 OR jornada_principal_id = ?1 OR jornada_principal_id = ?2)
         AND status <> 'encerrada'`).bind(atual.id, atual.jornada_principal_id || atual.id).all<any>()
     const alvos = (irmas.results || []).length ? irmas.results : [atual]
-    const avaliacoes = await Promise.all(alvos.map(async (item: any) =>
-      ({ item, limites: await avaliarLimitesJornada(c, { ...item, horario_apresentacao: apresentacao }, corteFinal) })))
+    const avaliacoes = await Promise.all(alvos.map(async (item: any) => {
+      const pernasItem = await db.prepare('SELECT horario_ac, horario_corte FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(item.jornada_principal_id || item.id).all<any>()
+      return { item, limites: await avaliarLimitesJornada(c, { ...item, horario_apresentacao: apresentacao, pernas: pernasItem.results || [] }, corteFinal) }
+    }))
     const excedido = avaliacoes.find(({ limites }) => limites.nivel_alerta === 'excedido')
     if (excedido && body.confirmar_excedente !== true) {
       return c.json({ error: 'limite_jornada_excedido', tripulante_id: excedido.item.tripulante_id, limites: excedido.limites,
