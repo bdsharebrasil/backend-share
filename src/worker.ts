@@ -3723,7 +3723,7 @@ async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
     },
   }
   for (const [tabela, colunas] of Object.entries(tabelas)) {
-    const info = await db.prepare(`PRAGMA table_info(${tabela})`).all<{ name: string }>()
+    const info = await db.prepare('SELECT name FROM pragma_table_info(?)').bind(tabela).all<{ name: string }>()
     const existentes = new Set((info.results || []).map(coluna => coluna.name))
     for (const [coluna, definicao] of Object.entries(colunas)) {
       if (!existentes.has(coluna)) {
