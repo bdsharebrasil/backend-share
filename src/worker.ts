@@ -2835,6 +2835,7 @@ app.patch('/api/colaborador/perfil', async c => {
   const assignments = updates.map(({ field }) => `${field} = ?`).join(', ')
   await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
   const updated = await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(colaborador.id).first<Colaborador>()
+  await sincronizarTripulacaoColaborador(c, colaborador.id, updated || {}).catch(error => log.warn('[colaborador/perfil] tripulação não sincronizada', error?.message || error))
   return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 } })
 })
 
@@ -2859,6 +2860,7 @@ app.post('/api/colaborador/foto', async c => {
   try {
     const key = await salvarArquivoColaborador(c, colaborador.id, file, 'avatar_profiles')
     await c.env.SHARE_DB.prepare('UPDATE user_profiles SET url_avatar = ?, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?').bind(key, colaborador.id).run()
+    await sincronizarTripulacaoColaborador(c, colaborador.id, {}).catch(error => log.warn('[colaborador/foto] tripulação não sincronizada', error?.message || error))
     return c.json({ foto_url: '/api/colaborador/foto' })
   } catch (error: any) {
     return c.json({ error: error?.message || 'falha_ao_salvar_foto' }, 400)
@@ -3389,12 +3391,23 @@ app.get('/api/interno/tripulacao/gestao', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = c.env.SHARE_DB
   const [tripulantes, habilitacoes, freelancers, aeronave] = await Promise.all([
-    db.prepare(`SELECT t.id, t.user_id, t.canac, t.nome_completo, t.status, t.tipo_licenca, up.email, up.telefone, up.url_avatar, up.departamento FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id ORDER BY t.nome_completo`).all(),
+    db.prepare(`SELECT t.id, t.user_id, t.canac, t.nome_completo, t.status, t.tipo_licenca, up.email, up.telefone, up.url_avatar, up.departamento, CASE WHEN up.url_avatar IS NOT NULL THEN '/api/interno/tripulacao/' || t.id || '/foto' ELSE NULL END AS foto_url FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id ORDER BY t.nome_completo`).all(),
     db.prepare('SELECT * FROM habilitacoes_tripulante ORDER BY data_validade, validade_cma').all(),
     db.prepare('SELECT f.*, a.matricula_registro, a.fabricante, a.modelo FROM tripulacao_freelancer f LEFT JOIN aeronave a ON a.id = f.aeronave_id ORDER BY f.nome_completo').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, numero_motores, status FROM aeronave ORDER BY matricula_registro').all(),
   ])
   return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronaves: aeronave.results })
+})
+app.get('/api/interno/tripulacao/:id/foto', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const row = await c.env.SHARE_DB.prepare('SELECT up.url_avatar FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE t.id = ?1').bind(c.req.param('id')).first<{ url_avatar: string | null }>()
+  if (!row?.url_avatar) return c.notFound()
+  const object = await bucketParaChaveColaborador(c, row.url_avatar).get(row.url_avatar)
+  if (!object) return c.notFound()
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('Cache-Control', 'private, max-age=300')
+  return new Response(object.body, { headers })
 })
 
 app.patch('/api/interno/tripulacao/:id', async c => {
