@@ -3945,12 +3945,26 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
     LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
     LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
     WHERE s.aeronave_id = ?1 AND s.numero_voo IS NOT NULL AND TRIM(s.numero_voo) <> ''
-    ORDER BY datetime(s.data_agendada) DESC
-    LIMIT 300
+    ORDER BY datetime(s.data_agendada) DESC LIMIT 300
   `).bind(aeronaveId).all<any>()
-  return c.json({ voos: rows.results || [] })
+  const voos = await Promise.all((rows.results || []).map(async (voo: any) => {
+    const jornadas = await c.env.SHARE_DB.prepare(`
+      SELECT id AS jornada_id, numero_jornada, data, status, horario_apresentacao, horario_acionamento,
+             horario_pouso, horario_corte
+      FROM jornadas_voo WHERE solicitacao_id = ?1 ORDER BY numero_jornada DESC, data DESC
+    `).bind(voo.solicitacao_id).all<any>()
+    const jornadasComPernas = await Promise.all((jornadas.results || []).map(async (jornada: any) => {
+      const pernas = await c.env.SHARE_DB.prepare(`
+        SELECT id AS perna_id, numero, origem, destino, horario_ac, horario_dep, horario_pouso,
+               horario_corte, status, lancamento_diario_id
+        FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero
+      `).bind(jornada.jornada_id).all<any>()
+      return { ...jornada, pernas: pernas.results || [] }
+    }))
+    return { ...voo, jornadas: jornadasComPernas }
+  }))
+  return c.json({ voos })
 })
-
 app.post('/api/interno/agendamento/:id/jornada', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
