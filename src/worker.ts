@@ -5931,14 +5931,13 @@ app.get('/api/gestor/gestao-colaborador/:id/ficha', async c => {
   const db = c.env.SHARE_DB
   const perfil = await db.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, endereco, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!perfil) return c.notFound()
-  const [documentos, funcoes, ferias, recebimentos, lancamentos] = await Promise.all([
+  const [documentos, funcoes, ferias, lancamentos] = await Promise.all([
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(id).all().catch(() => ({ results: [] })),
     db.prepare('SELECT id, funcao, criado_em FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY funcao').bind(id).all().catch(() => ({ results: [] })),
     db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(id).all().catch(() => ({ results: [] })),
-    db.prepare("SELECT id, tipo, descricao, valor, data_despesa, vencimento, status, observacoes, pago_por, criado_em FROM envio_despesas WHERE tipo IN ('share', 'reembolso') AND (pago_por = ?1 OR fornecedor = ?1) ORDER BY COALESCE(data_despesa, criado_em) DESC LIMIT 200").bind(id).all().catch(() => ({ results: [] })),
-    db.prepare("SELECT id, descricao, ROUND(valor_centavos / 100.0, 2) AS valor, data, status, observacoes, pago_por, criado_em FROM lancamentos WHERE pago_por = ?1 ORDER BY date(data) DESC, criado_em DESC LIMIT 200").bind(id).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, colaborador_id, descricao, ROUND(valor_centavos / 100.0, 2) AS valor, data, data_emissao, data_vencimento, data_pagamento, status, observacoes, pago_por, criado_em FROM lancamentos WHERE colaborador_id = ?1 ORDER BY date(COALESCE(data_vencimento, data, criado_em)) DESC, criado_em DESC LIMIT 200").bind(id).all().catch(() => ({ results: [] })),
   ])
-  return c.json({ perfil, documentos: documentos.results, funcoes: funcoes.results, ferias: ferias.results, recebimentos: [...recebimentos.results, ...lancamentos.results] })
+  return c.json({ perfil, documentos: documentos.results, funcoes: funcoes.results, ferias: ferias.results, recebimentos: lancamentos.results })
 })
 
 app.get('/api/gestor/ferias', async c => {
