@@ -3394,7 +3394,7 @@ app.get('/api/interno/tripulacao/gestao', async c => {
     db.prepare('SELECT f.*, a.matricula_registro, a.fabricante, a.modelo FROM tripulacao_freelancer f LEFT JOIN aeronave a ON a.id = f.aeronave_id ORDER BY f.nome_completo').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, numero_motores, status FROM aeronave ORDER BY matricula_registro').all(),
   ])
-  return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronave: aeronave.results })
+  return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronaves: aeronave.results })
 })
 
 app.patch('/api/interno/tripulacao/:id', async c => {
@@ -3440,7 +3440,14 @@ app.patch('/api/interno/tripulacao-freelancer/:id', async c => {
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
-
+app.delete('/api/interno/tripulacao-freelancer/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const id = c.req.param('id').trim()
+  if (!id) return c.json({ error: 'tripulante_id_obrigatorio' }, 400)
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM tripulacao_freelancer WHERE id = ?1').bind(id).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
 app.get('/api/interno/tripulacao/horas', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const mes = c.req.query('mes')
