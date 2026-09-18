@@ -293,7 +293,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     for (const [payer, payerExpenses] of grouped.entries()) {
       if (payerOnly && payer !== payerOnly) continue
       const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
-      const description = `${payerDescription(report, payer)}${categoryDescription(payerExpenses) ? ` · ${categoryDescription(payerExpenses)}` : ''}`.slice(0, 240)
+      const description = payerDescription(report, payer)
       await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, data_vencimento = ?
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
         .bind(amountCentavos, description, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
@@ -320,7 +320,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     if (payer === 'tripulante_2' && !text(report.tripulante_id_2)) throw new Error('tripulante_2_obrigatorio_para_despesa')
     const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
     if (amountCentavos <= 0) continue
-    const description = `${payerDescription(report, payer)}${categoryDescription(payerExpenses) ? ` · ${categoryDescription(payerExpenses)}` : ''}`.slice(0, 240)
+    const description = payerDescription(report, payer)
     const allocations = allocate(amountCentavos, rows, kind === 'HOLDING')
     if (!allocations.length) continue
 
