@@ -4858,6 +4858,11 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
             AND idempotency_key IN (?, ?)`)
           .bind(body.email_enviado_id, id, `${idempotencyBase}:LANCAMENTO_CLIENTE`, `${idempotencyBase}:LANCAMENTO_SHARE`).run()
       }
+      await db.batch([
+        db.prepare("UPDATE lancamentos SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND colaborador_id IS NOT NULL").bind(body.data_vencimento, id),
+        db.prepare("UPDATE contas_apagar SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, id),
+        db.prepare("UPDATE relatorio_despesa_viagem SET data_vencimento_reembolso = ?, programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
+      ])
       return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: existing.id, message: 'Reembolso já enviado ao cliente.' })
     }
     await db.batch([
@@ -4869,7 +4874,9 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?
           AND id IN (?, ?)`)
         .bind(body.email_enviado_id, id, clienteLancamentoId, shareLancamentoId) : null,
-      db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', enviado_para_cliente_em = CURRENT_TIMESTAMP, data_vencimento_reembolso = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
+      db.prepare("UPDATE lancamentos SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND colaborador_id IS NOT NULL").bind(body.data_vencimento, id),
+      db.prepare("UPDATE contas_apagar SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, id),
+      db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', enviado_para_cliente_em = CURRENT_TIMESTAMP, data_vencimento_reembolso = ?, programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
     ].filter(Boolean) as D1PreparedStatement[])
     return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaId, lancamento_cliente_id: clienteLancamentoId, lancamento_share_id: shareLancamentoId, message: 'Reembolso programado ao cliente.' })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:enviar-cliente]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_enviar_cliente' }, 400) }
@@ -4889,10 +4896,9 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
     const decision = body.aprovado ? 'aprovado' : 'reprovado'
     await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.motivo?.trim() || null, decision, row.id).run()
-    if (!body.aprovado) {
-      const updated = await buscarRelatorioViagemComNomes(c, row.id)
-      if (updated) await notifyReportRejection(c, updated, String(body.motivo || '').trim(), pos === 1 ? row.user1_id : row.user2_id || '')
-    }
+    const decidedBy = pos === 1 ? row.user1_id : row.user2_id || ''
+    const updatedForNotification = await buscarRelatorioViagemComNomes(c, row.id)
+    if (updatedForNotification) await notifyReportDecision(c, updatedForNotification, decision, String(body.motivo || '').trim(), decidedBy)
     if (body.aprovado) {
       const updated = await buscarRelatorioViagemComNomes(c, row.id)
       if (!updated) return c.notFound()
@@ -6007,6 +6013,25 @@ async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report:
   const mensagem = `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
   await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero}`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
   for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, 'ajuste_necessario').run()
+}
+async function notifyReportDecision(c: Context<{ Bindings: Bindings }>, report: any, decision: string, reason: string, decidedBy: string): Promise<void> {
+  const db = c.env.SHARE_DB
+  const recipients = await db.prepare(`SELECT id FROM user_profiles
+    WHERE id <> ?1 AND (status IS NULL OR lower(status) IN ('ativo', 'active')) AND (
+      lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master')
+      OR lower(replace(replace(trim(COALESCE(departamento, '')), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master')
+      OR id IN (SELECT user_id FROM usuarios_funcoes WHERE lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master'))
+    )`).bind(decidedBy || '').all<{ id: string }>()
+  const uniqueRecipients = [...new Set((recipients.results || []).map((item) => item.id).filter(Boolean))]
+  if (!uniqueRecipients.length) return
+  const taskId = uuid()
+  const numero = String(report.numero_relatorio || report.id)
+  const aprovado = decision === 'aprovado'
+  const mensagem = aprovado
+    ? `O tripulante ${report.nome_tripulante || 'não identificado'} aprovou o relatório ${numero}. O pagamento foi lançado para programação.`
+    : `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
+  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem ${aprovado ? 'aprovado' : 'rejeitado'}: ${numero}`, mensagem, decidedBy || null, JSON.stringify(uniqueRecipients)).run()
+  for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, decision).run()
 }
 
 app.get('/api/sharebrasil/tarefas/usuarios', async c => {

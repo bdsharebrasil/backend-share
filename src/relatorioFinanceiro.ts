@@ -289,17 +289,18 @@ export async function sincronizarRelatorioViagemFinanceiro(
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
         ORDER BY criado_em`).bind(reportId).all<{ destino_tipo: string; destino_id: string }>()
   if ((existing.results || []).length) {
+    const existingDueDate = dateValue(report.data_vencimento_reembolso, dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))))
     for (const [payer, payerExpenses] of grouped.entries()) {
       if (payerOnly && payer !== payerOnly) continue
       const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
       const description = `${payerDescription(report, payer)}${categoryDescription(payerExpenses) ? ` · ${categoryDescription(payerExpenses)}` : ''}`.slice(0, 240)
-      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?
+      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, data_vencimento = ?
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
-        .bind(amountCentavos, description, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
+        .bind(amountCentavos, description, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
       if (payer === 'tripulante_1' || payer === 'tripulante_2') {
-        await db.prepare(`UPDATE contas_apagar SET valor_centavos = ?, descricao = ?
+        await db.prepare(`UPDATE contas_apagar SET valor_centavos = ?, descricao = ?, data_vencimento = ?
           WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
-          .bind(amountCentavos, description, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}:CONTA_PAGAR`).run()
+          .bind(amountCentavos, description, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}:CONTA_PAGAR`).run()
       }
     }
     return { idempotent: true, destinos: (existing.results || []).map((item) => ({ tipo: item.destino_tipo, id: item.destino_id })) }
@@ -309,6 +310,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
   const statements: D1PreparedStatement[] = []
   const destinos: Array<{ tipo: string; id: string }> = []
   const fallbackDate = dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))
+  const dueDate = dateValue(report.data_vencimento_reembolso, fallbackDate)
   const valorAReceberCentavos = [...grouped.entries()]
     .filter(([payer]) => payer !== 'cliente')
     .reduce((total, [, payerExpenses]) => total + Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100), 0)
@@ -338,7 +340,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
         aeronave_id: text(report.aeronave_id),
         colaborador_id: tripulanteUserId,
         data_emissao: dateValue(report.data_inicio, fallbackDate),
-        data_vencimento: fallbackDate,
+        data_vencimento: dueDate,
         data_pagamento: null,
         descricao: description,
         categoria_nome: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
@@ -365,7 +367,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
         contaPagarId = uuid()
         statements.push(await prepareInsert(db, 'contas_apagar', {
           id: contaPagarId,
-          data_vencimento: fallbackDate,
+          data_vencimento: dueDate,
           valor_centavos: amountCentavos,
           categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
           descricao: description,
