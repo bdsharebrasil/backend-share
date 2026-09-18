@@ -3467,13 +3467,31 @@ app.get('/api/interno/tripulacao/horas', async c => {
   const inicio = c.req.query('inicio') || (/^\d{4}-\d{2}$/.test(mes || '') ? `${mes}-01` : '1900-01-01')
   const fim = c.req.query('fim') || (/^\d{4}-\d{2}$/.test(mes || '') ? `${mes}-31` : '2999-12-31')
   const aircraft = c.req.query('aeronave_id') || ''
-  const query = aircraft ? 'SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE date(l.data_registro) BETWEEN ?1 AND ?2 AND l.aeronave_id = ?3 ORDER BY date(l.data_registro) DESC' : 'SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE date(l.data_registro) BETWEEN ?1 AND ?2 ORDER BY date(l.data_registro) DESC'
-  const result = aircraft ? await c.env.SHARE_DB.prepare(query).bind(inicio, fim, aircraft).all<any>() : await c.env.SHARE_DB.prepare(query).bind(inicio, fim).all<any>()
-  const totals = new Map<string, any>(); const voos = result.results.map((row: any) => ({ id: row.id, data_registro: row.data_registro, matricula_registro: row.matricula_registro, pic_canac: row.pic_canac, pic_nome: row.pic_nome, sic_canac: row.sic_canac, sic_nome: row.sic_nome, tempo_voo: Number(row.tempo_voo || row.tempo_total || 0), horas_diurnas: Number(row.horas_diurnas || 0), horas_noturnas: Number(row.horas_noturnas || 0), tempo_ifr: Number(row.tempo_ifr || 0) }))
-  const add = (canac: string | null, nome: string | null, role: 'PIC' | 'SIC', row: any) => { if (!canac && !nome) return; const key = `${role}:${canac || nome}`; const current = totals.get(key) || { canac: canac || null, nome: nome || canac || 'Tripulante', funcao: role, horas_totais: 0, horas_pic: 0, horas_sic: 0, horas_diurnas: 0, horas_noturnas: 0, horas_ifr: 0, voos: 0 }; current.horas_totais += row.tempo_voo; current[`horas_${role.toLowerCase()}`] += row.tempo_voo; current.horas_diurnas += row.horas_diurnas; current.horas_noturnas += row.horas_noturnas; current.horas_ifr += row.tempo_ifr; current.voos += 1; totals.set(key, current) }
-  for (const row of voos) { add(row.pic_canac, row.pic_nome, 'PIC', row); add(row.sic_canac, row.sic_nome, 'SIC', row) }
+  const canac = (c.req.query('canac') || '').trim()
+  const filters = ['date(l.data_registro) BETWEEN ? AND ?']; const binds: string[] = [inicio, fim]
+  if (aircraft) { filters.push('l.aeronave_id = ?'); binds.push(aircraft) }
+  if (canac) { filters.push('(upper(l.pic_canac) = upper(?) OR upper(l.sic_canac) = upper(?))'); binds.push(canac, canac) }
+  const query = `SELECT l.*, a.matricula_registro FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id WHERE ${filters.join(' AND ')} ORDER BY date(l.data_registro) DESC`
+  const result = await c.env.SHARE_DB.prepare(query).bind(...binds).all<any>()
+  const voos = result.results.map((row: any) => ({ id: row.id, data_registro: row.data_registro, matricula_registro: row.matricula_registro, aeronave_id: row.aeronave_id, pic_canac: row.pic_canac, pic_nome: row.pic_nome, sic_canac: row.sic_canac, sic_nome: row.sic_nome, tempo_total: Number(row.tempo_total || row.tempo_voo || 0), tempo_ifr: Number(row.tempo_ifr || 0), horas_noturnas: Number(row.horas_noturnas || 0), horas_diurnas: Math.max(0, Number(row.tempo_total || row.tempo_voo || 0) - Number(row.tempo_ifr || 0) - Number(row.horas_noturnas || 0)) }))
+  const totals = new Map<string, any>(); const porAeronave = new Map<string, any>()
+  const add = (canacTripulante: string | null, nome: string | null, role: 'PIC' | 'SIC', row: any) => {
+    if (!canacTripulante && !nome) return
+    const tempoTotal = row.tempo_total; const tempoIfr = row.tempo_ifr; const horasNoturnas = row.horas_noturnas; const horasDiurnas = Math.max(0, tempoTotal - tempoIfr - horasNoturnas)
+    const key = `${role}:${canacTripulante || nome}`; const current = totals.get(key) || { canac: canacTripulante || null, nome: nome || canacTripulante || 'Tripulante', funcao: role, horas_totais: 0, horas_pic: 0, horas_sic: 0, horas_diurnas: 0, horas_noturnas: 0, horas_ifr: 0, voos: 0 }
+    current.horas_totais += tempoTotal; current[`horas_${role.toLowerCase()}`] += tempoTotal; current.horas_diurnas += horasDiurnas; current.horas_noturnas += horasNoturnas; current.horas_ifr += tempoIfr; current.voos += 1; totals.set(key, current)
+    const aircraftKey = row.aeronave_id || row.matricula_registro || 'sem-aeronave'; const aircraft = porAeronave.get(aircraftKey) || { aeronave_id: row.aeronave_id || null, matricula_registro: row.matricula_registro || 'Sem matrícula', voos: 0, pic: { voos: 0, horas_totais: 0, horas_diurnas: 0, horas_noturnas: 0, horas_ifr: 0 }, sic: { voos: 0, horas_totais: 0, horas_diurnas: 0, horas_noturnas: 0, horas_ifr: 0 } }
+    const bucket = aircraft[role.toLowerCase()]; bucket.voos += 1; bucket.horas_totais += tempoTotal; bucket.horas_diurnas += horasDiurnas; bucket.horas_noturnas += horasNoturnas; bucket.horas_ifr += tempoIfr
+    if (role === 'PIC' || !row.pic_canac || (canac && String(canacTripulante || '').toUpperCase() === canac.toUpperCase())) aircraft.voos += 1
+    porAeronave.set(aircraftKey, aircraft)
+  }
+  for (const row of voos) {
+    if (!canac || String(row.pic_canac || '').toUpperCase() === canac.toUpperCase()) add(row.pic_canac, row.pic_nome, 'PIC', row)
+    if (!canac || String(row.sic_canac || '').toUpperCase() === canac.toUpperCase()) add(row.sic_canac, row.sic_nome, 'SIC', row)
+  }
   const round = (value: number) => Math.round(value * 100) / 100
-  return c.json({ inicio, fim, voos, totais: [...totals.values()].map((item) => Object.fromEntries(Object.entries(item).map(([key, value]) => [key, typeof value === 'number' ? round(value as number) : value]))) })
+  const arredondar = (item: any): any => Object.fromEntries(Object.entries(item).map(([key, value]) => [key, typeof value === 'number' ? round(value as number) : typeof value === 'object' && value ? arredondar(value) : value]))
+  return c.json({ inicio, fim, voos, totais: [...totals.values()].map(arredondar), por_aeronave: [...porAeronave.values()].map(arredondar) })
 })
 
 app.get('/api/interno/planos-voo', async c => {
