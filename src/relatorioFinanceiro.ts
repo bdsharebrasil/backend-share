@@ -17,6 +17,7 @@ type Allocation = CotistaRow & {
 }
 
 const uuid = () => crypto.randomUUID()
+const FORNECEDOR_RELATORIO_VIAGEM = 'SHARE BRASIL'
 
 function text(value: unknown): string {
   return value == null ? '' : String(value).trim()
@@ -65,14 +66,13 @@ function expensesFromReport(report: ReportRow): Array<Record<string, any>> {
 }
 
 function payerDescription(report: ReportRow, payer: Payer): string {
-  const label = payer === 'tripulante_1'
-    ? 'Tripulante 1'
-    : payer === 'tripulante_2'
-      ? 'Tripulante 2'
-      : payer === 'cliente'
-        ? 'Cliente'
-        : 'ShareBrasil'
-  return `Relatório de despesa de viagem ${text(report.numero_relatorio) || text(report.id)} · ${label}`
+  const matricula = text(report.matricula_aeronave) || text(report.aeronave_matricula)
+  const nomeTripulante = payer === 'tripulante_2'
+    ? text(report.nome_tripulante_2)
+    : payer === 'tripulante_1'
+      ? text(report.nome_tripulante)
+      : ''
+  return ['Relatório Despesa de Viagem', matricula, nomeTripulante].filter(Boolean).join(' - ')
 }
 
 function categoryDescription(expenses: Array<Record<string, any>>): string | null {
@@ -114,7 +114,7 @@ async function selectCotistas(db: D1Database, report: ReportRow): Promise<{ kind
        LIMIT 1`).bind(text(report.aeronave_id), text(report.cliente_id)).all<CotistaRow>()
   }
   const rows = (result.results || []).filter((row) => text(row.id))
-  if (!rows.length) throw new Error(kind === 'HOLDING' ? 'cotistas_holding_nao_encontrados' : 'cotistas_cliente_nao_encontrados')
+  if (!rows.length && kind === 'HOLDING') throw new Error('cotistas_holding_nao_encontrados')
   return { kind, rows }
 }
 
@@ -280,6 +280,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     const payer = normalizePayer(expense.pago_por ?? expense.paid_by)
     grouped.set(payer, [...(grouped.get(payer) || []), expense])
   }
+  const { kind, rows } = await selectCotistas(db, report)
   const existing = payerOnly
     ? await db.prepare(`SELECT id AS destino_id, 'LANCAMENTO' AS destino_tipo
         FROM lancamentos WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
@@ -294,9 +295,9 @@ export async function sincronizarRelatorioViagemFinanceiro(
       if (payerOnly && payer !== payerOnly) continue
       const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
       const description = payerDescription(report, payer)
-      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, data_vencimento = ?
+      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_vencimento = ?
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
-        .bind(amountCentavos, description, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
+        .bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), rows[0]?.id || null, kind === 'CLIENTE' ? text(report.cliente_id) || null : null, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
       if (payer === 'tripulante_1' || payer === 'tripulante_2') {
         await db.prepare(`UPDATE contas_apagar SET valor_centavos = ?, descricao = ?, data_vencimento = ?
           WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
@@ -306,7 +307,6 @@ export async function sincronizarRelatorioViagemFinanceiro(
     return { idempotent: true, destinos: (existing.results || []).map((item) => ({ tipo: item.destino_tipo, id: item.destino_id })) }
   }
 
-  const { kind, rows } = await selectCotistas(db, report)
   const statements: D1PreparedStatement[] = []
   const destinos: Array<{ tipo: string; id: string }> = []
   const fallbackDate = dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))
@@ -322,7 +322,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     if (amountCentavos <= 0) continue
     const description = payerDescription(report, payer)
     const allocations = allocate(amountCentavos, rows, kind === 'HOLDING')
-    if (!allocations.length) continue
+    if (!allocations.length && kind === 'HOLDING') continue
 
     let lancamentoId: string | null = null
     let contaPagarId: string | null = null
@@ -343,6 +343,10 @@ export async function sincronizarRelatorioViagemFinanceiro(
         data_vencimento: dueDate,
         data_pagamento: null,
         descricao: description,
+        fornecedor_nome: FORNECEDOR_RELATORIO_VIAGEM,
+        numero_doc: text(report.numero_relatorio),
+        cotista_aeronave_id: allocations[0]?.id || null,
+        cliente_id: kind === 'CLIENTE' ? text(report.cliente_id) || null : null,
         categoria_nome: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
         grupo_categoria: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
         status: 'EM_ABERTO',
