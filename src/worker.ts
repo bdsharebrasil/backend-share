@@ -3280,8 +3280,9 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   if (data.slice(0, 7) !== `${diario.ano}-${String(diario.mes).padStart(2, '0')}`) return c.json({ error: 'data_fora_do_mes' }, 400)
   const pernaId = String(body.perna_jornada_id || '').trim()
   if (pernaId) {
-    const perna = await db.prepare('SELECT id, lancamento_diario_id FROM pernas_jornada_voo WHERE id = ?1').bind(pernaId).first<any>()
+    const perna = await db.prepare(`SELECT p.id, p.lancamento_diario_id, p.jornada_id, j.aeronave_id FROM pernas_jornada_voo p JOIN jornadas_voo j ON j.id = p.jornada_id WHERE p.id = ?1`).bind(pernaId).first<any>()
     if (!perna) return c.json({ error: 'perna_nao_encontrada' }, 404)
+    if (perna.aeronave_id !== aeronaveId || (body.jornada_id && String(body.jornada_id) !== String(perna.jornada_id))) return c.json({ error: 'perna_nao_corresponde_a_jornada_ou_aeronave' }, 409)
     if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   }
   const last = await db.prepare('SELECT COALESCE(MAX(numero_sequencial), 0) AS sequencial FROM lancamentos_diario_bordo WHERE diario_mes_id = ?1').bind(diarioMesId).first<{ sequencial: number }>()
