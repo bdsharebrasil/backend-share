@@ -3986,11 +3986,22 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
     `).bind(voo.solicitacao_id).all<any>()
     const jornadasComPernas = await Promise.all((jornadas.results || []).map(async (jornada: any) => {
       const pernas = await c.env.SHARE_DB.prepare(`
-        SELECT id AS perna_id, numero, origem, destino, horario_ac, horario_dep, horario_pouso,
-               horario_corte, status, lancamento_diario_id
-        FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero
+        SELECT p.id AS perna_id, p.numero, p.origem, p.destino, p.horario_ac, p.horario_dep, p.horario_pouso,
+               p.horario_corte, p.status, p.lancamento_diario_id, ap.coordenadas AS origem_coordenadas,
+               ad.coordenadas AS destino_coordenadas
+        FROM pernas_jornada_voo p
+        LEFT JOIN aerodromo ap ON upper(ap.designativo_icao) = upper(p.origem)
+        LEFT JOIN aerodromo ad ON upper(ad.designativo_icao) = upper(p.destino)
+        WHERE p.jornada_id = ?1 ORDER BY p.numero
       `).bind(jornada.jornada_id).all<any>()
-      return { ...jornada, pernas: pernas.results || [] }
+      const calculadas = (pernas.results || []).map((perna: any) => {
+        const coordenada = (value: unknown) => { const [lat, lon] = String(value || '').split(',').map(Number); return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] as const : null }
+        const origem = coordenada(perna.origem_coordenadas); const destino = coordenada(perna.destino_coordenadas)
+        const distancia_nm = origem && destino ? Number((haversineKm(origem[0], origem[1], destino[0], destino[1]) * 0.539957).toFixed(1)) : 0
+        const { origem_coordenadas: _origem, destino_coordenadas: _destino, ...publica } = perna
+        return { ...publica, distancia_nm }
+      })
+      return { ...jornada, pernas: calculadas }
     }))
     return { ...voo, jornadas: jornadasComPernas }
   }))
