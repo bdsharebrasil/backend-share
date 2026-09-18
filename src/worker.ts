@@ -3815,10 +3815,14 @@ function nivelAlertaJornada(minutos: number, limite: number): 'normal' | 'atenca
 }
 
 function minutosDaJornada(jornada: any, fimPrevisto?: string | null): number {
-  if (Array.isArray(jornada.pernas)) {
-    return jornada.pernas.reduce((total: number, perna: any) => total + minutosEntre(perna.horario_ac, perna.horario_corte), 0)
-  }
-  return 0
+  const pernas = Array.isArray(jornada.pernas) ? jornada.pernas : []
+  if (!pernas.length) return 0
+  const ultima = pernas[pernas.length - 1]
+  const inicio = jornada.horario_apresentacao || pernas[0]?.horario_ac
+  const fimVoo = fimPrevisto || ultima?.horario_corte || ultima?.horario_pouso
+  if (!inicio || !fimVoo) return 0
+  const posCorte = Number(jornada.minutos_pos_corte ?? LIMITES_JORNADA.posCorte)
+  return minutosEntre(inicio, fimVoo) + posCorte
 }
 
 async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
@@ -3826,8 +3830,9 @@ async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
       horario_pouso = (SELECT p.horario_pouso FROM pernas_jornada_voo p WHERE p.jornada_id = ?1 ORDER BY p.numero DESC LIMIT 1),
       horario_corte = (SELECT p.horario_corte FROM pernas_jornada_voo p WHERE p.jornada_id = ?1 ORDER BY p.numero DESC LIMIT 1)
     WHERE id = ?1`).bind(jornadaId).run()
-  const pernas = await db.prepare('SELECT horario_ac, horario_corte FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(jornadaId).all<any>()
-  const minutos = minutosDaJornada({ pernas: pernas.results || [] })
+  const jornada = await db.prepare('SELECT horario_apresentacao, minutos_pos_corte FROM jornadas_voo WHERE id = ?1').bind(jornadaId).first<any>()
+  const pernas = await db.prepare('SELECT horario_ac, horario_pouso, horario_corte FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(jornadaId).all<any>()
+  const minutos = minutosDaJornada({ ...jornada, pernas: pernas.results || [] })
   await db.prepare('UPDATE jornadas_voo SET minutos_jornada = ?1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2').bind(minutos || null, jornadaId).run()
   return pernas.results || []
 }
@@ -3900,7 +3905,7 @@ app.get('/api/interno/agendamento/:id/jornada', async c => {
     ...principal,
     pernas: pernas.results,
     limites: await avaliarLimitesJornada(c, { ...principal, pernas: pernas.results }),
-    tripulantes: await Promise.all(doVoo.map(async (j: any) => ({ ...j, limites: await avaliarLimitesJornada(c, j) }))),
+    tripulantes: await Promise.all(doVoo.map(async (j: any) => ({ ...j, pernas: pernas.results, limites: await avaliarLimitesJornada(c, { ...j, pernas: pernas.results }) }))),
     historico,
   })
 })
@@ -4053,8 +4058,8 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   return c.json({
     ...principal,
     pernas: pernas.results,
-    limites: await avaliarLimitesJornada(c, principal),
-    tripulantes: await Promise.all(criadas.map(async (item) => ({ ...item, limites: await avaliarLimitesJornada(c, item) }))),
+    limites: await avaliarLimitesJornada(c, { ...principal, pernas: pernas.results }),
+    tripulantes: await Promise.all(criadas.map(async (item) => ({ ...item, pernas: pernas.results, limites: await avaliarLimitesJornada(c, { ...item, pernas: pernas.results }) }))),
   }, 201)
 })
 
