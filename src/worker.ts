@@ -3136,7 +3136,8 @@ app.get('/api/interno/diario-bordo/detalhes', async c => {
       (SELECT COALESCE(ca.razao_social, so.nome) FROM abastecimentos ab LEFT JOIN cliente ca ON ca.id = ab.cliente_id LEFT JOIN hold_socios so ON so.id = ab.socio_id WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_pagador_nome,
       (SELECT ab.numero_comanda FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_comanda,
       (SELECT ab.numero_nf FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_nota,
-      (SELECT ab.id FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_id
+      (SELECT ab.id FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_id,
+      (SELECT p.id FROM pernas_jornada_voo p WHERE p.lancamento_diario_id = l.id LIMIT 1) AS perna_jornada_id
     FROM lancamentos_diario_bordo l
     LEFT JOIN cliente c ON c.id = l.cliente_id
     LEFT JOIN holdings h ON h.id = l.holding_id
@@ -3279,17 +3280,35 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   if (Number(diario.fechado)) return c.json({ error: 'diario_fechado' }, 409)
   if (data.slice(0, 7) !== `${diario.ano}-${String(diario.mes).padStart(2, '0')}`) return c.json({ error: 'data_fora_do_mes' }, 400)
   const pernaId = String(body.perna_jornada_id || '').trim()
+  let pernaVinculada: any = null
   if (pernaId) {
-    const perna = await db.prepare(`SELECT p.id, p.lancamento_diario_id, p.jornada_id, j.aeronave_id FROM pernas_jornada_voo p JOIN jornadas_voo j ON j.id = p.jornada_id WHERE p.id = ?1`).bind(pernaId).first<any>()
-    if (!perna) return c.json({ error: 'perna_nao_encontrada' }, 404)
-    if (perna.aeronave_id !== aeronaveId || (body.jornada_id && String(body.jornada_id) !== String(perna.jornada_id))) return c.json({ error: 'perna_nao_corresponde_a_jornada_ou_aeronave' }, 409)
-    if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
+    pernaVinculada = await db.prepare(`SELECT p.id, p.lancamento_diario_id, p.jornada_id, p.origem, p.destino, p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte, j.aeronave_id FROM pernas_jornada_voo p JOIN jornadas_voo j ON j.id = p.jornada_id WHERE p.id = ?1`).bind(pernaId).first<any>()
+    if (!pernaVinculada) return c.json({ error: 'perna_nao_encontrada' }, 404)
+    if (pernaVinculada.aeronave_id !== aeronaveId || (body.jornada_id && String(body.jornada_id) !== String(pernaVinculada.jornada_id))) return c.json({ error: 'perna_nao_corresponde_a_jornada_ou_aeronave' }, 409)
+    if (pernaVinculada.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   }
   const last = await db.prepare('SELECT COALESCE(MAX(numero_sequencial), 0) AS sequencial FROM lancamentos_diario_bordo WHERE diario_mes_id = ?1').bind(diarioMesId).first<{ sequencial: number }>()
   const id = uuid()
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
   const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac), nomeTripulantePorCanac(c, body.sic_canac), trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)])
-  const row = normalizarLancamentoDiario({ ...body, cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(body.tempo_total)), criadoPor: extractSupabaseUserId(c) })
+  const horario = (valor: string | null) => valor ? String(valor).slice(11, 16) : null
+  const tempoHoras = (inicio: string | null, fim: string | null) => Number((minutosEntre(inicio, fim) / 60).toFixed(2))
+  const dadosDaPerna = pernaVinculada ? {
+    ...body,
+    numero_voo: body.numero_voo || null,
+    jornada_id: pernaVinculada.jornada_id,
+    aerodromo_partida: pernaVinculada.origem,
+    aerodromo_chegada: pernaVinculada.destino,
+    tempo_ac: horario(pernaVinculada.horario_ac),
+    tempo_dep: horario(pernaVinculada.horario_dep),
+    tempo_pou: horario(pernaVinculada.horario_pouso),
+    tempo_cor: horario(pernaVinculada.horario_corte),
+    tempo_voo: tempoHoras(pernaVinculada.horario_dep, pernaVinculada.horario_pouso),
+    tempo_total: tempoHoras(pernaVinculada.horario_ac, pernaVinculada.horario_corte || pernaVinculada.horario_pouso),
+    horas_diurnas: tempoHoras(pernaVinculada.horario_dep, pernaVinculada.horario_pouso),
+    pousos_total: pernaVinculada.horario_pouso ? 1 : 0,
+  } : body
+  const row = normalizarLancamentoDiario({ ...dadosDaPerna, cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(dadosDaPerna.tempo_total)), criadoPor: extractSupabaseUserId(c) })
   const columns = ['id', ...Object.keys(row)]
   await db.prepare(`INSERT INTO lancamentos_diario_bordo (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).bind(id, ...columns.slice(1).map(column => row[column])).run()
   if (pernaId) {
@@ -3342,6 +3361,7 @@ app.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
   const result = await c.env.SHARE_DB.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).run()
   if (!result.meta.changes) return c.notFound()
+  await c.env.SHARE_DB.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1').bind(id).run()
   await recalcularDiarioMes(c, current.diario_mes_id)
   return c.json({ success: true })
 })
@@ -3806,8 +3826,17 @@ function normalizarHorarioJornada(data: string, valor: unknown, referencia?: str
 
 function minutosEntre(inicio: string | null, fim: string | null): number {
   if (!inicio || !fim) return 0
-  const a = new Date(inicio).getTime(), b = new Date(fim).getTime()
-  return Number.isFinite(a) && Number.isFinite(b) && b >= a ? Math.round((b - a) / 60000) : 0
+  const a = new Date(inicio).getTime()
+  const b = new Date(fim).getTime()
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0
+  const diferenca = b - a
+  if (diferenca >= 0 && diferenca <= 86_400_000) return Math.round(diferenca / 60000)
+
+  const hora = String(fim).match(/T(\d{2}:\d{2})(?::\d{2})?/)?.[1]
+  if (!hora) return 0
+  let ajustado = new Date(`${String(inicio).slice(0, 10)}T${hora}:00Z`).getTime()
+  while (ajustado < a) ajustado += 86_400_000
+  return ajustado - a <= 86_400_000 ? Math.round((ajustado - a) / 60000) : 0
 }
 
 function nivelAlertaJornada(minutos: number, limite: number): 'normal' | 'atencao' | 'critico' | 'excedido' {
