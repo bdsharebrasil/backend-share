@@ -830,6 +830,22 @@ function normalizeAirportList(data: any, userLat: number, userLon: number): Airp
   return list
 }
 
+function normalizeAirportKey(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '')
+}
+
+function airportField(source: Record<string, any>, aliases: string[]): any {
+  const keys = new Set(aliases.map(normalizeAirportKey))
+  const key = Object.keys(source).find((candidate) => keys.has(normalizeAirportKey(candidate)))
+  return key ? source[key] : null
+}
+
+function airportCollection(value: any): any[] {
+  if (value == null || value === '') return []
+  if (Array.isArray(value)) return value
+  return [value]
+}
+
 function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, any> {
   const source = item?.aerodrome ?? item?.airport ?? item?.rotaer ?? item ?? {}
   const rawCoordinates = source.coordinates ?? source.coordenadas
@@ -838,6 +854,13 @@ function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, an
   const runways = source.runways ?? source.pistas ?? source.runway ?? []
   const frequencies = source.frequencies ?? source.frequencias ?? source.frequency ?? []
   const restrictions = source.restrictions ?? source.restricoes ?? source.observacoes ?? []
+  const operational = {
+    opea: airportField(source, ['opea', 'procedimentos_operacionais', 'operational_procedures', 'operational_area']),
+    obstacles: airportCollection(airportField(source, ['obstaculos', 'obstacles', 'obstacle'])),
+    other_lighting: airportField(source, ['outras_iluminacoes', 'other_lighting', 'other_lighting_systems', 'other_lights']),
+    secondary_power: airportField(source, ['fonte_de_energia_secundaria', 'energia_secundaria', 'secondary_power', 'secondary_energy']),
+    local_regulations: airportField(source, ['regulamentos_locais_de_aerodromo', 'regulamentos_locais', 'local_regulations', 'local_rules']),
+  }
   return {
     ...source,
     icao: rotaerIcao(source) || fallbackIcao,
@@ -849,6 +872,12 @@ function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, an
     runways: Array.isArray(runways) ? runways : [runways].filter(Boolean),
     frequencies: Array.isArray(frequencies) ? frequencies : [frequencies].filter(Boolean),
     restrictions: Array.isArray(restrictions) ? restrictions : [restrictions].filter(Boolean),
+    operational,
+    opea: operational.opea,
+    obstacles: operational.obstacles,
+    other_lighting: operational.other_lighting,
+    secondary_power: operational.secondary_power,
+    local_regulations: operational.local_regulations,
     contact: source.contact ?? source.contato ?? {
       phone: source.phone ?? source.telefone ?? source.tel,
       email: source.email,
@@ -856,20 +885,34 @@ function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, an
     raw_data: source,
   }
 }
+async function enriquecerRotaerComPublicacao(c: Context<{ Bindings: Bindings }>, airport: Record<string, any>, icao: string): Promise<Record<string, any>> {
+  try {
+    const publication = await cachedFetch(c, `pub-ad-${icao}`, 3600, () => fetchAisweb(c, 'pub', { icaoCode: icao }))
+    const publicationItems = collectionItems(publication)
+    const publicationItem = publicationItems.find((item) => rotaerIcao(item) === icao) ?? publicationItems[0]
+    const merged = publicationItem && typeof publicationItem === 'object' ? { ...(airport.raw_data || airport), ...publicationItem } : airport.raw_data || airport
+    const enriched = normalizeRotaerAirport(merged, icao)
+    return { ...enriched, publications: publication, raw_data: { rotaer: airport.raw_data || airport, pub: publication } }
+  } catch (error: any) {
+    log.warn(`[pub] publicação AIP indisponível para ${icao}: ${error.message}`)
+    return airport
+  }
+}
+
 async function fetchRotaerByIcao(c: Context<{ Bindings: Bindings }>, icao: string): Promise<any> {
   const normalizedIcao = icao.trim().toUpperCase()
   try {
     const detail = await cachedFetch(c, `rotaer-detail-${normalizedIcao}`, 1800,
       () => fetchAisweb(c, 'rotaer', { icaoCode: normalizedIcao }))
     const detailItem = rotaerItems(detail).find(item => rotaerIcao(item) === normalizedIcao) ?? rotaerItems(detail)[0]
-    if (detailItem) return normalizeRotaerAirport(detailItem, normalizedIcao)
+    if (detailItem) return enriquecerRotaerComPublicacao(c, normalizeRotaerAirport(detailItem, normalizedIcao), normalizedIcao)
   } catch (error: any) {
     log.warn(`[rotaer] ficha detalhada indisponível para ${normalizedIcao}: ${error.message}`)
   }
   const data = await cachedFetch(c, 'rotaer-all', 1800, () => fetchAisweb(c, 'rotaer', {}))
   const airport = rotaerItems(data).find(item => rotaerIcao(item) === normalizedIcao)
   if (!airport) throw new Error(`Aeródromo ${normalizedIcao} não encontrado no ROTAER/AISWEB`)
-  return normalizeRotaerAirport(airport, normalizedIcao)
+  return enriquecerRotaerComPublicacao(c, normalizeRotaerAirport(airport, normalizedIcao), normalizedIcao)
 }
 
 // ─── Nearby helper: tenta geiloc (4s), fallback para rotaer-all ──────────────
@@ -3540,10 +3583,38 @@ app.get('/api/interno/tripulacao/horas', async c => {
   }
 })
 
+app.get('/api/interno/abastecimentos/precos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaAbastecimentos(c)
+  const icao = String(c.req.query('icao') || '').trim().toUpperCase()
+  const tipo = String(c.req.query('tipo_combustivel') || '').trim().toUpperCase()
+  if (!/^[A-Z]{4}$/.test(icao)) return c.json({ error: 'icao_invalido' }, 400)
+  const colunaPreco = /JET|JETA|JET_A1|JET-A1/.test(tipo) ? 'preco_jet' : 'preco_avgas'
+  const db = c.env.SHARE_DB
+  const [fornecedores, historico] = await Promise.all([
+    db.prepare(`SELECT id, COALESCE(NULLIF(apelido, ''), nome_completo) AS fornecedor, codigo_icao, ${colunaPreco} AS valor_unitario, 'fornecedor_cadastrado' AS origem
+      FROM fornecedores_favoritos
+      WHERE upper(COALESCE(codigo_icao, '')) = ?1 AND COALESCE(${colunaPreco}, 0) > 0
+      ORDER BY valor_unitario`).bind(icao).all(),
+    db.prepare(`SELECT a.id, a.data, a.tipo_combustivel, a.local, a.valor_unitario, a.litros,
+        COALESCE(NULLIF(f.apelido, ''), f.nome_completo) AS fornecedor, 'abastecimento_historico' AS origem
+      FROM abastecimentos a
+      LEFT JOIN fornecedores_favoritos f ON f.id = a.fornecedor_id
+      WHERE (upper(COALESCE(a.local, '')) = ?1 OR upper(COALESCE(a.trecho, '')) LIKE ?2)
+        AND (?3 = '' OR upper(COALESCE(a.tipo_combustivel, '')) LIKE ?4)
+        AND COALESCE(a.valor_unitario, 0) > 0
+      ORDER BY date(a.data) DESC, a.criado_em DESC LIMIT 20`).bind(icao, `%${icao}%`, tipo, `%${tipo}%`).all(),
+  ])
+  return c.json({ icao, tipo_combustivel: tipo || null, fornecedores: fornecedores.results, historico: historico.results, source: 'controle_abastecimento' })
+})
+
 app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
-  const rows = await c.env.SHARE_DB.prepare(`SELECT id, numero_voo, adep, ades, data_voo, eobt, payload_json, criado_em AS created_at FROM planos_voo ORDER BY criado_em DESC LIMIT 50`).all<any>()
+  await garantirTabelaChecklistPlano(c)
+  const rows = await c.env.SHARE_DB.prepare(`SELECT p.id, p.numero_voo, p.adep, p.ades, p.data_voo, p.eobt, p.payload_json, p.criado_em AS created_at, cp.status AS checklist_status
+    FROM planos_voo p LEFT JOIN checklists_planos_voo cp ON cp.plano_voo_id = p.id
+    ORDER BY p.criado_em DESC LIMIT 50`).all<any>()
   return c.json(rows.results.map(row => ({ ...row, payload: JSON.parse(row.payload_json) })))
 })
 
@@ -3562,6 +3633,82 @@ app.post('/api/interno/planos-voo', async c => {
   await c.env.SHARE_DB.prepare(`INSERT INTO planos_voo (id, numero_voo, adep, ades, data_voo, eobt, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, numeroVoo, adep, ades, dataVoo, eobt, JSON.stringify(body)).run()
   return c.json({ id, created_at: new Date().toISOString() }, 201)
+})
+
+async function garantirTabelaChecklistPlano(c: Context<{ Bindings: Bindings }>) {
+  await c.env.SHARE_DB.prepare(`CREATE TABLE IF NOT EXISTS checklists_planos_voo (
+    id TEXT PRIMARY KEY NOT NULL,
+    plano_voo_id TEXT NOT NULL UNIQUE,
+    itens_json TEXT NOT NULL DEFAULT '{}',
+    observacoes TEXT NULL,
+    status TEXT NOT NULL DEFAULT 'rascunho',
+    executado_por TEXT NULL,
+    executado_por_nome TEXT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    concluido_em TEXT NULL
+  )`).run()
+}
+
+app.get('/api/interno/planos-voo/:id/checklist', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaChecklistPlano(c)
+  const row = await c.env.SHARE_DB.prepare('SELECT id, plano_voo_id, itens_json, observacoes, status, executado_por AS usuario_id, executado_por_nome, criado_em, atualizado_em, concluido_em FROM checklists_planos_voo WHERE plano_voo_id = ?1').bind(c.req.param('id')).first<any>()
+  if (!row) return c.json(null)
+  return c.json({ ...row, itens: JSON.parse(row.itens_json || '{}') })
+})
+
+app.post('/api/interno/planos-voo/:id/checklist', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaChecklistPlano(c)
+  const plano = await c.env.SHARE_DB.prepare('SELECT id FROM planos_voo WHERE id = ?1').bind(c.req.param('id')).first()
+  if (!plano) return c.notFound()
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  const userId = extractSupabaseUserId(c)
+  const executor = userId ? await c.env.SHARE_DB.prepare('SELECT COALESCE(nome_exibicao, nome_completo, email) AS nome FROM user_profiles WHERE id=?1').bind(userId).first<{ nome: string }>() : null
+  const userName = executor?.nome || userId || 'Usuário não identificado'
+  const status = body.status === 'concluido' ? 'concluido' : 'rascunho'
+  const agora = new Date().toISOString()
+  const concluidoEm = status === 'concluido' ? agora : null
+  const id = uuid()
+  await c.env.SHARE_DB.prepare(`INSERT INTO checklists_planos_voo (id, plano_voo_id, itens_json, observacoes, status, executado_por, executado_por_nome, criado_em, atualizado_em, concluido_em)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?8)
+    ON CONFLICT(plano_voo_id) DO UPDATE SET itens_json=excluded.itens_json, observacoes=excluded.observacoes, status=excluded.status, executado_por=excluded.executado_por, executado_por_nome=excluded.executado_por_nome, atualizado_em=CURRENT_TIMESTAMP, concluido_em=excluded.concluido_em`).bind(id, c.req.param('id'), JSON.stringify(body.itens || {}), String(body.observacoes || '').trim() || null, status, userId, userName, concluidoEm).run()
+  const row = await c.env.SHARE_DB.prepare('SELECT id, plano_voo_id, status, atualizado_em, concluido_em FROM checklists_planos_voo WHERE plano_voo_id = ?1').bind(c.req.param('id')).first<any>()
+  return c.json(row, 201)
+})
+
+app.post('/api/interno/planos-voo/:id/pdf', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const planId = c.req.param('id')
+  const plan = await c.env.SHARE_DB.prepare('SELECT id, payload_json FROM planos_voo WHERE id = ?1').bind(planId).first<{ id: string; payload_json: string }>()
+  if (!plan) return c.notFound()
+  const form = await c.req.formData()
+  const file = form.get('arquivo')
+  if (!(file instanceof File) || !file.size || file.type !== 'application/pdf') return c.json({ error: 'pdf_invalido' }, 400)
+  const userId = extractSupabaseUserId(c) || 'interno'
+  const key = await salvarArquivoShareBrasil(c, userId, file, 'planos-voo')
+  const payload = JSON.parse(plan.payload_json || '{}')
+  payload.pdf = { key, nome_arquivo: file.name, salvo_em: new Date().toISOString() }
+  await c.env.SHARE_DB.prepare('UPDATE planos_voo SET payload_json = ?1 WHERE id = ?2').bind(JSON.stringify(payload), planId).run()
+  return c.json({ success: true, nome_arquivo: file.name })
+})
+
+app.get('/api/interno/planos-voo/:id/pdf', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const plan = await c.env.SHARE_DB.prepare('SELECT payload_json FROM planos_voo WHERE id = ?1').bind(c.req.param('id')).first<{ payload_json: string }>()
+  if (!plan) return c.notFound()
+  const payload = JSON.parse(plan.payload_json || '{}')
+  const key = payload?.pdf?.key
+  if (!key) return c.notFound()
+  const object = await shareBrasilBucket(c).get(key)
+  if (!object) return c.notFound()
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('Content-Type', 'application/pdf')
+  headers.set('Content-Disposition', `inline; filename="${shareBrasilFileName(payload.pdf.nome_arquivo || 'plano-voo.pdf')}"`)
+  headers.set('Cache-Control', 'private, max-age=300')
+  return new Response(object.body, { headers })
 })
 
 app.get('/api/interno/agendamento/opcoes', async c => {
