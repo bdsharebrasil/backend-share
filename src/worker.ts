@@ -1606,6 +1606,31 @@ app.get('/api/notam/:icao', async (c) => {
   }
 })
 
+app.get('/api/charts/preview', async (c) => {
+  if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+  const rawUrl = c.req.query('url')
+  if (!rawUrl) return c.json({ error: 'url é obrigatória' }, 400)
+  let chartUrl: URL
+  try {
+    chartUrl = new URL(rawUrl)
+  } catch {
+    return c.json({ error: 'URL da carta inválida' }, 400)
+  }
+  if (chartUrl.protocol !== 'https:' || chartUrl.hostname !== 'aisweb.decea.mil.br') return c.json({ error: 'Domínio da carta não autorizado' }, 400)
+  try {
+    const response = await fetch(chartUrl)
+    if (!response.ok || !response.body) return c.json({ error: `Não foi possível carregar a carta (${response.status})` }, 502)
+    const headers = new Headers()
+    headers.set('Content-Type', response.headers.get('content-type') || 'application/pdf')
+    headers.set('Content-Disposition', c.req.query('download') === '1' ? 'attachment' : 'inline')
+    headers.set('Cache-Control', 'private, max-age=300')
+    return new Response(response.body, { status: 200, headers })
+  } catch (e: any) {
+    log.error('[charts/preview]:', e.message)
+    return c.json({ error: 'Não foi possível carregar a carta' }, 502)
+  }
+})
+
 app.get('/api/charts/:icao', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icao = c.req.param('icao').toUpperCase()
@@ -3037,10 +3062,14 @@ app.post('/api/portal/solicitacoes', async c => {
   if (!clientId) return c.json({ error: 'cliente_nao_vinculado' }, 409)
   const body = await c.req.json<Record<string, unknown>>().catch(() => null)
   if (!body || !body.aeronave_id || !body.origem || !body.destino || !body.data_agendada) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
+  const dataAgendada = String(body.data_agendada).trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataAgendada)) return c.json({ error: 'data_agendada_invalida' }, 400)
+  const horarioPrevisto = body.horario_previsto_agendamento ? normalizarHorarioAgendamento(dataAgendada, body.horario_previsto_agendamento) : null
+  if (body.horario_previsto_agendamento && !horarioPrevisto) return c.json({ error: 'horario_previsto_invalido' }, 400)
   const aircraft = await c.env.SHARE_DB.prepare("SELECT id, status FROM aeronave WHERE id = ?1").bind(String(body.aeronave_id)).first<{ id: string; status: string }>()
   if (!aircraft || aircraft.status.toLowerCase() !== 'ativa') return c.json({ error: 'aeronave_indisponivel' }, 409)
   const id = crypto.randomUUID()
-  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), String(body.data_agendada), body.horario_previsto_agendamento ? String(body.horario_previsto_agendamento) : null, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
+  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), dataAgendada, horarioPrevisto, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
   const row = await c.env.SHARE_DB.prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
   let notificationSent = true
   try {
@@ -3808,6 +3837,8 @@ app.post('/api/interno/agendamento', async c => {
   const aeronaveId = body?.aeronave_id?.trim() || ''
   if (!origem || !destino || !dataAgendada || !dataFim || !aeronaveId) return c.json({ error: 'origem_destino_periodo_e_aeronave_obrigatorios' }, 400)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dataAgendada) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim) || dataFim < dataAgendada) return c.json({ error: 'periodo_invalido' }, 400)
+  const horarioPrevisto = body?.horario_previsto_agendamento ? normalizarHorarioAgendamento(dataAgendada, body.horario_previsto_agendamento) : null
+  if (body?.horario_previsto_agendamento && !horarioPrevisto) return c.json({ error: 'horario_previsto_invalido' }, 400)
   const inicioMs = Date.parse(`${dataAgendada}T00:00:00Z`)
   const fimMs = Date.parse(`${dataFim}T00:00:00Z`)
   const diasDuracao = Math.floor((fimMs - inicioMs) / 86_400_000) + 1
@@ -3846,7 +3877,7 @@ app.post('/api/interno/agendamento', async c => {
   }
   const id = uuid()
   await c.env.SHARE_DB.prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, cliente_emprestimo_id, socio_emprestimo_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, clienteId, socio?.id || null, clienteEmprestimoId, socioEmprestimoId, aeronaveId, vooEmprestado, origem, destino, dataAgendada, body?.horario_previsto_agendamento?.trim() || null, diasDuracao, Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, piloto?.id || null, copiloto?.id || null, null, null).run()
+    .bind(id, clienteId, socio?.id || null, clienteEmprestimoId, socioEmprestimoId, aeronaveId, vooEmprestado, origem, destino, dataAgendada, horarioPrevisto, diasDuracao, Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, piloto?.id || null, copiloto?.id || null, null, null).run()
   return c.json({ id, status: 'pendente', numero_voo: null }, 201)
 })
 
@@ -3972,6 +4003,18 @@ function normalizarHorarioJornada(data: string, valor: unknown, referencia?: str
   return instante.toISOString()
 }
 
+function normalizarHorarioAgendamento(data: string, valor: unknown): string | null {
+  const texto = String(valor ?? '').trim()
+  if (!texto) return null
+  if (/^\d{4}-\d{2}-\d{2}T/.test(texto)) {
+    const instante = new Date(texto)
+    return Number.isFinite(instante.getTime()) ? instante.toISOString() : null
+  }
+  if (!/^\d{2}:\d{2}(?::\d{2})?$/.test(texto)) return null
+  const instante = new Date(`${data}T${texto.length === 5 ? `${texto}:00` : texto}Z`)
+  return Number.isFinite(instante.getTime()) ? instante.toISOString() : null
+}
+
 function minutosEntre(inicio: string | null, fim: string | null): number {
   if (!inicio || !fim) return 0
   const a = new Date(inicio).getTime()
@@ -3999,8 +4042,7 @@ function minutosDaJornada(jornada: any, fimPrevisto?: string | null): number {
   const inicio = jornada.horario_apresentacao || pernas[0]?.horario_ac
   const fimVoo = fimPrevisto || ultima?.horario_corte || ultima?.horario_pouso
   if (!inicio || !fimVoo) return 0
-  const posCorte = Number(jornada.minutos_pos_corte ?? LIMITES_JORNADA.posCorte)
-  return minutosEntre(inicio, fimVoo) + posCorte
+  return minutosEntre(inicio, fimVoo) + LIMITES_JORNADA.posCorte
 }
 
 async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
@@ -4011,7 +4053,7 @@ async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
   const jornada = await db.prepare('SELECT horario_apresentacao, minutos_pos_corte FROM jornadas_voo WHERE id = ?1').bind(jornadaId).first<any>()
   const pernas = await db.prepare('SELECT horario_ac, horario_pouso, horario_corte FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(jornadaId).all<any>()
   const minutos = minutosDaJornada({ ...jornada, pernas: pernas.results || [] })
-  await db.prepare('UPDATE jornadas_voo SET minutos_jornada = ?1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2').bind(minutos || null, jornadaId).run()
+  await db.prepare('UPDATE jornadas_voo SET minutos_pos_corte = 30, minutos_jornada = ?1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2').bind(minutos || null, jornadaId).run()
   return pernas.results || []
 }
 
@@ -4219,6 +4261,9 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const apresentacao = normalizarHorarioJornada(data, body.horario_apresentacao || body.tripulacao_checkin_hora)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || !apresentacao) return c.json({ error: 'data_rota_e_apresentacao_obrigatorias', detail: 'Informe a data, partida, chegada e a apresentação do tripulante.' }, 400)
   const acionamento = normalizarHorarioJornada(data, body.horario_acionamento || body.tempo_ac, apresentacao)
+  if (!acionamento || new Date(acionamento).getTime() - new Date(apresentacao).getTime() !== 30 * 60_000) {
+    return c.json({ error: 'apresentacao_deve_ser_30_minutos_antes_do_acionamento' }, 400)
+  }
   const corteInicio = normalizarHorarioJornada(data, body.horario_pouso, apresentacao)
   const horarioDep = normalizarHorarioJornada(data, body.horario_dep || body.tempo_dep, acionamento || apresentacao)
   const numero = await db.prepare('SELECT COALESCE(MAX(numero_jornada), 0) + 1 AS proximo FROM jornadas_voo WHERE solicitacao_id = ?1').bind(idSolicitacao).first<{ proximo: number }>()
@@ -4232,7 +4277,7 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
          horario_apresentacao, horario_acionamento, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(jornadaId, idSolicitacao, voo.aeronave_id, item.tripulante_id, item.funcao, principalId, numeroJornada, data,
-        apresentacao, acionamento, corteInicio, Number(body.minutos_pos_corte ?? LIMITES_JORNADA.posCorte), horarioDep ? 'em_rota' : 'em_solo',
+        apresentacao, acionamento, corteInicio, LIMITES_JORNADA.posCorte, horarioDep ? 'em_rota' : 'em_solo',
         body.observacoes || null, extractSupabaseUserId(c)).run()
     if (!principalId) {
       principalId = jornadaId
@@ -4241,7 +4286,11 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
     }
     criadas.push(await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(jornadaId).first<any>())
   }
-  await db.prepare("UPDATE solicitacoes_reserva_voo SET status = 'em_voo', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'aprovada'").bind(idSolicitacao).run()
+  await db.prepare(`UPDATE solicitacoes_reserva_voo
+    SET horario_previsto_agendamento = ?1,
+        status = CASE WHEN status = 'aprovada' THEN 'em_voo' ELSE status END,
+        atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ?2`).bind(acionamento, idSolicitacao).run()
   const pernas = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(principalId).all<any>()
   const principal = criadas[0]
   return c.json({
@@ -4265,6 +4314,9 @@ app.patch('/api/interno/jornadas/:id', async c => {
   const ultimaPerna = await db.prepare('SELECT horario_pouso, horario_corte FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero DESC LIMIT 1').bind(atual.jornada_principal_id || atual.id).first<any>()
   const corteInicio = normalizarHorarioJornada(data, body.horario_pouso ?? ultimaPerna?.horario_pouso ?? atual.horario_pouso, acionamento || apresentacao)
   const corteFinal = normalizarHorarioJornada(data, body.horario_corte ?? ultimaPerna?.horario_corte ?? atual.horario_corte, corteInicio || acionamento || apresentacao)
+  if (!apresentacao || !acionamento || new Date(acionamento).getTime() - new Date(apresentacao).getTime() !== 30 * 60_000) {
+    return c.json({ error: 'apresentacao_deve_ser_30_minutos_antes_do_acionamento' }, 400)
+  }
   const status = body.status ?? atual.status
   if (!STATUS_JORNADA.includes(status)) return c.json({ error: 'status_invalido' }, 400)
   let minutos: number | null = atual.minutos_jornada
@@ -4289,12 +4341,16 @@ app.patch('/api/interno/jornadas/:id', async c => {
     }
     for (const { item, limites } of avaliacoes) {
       await db.prepare(`UPDATE jornadas_voo SET horario_apresentacao = ?1, horario_acionamento = ?2, horario_pouso = ?3,
-          horario_corte = ?4, data = ?5, status = 'encerrada', observacoes = ?6, minutos_jornada = ?7, nivel_alerta = ?8
+          horario_corte = ?4, data = ?5, minutos_pos_corte = 30, status = 'encerrada', observacoes = ?6, minutos_jornada = ?7, nivel_alerta = ?8
          WHERE id = ?9`)
         .bind(apresentacao, acionamento, corteInicio, corteFinal, data,
           item.id === atual.id ? (body.observacoes ?? atual.observacoes) : item.observacoes,
           limites.minutos_jornada, limites.nivel_alerta, item.id).run()
     }
+    await db.prepare(`UPDATE solicitacoes_reserva_voo
+      SET horario_previsto_agendamento = ?1,
+          atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ?2`).bind(acionamento, atual.solicitacao_id).run()
     // Encerrar uma jornada não finaliza o agendamento. A solicitação permanece
     // aprovada para permitir outra jornada no mesmo número de voo.
     const atualizada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(atual.id).first<any>()
@@ -4302,9 +4358,13 @@ app.patch('/api/interno/jornadas/:id', async c => {
       tripulantes: avaliacoes.map(({ item, limites }) => ({ id: item.id, tripulante_id: item.tripulante_id, funcao: item.funcao_tripulante, limites })) })
   }
   await db.prepare(`UPDATE jornadas_voo SET horario_apresentacao = ?1, horario_acionamento = ?2, horario_pouso = ?3,
-      horario_corte = ?4, data = ?5, status = ?6, observacoes = ?7, minutos_jornada = ?8, nivel_alerta = ?9
+      horario_corte = ?4, data = ?5, minutos_pos_corte = 30, status = ?6, observacoes = ?7, minutos_jornada = ?8, nivel_alerta = ?9
      WHERE id = ?10`)
     .bind(apresentacao, acionamento, corteInicio, corteFinal, data, status, body.observacoes !== undefined ? body.observacoes : atual.observacoes, minutos, nivel, atual.id).run()
+  await db.prepare(`UPDATE solicitacoes_reserva_voo
+    SET horario_previsto_agendamento = ?1,
+        atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ?2`).bind(acionamento, atual.solicitacao_id).run()
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(atual.id).first<any>()
   return c.json({ ...jornada, limites: await avaliarLimitesJornada(c, jornada) })
 })
