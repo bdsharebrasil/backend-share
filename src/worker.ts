@@ -3952,7 +3952,7 @@ async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
     { table: 'pernas_jornada_voo', columns: ['id', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'status', 'lancamento_diario_id'] },
   ])
 }
-const LIMITES_JORNADA = { dia: 540, semana: 2640, mes: 10560, posCorte: 45 } as const
+const LIMITES_JORNADA = { dia: 540, semana: 2640, mes: 10560, posCorte: 30 } as const
 const STATUS_JORNADA = ['em_solo', 'em_rota', 'encerrada'] as const
 
 function normalizarHorarioJornada(data: string, valor: unknown, referencia?: string | null): string | null {
