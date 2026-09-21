@@ -2843,7 +2843,8 @@ app.get('/api/colaborador/perfil', async c => {
     db.prepare('SELECT id, data_inicio, data_fim, quantidade_dias, status, observacoes, motivo_reprovacao, aprovado_em, criado_em, atualizado_em FROM solicitacoes_ferias WHERE colaborador_id = ?1 ORDER BY data_inicio DESC, criado_em DESC').bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] férias indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT r.id, r.numero_relatorio, r.numero_voo, r.data_inicio, r.data_fim, r.total_valor,
       r.total_tripulante_1, r.total_tripulante_2, r.status, r.status_aprovacao_tripulante,
-      r.status_aprovacao_tripulante_2, r.despesas, r.pdf_url, r.tripulacao_id, r.tripulante_id_2,
+      r.status_aprovacao_tripulante_2, r.aprovado_tripulante_1_em, r.aprovado_tripulante_2_em,
+      r.aprovado_tripulante_em, r.despesas, r.pdf_url, r.tripulacao_id, r.tripulante_id_2,
       a.matricula_registro AS aeronave_matricula
       FROM relatorio_despesa_viagem r LEFT JOIN aeronave a ON a.id = r.aeronave_id
       LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
@@ -4870,6 +4871,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
         enviado_para_tripulante_em = CASE WHEN ? = 1 THEN NULL ELSE enviado_para_tripulante_em END,
         enviado_para_tripulante_2_em = CASE WHEN ? = 1 THEN NULL ELSE enviado_para_tripulante_2_em END,
         aprovado_tripulante_1_em = CASE WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_1_em END,
+        aprovado_tripulante_em = CASE WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END,
         aprovado_tripulante_2_em = CASE WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_2_em END,
         pdf_url = CASE WHEN ? = 1 THEN NULL ELSE pdf_url END,
         pdf_path = CASE WHEN ? = 1 THEN NULL ELSE pdf_path END,
@@ -4884,7 +4886,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
       Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
       Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0),
       emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0,
-      emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0,
+      emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0,
       emAjuste ? 1 : 0, emAjuste ? 1 : 0, id,
     ).run()
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
@@ -5000,13 +5002,25 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     const dateColumn = pos === 1 ? 'aprovado_tripulante_1_em' : 'aprovado_tripulante_2_em'
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
     const decision = body.aprovado ? 'aprovado' : 'reprovado'
-    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.observacoes?.trim() || null, decision, id).run()
+    const nextTripulante1Status = pos === 1 ? decision : report.status_aprovacao_tripulante
+    const nextTripulante2Status = pos === 2 ? decision : report.status_aprovacao_tripulante_2
+    const requiredSecond = despesasRelatorioViagem(report.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/[\s-]+/g, '_') === 'tripulante_2')
+    const nextReportStatus = decision === 'reprovado'
+      ? 'ajuste_necessario'
+      : nextTripulante1Status === 'aprovado' && (!requiredSecond || nextTripulante2Status === 'aprovado')
+        ? 'aprovado'
+        : 'aguardando_aprovacao'
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN CURRENT_TIMESTAMP WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.observacoes?.trim() || null, nextReportStatus, id).run()
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
-    if (body.aprovado) await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id, pos === 1 ? 'tripulante_1' : 'tripulante_2')
+    if (body.aprovado) {
+      try {
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id, pos === 1 ? 'tripulante_1' : 'tripulante_2')
+      } catch (error: any) {
+        log.warn('[relatorio-despesa-viagem:aprovacao-direta-financeiro]', error?.message || error)
+      }
+    }
     if (!body.aprovado) await notifyReportRejection(c, updated, String(body.observacoes || '').trim(), colaborador.id)
-    const requiredSecond = despesasRelatorioViagem(updated?.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/\s/g, '_') === 'tripulante_2')
-    if (body.aprovado && updated?.status_aprovacao_tripulante === 'aprovado' && (!requiredSecond || updated?.status_aprovacao_tripulante_2 === 'aprovado')) await c.env.SHARE_DB.prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run()
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:aprovacao-direta]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_decidir_aprovacao' }, 400) }
 })
@@ -5096,17 +5110,32 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
     const dateColumn = pos === 1 ? 'aprovado_tripulante_1_em' : 'aprovado_tripulante_2_em'
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
     const decision = body.aprovado ? 'aprovado' : 'reprovado'
-    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, ${reasonColumn} = ?, status = CASE WHEN ? = 'reprovado' THEN 'ajuste_necessario' ELSE 'aguardando_aprovacao' END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, body.motivo?.trim() || null, decision, row.id).run()
+    const nextTripulante1Status = pos === 1 ? decision : row.status_aprovacao_tripulante
+    const nextTripulante2Status = pos === 2 ? decision : row.status_aprovacao_tripulante_2
+    const requiredSecond = despesasRelatorioViagem(row.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/[\s-]+/g, '_') === 'tripulante_2')
+    const nextReportStatus = decision === 'reprovado'
+      ? 'ajuste_necessario'
+      : nextTripulante1Status === 'aprovado' && (!requiredSecond || nextTripulante2Status === 'aprovado')
+        ? 'aprovado'
+        : 'aguardando_aprovacao'
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN CURRENT_TIMESTAMP WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.motivo?.trim() || null, nextReportStatus, row.id).run()
     const decidedBy = pos === 1 ? row.user1_id : row.user2_id || ''
     const updatedForNotification = await buscarRelatorioViagemComNomes(c, row.id)
-    if (updatedForNotification) await notifyReportDecision(c, updatedForNotification, decision, String(body.motivo || '').trim(), decidedBy)
+    if (updatedForNotification) {
+      try {
+        await notifyReportDecision(c, updatedForNotification, decision, String(body.motivo || '').trim(), decidedBy)
+      } catch (error: any) {
+        log.warn('[relatorio-despesa-viagem:aprovacao-publica-notificacao]', error?.message || error)
+      }
+    }
     if (body.aprovado) {
       const updated = await buscarRelatorioViagemComNomes(c, row.id)
       if (!updated) return c.notFound()
-      await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, extractSupabaseUserId(c), pos === 1 ? 'tripulante_1' : 'tripulante_2')
-      const requiredSecond = despesasRelatorioViagem(updated?.despesas).some((item: any) => String(item?.pago_por || '').toLowerCase().replace(/\s/g, '_') === 'tripulante_2')
-      const allApproved = updated?.status_aprovacao_tripulante === 'aprovado' && (!requiredSecond || updated?.status_aprovacao_tripulante_2 === 'aprovado')
-      if (allApproved) await c.env.SHARE_DB.prepare("UPDATE relatorio_despesa_viagem SET status = 'aprovado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(row.id).run()
+      try {
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, extractSupabaseUserId(c), pos === 1 ? 'tripulante_1' : 'tripulante_2')
+      } catch (error: any) {
+        log.warn('[relatorio-despesa-viagem:aprovacao-publica-financeiro]', error?.message || error)
+      }
     }
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, row.id), aprovado: body.aprovado })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:aprovacao-publica]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_decidir_aprovacao' }, 400) }
