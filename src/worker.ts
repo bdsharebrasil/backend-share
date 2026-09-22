@@ -89,7 +89,7 @@ app.use('*', async (c, next) => {
   const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
   const corsMiddleware = cors({
     origin: allowed && allowed.length > 0 ? allowed : '*',
-    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowHeaders: ['Content-Type', 'Authorization', 'apikey', 'X-Requested-With'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
   })
   return corsMiddleware(c, next)
@@ -198,7 +198,7 @@ async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Pro
   const authorization = c.req.header('authorization')
   log.debug('[auth] Authorization header present:', Boolean(authorization))
   const { SUPABASE_URL, SUPABASE_ANON_KEY, VITE_SUPABASE_PUBLISHABLE_KEY } = c.env
-  const supabaseApiKey = SUPABASE_ANON_KEY || VITE_SUPABASE_PUBLISHABLE_KEY
+  const supabaseApiKey = SUPABASE_ANON_KEY || VITE_SUPABASE_PUBLISHABLE_KEY || c.req.header('apikey')
 
   if (!authorization?.startsWith('Bearer ')) {
     log.debug('[auth] missing Bearer token')
