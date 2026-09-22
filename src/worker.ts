@@ -3135,6 +3135,12 @@ function diarioBoolean(value: unknown): number {
   return value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0
 }
 
+function diarioText(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  return text || null
+}
+
 async function recalcularDiarioMes(c: Context<{ Bindings: Bindings }>, diarioMesId: string): Promise<void> {
   const db = c.env.SHARE_DB
   const diario = await db.prepare('SELECT id, celula_anterior_ttotal, celula_prox_revisao_ttotal, celula_anterior_tvoo, celula_prox_revisao_tvoo FROM diario_mes WHERE id = ?1').bind(diarioMesId).first<any>()
@@ -3321,7 +3327,7 @@ function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, de
   const consumoVoo = Number((tempoVoo * consumoHora).toFixed(2))
   const consumoTotal = Number((tempoTotal * consumoHora).toFixed(2))
   const row: Record<string, unknown> = {
-    numero_voo: body.numero_voo?.trim() || null, jornada_id: body.jornada_id?.trim() || null, diario_mes_id: defaults.diarioMesId || body.diario_mes_id,
+    numero_voo: diarioText(body.numero_voo), jornada_id: diarioText(body.jornada_id), diario_mes_id: defaults.diarioMesId || body.diario_mes_id,
     aeronave_id: body.aeronave_id, cliente_id: rateioIgual ? null : body.cliente_id || null, holding_id: rateioIgual ? null : body.holding_id || null, socio_id: rateioIgual ? null : body.socio_id || null, voo_emprestado: diarioBoolean(body.voo_emprestado), socio_tomador_emprestimo_id: body.socio_tomador_emprestimo_id || null, cliente_tomador_emprestimo_id: body.cliente_tomador_emprestimo_id || null,
     data_registro: data, aerodromo_partida: partida, aerodromo_chegada: chegada, trecho: body.trecho?.trim() || `${partida} X ${chegada}`,
     pic_canac: String(body.pic_canac || '').trim().toUpperCase(), pic_nome: body.pic_nome?.trim() || null, sic_canac: body.sic_canac?.trim()?.toUpperCase() || null, sic_nome: body.sic_nome?.trim() || null, tripulacao_checkin_hora: body.tripulacao_checkin_hora || null,
