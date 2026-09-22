@@ -3422,6 +3422,19 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (body.data_registro !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.data_registro)) || String(row.data_registro).slice(0, 7) !== `${current.diario_ano || ''}-${String(current.diario_mes || '').padStart(2, '0')}`)) return c.json({ error: 'data_fora_do_mes' }, 400)
   const assignments = updates.filter(([field], index, list) => list.findIndex(([candidate]) => candidate === field) === index)
   await db.prepare(`UPDATE lancamentos_diario_bordo SET ${assignments.map(([field]) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...assignments.map(([, value]) => value), id).run()
+  if (body.abastecido === false || (body.abastecimento && diarioNumber(body.abastecimento.litros) <= 0)) {
+    await db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id).run()
+  } else if (body.abastecimento && diarioNumber(body.abastecimento.litros) > 0) {
+    await garantirTabelaAbastecimentos(c)
+    const abastecimento = body.abastecimento
+    const existente = await db.prepare('SELECT id FROM abastecimentos WHERE lancamento_diario_id = ?1 ORDER BY date(data) DESC, id DESC LIMIT 1').bind(id).first<{ id: string }>()
+    const valores = [abastecimento.cliente_id || null, abastecimento.socio_id || null, current.aeronave_id, abastecimento.data || row.data_registro, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimento.local || row.local_combustivel || row.aerodromo_partida, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Atualizado no Diário de Bordo', extractSupabaseUserId(c), diarioBoolean(body.voo_emprestado ?? current.voo_emprestado), row.numero_voo || current.numero_voo || null]
+    if (existente) {
+      await db.prepare('UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, numero_nf=?, litros=?, valor_unitario=?, valor_total=?, status=?, observacao=?, criado_por=?, voo_emprestado=?, numero_voo=? WHERE id=?').bind(...valores, existente.id).run()
+    } else {
+      await db.prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uuid(), ...valores.slice(0, 15), id, ...valores.slice(15)).run()
+    }
+  }
   await recalcularDiarioMes(c, current.diario_mes_id)
   return c.json(await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first())
 })
