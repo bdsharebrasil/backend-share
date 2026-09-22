@@ -3318,8 +3318,8 @@ function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, de
   const tempoVoo = diarioNumber(body.tempo_voo)
   const tempoTotal = diarioNumber(body.tempo_total, tempoVoo)
   const consumoHora = diarioNumber(aeronave?.consumo_combustivel)
-  const consumoVoo = diarioNumber(body.consumo_combustivel_voo, Number((tempoVoo * consumoHora).toFixed(2)))
-  const consumoTotal = diarioNumber(body.consumo_combustivel_total, Number((tempoTotal * consumoHora).toFixed(2)))
+  const consumoVoo = Number((tempoVoo * consumoHora).toFixed(2))
+  const consumoTotal = Number((tempoTotal * consumoHora).toFixed(2))
   const row: Record<string, unknown> = {
     numero_voo: body.numero_voo?.trim() || null, jornada_id: body.jornada_id?.trim() || null, diario_mes_id: defaults.diarioMesId || body.diario_mes_id,
     aeronave_id: body.aeronave_id, cliente_id: rateioIgual ? null : body.cliente_id || null, holding_id: rateioIgual ? null : body.holding_id || null, socio_id: rateioIgual ? null : body.socio_id || null, voo_emprestado: diarioBoolean(body.voo_emprestado), socio_tomador_emprestimo_id: body.socio_tomador_emprestimo_id || null, cliente_tomador_emprestimo_id: body.cliente_tomador_emprestimo_id || null,
@@ -3365,33 +3365,30 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
   const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac), nomeTripulantePorCanac(c, body.sic_canac), trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)])
   const horario = (valor: string | null) => valor ? String(valor).slice(11, 16) : null
-  const tempoHoras = (inicio: string | null, fim: string | null) => Number((minutosEntre(inicio, fim) / 60).toFixed(2))
-  let calculoSolar = { diurnas: 0, noturnas: 0 }
-  if (pernaVinculada) {
-    try {
-      calculoSolar = await calcularHorasDiurnas(c, pernaVinculada.origem, pernaVinculada.horario_dep, pernaVinculada.horario_pouso)
-    } catch (error: any) {
-      log.error('[diario-bordo] cálculo solar da perna vinculada falhou:', error?.message ?? error)
-      return c.json({ error: 'calculo_solar_indisponivel' }, 502)
-    }
-  }
+  const dadosOperacionais = await calcularDadosOperacionais(c, pernaVinculada ? {
+    ...body,
+    acionamento_utc: pernaVinculada.horario_ac,
+    decolagem_utc: pernaVinculada.horario_dep,
+    pouso_utc: pernaVinculada.horario_pouso,
+    corte_utc: pernaVinculada.horario_corte,
+  } : body, data, pernaVinculada?.origem || body.aerodromo_partida)
   const dadosDaPerna = pernaVinculada ? {
     ...body,
     numero_voo: body.numero_voo || null,
     jornada_id: pernaVinculada.jornada_id,
     aerodromo_partida: pernaVinculada.origem,
     aerodromo_chegada: pernaVinculada.destino,
-    tempo_ac: horario(pernaVinculada.horario_ac),
-    tempo_dep: horario(pernaVinculada.horario_dep),
-    tempo_pou: horario(pernaVinculada.horario_pouso),
-    tempo_cor: horario(pernaVinculada.horario_corte),
-    tempo_voo: tempoHoras(pernaVinculada.horario_dep, pernaVinculada.horario_pouso),
-    tempo_total: tempoHoras(pernaVinculada.horario_ac, pernaVinculada.horario_corte || pernaVinculada.horario_pouso),
-    horas_diurnas: calculoSolar.diurnas,
-    horas_noturnas: calculoSolar.noturnas,
+    tempo_ac: horario(dadosOperacionais.acionamento_utc),
+    tempo_dep: horario(dadosOperacionais.decolagem_utc),
+    tempo_pou: horario(dadosOperacionais.pouso_utc),
+    tempo_cor: horario(dadosOperacionais.corte_utc),
+    tempo_voo: dadosOperacionais.tempo_voo,
+    tempo_total: dadosOperacionais.tempo_total,
+    horas_diurnas: dadosOperacionais.horas_diurnas,
+    horas_noturnas: dadosOperacionais.horas_noturnas,
     pousos_total: pernaVinculada.horario_pouso ? 1 : 0,
   } : body
-  const row = normalizarLancamentoDiario({ ...dadosDaPerna, cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(dadosDaPerna.tempo_total)), criadoPor: extractSupabaseUserId(c) })
+  const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(dadosOperacionais.tempo_total)), criadoPor: extractSupabaseUserId(c) })
   const columns = ['id', ...Object.keys(row)]
   await db.prepare(`INSERT INTO lancamentos_diario_bordo (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).bind(id, ...columns.slice(1).map(column => row[column])).run()
   if (pernaId) {
@@ -3408,7 +3405,7 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   }
   await recalcularDiarioMes(c, diarioMesId)
   const inserted = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
-  return c.json(inserted, 201)
+  return c.json({ ...inserted, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status }, 201)
 })
 
 app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
@@ -3420,13 +3417,17 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (!current) return c.notFound()
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
   const aeronave = await db.prepare('SELECT id, consumo_combustivel FROM aeronave WHERE id = ?1').bind(current.aeronave_id).first<any>()
-  const merged = { ...current, ...body, aeronave_id: current.aeronave_id, diario_mes_id: current.diario_mes_id,
-    consumo_combustivel_voo: body.consumo_combustivel_voo === undefined ? undefined : body.consumo_combustivel_voo,
-    consumo_combustivel_total: body.consumo_combustivel_total === undefined ? undefined : body.consumo_combustivel_total }
+  const merged = { ...current, ...body, aeronave_id: current.aeronave_id, diario_mes_id: current.diario_mes_id }
+  const operacionalInput: Record<string, any> = { ...merged }
+  if (body.horas_noturnas === undefined) delete operacionalInput.horas_noturnas
+  const dadosOperacionais = await calcularDadosOperacionais(c, operacionalInput, String(current.data_registro || '').slice(0, 10), current.aerodromo_partida)
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
   const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac || current.pic_canac), nomeTripulantePorCanac(c, body.sic_canac || current.sic_canac), body.aerodromo_partida || body.aerodromo_chegada ? trechoAerodromosDiario(c, body.aerodromo_partida || current.aerodromo_partida, body.aerodromo_chegada || current.aerodromo_chegada) : Promise.resolve(current.trecho)])
-  const row = normalizarLancamentoDiario({ ...merged, cliente_id: body.cliente_id !== undefined ? String(body.cliente_id || '').trim() || null : current.cliente_id, socio_id: body.socio_id !== undefined ? String(body.socio_id || '').trim() || null : current.socio_id, trecho, pic_nome: nomePic || body.pic_nome || current.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || current.sic_nome || null }, aeronave, { diarioMesId: current.diario_mes_id, sequencial: current.numero_sequencial, criadoPor: current.criado_por })
-  const updates = DIARIO_LANCAMENTO_FIELDS.filter(field => body[field] !== undefined).map(field => [field, row[field]] as const)
+  const row = normalizarLancamentoDiario({ ...merged, ...dadosOperacionais, tempo_ac: dadosOperacionais.acionamento_utc?.slice(11, 16) || null, tempo_dep: dadosOperacionais.decolagem_utc?.slice(11, 16) || null, tempo_pou: dadosOperacionais.pouso_utc?.slice(11, 16) || null, tempo_cor: dadosOperacionais.corte_utc?.slice(11, 16) || null, cliente_id: body.cliente_id !== undefined ? String(body.cliente_id || '').trim() || null : current.cliente_id, socio_id: body.socio_id !== undefined ? String(body.socio_id || '').trim() || null : current.socio_id, trecho, pic_nome: nomePic || body.pic_nome || current.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || current.sic_nome || null }, aeronave, { diarioMesId: current.diario_mes_id, sequencial: current.numero_sequencial, criadoPor: current.criado_por })
+  const timestampsInformados = ['acionamento_utc', 'decolagem_utc', 'pouso_utc', 'corte_utc'].some(field => body[field] !== undefined)
+  const camposOperacionais = ['tempo_ac', 'tempo_dep', 'tempo_pou', 'tempo_cor', 'tempo_voo', 'tempo_total', 'horas_diurnas', 'horas_noturnas', 'consumo_combustivel_voo', 'consumo_combustivel_total']
+  const recalcularOperacionais = timestampsInformados || body.horas_noturnas !== undefined
+  const updates = DIARIO_LANCAMENTO_FIELDS.filter(field => body[field] !== undefined || recalcularOperacionais && camposOperacionais.includes(field)).map(field => [field, row[field]] as const)
   if (body.data_registro !== undefined) updates.push(['data_registro', row.data_registro])
   if (updates.length === 0) return c.json({ error: 'nenhum_campo_informado' }, 400)
   if (body.data_registro !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.data_registro)) || String(row.data_registro).slice(0, 7) !== `${current.diario_ano || ''}-${String(current.diario_mes || '').padStart(2, '0')}`)) return c.json({ error: 'data_fora_do_mes' }, 400)
@@ -3446,7 +3447,8 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
     }
   }
   await recalcularDiarioMes(c, current.diario_mes_id)
-  return c.json(await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first())
+  const updated = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
+  return c.json({ ...updated, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status })
 })
 
 app.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
@@ -4126,6 +4128,54 @@ async function calcularHorasDiurnas(
   }
 }
 
+type DadosOperacionais = {
+  acionamento_utc: string | null
+  decolagem_utc: string | null
+  pouso_utc: string | null
+  corte_utc: string | null
+  tempo_voo: number
+  tempo_total: number
+  horas_diurnas: number
+  horas_noturnas: number
+  solar_status: 'calculated' | 'calculated_manual_night' | 'not_calculated'
+}
+
+async function calcularDadosOperacionais(
+  c: Context<{ Bindings: Bindings }>,
+  body: Record<string, any>,
+  data: string,
+  origem: string | null = body.aerodromo_partida,
+): Promise<DadosOperacionais> {
+  const timestamp = (utc: unknown, legado: unknown, referencia?: string | null) =>
+    normalizarHorarioJornada(data, utc ?? legado, referencia)
+  const acionamento = timestamp(body.acionamento_utc, body.tempo_ac)
+  const decolagem = timestamp(body.decolagem_utc, body.tempo_dep, acionamento)
+  const pouso = timestamp(body.pouso_utc, body.tempo_pou, decolagem || acionamento)
+  const corte = timestamp(body.corte_utc, body.tempo_cor, pouso || decolagem || acionamento)
+  const inicioVoo = decolagem ? new Date(decolagem).getTime() : NaN
+  const fimVoo = pouso ? new Date(pouso).getTime() : NaN
+  const inicioTotal = acionamento ? new Date(acionamento).getTime() : NaN
+  const fimTotal = (corte || pouso) ? new Date(corte || pouso!).getTime() : NaN
+  const tempoVoo = Number((Number.isFinite(inicioVoo) && Number.isFinite(fimVoo) && fimVoo >= inicioVoo ? (fimVoo - inicioVoo) / 3_600_000 : 0).toFixed(2))
+  const tempoTotal = Number((Number.isFinite(inicioTotal) && Number.isFinite(fimTotal) && fimTotal >= inicioTotal ? (fimTotal - inicioTotal) / 3_600_000 : tempoVoo).toFixed(2))
+  const calculoSolar = await calcularHorasDiurnas(c, origem, decolagem, pouso)
+  const temAjusteNoturno = body.horas_noturnas !== undefined && body.horas_noturnas !== null && body.horas_noturnas !== ''
+  const horasNoturnas = temAjusteNoturno
+    ? Number(Math.min(tempoVoo, Math.max(0, diarioNumber(body.horas_noturnas))).toFixed(2))
+    : calculoSolar.noturnas
+  return {
+    acionamento_utc: acionamento,
+    decolagem_utc: decolagem,
+    pouso_utc: pouso,
+    corte_utc: corte,
+    tempo_voo: tempoVoo,
+    tempo_total: tempoTotal,
+    horas_diurnas: temAjusteNoturno ? Number(Math.max(0, tempoVoo - horasNoturnas).toFixed(2)) : calculoSolar.diurnas,
+    horas_noturnas: horasNoturnas,
+    solar_status: temAjusteNoturno ? 'calculated_manual_night' : (decolagem && pouso ? 'calculated' : 'not_calculated'),
+  }
+}
+
 function nivelAlertaJornada(minutos: number, limite: number): 'normal' | 'atencao' | 'critico' | 'excedido' {
   const pct = limite > 0 ? minutos / limite : 0
   return pct > 1 ? 'excedido' : pct >= 0.9 ? 'critico' : pct >= 0.75 ? 'atencao' : 'normal'
@@ -4301,6 +4351,7 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
   const aeronaveId = c.req.param('aeronaveId')
   if (!aeronaveId) return c.json({ voos: [] })
   const db = c.env.SHARE_DB
+  const aeronave = await db.prepare('SELECT consumo_combustivel FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ consumo_combustivel: number | string | null }>()
   const schema = await db.prepare("SELECT name FROM pragma_table_info('jornadas_voo')").all<{ name: string }>().catch(() => ({ results: [] as { name: string }[] }))
   const jornadaColumns = new Set((schema.results || []).map((item) => String(item.name)))
   const pernaSchema = await db.prepare("SELECT name FROM pragma_table_info('pernas_jornada_voo')").all<{ name: string }>().catch(() => ({ results: [] as { name: string }[] }))
@@ -4347,9 +4398,10 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
           const coordenada = (value: unknown) => { const [lat, lon] = String(value || '').split(',').map(Number); return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] as const : null }
           const origem = coordenada(perna.origem_coordenadas); const destino = coordenada(perna.destino_coordenadas)
           const distancia_nm = origem && destino ? Number((haversineKm(origem[0], origem[1], destino[0], destino[1]) * 0.539957).toFixed(1)) : 0
-          const calculoSolar = await calcularHorasDiurnas(c, perna.origem, perna.horario_dep, perna.horario_pouso)
+          const dadosOperacionais = await calcularDadosOperacionais(c, { acionamento_utc: perna.horario_ac, decolagem_utc: perna.horario_dep, pouso_utc: perna.horario_pouso, corte_utc: perna.horario_corte, aerodromo_partida: perna.origem }, String(perna.horario_ac || jornada.data).slice(0, 10), perna.origem)
           const { origem_coordenadas: _origem, destino_coordenadas: _destino, ...publica } = perna
-          return { ...publica, distancia_nm, horas_diurnas: calculoSolar.diurnas, horas_noturnas: calculoSolar.noturnas }
+          const consumoHora = diarioNumber(aeronave?.consumo_combustivel)
+          return { ...publica, distancia_nm, tempo_voo: dadosOperacionais.tempo_voo, tempo_total: dadosOperacionais.tempo_total, horas_diurnas: dadosOperacionais.horas_diurnas, horas_noturnas: dadosOperacionais.horas_noturnas, consumo_combustivel_voo: Number((dadosOperacionais.tempo_voo * consumoHora).toFixed(2)), consumo_combustivel_total: Number((dadosOperacionais.tempo_total * consumoHora).toFixed(2)), solar_status: dadosOperacionais.solar_status }
         }))
         return { ...jornada, pernas: calculadas }
       }))
