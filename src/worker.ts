@@ -3366,6 +3366,15 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac), nomeTripulantePorCanac(c, body.sic_canac), trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)])
   const horario = (valor: string | null) => valor ? String(valor).slice(11, 16) : null
   const tempoHoras = (inicio: string | null, fim: string | null) => Number((minutosEntre(inicio, fim) / 60).toFixed(2))
+  let calculoSolar = { diurnas: 0, noturnas: 0 }
+  if (pernaVinculada) {
+    try {
+      calculoSolar = await calcularHorasDiurnas(c, pernaVinculada.origem, pernaVinculada.horario_dep, pernaVinculada.horario_pouso)
+    } catch (error: any) {
+      log.error('[diario-bordo] cálculo solar da perna vinculada falhou:', error?.message ?? error)
+      return c.json({ error: 'calculo_solar_indisponivel' }, 502)
+    }
+  }
   const dadosDaPerna = pernaVinculada ? {
     ...body,
     numero_voo: body.numero_voo || null,
@@ -3378,7 +3387,8 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
     tempo_cor: horario(pernaVinculada.horario_corte),
     tempo_voo: tempoHoras(pernaVinculada.horario_dep, pernaVinculada.horario_pouso),
     tempo_total: tempoHoras(pernaVinculada.horario_ac, pernaVinculada.horario_corte || pernaVinculada.horario_pouso),
-    horas_diurnas: tempoHoras(pernaVinculada.horario_dep, pernaVinculada.horario_pouso),
+    horas_diurnas: calculoSolar.diurnas,
+    horas_noturnas: calculoSolar.noturnas,
     pousos_total: pernaVinculada.horario_pouso ? 1 : 0,
   } : body
   const row = normalizarLancamentoDiario({ ...dadosDaPerna, cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(dadosDaPerna.tempo_total)), criadoPor: extractSupabaseUserId(c) })
@@ -3727,7 +3737,7 @@ app.post('/api/interno/planos-voo/:id/pdf', async c => {
   const plan = await c.env.SHARE_DB.prepare('SELECT id, payload_json FROM planos_voo WHERE id = ?1').bind(planId).first<{ id: string; payload_json: string }>()
   if (!plan) return c.notFound()
   const form = await c.req.formData()
-  const file = form.get('arquivo')
+  const file = form.get('arquivo') as File | null
   if (!(file instanceof File) || !file.size || file.type !== 'application/pdf') return c.json({ error: 'pdf_invalido' }, 400)
   const userId = extractSupabaseUserId(c) || 'interno'
   const key = await salvarArquivoShareBrasil(c, userId, file, 'planos-voo')
@@ -4066,6 +4076,56 @@ function minutosEntre(inicio: string | null, fim: string | null): number {
   return ajustado - a <= 86_400_000 ? Math.round((ajustado - a) / 60000) : 0
 }
 
+function dataUtc(timestamp: number): string {
+  return new Date(timestamp).toISOString().slice(0, 10)
+}
+
+function instanteSolarUtc(data: string, valor: unknown): number | null {
+  const texto = String(valor ?? '').trim()
+  if (!texto) return null
+  const normalizado = texto.replace(/^(\d{4})(\d{2})(\d{2})\s+/, '$1-$2-$3T')
+  const candidato = /^\d{4}-\d{2}-\d{2}T/.test(normalizado)
+    ? normalizado
+    : `${data}T${normalizado}${/Z$|[+-]\d{2}:?\d{2}$/.test(normalizado) ? '' : 'Z'}`
+  const timestamp = Date.parse(candidato)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+async function calcularHorasDiurnas(
+  c: Context<{ Bindings: Bindings }>,
+  origem: string | null,
+  partida: string | null,
+  pouso: string | null,
+): Promise<{ diurnas: number; noturnas: number }> {
+  const inicio = partida ? new Date(partida).getTime() : NaN
+  const fim = pouso ? new Date(pouso).getTime() : NaN
+  const icao = String(origem ?? '').trim().toUpperCase()
+  if (!icao || !Number.isFinite(inicio) || !Number.isFinite(fim) || fim <= inicio) return { diurnas: 0, noturnas: 0 }
+
+  const totalMs = fim - inicio
+  const datas: string[] = []
+  for (let cursor = Date.parse(`${dataUtc(inicio)}T00:00:00Z`); cursor <= fim; cursor += 86_400_000) {
+    datas.push(dataUtc(cursor))
+  }
+  const dias = await Promise.all(datas.map(async (data) => {
+    const dataDecea = data.replace(/-/g, '')
+    const payload = await cachedFetch(c, `solar-${icao}-${dataDecea}`, 86_400, () => fetchAisweb(c, 'sol', { icaoCode: icao, date: dataDecea }))
+    const itens = Array.isArray(payload) ? payload : (payload?.sol ?? [payload])
+    const esperado = data.replace(/\D/g, '')
+    const item = itens.find((dia: any) => String(dia?.date ?? dia?.data ?? '').replace(/\D/g, '') === esperado) || (itens.length === 1 && !itens[0]?.date && !itens[0]?.data ? itens[0] : null)
+    const nascer = instanteSolarUtc(data, item?.nascer ?? item?.sunrise)
+    const poente = instanteSolarUtc(data, item?.poente ?? item?.sunset)
+    if (nascer === null || poente === null || poente <= nascer) throw new Error(`DECEA não retornou nascer/pôr do sol para ${icao} em ${data}`)
+    return Math.max(0, Math.min(fim, poente) - Math.max(inicio, nascer))
+  }))
+  const diurnas = dias.reduce((total, valor) => total + valor, 0) / 3_600_000
+  const tempoVoo = totalMs / 3_600_000
+  return {
+    diurnas: Number(diurnas.toFixed(2)),
+    noturnas: Number(Math.max(0, tempoVoo - diurnas).toFixed(2)),
+  }
+}
+
 function nivelAlertaJornada(minutos: number, limite: number): 'normal' | 'atencao' | 'critico' | 'excedido' {
   const pct = limite > 0 ? minutos / limite : 0
   return pct > 1 ? 'excedido' : pct >= 0.9 ? 'critico' : pct >= 0.75 ? 'atencao' : 'normal'
@@ -4214,9 +4274,10 @@ app.get('/api/interno/diario-bordo/preenchimento-jornada/:id', async c => {
   const pernas = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ? ORDER BY numero').bind(jornadaId).all<any>()
   const hhmm = (iso: string | null) => (iso ? String(iso).slice(11, 16) : null)
   const horas = (ini: string | null, fim: string | null) => Math.round((minutosEntre(ini, fim) / 60) * 100) / 100
-  const preenchimentos = pernas.results.map((perna: any) => {
+  const preenchimentos = await Promise.all(pernas.results.map(async (perna: any) => {
     const tempoVoo = horas(perna.horario_dep, perna.horario_pouso)
     const tempoTotal = horas(perna.horario_ac, perna.horario_corte || perna.horario_pouso)
+    const calculoSolar = await calcularHorasDiurnas(c, perna.origem, perna.horario_dep, perna.horario_pouso)
     return {
       perna_jornada_id: perna.id, ja_lancado: Boolean(perna.lancamento_diario_id), lancamento_diario_id: perna.lancamento_diario_id || null,
       data_registro: String(perna.horario_ac || jornada.data).slice(0, 10), numero_voo: jornada.numero_voo || null, jornada_id: jornada.id,
@@ -4226,9 +4287,9 @@ app.get('/api/interno/diario-bordo/preenchimento-jornada/:id', async c => {
       pic_canac: jornada.pic_canac || '', pic_nome: jornada.pic_nome || null, sic_canac: jornada.sic_canac || null, sic_nome: jornada.sic_nome || null,
       tripulacao_checkin_hora: hhmm(jornada.horario_apresentacao), tempo_ac: hhmm(perna.horario_ac), tempo_dep: hhmm(perna.horario_dep),
       tempo_pou: hhmm(perna.horario_pouso), tempo_cor: hhmm(perna.horario_corte), tempo_voo: tempoVoo,
-      tempo_total: tempoTotal || tempoVoo, horas_diurnas: tempoVoo, pousos_total: perna.horario_pouso ? 1 : 0, passageiros: perna.numero_passageiros ?? 0,
+      tempo_total: tempoTotal || tempoVoo, horas_diurnas: calculoSolar.diurnas, horas_noturnas: calculoSolar.noturnas, pousos_total: perna.horario_pouso ? 1 : 0, passageiros: perna.numero_passageiros ?? 0,
     }
-  })
+  }))
   return c.json({ jornada_id: jornada.id, solicitacao_id: jornada.solicitacao_id, aeronave_id: jornada.aeronave_id, pernas: preenchimentos })
 })
 
@@ -4282,13 +4343,14 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
           LEFT JOIN aerodromo ad ON upper(ad.designativo_icao) = upper(p.destino)
           WHERE p.jornada_id = ?1 ORDER BY p.numero
         `).bind(jornada.jornada_id).all<any>()
-        const calculadas = (pernas.results || []).map((perna: any) => {
+        const calculadas = await Promise.all((pernas.results || []).map(async (perna: any) => {
           const coordenada = (value: unknown) => { const [lat, lon] = String(value || '').split(',').map(Number); return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] as const : null }
           const origem = coordenada(perna.origem_coordenadas); const destino = coordenada(perna.destino_coordenadas)
           const distancia_nm = origem && destino ? Number((haversineKm(origem[0], origem[1], destino[0], destino[1]) * 0.539957).toFixed(1)) : 0
+          const calculoSolar = await calcularHorasDiurnas(c, perna.origem, perna.horario_dep, perna.horario_pouso)
           const { origem_coordenadas: _origem, destino_coordenadas: _destino, ...publica } = perna
-          return { ...publica, distancia_nm }
-        })
+          return { ...publica, distancia_nm, horas_diurnas: calculoSolar.diurnas, horas_noturnas: calculoSolar.noturnas }
+        }))
         return { ...jornada, pernas: calculadas }
       }))
       return { ...voo, jornadas: jornadasComPernas }
