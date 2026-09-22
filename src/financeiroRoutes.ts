@@ -230,6 +230,72 @@ function mapConta(row: Record<string, unknown>): Record<string, unknown> {
   }
 }
 
+function periodoFinanceiro(periodo: string | undefined): { inicio?: string; fim?: string } {
+  if (!periodo || !/^\\d{4}-\\d{2}$/.test(periodo)) return {}
+  const [ano, mes] = periodo.split('-').map(Number)
+  return {
+    inicio: `${periodo}-01`,
+    fim: new Date(Date.UTC(ano, mes, 0)).toISOString().slice(0, 10),
+  }
+}
+
+function statusFinanceiro(status: unknown): string {
+  const value = String(status ?? '').toUpperCase()
+  if (value === 'EM_ABERTO') return 'Pendente'
+  if (value === 'EM_ATRASO' || value === 'ATRASADO') return 'Atrasado'
+  if (value === 'RECEBIDO') return 'Recebido'
+  if (value === 'PAGO' || value === 'PAGO_DIRETAMENTE' || value === 'REEMBOLSADO') return 'Pago'
+  if (value === 'CANCELADO') return 'Cancelado'
+  return 'Pendente'
+}
+
+function valorReais(row: Record<string, unknown>, field = 'valor_centavos'): number {
+  return Number(row[field] ?? 0) / 100
+}
+
+async function dashboardShare(c: any) {
+  const db = c.env.SHARE_DB
+  const { inicio, fim } = periodoFinanceiro(c.req.query('periodo'))
+  const aeronave = c.req.query('aeronave')
+  const filtros: string[] = []
+  const params: unknown[] = []
+  if (inicio) { filtros.push('date(COALESCE(l.data_emissao, l.criado_em)) >= date(?)'); params.push(inicio) }
+  if (fim) { filtros.push('date(COALESCE(l.data_emissao, l.criado_em)) <= date(?)'); params.push(fim) }
+  if (aeronave && aeronave !== 'Todas as aeronaves') { filtros.push('a.matricula_registro = ?'); params.push(aeronave) }
+  const where = filtros.length ? `WHERE ${filtros.join(' AND ')}` : ''
+  const [lancamentos, pagar, receber, reembolsos, categorias] = await Promise.all([
+    listar(db, `SELECT l.*, a.matricula_registro AS aeronave, cb.banco AS banco_pagamento_nome FROM lancamentos l LEFT JOIN aeronave a ON a.id = l.aeronave_id LEFT JOIN contas_bancarias cb ON cb.id = l.conta_bancaria_id ${where} ORDER BY date(COALESCE(l.data_emissao, l.criado_em)) DESC LIMIT 1000`, ...params),
+    listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id, a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id LEFT JOIN aeronave a ON a.id = cp.aeronave_id ${aeronave && aeronave !== 'Todas as aeronaves' ? 'WHERE a.matricula_registro = ?' : ''} ORDER BY date(cp.data_vencimento) ASC LIMIT 500`, ...(aeronave && aeronave !== 'Todas as aeronaves' ? [aeronave] : [])),
+    listar(db, `SELECT cr.*, l.numero_doc, l.numero_nf, l.aeronave_id, a.matricula_registro AS aeronave, COALESCE(l.descricao, cr.descricao) AS descricao_real FROM contas_areceber cr LEFT JOIN lancamentos l ON l.id = cr.lancamentos_id LEFT JOIN aeronave a ON a.id = cr.aeronave_id ${aeronave && aeronave !== 'Todas as aeronaves' ? 'WHERE a.matricula_registro = ?' : ''} ORDER BY date(cr.data_vencimento) ASC LIMIT 500`, ...(aeronave && aeronave !== 'Todas as aeronaves' ? [aeronave] : [])),
+    listar(db, `SELECT r.*, l.descricao, l.aeronave_id, a.matricula_registro AS aeronave, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, r.cotista_id) AS cotista_nome, COALESCE((SELECT SUM(rp.valor_centavos) FROM rateio_pagamentos rp WHERE rp.conta_receber_id = r.conta_receber_id AND rp.status = 'CONFIRMADO'), 0) AS valor_recebido_centavos FROM reembolsos r LEFT JOIN lancamentos l ON l.id = r.lancamento_origem_id LEFT JOIN aeronave a ON a.id = l.aeronave_id LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY r.criado_em DESC LIMIT 500`),
+    listar(db, `SELECT COALESCE(l.categoria_nome, 'Sem categoria') AS nome, SUM(CASE WHEN l.fluxo IN ('SAIDA','DESPESA') THEN l.valor_centavos ELSE 0 END) AS valor FROM lancamentos l LEFT JOIN aeronave a ON a.id = l.aeronave_id ${where} GROUP BY COALESCE(l.categoria_nome, 'Sem categoria') ORDER BY valor DESC LIMIT 12`, ...params),
+  ])
+  const saidas = lancamentos.filter((row) => ['SAIDA', 'DESPESA'].includes(String(row.fluxo ?? '').toUpperCase()))
+  const entradas = lancamentos.filter((row) => ['ENTRADA', 'RECEITA'].includes(String(row.fluxo ?? '').toUpperCase()))
+  const total = (rows: Record<string, unknown>[]) => rows.reduce((sum, row) => sum + valorReais(row), 0)
+  const porMes = new Map<string, { mes: string; entradas: number; saidas: number; saldo: number }>()
+  lancamentos.forEach((row) => {
+    const mes = String(row.data_emissao ?? row.criado_em ?? '').slice(0, 7)
+    if (!mes) return
+    const atual = porMes.get(mes) ?? { mes, entradas: 0, saidas: 0, saldo: 0 }
+    const value = valorReais(row)
+    if (['ENTRADA', 'RECEITA'].includes(String(row.fluxo ?? '').toUpperCase())) atual.entradas += value
+    else atual.saidas += value
+    atual.saldo = atual.entradas - atual.saidas
+    porMes.set(mes, atual)
+  })
+  const payables = pagar.map((row) => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao ?? row.lancamento_descricao, fornecedor: row.fornecedor_nome ?? 'Não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', cotistaCliente: row.cotista_aeronave_id ?? 'Share Brasil', valor: valorReais(row), status: statusFinanceiro(row.status), documento: row.numero_nf ?? row.numero_doc ?? '', banco: row.banco_pagamento_nome ?? null }))
+  const receivables = receber.map((row) => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao_real ?? 'Recebimento', cliente: row.cotista_id ?? 'Cliente não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', valor: valorReais(row), status: statusFinanceiro(row.status), banco: row.banco_recebimento ?? null, nf: row.numero_nf ?? row.numero_doc ?? null }))
+  const reimbursements = reembolsos.map((row) => { const totalCentavos = Number(row.valor_centavos ?? 0); const recebidoCentavos = Number(row.valor_recebido_centavos ?? 0); return { id: row.id, despesa: row.descricao ?? 'Reembolso', aeronave: row.aeronave ?? 'Todas', clienteCotista: row.cotista_nome ?? row.cotista_id ?? 'Não informado', valorTotal: totalCentavos / 100, valorDevido: totalCentavos / 100, valorRecebido: recebidoCentavos / 100, valorPendente: Math.max(0, totalCentavos - recebidoCentavos) / 100, status: statusFinanceiro(row.status), pagoPor: 'Share Brasil', origem: 'D1 / reembolsos' } })
+  return c.json({ live: true, kpis: [
+    { label: 'A pagar', value: total(pagar).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${pagar.length} títulos`, helper: 'obrigações no D1', tone: 'warning' },
+    { label: 'A receber', value: total(receber).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${receber.length} títulos`, helper: 'recebíveis no D1', tone: 'info' },
+    { label: 'Reembolsos pendentes', value: total(reembolsos.filter((row) => !['RECEBIDO', 'REEMBOLSADO'].includes(String(row.status).toUpperCase()))).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${reembolsos.length} registros`, helper: 'aptos para acompanhamento', tone: 'special' },
+    { label: 'Entradas no período', value: total(entradas).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${entradas.length} lançamentos`, helper: 'caixa realizado', tone: 'success' },
+    { label: 'Saídas no período', value: total(saidas).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${saidas.length} lançamentos`, helper: 'despesas registradas', tone: 'default' },
+  ], cashFlow: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), categories: categorias.map((row, index) => ({ name: row.nome, value: Number(row.valor ?? 0) / 100, fill: ['var(--chart-cyan)', 'var(--chart-blue)', 'var(--chart-indigo)', 'var(--chart-violet)', 'var(--chart-slate)'][index % 5] })), payables, receivables, reimbursements, salaries: [] })
+}
+
 async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber') {
   const status = c.req.query('status')
   const cotistaId = c.req.query('cotistaId')
@@ -265,6 +331,30 @@ financeiroRoutes.get('/schema/validate', async (c) => {
   } catch (error) {
     return errorResponse(c, error)
   }
+})
+
+financeiroRoutes.get('/share', async (c) => {
+  try { return await dashboardShare(c) } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/cotista', async (c) => {
+  try {
+    const url = new URL(c.req.url)
+    url.pathname = '/cotista/dashboard'
+    const aeronave = c.req.query('aeronave')
+    const cotista = c.req.query('cotista')
+    const periodo = c.req.query('periodo')
+    if (aeronave && aeronave !== 'Todas as aeronaves') url.searchParams.set('aeronave_id', aeronave)
+    if (cotista && cotista !== 'Todos os cotistas') {
+      const encontrado = await c.env.SHARE_DB.prepare(`SELECT ca.id FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id = ? OR upper(COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, '')) = upper(?) LIMIT 1`).bind(cotista, cotista).first<{ id: string }>()
+      if (encontrado?.id) url.searchParams.set('cotista_id', encontrado.id)
+    }
+    if (periodo && /^\\d{4}-\\d{2}$/.test(periodo)) { const [ano, mes] = periodo.split('-').map(Number); url.searchParams.set('inicio', `${periodo}-01`); url.searchParams.set('fim', new Date(Date.UTC(ano, mes, 0)).toISOString().slice(0, 10)) }
+    url.searchParams.delete('aeronave')
+    url.searchParams.delete('cotista')
+    url.searchParams.delete('periodo')
+    return financeiroRoutes.fetch(new Request(url, c.req.raw), c.env, c.executionCtx)
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.get('/contas-apagar', async (c) => {
@@ -593,29 +683,46 @@ financeiroRoutes.get('/dashboard/financeiro/movimentacoes', async (c) => {
 
 financeiroRoutes.get('/cotista/dashboard', async (c) => {
   try {
+    const inicio = c.req.query('inicio')
+    const fim = c.req.query('fim')
+    const aeronaveId = c.req.query('aeronave_id')
+    const cotistaId = c.req.query('cotista_id')
+    const filtrosCliente: string[] = []
+    const filtrosHolding: string[] = []
+    const paramsCliente: unknown[] = []
+    const paramsHolding: unknown[] = []
+    if (inicio) { filtrosCliente.push('date(r.data_emissao) >= date(?)'); paramsCliente.push(inicio); filtrosHolding.push('date(r.data_emissao) >= date(?)'); paramsHolding.push(inicio) }
+    if (fim) { filtrosCliente.push('date(r.data_emissao) <= date(?)'); paramsCliente.push(fim); filtrosHolding.push('date(r.data_emissao) <= date(?)'); paramsHolding.push(fim) }
+    if (aeronaveId) { filtrosCliente.push('r.aeronave_id = ?'); paramsCliente.push(aeronaveId); filtrosHolding.push('r.aeronave_id = ?'); paramsHolding.push(aeronaveId) }
+    if (cotistaId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaId); filtrosHolding.push('r.socio_id = ?'); paramsHolding.push(cotistaId) }
     const rows = await listar(c.env.SHARE_DB, `
-      SELECT id, data_emissao AS data, descricao_despesa AS descricao,
-             NULL AS numero_doc, fornecedor_id, categoria_nome, NULL AS grupo_categoria,
-             data_vencimento, 'SAIDA' AS fluxo, valor_rateado_centavos AS valor_centavos,
-             pago_por_cotista_id AS pago_por, 'CLIENTE' AS tipo_caixa,
-             pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado,
-             status, observacoes, 'rateio_despesas' AS origem_rateio
-        FROM rateio_despesas
+      SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
+             r.documento_numero AS numero_doc, r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
+             r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
+             r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por_cotista_id AS pago_por, 'CLIENTE' AS tipo_caixa,
+             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes, 'rateio_despesas' AS origem_rateio
+        FROM rateio_despesas r
+        ${filtrosCliente.length ? `WHERE ${filtrosCliente.join(' AND ')}` : ''}
       UNION ALL
-      SELECT id, data_emissao AS data, descricao_despesa AS descricao,
-              NULL AS numero_doc, NULL AS fornecedor_id, categoria_nome, NULL AS grupo_categoria,
-             data_vencimento, 'SAIDA' AS fluxo, valor_rateado_centavos AS valor_centavos,
-             pago_por_socio_id AS pago_por, 'HOLDING' AS tipo_caixa,
-             pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado,
-             status, observacoes, 'rateio_hold' AS origem_rateio
-        FROM rateio_hold
-      ORDER BY data DESC, id DESC
-       LIMIT 500
-    `)
-    const lancamentos = rows.map((row) => ({ id: row.id, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
-    const entradas = lancamentos.filter((row) => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
-    const saidas = lancamentos.filter((row) => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
-    return c.json({ lancamentos, saldos: [], matrizCompensacao: {}, holdings: [], resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: saidas, pendentes: lancamentos.filter((row) => row.status === 'EM_ABERTO').length, media_mensal: 0, media_lancamento: lancamentos.length ? (entradas + saidas) / lancamentos.length : 0 }, fechamento_mensal: [], ranking_gastos: [], ranking_cotistas: [] })
+      SELECT r.id, r.aeronave_id, r.socio_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
+             r.documento_numero AS numero_doc, NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
+             r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
+             r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por_socio_id AS pago_por, 'HOLDING' AS tipo_caixa,
+             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes, 'rateio_hold' AS origem_rateio
+        FROM rateio_hold r
+        ${filtrosHolding.length ? `WHERE ${filtrosHolding.join(' AND ')}` : ''}
+      ORDER BY data DESC, id DESC LIMIT 1000
+    `, ...paramsCliente, ...paramsHolding)
+    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
+    const saidas = lancamentos.reduce((total, row) => total + row.valorCentavos / 100, 0)
+    const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()
+    const porCategoria = new Map<string, { valor: number; quantidade: number; grupo: string }>()
+    rows.forEach((row) => {
+      const mes = String(row.data ?? '').slice(0, 7)
+      if (mes) { const atual = porMes.get(mes) ?? { mes, entradas: 0, saidas: 0, custoRateado: 0, lancamentos: 0, saldo: 0, mediaPorLancamento: 0 }; atual.saidas += Number(row.valor_centavos || 0) / 100; atual.custoRateado += Number(row.valor_rateado_centavos || 0) / 100; atual.lancamentos += 1; atual.saldo = atual.entradas - atual.saidas; atual.mediaPorLancamento = atual.lancamentos ? atual.saidas / atual.lancamentos : 0; porMes.set(mes, atual) }
+      const categoria = String(row.categoria_nome ?? 'SEM CATEGORIA'); const atual = porCategoria.get(categoria) ?? { valor: 0, quantidade: 0, grupo: String(row.grupo_categoria ?? '') }; atual.valor += Number(row.valor_centavos || 0) / 100; atual.quantidade += 1; porCategoria.set(categoria, atual)
+    })
+    return c.json({ lancamentos, saldos: [], matrizCompensacao: {}, holdings: [], resumo: { entradas: 0, saidas, saldo: -saidas, custo_rateado: saidas, pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status))).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -659,6 +766,75 @@ financeiroRoutes.post('/reembolsos', async (c) => {
   } catch (error) {
     return errorResponse(c, error)
   }
+})
+
+financeiroRoutes.patch('/lancamentos/:id', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    const body = await c.req.json<Record<string, unknown>>()
+    const atual = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
+    if (!atual) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
+    const allowed = ['descricao', 'data_emissao', 'data_vencimento', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'observacoes', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+    const values = allowed.filter((field) => Object.prototype.hasOwnProperty.call(body, field)).map((field) => [field, body[field] ?? null] as const)
+    if (body.valor_centavos != null || body.valorCentavos != null) {
+      const amount = Number(body.valor_centavos ?? body.valorCentavos)
+      if (!Number.isInteger(amount) || amount <= 0) return c.json({ error: 'valor_centavos_invalido' }, 400)
+      values.push(['valor_centavos', amount])
+    }
+    if (!values.length) return c.json({ error: 'nenhum_campo_para_atualizar' }, 400)
+    const assignments = values.map(([field]) => `${field} = ?`).join(', ')
+    await db.batch([
+      db.prepare(`UPDATE lancamentos SET ${assignments}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...values.map(([, value]) => value), id),
+      ...(values.some(([field]) => field === 'valor_centavos') ? [db.prepare('UPDATE contas_apagar SET valor_centavos = ? WHERE lancamentos_id = ?').bind(values.find(([field]) => field === 'valor_centavos')?.[1], id), db.prepare('UPDATE contas_areceber SET valor_centavos = ? WHERE lancamentos_id = ?').bind(values.find(([field]) => field === 'valor_centavos')?.[1], id)] : []),
+    ])
+    return c.json(await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(id).first())
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/lancamentos/:id/duplicar', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const source = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
+    if (!source) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const payload = { descricao: body.descricao ?? source.descricao, data: body.data ?? source.data_emissao, data_emissao: body.data_emissao ?? body.data ?? source.data_emissao, data_vencimento: body.data_vencimento ?? source.data_vencimento, valor_centavos: body.valor_centavos ?? source.valor_centavos, categoria_id: source.categoria_id, categoria_nome: source.categoria_nome, grupo_categoria: source.grupo_categoria, fornecedor_nome: source.fornecedor_nome, aeronave_id: source.aeronave_id, cotista_aeronave_id: source.cotista_aeronave_id, tipo_caixa: source.tipo_caixa, reembolsavel: source.reembolsavel, idempotency_key: `duplicado:${source.id}:${crypto.randomUUID()}` }
+    const result = String(source.fluxo).toUpperCase() === 'ENTRADA' || String(source.fluxo).toUpperCase() === 'RECEITA' ? await issueRevenue(db, payload, c.get('userId') || null) : await createExpense(db, payload, c.get('userId') || null)
+    return c.json(result, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/lancamentos/:id/anexos', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    const row = await db.prepare('SELECT anexos_json FROM lancamentos WHERE id = ?').bind(id).first<{ anexos_json?: string }>()
+    if (!row) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
+    const body = await c.req.json<Record<string, unknown>>()
+    const anexo = { id: crypto.randomUUID(), nome: String(body.nome ?? '').trim(), url: String(body.url ?? '').trim(), tipo: String(body.tipo ?? 'documento'), numero: body.numero ? String(body.numero) : null }
+    if (!anexo.nome || !anexo.url) return c.json({ error: 'nome_e_url_obrigatorios' }, 400)
+    const antigos = JSON.parse(String(row.anexos_json || '[]'))
+    const anexos = Array.isArray(antigos) ? [...antigos, anexo] : [anexo]
+    await db.prepare('UPDATE lancamentos SET anexos_json = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(anexos), id).run()
+    return c.json({ anexo }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/contas-apagar/:id/agendar', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const row = await db.prepare('SELECT id, lancamentos_id, status FROM contas_apagar WHERE id = ?').bind(id).first<Record<string, unknown>>()
+    if (!row) return c.json({ error: 'conta_a_pagar_nao_encontrada' }, 404)
+    if (String(row.status).toUpperCase() === 'PAGO') return c.json({ error: 'conta_ja_paga' }, 409)
+    const observacao = String(body.observacoes ?? 'Pagamento agendado').trim()
+    await db.batch([
+      db.prepare("UPDATE contas_apagar SET status = 'EM_ABERTO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id),
+      ...(row.lancamentos_id ? [db.prepare('UPDATE lancamentos SET observacoes = CASE WHEN observacoes IS NULL OR observacoes = \'\' THEN ? ELSE observacoes || \'\\n\' || ? END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(observacao, observacao, row.lancamentos_id)] : []),
+    ])
+    return c.json({ ok: true, id, status: 'Agendado' })
+  } catch (error) { return errorResponse(c, error) }
 })
 
 const DEMONSTRATIVO_IA_PROMPT = (tipo: string) => `Você é um EXTRATOR DE DADOS estritamente fiel de demonstrativos/faturas de tarifas aeroportuárias e de navegação aérea brasileiras.
@@ -1131,21 +1307,7 @@ financeiroRoutes.patch('/envios-pagamento/:id', async (c) => {
   const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
   const allowed = new Set(['PENDENTE', 'APROVADO', 'CONVERTIDO', 'CANCELADO', 'EMAIL_ENVIADO'])
   if (!body.status || !allowed.has(body.status)) return c.json({ error: 'status_solicitacao_invalido' }, 400)
-  let statusFinal = body.status
-  if (body.status === 'EMAIL_ENVIADO') {
-    const request = await c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
-    if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
-    // A solicitação só é considerada enviada depois de materializar o
-    // lançamento e os rateios. A conversão é idempotente, portanto o botão
-    // explícito de converter continua seguro para versões antigas do front.
-    if (request.tipo === 'reembolso' || request.tipo === 'cliente') {
-      try {
-        await convertPaymentRequest(c.env.SHARE_DB, request, createExpense, c.get('userId') || null)
-        statusFinal = 'CONVERTIDO'
-      } catch (error) { return errorResponse(c, error) }
-    }
-  }
-  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(statusFinal, c.req.param('id')).run()
+  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, c.req.param('id')).run()
   return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first().then((row) => c.json(row))
 })
 
