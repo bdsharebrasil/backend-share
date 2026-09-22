@@ -197,8 +197,8 @@ function escapeHtml(value: string | number): string {
 async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
   const authorization = c.req.header('authorization')
   log.debug('[auth] Authorization header present:', Boolean(authorization))
-  const { SUPABASE_URL, SUPABASE_ANON_KEY, VITE_SUPABASE_PUBLISHABLE_KEY } = c.env
-  const supabaseApiKey = SUPABASE_ANON_KEY || VITE_SUPABASE_PUBLISHABLE_KEY || c.req.header('apikey')
+  const { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, VITE_SUPABASE_PUBLISHABLE_KEY } = c.env
+  const supabaseApiKey = SUPABASE_ANON_KEY || VITE_SUPABASE_PUBLISHABLE_KEY || SUPABASE_SERVICE_ROLE_KEY || c.req.header('apikey')
 
   if (!authorization?.startsWith('Bearer ')) {
     log.debug('[auth] missing Bearer token')
@@ -1069,7 +1069,7 @@ async function authenticatedColaborador(c: Context<{ Bindings: Bindings }>): Pro
 async function authenticatedColaboradorToken(c: Context<{ Bindings: Bindings }>, token: string): Promise<Colaborador | null> {
   const normalizedToken = token.trim()
   if (!normalizedToken || !c.env.SUPABASE_URL) return null
-  const apiKey = c.env.SUPABASE_ANON_KEY || c.env.VITE_SUPABASE_PUBLISHABLE_KEY
+  const apiKey = c.env.SUPABASE_ANON_KEY || c.env.VITE_SUPABASE_PUBLISHABLE_KEY || c.env.SUPABASE_SERVICE_ROLE_KEY
   if (!apiKey) return null
   const response = await fetch(`${c.env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey: apiKey, Authorization: `Bearer ${normalizedToken}` } }).catch(() => null)
   if (!response?.ok) return null
@@ -3980,14 +3980,14 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
 async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [
     { table: 'jornadas_voo', columns: ['id', 'solicitacao_id', 'aeronave_id', 'data', 'horario_acionamento', 'horario_apresentacao', 'tripulante_id', 'funcao_tripulante', 'jornada_principal_id', 'status'] },
-    { table: 'pernas_jornada_voo', columns: ['id', 'jornada_id', 'numero', 'origem', 'destino', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'status'] },
+    { table: 'pernas_jornada_voo', columns: ['id', 'jornada_id', 'numero', 'origem', 'destino', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'passageiros', 'status'] },
   ])
 }
 
 function normalizarPernaJornada(perna: any) {
   return {
     ...perna,
-    numero_passageiros: perna.numero_passageiros == null ? 0 : Number(perna.numero_passageiros),
+    numero_passageiros: perna.numero_passageiros ?? (perna.passageiros == null ? 0 : Number(perna.passageiros)),
   }
 }
 
@@ -4001,7 +4001,7 @@ function normalizarJornadaRegistro(jornada: any) {
   }
 }
 const LIMITES_JORNADA = { dia: 540, semana: 2640, mes: 10560, posCorte: 30 } as const
-const STATUS_JORNADA = ['em_solo', 'em_rota', 'encerrada'] as const
+const STATUS_JORNADA = ['em_solo', 'em_rota', 'pousado', 'encerrada'] as const
 
 function normalizarNumeroPassageiros(valor: unknown): number | null {
   if (valor === undefined || valor === null || valor === '') return 0
@@ -4148,7 +4148,7 @@ app.get('/api/interno/agendamento/:id/jornada', async c => {
     if (origem && destino) {
       const status = statusPerna({ horario_dep: principal.horario_dep, horario_pouso: principal.horario_pouso, horario_corte: principal.horario_corte })
       const pernaId = uuid()
-      await c.env.SHARE_DB.prepare(`INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, numero_passageiros, horario_ac, horario_dep, horario_pouso, horario_corte, status)
+      await c.env.SHARE_DB.prepare(`INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, passageiros, horario_ac, horario_dep, horario_pouso, horario_corte, status)
         VALUES (?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)`).bind(pernaId, raiz, origem, destino, principal.horario_acionamento || null, principal.horario_dep || null, principal.horario_pouso || null, principal.horario_corte || null, status === 'programada' && principal.status === 'em_rota' ? 'em_voo' : status).run()
       pernasNormalizadas = [(await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(pernaId).first<any>())].filter(Boolean).map(normalizarPernaJornada)
     }
@@ -4234,7 +4234,7 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
   const jornadaDisponivel = jornadaColumns.has('id')
   const colunaPouso = jornadaColumns.has('horario_pouso') ? 'horario_pouso' : 'horario_corte_inicio'
   const colunaCorte = jornadaColumns.has('horario_corte') ? 'horario_corte' : 'horario_corte_final'
-  const colunaPassageiros = pernaColumns.has('numero_passageiros') ? 'COALESCE(p.numero_passageiros, 0)' : '0'
+  const colunaPassageiros = pernaColumns.has('passageiros') ? 'COALESCE(p.passageiros, 0)' : '0'
   const rows = await db.prepare(`
     SELECT s.id AS solicitacao_id, s.numero_voo, s.origem, s.destino, s.data_agendada,
            s.cliente_id, s.socio_id, s.voo_emprestado, s.cliente_emprestimo_id, s.socio_emprestimo_id,
@@ -4343,7 +4343,7 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
         body.observacoes || null, extractSupabaseUserId(c)).run()
     if (!principalId) {
       principalId = jornadaId
-      await db.prepare('INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, numero_passageiros, horario_ac, horario_dep, status) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)')
+      await db.prepare('INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, passageiros, horario_ac, horario_dep, status) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)')
         .bind(uuid(), jornadaId, origem, destino, numeroPassageiros, acionamento, horarioDep, statusPerna({ horario_ac: acionamento, horario_dep: horarioDep })).run()
     }
     criadas.push(await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(jornadaId).first<any>())
@@ -4357,9 +4357,9 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const principal = criadas[0]
   return c.json({
     ...principal,
-    pernas: pernas.results,
-    limites: await avaliarLimitesJornada(c, { ...principal, pernas: pernas.results }),
-    tripulantes: await Promise.all(criadas.map(async (item) => ({ ...item, pernas: pernas.results, limites: await avaliarLimitesJornada(c, { ...item, pernas: pernas.results }) }))),
+    pernas: (pernas.results || []).map(normalizarPernaJornada),
+    limites: await avaliarLimitesJornada(c, { ...principal, pernas: (pernas.results || []).map(normalizarPernaJornada) }),
+    tripulantes: await Promise.all(criadas.map(async (item) => ({ ...item, pernas: (pernas.results || []).map(normalizarPernaJornada), limites: await avaliarLimitesJornada(c, { ...item, pernas: (pernas.results || []).map(normalizarPernaJornada) }) }))),
   }, 201)
 })
 
@@ -4488,7 +4488,7 @@ app.post('/api/interno/jornadas/:id/pernas', async c => {
   const numeroPassageiros = normalizarNumeroPassageiros(b.numero_passageiros)
   if (numeroPassageiros === null) return c.json({ error: 'numero_passageiros_invalido' }, 400)
   const status = statusPerna({ horario_ac: horarioAc, horario_dep: horarioDep, horario_pouso: horarioPouso, horario_corte: horarioCorte })
-  await db.prepare('INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, numero_passageiros, horario_ac, horario_dep, horario_pouso, horario_corte, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  await db.prepare('INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, passageiros, horario_ac, horario_dep, horario_pouso, horario_corte, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .bind(pernaId, jornada.id, numero, origem, destino, numeroPassageiros, horarioAc, horarioDep, horarioPouso, horarioCorte, status).run()
   const pernas = await sincronizarResumoJornada(db, jornada.id)
   if (horarioDep && jornada.status === 'em_solo') await db.prepare("UPDATE jornadas_voo SET status = 'em_rota' WHERE id = ?1").bind(jornada.id).run()
@@ -4537,7 +4537,7 @@ app.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
   if (body.numero_passageiros !== undefined) {
     const numeroPassageiros = normalizarNumeroPassageiros(body.numero_passageiros)
     if (numeroPassageiros === null) return c.json({ error: 'numero_passageiros_invalido' }, 400)
-    valores.numero_passageiros = numeroPassageiros
+    valores.passageiros = numeroPassageiros
   }
   const encadeamento = ['horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte'] as const
   let referencia: string | null = jornada?.horario_apresentacao || null
@@ -4556,7 +4556,7 @@ app.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
     .bind(...campos.map((campo) => valores[campo] ?? null), perna.id).run()
   const pernas = await sincronizarResumoJornada(db, perna.jornada_id)
   const atualizada = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(perna.id).first<any>()
-  return c.json({ ...atualizada, limites: jornada ? await avaliarLimitesJornada(c, { ...jornada, pernas }) : null })
+  return c.json({ ...normalizarPernaJornada(atualizada), limites: jornada ? await avaliarLimitesJornada(c, { ...jornada, pernas }) : null })
 })
 
 /*
