@@ -632,7 +632,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
       listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
       listar(db, 'SELECT * FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
-      listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
+      listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em, email_enviado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
     const contaPendente = (row: Record<string, unknown>) => {

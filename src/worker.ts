@@ -7171,7 +7171,7 @@ async function garantirTabelaEmails(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [
     { table: 'user_profiles', columns: ['id', 'email_envio'] },
     { table: 'assinaturas_email', columns: ['id'] },
-    { table: 'emails_enviados', columns: ['id', 'anexos_detalhes'] },
+    { table: 'emails_enviados', columns: ['id', 'anexos_detalhes', 'email_enviado_em'] },
   ])
 }
 function normalizarEmail(valor: unknown): string | null {
@@ -7251,7 +7251,7 @@ app.get('/api/interno/emails', async c => {
     db.prepare("SELECT r.id AS recibo_id, r.numero_recibo, r.url_recibo, COALESCE(a.id, r.id) AS id, COALESCE(a.nome_arquivo, r.numero_recibo || '.pdf') AS nome_arquivo, COALESCE(a.tipo_arquivo, 'application/pdf') AS tipo_arquivo, a.tamanho_arquivo, COALESCE(a.criado_em, r.criado_em) AS criado_em FROM recibos r LEFT JOIN recibo_anexos a ON a.recibo_id = r.id AND (UPPER(COALESCE(a.finalidade, '')) = 'PDF' OR a.tipo_arquivo = 'application/pdf') WHERE a.id IS NOT NULL OR r.url_recibo IS NOT NULL ORDER BY COALESCE(a.criado_em, r.criado_em) DESC LIMIT 300").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em FROM relatorio_despesa_viagem_anexos ORDER BY criado_em DESC LIMIT 200").all().catch(() => ({ results: [] })),
     db.prepare("SELECT id, local, numero_comanda, numero_nf, comanda_url, nota_url, boleto_url FROM abastecimentos WHERE comanda_url IS NOT NULL OR nota_url IS NOT NULL OR boleto_url IS NOT NULL ORDER BY data DESC LIMIT 200").all().catch(() => ({ results: [] })),
-    db.prepare("SELECT id, destinatarios, assunto, mensagem, status, anexos, anexos_detalhes, quantidade_anexos, erro_mensagem AS erro, enviado_por, referencia_tipo, referencia_id, criado_em FROM emails_enviados WHERE enviado_por = ?1 ORDER BY criado_em DESC LIMIT 100").bind(user.id).all(),
+    db.prepare("SELECT id, destinatarios, assunto, mensagem, status, anexos, anexos_detalhes, quantidade_anexos, erro_mensagem AS erro, enviado_por, referencia_tipo, referencia_id, criado_em, email_enviado_em FROM emails_enviados WHERE enviado_por = ?1 ORDER BY criado_em DESC LIMIT 100").bind(user.id).all(),
   ])
   const contatos: any[] = []
   for (const row of (clientes.results as any[])) {
@@ -7446,7 +7446,8 @@ app.post('/api/interno/emails', async c => {
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, anexos_detalhes, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), JSON.stringify(anexosDetalhes), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId).run()
+  const emailEnviadoEm = status === 'enviado' ? new Date().toISOString() : null
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, anexos_detalhes, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id, email_enviado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), JSON.stringify(anexosDetalhes), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId, emailEnviadoEm).run()
   if (status === 'enviado') {
     // A FK de lancamentos.email_enviado_id exige que o registro pai exista
     // antes da atualização do lançamento.
