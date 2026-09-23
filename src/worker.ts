@@ -4179,6 +4179,7 @@ async function calcularDadosOperacionais(
       calculoSolar = await calcularHorasDiurnas(c, origem, decolagem, pouso)
       solarCalculado = true
     } catch (error) {
+      calculoSolar = { diurnas: tempoVoo, noturnas: 0 }
       log.warn('[diario-bordo] não foi possível calcular horas diurnas', error)
     }
   }
