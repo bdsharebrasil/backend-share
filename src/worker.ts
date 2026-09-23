@@ -7850,6 +7850,56 @@ async function garantirTabelaFichaPeso(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [{table:'ctm_ficha_peso_balanceamento',columns:['id','solicitacao_id','assinatura_nome']}])
 }
 
+app.get('/api/ctm/peso-balanceamento', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const aeronaveId = c.req.query('aeronave_id')
+  const query = aeronaveId
+    ? `SELECT p.*, a.matricula_registro, a.fabricante, a.modelo, a.numero_serie
+       FROM ctm_peso_balanceamento p LEFT JOIN aeronave a ON a.id = p.aeronave_id
+       WHERE p.aeronave_id = ?1 ORDER BY p.atualizado_em DESC`
+    : `SELECT p.*, a.matricula_registro, a.fabricante, a.modelo, a.numero_serie
+       FROM ctm_peso_balanceamento p LEFT JOIN aeronave a ON a.id = p.aeronave_id
+       ORDER BY p.atualizado_em DESC`
+  const rows = await c.env.SHARE_DB.prepare(query).bind(...(aeronaveId ? [aeronaveId] : [])).all<any>()
+  return c.json({ configuracoes: rows.results || [] })
+})
+
+app.post('/api/ctm/peso-balanceamento', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const aeronaveId = String(body.aeronave_id || '').trim()
+  if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+  const numero = (value: unknown, fallback: number | null = null) => value === '' || value === undefined || value === null ? fallback : Number(value)
+  const atual = await c.env.SHARE_DB.prepare('SELECT id FROM ctm_peso_balanceamento WHERE aeronave_id = ?1').bind(aeronaveId).first<any>()
+  const id = atual?.id || crypto.randomUUID()
+  const valores = [
+    numero(body.peso_vazio_padrao, 0), numero(body.braco_cg_padrao, 0), numero(body.momento_padrao),
+    numero(body.peso_maximo_decolagem, 0), numero(body.peso_maximo_pouso, 0), numero(body.peso_maximo_sem_combustivel),
+    numero(body.cg_limite_dianteiro, 0), numero(body.cg_limite_traseiro, 0), numero(body.mac_comprimento, 0), numero(body.lemac_distancia, 0),
+    numero(body.capacidade_combustivel_total), numero(body.capacidade_combustivel_util), body.validado ? 1 : 0,
+    body.notas?.toString().trim() || null, body.data_ultima_pesagem || null, body.numero_relatorio_pesagem?.toString().trim() || null,
+    body.responsavel_tecnico?.toString().trim() || null, numero(body.limite_bagagem_diant_kg), numero(body.limite_bagagem_tras_kg), user.id,
+  ]
+  if (atual) {
+    await c.env.SHARE_DB.prepare(`UPDATE ctm_peso_balanceamento SET peso_vazio_padrao=?, braco_cg_padrao=?, momento_padrao=?, peso_maximo_decolagem=?, peso_maximo_pouso=?, peso_maximo_sem_combustivel=?, cg_limite_dianteiro=?, cg_limite_traseiro=?, mac_comprimento=?, lemac_distancia=?, capacidade_combustivel_total=?, capacidade_combustivel_util=?, validado=?, notas=?, data_ultima_pesagem=?, numero_relatorio_pesagem=?, responsavel_tecnico=?, limite_bagagem_diant_kg=?, limite_bagagem_tras_kg=?, atualizado_em=CURRENT_TIMESTAMP, criado_por=? WHERE id=?`).bind(...valores, id).run()
+  } else {
+    await c.env.SHARE_DB.prepare(`INSERT INTO ctm_peso_balanceamento (peso_vazio_padrao, braco_cg_padrao, momento_padrao, peso_maximo_decolagem, peso_maximo_pouso, peso_maximo_sem_combustivel, cg_limite_dianteiro, cg_limite_traseiro, mac_comprimento, lemac_distancia, capacidade_combustivel_total, capacidade_combustivel_util, validado, notas, data_ultima_pesagem, numero_relatorio_pesagem, responsavel_tecnico, limite_bagagem_diant_kg, limite_bagagem_tras_kg, criado_por, aeronave_id, id) VALUES (${new Array(22).fill('?').join(', ')})`).bind(...valores, aeronaveId, id).run()
+  }
+  const configuracao = await c.env.SHARE_DB.prepare('SELECT p.*, a.matricula_registro, a.fabricante, a.modelo, a.numero_serie FROM ctm_peso_balanceamento p LEFT JOIN aeronave a ON a.id=p.aeronave_id WHERE p.id=?1').bind(id).first<any>()
+  return c.json({ configuracao }, atual ? 200 : 201)
+})
+
+app.get('/api/ctm/fichas-peso-balanceamento', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const rows = await c.env.SHARE_DB.prepare(`SELECT f.*, a.matricula_registro, a.modelo, s.origem, s.destino, s.data_agendada
+    FROM ctm_ficha_peso_balanceamento f LEFT JOIN aeronave a ON a.id=f.aeronave_id
+    LEFT JOIN solicitacoes_reserva_voo s ON s.id=f.solicitacao_id ORDER BY COALESCE(f.data_voo, f.criado_em) DESC`).all<any>()
+  return c.json({ fichas: (rows.results || []).map((f: any) => ({ ...f, itens_carregamento: parseJsonOr(f.itens_carregamento, []), snapshot_limites: parseJsonOr(f.snapshot_limites, {}) })) })
+})
+
 const parseJsonOr = (value: unknown, fallback: unknown) => {
   try { return JSON.parse(String(value ?? '')) } catch { return fallback }
 }
