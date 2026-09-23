@@ -699,6 +699,7 @@ function clientAllocationStatements(
           origem_id: nullableText(command.recibo_id),
           origem_tipo: nullableText(command.recibo_id) ? 'RECIBO' : null,
           numero_recibo: nullableText(command.numero_recibo),
+          numero_voo: nullableText(command.numero_voo),
           url_recibo: nullableText(command.url_recibo),
           anexos_json: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return JSON.stringify(anexos.filter((anexo: Row) => !anexo.cotista_id || anexo.cotista_id === line.cotistaId)) })(),
           numero_nf: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return anexos.find((anexo: Row) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')?.numero || null })(),
@@ -763,8 +764,8 @@ function holdingAllocationStatements(
     return insertStatement(
       db,
       schema,
-      'rateio_hold',
-      {
+        'rateio_hold',
+        {
         id: id(),
         movimento_holding_id: movimentoId,
         aeronave_id: command.aeronave_id,
@@ -776,6 +777,7 @@ function holdingAllocationStatements(
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria,
         ),
+        numero_voo: nullableText(command.numero_voo),
         tipo_rateio: upper(command.tipo_rateio || 'FIXO'),
         percentual_sociedade: line.percentual,
         percentual_uso: line.percentual,
@@ -953,6 +955,7 @@ export async function createExpense(
           origem_tipo: command.recibo_id ? 'RECIBO' : 'DESPESA',
           origem_id: command.recibo_id || lancamentoId,
           numero_recibo: nullableText(command.numero_recibo),
+          numero_voo: nullableText(command.numero_voo),
           url_recibo: nullableText(command.url_recibo),
           idempotency_key: command.idempotency_key,
           criado_por: userId,
@@ -1838,7 +1841,24 @@ async function buildReceiptPagamento(
     )
   }
 
+  const possuiRateioInformado = Array.isArray(command.rateio_linhas) && command.rateio_linhas.length > 0
   if (['cotista_aeronave', 'cliente'].includes(String(input.pagador_tipo))) {
+    if (input.pagador_tipo === 'cliente' && possuiRateioInformado) {
+      return createExpense(db, {
+        ...command,
+        recibo_id: receiptId,
+        tipo_caixa: 'CLIENTE',
+        fluxo: 'SAIDA',
+        categoria_id: input.categoria_movimentacao_id,
+        categoria_cliente_id: input.categoria_movimentacao_id,
+        aeronave_id: input.aeronave_id || command.aeronave_id,
+        numero_voo: input.numero_voo,
+        rateio_linhas: command.rateio_linhas,
+        pago_diretamente: true,
+        reembolsavel: false,
+        idempotency_key: `recibo-pagamento:${receiptId}`,
+      }, userId, { internal: true })
+    }
     const pagadorId = text(input.pagador_id)
     const aeronaveInformada = text(input.aeronave_id || command.aeronave_id)
     const cotista = await db.prepare(`
@@ -1870,6 +1890,7 @@ async function buildReceiptPagamento(
     return createExpense(db, {
       ...command,
       recibo_id: receiptId,
+      numero_voo: input.numero_voo,
       tipo_caixa: 'CLIENTE',
       fluxo: 'SAIDA',
       categoria_id: input.categoria_movimentacao_id,
@@ -1991,6 +2012,7 @@ export async function enviarReciboPagamentoParaRateio(
 
   const result = await finalizarRecibo(db, receiptId, userId, {
     aeronave_id: text(body.aeronave_id) || receipt.aeronave_id || null,
+    numero_voo: text(body.numero_voo) || receipt.numero_voo || null,
     rateio_linhas: Array.isArray(body.rateio_linhas) ? body.rateio_linhas : undefined,
     data_vencimento: text(body.data_vencimento) || receipt.data_vencimento || null,
     observacoes: text(body.observacoes) || receipt.observacoes || null,

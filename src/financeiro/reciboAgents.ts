@@ -7,6 +7,8 @@ type ReceiptInput = {
   pagador_id: string
   valor_centavos: number
   categoria_movimentacao_id: string
+  categoria_nome?: string | null
+  numero_voo?: string | null
   subcategoria_1?: string | null
   descricao: string
   data_emissao: string
@@ -30,7 +32,7 @@ type ReceiptInput = {
   recebedor_uf?: string | null
 }
 
-const RECEIPT_STATUSES: readonly StatusRecibo[] = ['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO']
+const RECEIPT_STATUSES: readonly StatusRecibo[] = ['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'EMAIL_ENVIADO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO']
 
 export function validateReceiptCommand(body: Row): ReceiptInput {
   const tipo = String(body.tipo_recibo ?? '').trim()
@@ -48,6 +50,8 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     pagador_id: pagadorId,
     valor_centavos: valor,
     categoria_movimentacao_id: categoria,
+    categoria_nome: body.categoria_nome ? String(body.categoria_nome) : null,
+    numero_voo: body.numero_voo ? String(body.numero_voo) : null,
     subcategoria_1: body.subcategoria_1 ? String(body.subcategoria_1) : null,
     descricao: String(body.descricao ?? body.descricao_servico ?? '').trim(),
     data_emissao: String(body.data_emissao ?? '').trim(),
@@ -106,8 +110,8 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
       pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
       valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
-      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?)
+      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por, categoria_nome, numero_voo
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
     input.rateado ? 1 : 0, input.pagador_tipo, input.pagador_id,
@@ -116,7 +120,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
-    input.observacoes, userId,
+    input.observacoes, userId, input.categoria_nome, input.numero_voo,
   ).run()
 }
 
