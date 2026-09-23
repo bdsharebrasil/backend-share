@@ -4088,6 +4088,14 @@ function dataUtc(timestamp: number): string {
   return new Date(timestamp).toISOString().slice(0, 10)
 }
 
+function normalizarDataParaComparacao(valor: unknown): string {
+  const texto = String(valor ?? '').trim()
+  if (!texto) return ''
+  const dm = texto.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/)
+  if (dm) return `${dm[3]}${dm[2]}${dm[1]}`
+  return texto.replace(/\D/g, '')
+}
+
 function instanteSolarUtc(data: string, valor: unknown): number | null {
   const texto = String(valor ?? '').trim()
   if (!texto) return null
@@ -4120,7 +4128,7 @@ async function calcularHorasDiurnas(
     const payload = await cachedFetch(c, `solar-${icao}-${dataDecea}`, 86_400, () => fetchAisweb(c, 'sol', { icaoCode: icao, date: dataDecea }))
     const itens = Array.isArray(payload) ? payload : (payload?.sol ?? [payload])
     const esperado = data.replace(/\D/g, '')
-    const item = itens.find((dia: any) => String(dia?.date ?? dia?.data ?? '').replace(/\D/g, '') === esperado) || (itens.length === 1 && !itens[0]?.date && !itens[0]?.data ? itens[0] : null)
+    const item = itens.find((dia: any) => normalizarDataParaComparacao(dia?.date ?? dia?.data) === esperado) || (itens.length === 1 ? itens[0] : null)
     const nascer = instanteSolarUtc(data, item?.nascer ?? item?.sunrise)
     const poente = instanteSolarUtc(data, item?.poente ?? item?.sunset)
     if (nascer === null || poente === null || poente <= nascer) throw new Error(`DECEA não retornou nascer/pôr do sol para ${icao} em ${data}`)
@@ -4384,14 +4392,21 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
   `).bind(aeronaveId).all<any>()
   const voos = await Promise.all((rows.results || []).map(async (voo: any) => {
     if (!jornadaDisponivel) return { ...voo, jornadas: [] }
+    let jornadas: { results?: any[] } = { results: [] }
     try {
-      const jornadas = await db.prepare(`
+      jornadas = await db.prepare(`
         SELECT id AS jornada_id, numero_jornada, data, status, horario_apresentacao, horario_acionamento,
                ${colunaPouso} AS horario_pouso, ${colunaCorte} AS horario_corte
         FROM jornadas_voo WHERE solicitacao_id = ?1 ORDER BY numero_jornada DESC, data DESC
       `).bind(voo.solicitacao_id).all<any>()
-      const jornadasComPernas = await Promise.all((jornadas.results || []).map(async (jornada: any) => {
-        const pernas = await db.prepare(`
+    } catch (error) {
+      log.error('[diario-bordo] jornadas indisponíveis para número de voo', error)
+      return { ...voo, jornadas: [] }
+    }
+    const jornadasComPernas = await Promise.all((jornadas.results || []).map(async (jornada: any) => {
+      let pernas: { results?: any[] } = { results: [] }
+      try {
+        pernas = await db.prepare(`
           SELECT p.id AS perna_id, p.numero, p.origem, p.destino,
                  ${colunaPassageiros} AS numero_passageiros,
                  p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte,
@@ -4402,22 +4417,27 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
           LEFT JOIN aerodromo ad ON upper(ad.designativo_icao) = upper(p.destino)
           WHERE p.jornada_id = ?1 ORDER BY p.numero
         `).bind(jornada.jornada_id).all<any>()
-        const calculadas = await Promise.all((pernas.results || []).map(async (perna: any) => {
-          const coordenada = (value: unknown) => { const [lat, lon] = String(value || '').split(',').map(Number); return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] as const : null }
-          const origem = coordenada(perna.origem_coordenadas); const destino = coordenada(perna.destino_coordenadas)
-          const distancia_nm = origem && destino ? Number((haversineKm(origem[0], origem[1], destino[0], destino[1]) * 0.539957).toFixed(1)) : 0
+      } catch (error) {
+        log.error(`[diario-bordo] pernas indisponíveis para jornada ${jornada.jornada_id}`, error)
+        return { ...jornada, pernas: [] }
+      }
+      const consumoHora = diarioNumber(aeronave?.consumo_combustivel)
+      const calculadas = await Promise.all((pernas.results || []).map(async (perna: any) => {
+        const { origem_coordenadas: _origem, destino_coordenadas: _destino, ...publica } = perna
+        const coordenada = (value: unknown) => { const [lat, lon] = String(value || '').split(',').map(Number); return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] as const : null }
+        const origem = coordenada(perna.origem_coordenadas); const destino = coordenada(perna.destino_coordenadas)
+        const distancia_nm = origem && destino ? Number((haversineKm(origem[0], origem[1], destino[0], destino[1]) * 0.539957).toFixed(1)) : 0
+        try {
           const dadosOperacionais = await calcularDadosOperacionais(c, { acionamento_utc: perna.horario_ac, decolagem_utc: perna.horario_dep, pouso_utc: perna.horario_pouso, corte_utc: perna.horario_corte, aerodromo_partida: perna.origem }, String(perna.horario_ac || jornada.data).slice(0, 10), perna.origem)
-          const { origem_coordenadas: _origem, destino_coordenadas: _destino, ...publica } = perna
-          const consumoHora = diarioNumber(aeronave?.consumo_combustivel)
           return { ...publica, distancia_nm, tempo_voo: dadosOperacionais.tempo_voo, tempo_total: dadosOperacionais.tempo_total, horas_diurnas: dadosOperacionais.horas_diurnas, horas_noturnas: dadosOperacionais.horas_noturnas, consumo_combustivel_voo: Number((dadosOperacionais.tempo_voo * consumoHora).toFixed(2)), consumo_combustivel_total: Number((dadosOperacionais.tempo_total * consumoHora).toFixed(2)), solar_status: dadosOperacionais.solar_status }
-        }))
-        return { ...jornada, pernas: calculadas }
+        } catch (error) {
+          log.error(`[diario-bordo] falha ao calcular dados da perna ${perna.perna_id}`, error)
+          return { ...publica, distancia_nm, tempo_voo: 0, tempo_total: 0, horas_diurnas: 0, horas_noturnas: 0, consumo_combustivel_voo: 0, consumo_combustivel_total: 0, solar_status: 'not_calculated' }
+        }
       }))
-      return { ...voo, jornadas: jornadasComPernas }
-    } catch (error) {
-      log.error('[diario-bordo] jornadas indisponíveis para número de voo', error)
-      return { ...voo, jornadas: [] }
-    }
+      return { ...jornada, pernas: calculadas }
+    }))
+    return { ...voo, jornadas: jornadasComPernas }
   }))
   return c.json({ voos })
 })
