@@ -3373,17 +3373,17 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const horario = (valor: string | null) => valor ? String(valor).slice(11, 16) : null
   const dadosOperacionais = await calcularDadosOperacionais(c, pernaVinculada ? {
     ...body,
-    acionamento_utc: pernaVinculada.horario_ac,
-    decolagem_utc: pernaVinculada.horario_dep,
-    pouso_utc: pernaVinculada.horario_pouso,
-    corte_utc: pernaVinculada.horario_corte,
-  } : body, data, pernaVinculada?.origem || body.aerodromo_partida)
+    acionamento_utc: body.acionamento_utc ?? body.tempo_ac ?? pernaVinculada.horario_ac,
+    decolagem_utc: body.decolagem_utc ?? body.tempo_dep ?? pernaVinculada.horario_dep,
+    pouso_utc: body.pouso_utc ?? body.tempo_pou ?? pernaVinculada.horario_pouso,
+    corte_utc: body.corte_utc ?? body.tempo_cor ?? pernaVinculada.horario_corte,
+  } : body, data, body.aerodromo_partida || pernaVinculada?.origem || body.aerodromo_partida)
   const dadosDaPerna = pernaVinculada ? {
     ...body,
     numero_voo: body.numero_voo || null,
     jornada_id: pernaVinculada.jornada_id,
-    aerodromo_partida: pernaVinculada.origem,
-    aerodromo_chegada: pernaVinculada.destino,
+    aerodromo_partida: body.aerodromo_partida || pernaVinculada.origem,
+    aerodromo_chegada: body.aerodromo_chegada || pernaVinculada.destino,
     tempo_ac: horario(dadosOperacionais.acionamento_utc),
     tempo_dep: horario(dadosOperacionais.decolagem_utc),
     tempo_pou: horario(dadosOperacionais.pouso_utc),
@@ -3392,7 +3392,7 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
     tempo_total: dadosOperacionais.tempo_total,
     horas_diurnas: dadosOperacionais.horas_diurnas,
     horas_noturnas: dadosOperacionais.horas_noturnas,
-    pousos_total: pernaVinculada.horario_pouso ? 1 : 0,
+    pousos_total: body.pousos_total ?? (pernaVinculada.horario_pouso ? 1 : 0),
   } : body
   const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(dadosOperacionais.tempo_total)), criadoPor: extractSupabaseUserId(c) })
   const columns = ['id', ...Object.keys(row)]
@@ -4172,7 +4172,16 @@ async function calcularDadosOperacionais(
   const fimTotal = (corte || pouso) ? new Date(corte || pouso!).getTime() : NaN
   const tempoVoo = Number((Number.isFinite(inicioVoo) && Number.isFinite(fimVoo) && fimVoo >= inicioVoo ? (fimVoo - inicioVoo) / 3_600_000 : 0).toFixed(2))
   const tempoTotal = Number((Number.isFinite(inicioTotal) && Number.isFinite(fimTotal) && fimTotal >= inicioTotal ? (fimTotal - inicioTotal) / 3_600_000 : tempoVoo).toFixed(2))
-  const calculoSolar = await calcularHorasDiurnas(c, origem, decolagem, pouso)
+  let calculoSolar = { diurnas: 0, noturnas: 0 }
+  let solarCalculado = false
+  if (decolagem && pouso) {
+    try {
+      calculoSolar = await calcularHorasDiurnas(c, origem, decolagem, pouso)
+      solarCalculado = true
+    } catch (error) {
+      log.warn('[diario-bordo] não foi possível calcular horas diurnas', error)
+    }
+  }
   const temAjusteNoturno = body.horas_noturnas !== undefined && body.horas_noturnas !== null && body.horas_noturnas !== ''
   const horasNoturnas = temAjusteNoturno
     ? Number(Math.min(tempoVoo, Math.max(0, diarioNumber(body.horas_noturnas))).toFixed(2))
@@ -4186,7 +4195,7 @@ async function calcularDadosOperacionais(
     tempo_total: tempoTotal,
     horas_diurnas: temAjusteNoturno ? Number(Math.max(0, tempoVoo - horasNoturnas).toFixed(2)) : calculoSolar.diurnas,
     horas_noturnas: horasNoturnas,
-    solar_status: temAjusteNoturno ? 'calculated_manual_night' : (decolagem && pouso ? 'calculated' : 'not_calculated'),
+    solar_status: temAjusteNoturno ? 'calculated_manual_night' : (solarCalculado ? 'calculated' : 'not_calculated'),
   }
 }
 
