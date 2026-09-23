@@ -4896,6 +4896,7 @@ async function persistirMetadadosFinanceirosRelatorio(
   usuarioId?: string | null,
   emailId?: string | null,
   enviadoCliente = false,
+  dataVencimento?: string | null,
 ) {
   const prefixo = `RELATORIO_DESPESA_VIAGEM:${relatorioId}`
   const contas = await db.prepare(`SELECT
@@ -4911,14 +4912,17 @@ async function persistirMetadadosFinanceirosRelatorio(
       gerado_por_usuario_id = COALESCE(gerado_por_usuario_id, ?1),
       contas_apagar_tripulante_1_id = COALESCE(?2, contas_apagar_tripulante_1_id),
       contas_apagar_tripulante_2_id = COALESCE(?3, contas_apagar_tripulante_2_id),
+      status = CASE WHEN ?4 = 1 THEN 'enviado_cliente' ELSE status END,
       enviado_para_cliente_em = CASE WHEN ?4 = 1 THEN COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP) ELSE enviado_para_cliente_em END,
       programado_pagamento_em = COALESCE(programado_pagamento_em, CASE WHEN ?4 = 1 THEN CURRENT_TIMESTAMP ELSE NULL END),
+      data_vencimento_reembolso = COALESCE(?5, data_vencimento_reembolso),
       atualizado_em = CURRENT_TIMESTAMP
-    WHERE id = ?5`).bind(
+    WHERE id = ?6`).bind(
     usuarioId || null,
     contas?.conta_tripulante_1 || null,
     contas?.conta_tripulante_2 || null,
     enviadoCliente ? 1 : 0,
+    dataVencimento || null,
     relatorioId,
   ).run()
   if (emailId) {
@@ -5432,8 +5436,8 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
         db.prepare("UPDATE contas_apagar SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, id),
         db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', data_vencimento_reembolso = ?, enviado_para_cliente_em = COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP), programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
       ])
-      await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true)
-      return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: existing.id, message: 'Reembolso já enviado ao cliente.' })
+      await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
+      return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: existing.id, relatorio: await buscarRelatorioViagemComNomes(c, id), message: 'Reembolso já enviado ao cliente.' })
     }
     await db.batch([
       db.prepare(`INSERT INTO lancamentos (id, aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome, grupo_categoria, periodicidade, status, fluxo, tipo_caixa, valor_centavos, pago_diretamente, reembolsavel, reembolso_quitado, observacoes, criado_por, origem_tipo, origem_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 'SAIDA', 'CLIENTE', ?, 0, 0, 0, ?, ?, 'RELATORIO_DESPESA_VIAGEM', ?, ?)`).bind(clienteLancamentoId, report.aeronave_id, hoje, body.data_vencimento, descricao, categoriaId, 'RELATORIO DE VIAGEM', 'DESPESAS DE VIAGEM', periodicidade, valorCentavos, `Tipo de rateio: ${tipoRateio}`, user.id, id, `${idempotencyBase}:LANCAMENTO_CLIENTE`),
@@ -5448,8 +5452,8 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
       db.prepare("UPDATE contas_apagar SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, id),
       db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', enviado_para_cliente_em = CURRENT_TIMESTAMP, data_vencimento_reembolso = ?, programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
     ].filter(Boolean) as D1PreparedStatement[])
-    await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true)
-    return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaId, lancamento_cliente_id: clienteLancamentoId, lancamento_share_id: shareLancamentoId, message: 'Reembolso programado ao cliente.' })
+    await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
+    return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaId, lancamento_cliente_id: clienteLancamentoId, lancamento_share_id: shareLancamentoId, relatorio: await buscarRelatorioViagemComNomes(c, id), message: 'Reembolso programado ao cliente.' })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:enviar-cliente]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_enviar_cliente' }, 400) }
 })
 app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
