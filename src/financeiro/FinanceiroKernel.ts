@@ -2161,6 +2161,7 @@ async function issueReceiptInternal(
     valor_centavos: input.valor_centavos,
     data: input.data_emissao,
     categoria_id: input.categoria_movimentacao_id,
+    categoria_despesa_subcategoria: input.subcategoria_1,
     aeronave_id: input.aeronave_id,
     cotista_aeronave_id: input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : body.cotista_aeronave_id,
     cliente_id: input.pagador_tipo === 'cliente' ? input.pagador_id : body.cliente_id,

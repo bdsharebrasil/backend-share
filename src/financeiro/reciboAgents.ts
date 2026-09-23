@@ -7,6 +7,7 @@ type ReceiptInput = {
   pagador_id: string
   valor_centavos: number
   categoria_movimentacao_id: string
+  subcategoria_1?: string | null
   descricao: string
   data_emissao: string
   data_vencimento?: string | null
@@ -47,6 +48,7 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     pagador_id: pagadorId,
     valor_centavos: valor,
     categoria_movimentacao_id: categoria,
+    subcategoria_1: body.subcategoria_1 ? String(body.subcategoria_1) : null,
     descricao: String(body.descricao ?? body.descricao_servico ?? '').trim(),
     data_emissao: String(body.data_emissao ?? '').trim(),
     data_vencimento: body.data_vencimento ? String(body.data_vencimento) : null,
@@ -104,7 +106,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
       pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
       valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
-      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por
+      categoria_movimentacao_id, subcategoria_1, grupo_categoria, status, recebedor_nome, observacoes, criado_por
       , recebedor_cpf, recebedor_endereco, recebedor_cidade, recebedor_uf
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?, ?, ?)
   `).bind(
@@ -114,7 +116,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.cidade_pagador, input.uf_pagador, input.valor_centavos, input.descricao,
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
-    input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
+    input.categoria_movimentacao_id, input.subcategoria_1, input.grupo_categoria, recebedorNome,
     input.observacoes, userId, input.recebedor_cpf, input.recebedor_endereco,
     input.recebedor_cidade, input.recebedor_uf,
   ).run()

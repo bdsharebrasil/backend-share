@@ -2330,6 +2330,7 @@ status TEXT
   ),
 
   categoria_movimentacao_id TEXT NOT NULL,
+  subcategoria_1 TEXT,
   grupo_categoria TEXT,
 
   status TEXT,
