@@ -4366,6 +4366,7 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
   const colunaPouso = jornadaColumns.has('horario_pouso') ? 'horario_pouso' : 'horario_corte_inicio'
   const colunaCorte = jornadaColumns.has('horario_corte') ? 'horario_corte' : 'horario_corte_final'
   const colunaPassageiros = pernaColumns.has('passageiros') ? 'COALESCE(p.passageiros, 0)' : '0'
+  const colunaLancamento = pernaColumns.has('lancamento_diario_id') ? 'p.lancamento_diario_id' : 'NULL'
   const rows = await db.prepare(`
     SELECT s.id AS solicitacao_id, s.numero_voo, s.origem, s.destino, s.data_agendada,
            s.cliente_id, s.socio_id, s.voo_emprestado, s.cliente_emprestimo_id, s.socio_emprestimo_id,
@@ -4394,7 +4395,7 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
           SELECT p.id AS perna_id, p.numero, p.origem, p.destino,
                  ${colunaPassageiros} AS numero_passageiros,
                  p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte,
-                 p.status, p.lancamento_diario_id, ap.coordenadas AS origem_coordenadas,
+                 p.status, ${colunaLancamento} AS lancamento_diario_id, ap.coordenadas AS origem_coordenadas,
                  ad.coordenadas AS destino_coordenadas
           FROM pernas_jornada_voo p
           LEFT JOIN aerodromo ap ON upper(ap.designativo_icao) = upper(p.origem)
