@@ -696,6 +696,10 @@ function clientAllocationStatements(
           data_pagamento: null,
           descricao_despesa: command.descricao,
           observacoes: nullableText(command.observacoes),
+          origem_id: nullableText(command.recibo_id),
+          origem_tipo: nullableText(command.recibo_id) ? 'RECIBO' : null,
+          numero_recibo: nullableText(command.numero_recibo),
+          url_recibo: nullableText(command.url_recibo),
           anexos_json: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return JSON.stringify(anexos.filter((anexo: Row) => !anexo.cotista_id || anexo.cotista_id === line.cotistaId)) })(),
           numero_nf: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return anexos.find((anexo: Row) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')?.numero || null })(),
           url_nf: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return anexos.find((anexo: Row) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')?.url || null })(),
@@ -785,6 +789,10 @@ function holdingAllocationStatements(
         data_pagamento: line.pagoDiretamente ? command.data : null,
         descricao_despesa: command.descricao,
         observacoes: nullableText(command.observacoes),
+        origem_id: nullableText(command.recibo_id),
+        origem_tipo: nullableText(command.recibo_id) ? 'RECIBO' : null,
+        documento_numero: nullableText(command.numero_recibo),
+        documento_url: nullableText(command.url_recibo),
         criado_por: userId,
       },
       ['id', 'movimento_holding_id', 'aeronave_id', 'socio_id'],
@@ -850,10 +858,13 @@ export async function createExpense(
           grupo_categoria: nullableText(command.grupo_categoria),
           fluxo: 'SAIDA',
           natureza: reembolsavel ? 'REEMBOLSO' : 'DESPESA',
+          tipo_caixa: 'HOLD',
           valor_centavos: amount,
           valor: amount / 100,
           pago_diretamente: direct ? 1 : 0,
           status: direct ? 'PAGO' : 'EM_ABERTO',
+          numero_recibo: nullableText(command.numero_recibo),
+          url_recibo: nullableText(command.url_recibo),
           criado_por: userId,
           observacoes: nullableText(command.observacoes),
           idempotency_key: command.idempotency_key,
@@ -939,8 +950,10 @@ export async function createExpense(
           pago_diretamente: 1,
           reembolsavel: 0,
           reembolso_quitado: 0,
-          origem_tipo: 'DESPESA',
-          origem_id: lancamentoId,
+          origem_tipo: command.recibo_id ? 'RECIBO' : 'DESPESA',
+          origem_id: command.recibo_id || lancamentoId,
+          numero_recibo: nullableText(command.numero_recibo),
+          url_recibo: nullableText(command.url_recibo),
           idempotency_key: command.idempotency_key,
           criado_por: userId,
         },
@@ -1826,16 +1839,48 @@ async function buildReceiptPagamento(
   }
 
   if (['cotista_aeronave', 'cliente'].includes(String(input.pagador_tipo))) {
+    const pagadorId = text(input.pagador_id)
+    const aeronaveInformada = text(input.aeronave_id || command.aeronave_id)
+    const cotista = await db.prepare(`
+      SELECT id, aeronave_id, socio_id, percentual_sociedade
+        FROM cotista_aeronave
+       WHERE (id = ?1 AND ?2 = 'cotista_aeronave')
+          OR (cliente_id = ?1 AND ?2 = 'cliente')
+         AND (?3 = '' OR aeronave_id = ?3)
+       ORDER BY CASE WHEN aeronave_id = ?3 AND ?3 <> '' THEN 0 ELSE 1 END, id
+       LIMIT 1
+    `).bind(pagadorId, String(input.pagador_tipo), aeronaveInformada).first<{ id: string; aeronave_id: string; socio_id: string | null; percentual_sociedade: number | null }>()
+    if (!cotista?.id) {
+      throw new FinanceError(
+        'O pagador precisa estar vinculado a um cotista e a uma aeronave para gerar o rateio',
+        'cotista_rateio_obrigatorio',
+      )
+    }
+    const percentualSociedade = Number(cotista.percentual_sociedade ?? 100)
+    const rateioLinhas = Array.isArray(command.rateio_linhas) && command.rateio_linhas.length
+      ? command.rateio_linhas
+      : [{
+          cotista_id: cotista.id,
+          socio_id: cotista.socio_id,
+          percentual: 100,
+          percentual_sociedade: percentualSociedade,
+          valor_centavos: input.valor_centavos,
+          pago_diretamente: true,
+        }]
     return createExpense(db, {
       ...command,
       recibo_id: receiptId,
       tipo_caixa: 'CLIENTE',
       fluxo: 'SAIDA',
-      categoria_id: null,
+      categoria_id: input.categoria_movimentacao_id,
       categoria_cliente_id: input.categoria_movimentacao_id,
-      sem_rateio: true,
+      aeronave_id: cotista.aeronave_id || aeronaveInformada,
+      cotista_aeronave_id: cotista.id,
+      socio_id: cotista.socio_id,
+      rateio_linhas: rateioLinhas,
       pago_diretamente: true,
       reembolsavel: false,
+      idempotency_key: `recibo-pagamento:${receiptId}`,
     }, userId, { internal: true })
   }
 
@@ -1883,6 +1928,7 @@ export async function finalizarRecibo(
   db: Database,
   receiptId: string,
   userId: string | null,
+  overrides: Row = {},
 ): Promise<Row> {
   const receipt = await db.prepare('SELECT * FROM recibos WHERE id = ? LIMIT 1').bind(receiptId).first<Row>()
   if (!receipt) throw new FinanceError('Recibo não encontrado', 'recibo_nao_encontrado', 404)
@@ -1904,6 +1950,7 @@ export async function finalizarRecibo(
     db,
     {
       ...receipt,
+      ...overrides,
       valor_centavos: receipt.valor,
       categoria_movimentacao_id: receipt.categoria_movimentacao_id,
       data: receipt.data_emissao,
@@ -1913,6 +1960,63 @@ export async function finalizarRecibo(
     buildFinance,
     receiptId,
   )
+}
+
+export async function enviarReciboPagamentoParaRateio(
+  db: Database,
+  receiptId: string,
+  userId: string | null,
+  body: Row = {},
+): Promise<Row> {
+  const receipt = await db.prepare(
+    `SELECT * FROM recibos WHERE id = ?1 AND tipo_recibo = 'recibo_pagamento' LIMIT 1`,
+  ).bind(receiptId).first<Row>()
+  if (!receipt) throw new FinanceError('Recibo de pagamento não encontrado', 'recibo_pagamento_nao_encontrado', 404)
+
+  const existingClient = await db.prepare(
+    `SELECT id FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
+  ).bind(receiptId).first<{ id: string }>().catch(() => null)
+  const existingHolding = await db.prepare(
+    `SELECT id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
+  ).bind(receiptId).first<{ id: string }>().catch(() => null)
+  if (existingClient?.id || existingHolding?.id) {
+    return {
+      ok: true,
+      recibo_id: receiptId,
+      lancamento_id: receipt.lancamento_id || null,
+      rateio_ids: [existingClient?.id || existingHolding!.id],
+      idempotent: true,
+    }
+  }
+
+  const result = await finalizarRecibo(db, receiptId, userId, {
+    aeronave_id: text(body.aeronave_id) || receipt.aeronave_id || null,
+    rateio_linhas: Array.isArray(body.rateio_linhas) ? body.rateio_linhas : undefined,
+    data_vencimento: text(body.data_vencimento) || receipt.data_vencimento || null,
+    observacoes: text(body.observacoes) || receipt.observacoes || null,
+  })
+  const rateios = await db.prepare(
+    `SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor
+       FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1
+     UNION ALL
+     SELECT rh.id, ca.id AS cotista_id, rh.percentual_uso AS percentual, rh.valor_rateado_centavos AS valor
+       FROM rateio_hold rh LEFT JOIN cotista_aeronave ca ON ca.socio_id = rh.socio_id AND ca.aeronave_id = rh.aeronave_id
+      WHERE rh.origem_tipo = 'RECIBO' AND rh.origem_id = ?1`,
+  ).bind(receiptId).all<{ id: string; cotista_id: string | null; percentual: number | null; valor: number }>().catch(() => ({ results: [] as { id: string; cotista_id: string | null; percentual: number | null; valor: number }[] }))
+  if (!rateios.results?.length) throw new FinanceError('Não foi possível criar o rateio do recibo', 'rateio_nao_criado', 500)
+  const reciboRateioExistente = await db.prepare('SELECT id FROM recibo_rateio WHERE recibo_id = ?1 LIMIT 1').bind(receiptId).first<{ id: string }>().catch(() => null)
+  if (!reciboRateioExistente) {
+    await db.batch(rateios.results.map((rateio) => db.prepare(
+      'INSERT INTO recibo_rateio (id, recibo_id, rateio_id, percentual, valor, cotista_id) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(id(), receiptId, rateio.id, Number(rateio.percentual || 0), Number(rateio.valor || 0), rateio.cotista_id)))
+  }
+  return {
+    ok: true,
+    recibo_id: receiptId,
+    lancamento_id: result.lancamento_id || null,
+    rateio_ids: rateios.results.map((row) => row.id),
+    idempotent: false,
+  }
 }
 
 export async function emitirReciboReembolso(db: Database, body: Row, userId: string | null): Promise<Row> {
@@ -2090,6 +2194,11 @@ async function issueReceiptInternal(
         endereco_pagador: body.endereco_pagador || null,
         cidade_pagador: body.cidade_pagador || null,
         uf_pagador: body.uf_pagador || null,
+        recebedor_nome: input.recebedor_nome || null,
+        recebedor_cpf: input.recebedor_cpf || null,
+        recebedor_endereco: input.recebedor_endereco || null,
+        recebedor_cidade: input.recebedor_cidade || null,
+        recebedor_uf: input.recebedor_uf || null,
         aeronave_id: input.aeronave_id || null,
         rateado: 0,
         valor: input.valor_centavos,

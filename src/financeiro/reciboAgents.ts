@@ -55,6 +55,10 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     cliente_id: body.cliente_id ? String(body.cliente_id) : null,
     colaborador_id: body.colaborador_id ? String(body.colaborador_id) : null,
     recebedor_nome: body.recebedor_nome ? String(body.recebedor_nome) : null,
+    recebedor_cpf: body.recebedor_cpf ? String(body.recebedor_cpf) : null,
+    recebedor_endereco: body.recebedor_endereco ? String(body.recebedor_endereco) : null,
+    recebedor_cidade: body.recebedor_cidade ? String(body.recebedor_cidade) : null,
+    recebedor_uf: body.recebedor_uf ? String(body.recebedor_uf) : null,
     observacoes: body.observacoes ? String(body.observacoes) : null,
     grupo_categoria: body.grupo_categoria ? String(body.grupo_categoria) : null,
   }
@@ -101,7 +105,8 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
       valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
       categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?)
+      , recebedor_cpf, recebedor_endereco, recebedor_cidade, recebedor_uf
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
     input.rateado ? 1 : 0, input.pagador_tipo, input.pagador_id,
@@ -110,7 +115,8 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
-    input.observacoes, userId,
+    input.observacoes, userId, input.recebedor_cpf, input.recebedor_endereco,
+    input.recebedor_cidade, input.recebedor_uf,
   ).run()
 }
 

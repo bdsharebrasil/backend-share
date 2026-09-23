@@ -2339,6 +2339,10 @@ status TEXT
   criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
   url_recibo TEXT,
   recebedor_nome TEXT,
+  recebedor_cpf TEXT,
+  recebedor_endereco TEXT,
+  recebedor_cidade TEXT,
+  recebedor_uf TEXT,
   numero_documento_anexo TEXT,
   observacoes TEXT
 , categoria_nome TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE recibos_saida (
