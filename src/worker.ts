@@ -4377,7 +4377,8 @@ app.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
     LEFT JOIN tripulacao_freelancer f ON f.id = s.piloto_id
     LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
     LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
-    WHERE s.aeronave_id = ?1 AND s.numero_voo IS NOT NULL AND TRIM(s.numero_voo) <> ''
+    WHERE (s.aeronave_id = ?1 OR EXISTS (SELECT 1 FROM jornadas_voo jv WHERE jv.solicitacao_id = s.id AND jv.aeronave_id = ?1))
+      AND s.numero_voo IS NOT NULL AND TRIM(s.numero_voo) <> ''
     ORDER BY datetime(s.data_agendada) DESC LIMIT 300
   `).bind(aeronaveId).all<any>()
   const voos = await Promise.all((rows.results || []).map(async (voo: any) => {
