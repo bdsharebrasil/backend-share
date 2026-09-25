@@ -5715,7 +5715,29 @@ app.get('/api/interno/abastecimentos', async c => {
   return c.json({ abastecimentos: result.results })
 })
 
-async function statementFinanceiroAbastecimento(c: Context<{ Bindings: Bindings }>, abastecimentoId: string, body: Record<string, any>, userId: string | null): Promise<D1PreparedStatement> {
+function dataAbastecimentoValida(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+}
+
+function respostaErroAbastecimento(c: Context<{ Bindings: Bindings }>, error: unknown, operacao: 'criar' | 'atualizar') {
+  const codigo = error instanceof Error ? error.message : ''
+  const errosConhecidos: Record<string, { detalhe: string; status: 400 | 404 | 409 }> = {
+    socio_nao_encontrado: { detalhe: 'O sócio informado não foi encontrado.', status: 404 },
+    socio_nao_vinculado_a_aeronave: { detalhe: 'O sócio não está vinculado à aeronave selecionada.', status: 409 },
+    cliente_nao_vinculado_a_aeronave: { detalhe: 'O cliente não está vinculado à aeronave selecionada.', status: 409 },
+    abastecimento_com_rateio_nao_pode_mudar_titular: { detalhe: 'Não é possível alterar o titular ou a aeronave de um abastecimento cujo lançamento já possui rateio.', status: 409 },
+  }
+  const conhecido = errosConhecidos[codigo]
+  if (!conhecido) console.error(`[abastecimentos:${operacao}]`, error)
+  return c.json({
+    error: conhecido ? codigo : `falha_ao_${operacao}_abastecimento`,
+    detail: conhecido?.detalhe || `Não foi possível ${operacao === 'criar' ? 'criar' : 'atualizar'} o abastecimento.`,
+  }, conhecido?.status || 500)
+}
+
+async function statementFinanceiroAbastecimento(c: Context<{ Bindings: Bindings }>, abastecimentoId: string, body: Record<string, any>, userId: string | null, comprovanteUrl: string | null = null): Promise<D1PreparedStatement> {
   const db = c.env.SHARE_DB
   const aeronaveId = String(body.aeronave_id)
   const data = String(body.data)
@@ -5731,25 +5753,26 @@ async function statementFinanceiroAbastecimento(c: Context<{ Bindings: Bindings 
     const socio = await db.prepare('SELECT id, holding_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; holding_id: string | null }>()
     if (!socio) throw new Error('socio_nao_encontrado')
     if (socio.holding_id) {
-      return db.prepare(`INSERT INTO movimentos_holding (id, holding_id, socio_id, aeronave_id, periodicidade, tipo_caixa, colaborador_id, data_emissao, data_vencimento, data_pagamento, descricao, abastecimentos_id, fornecedor_id, fornecedor_nome, categoria_nome, grupo_categoria, fluxo, valor_centavos, status, pago_diretamente, forma_pagamento, numero_nf, numero_doc, observacoes, criado_por) VALUES (?, ?, ?, ?, 'EVENTUAL', 'HOLD', ?, ?, ?, ?, ?, ?, ?, ?, 'Combustível', 'CAIXA CLIENTE', 'SAIDA', ?, ?, 0, ?, ?, ?, ?, ?)`)
-        .bind(uuid(), socio.holding_id, socio.id, aeronaveId, userId, data, vencimento, pago ? body.data_pagamento || null : null, descricao, abastecimentoId, null, fornecedor?.nome || null, valorCentavos, pago ? 'PAGO' : 'EM_ABERTO', body.forma_pagamento || null, body.numero_nf || null, body.numero_comanda || null, body.observacao || null, userId)
+      return db.prepare(`INSERT INTO movimentos_holding (id, holding_id, socio_id, aeronave_id, periodicidade, tipo_caixa, colaborador_id, data_emissao, data_vencimento, data_pagamento, descricao, abastecimentos_id, fornecedor_id, fornecedor_nome, categoria_nome, grupo_categoria, fluxo, valor_centavos, status, pago_diretamente, forma_pagamento, numero_nf, numero_doc, comprovante_url, observacoes, criado_por) VALUES (?, ?, ?, ?, 'EVENTUAL', 'HOLD', ?, ?, ?, ?, ?, ?, ?, ?, 'Combustível', 'CAIXA CLIENTE', 'SAIDA', ?, ?, 0, ?, ?, ?, ?, ?, ?)`)
+        .bind(uuid(), socio.holding_id, socio.id, aeronaveId, userId, data, vencimento, pago ? body.data_pagamento || null : null, descricao, abastecimentoId, null, fornecedor?.nome || null, valorCentavos, pago ? 'PAGO' : 'EM_ABERTO', body.forma_pagamento || null, body.numero_nf || null, body.numero_comanda || null, comprovanteUrl, body.observacao || null, userId)
     }
 
     const cotista = await db.prepare('SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1 AND socio_id = ?2 ORDER BY id LIMIT 1').bind(aeronaveId, socio.id).first<{ id: string }>()
     if (!cotista) throw new Error('socio_nao_vinculado_a_aeronave')
-    return db.prepare(`INSERT INTO lancamentos (id, aeronave_id, cotista_aeronave_id, periodicidade, data_emissao, data_vencimento, data_pagamento, descricao, fornecedores_favoritos_id, fornecedor_nome, abastecimentos_id, status, categoria_nome, fluxo, tipo_caixa, valor_centavos, numero_nf, numero_doc, url_nf, url_doc, url_boleto, comprovante_url, forma_pagamento, observacoes, criado_por, origem_tipo, origem_id, cliente_id) VALUES (?, ?, ?, 'EVENTUAL', ?, ?, ?, ?, ?, ?, ?, ?, 'Combustível', 'DESPESA', 'CLIENTE', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, 'ABASTECIMENTO', ?, NULL)`)
-      .bind(uuid(), aeronaveId, cotista.id, data, vencimento, pago ? body.data_pagamento || null : null, descricao, null, fornecedor?.nome || null, abastecimentoId, pago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.numero_nf || null, body.numero_comanda || null, body.forma_pagamento || null, body.observacao || null, userId, abastecimentoId)
+  return db.prepare(`INSERT INTO lancamentos (id, aeronave_id, cotista_aeronave_id, periodicidade, data_emissao, data_vencimento, data_pagamento, descricao, fornecedores_favoritos_id, fornecedor_nome, abastecimentos_id, status, categoria_nome, fluxo, tipo_caixa, valor_centavos, numero_nf, numero_doc, url_nf, url_doc, url_boleto, comprovante_url, forma_pagamento, observacoes, criado_por, origem_tipo, origem_id, cliente_id) VALUES (?, ?, ?, 'EVENTUAL', ?, ?, ?, ?, ?, ?, ?, ?, 'Combustível', 'DESPESA', 'CLIENTE', ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, 'ABASTECIMENTO', ?, NULL)`)
+      .bind(uuid(), aeronaveId, cotista.id, data, vencimento, pago ? body.data_pagamento || null : null, descricao, null, fornecedor?.nome || null, abastecimentoId, pago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.numero_nf || null, body.numero_comanda || null, comprovanteUrl, body.forma_pagamento || null, body.observacao || null, userId, abastecimentoId)
   }
 
   const cotista = await db.prepare('SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1 AND cliente_id = ?2 ORDER BY id LIMIT 1').bind(aeronaveId, body.cliente_id).first<{ id: string }>()
   if (!cotista) throw new Error('cliente_nao_vinculado_a_aeronave')
-  return db.prepare(`INSERT INTO lancamentos (id, aeronave_id, cotista_aeronave_id, periodicidade, data_emissao, data_vencimento, data_pagamento, descricao, fornecedores_favoritos_id, fornecedor_nome, abastecimentos_id, status, categoria_nome, fluxo, tipo_caixa, valor_centavos, numero_nf, numero_doc, url_nf, url_doc, url_boleto, comprovante_url, forma_pagamento, observacoes, criado_por, origem_tipo, origem_id, cliente_id) VALUES (?, ?, ?, 'EVENTUAL', ?, ?, ?, ?, ?, ?, ?, ?, 'Combustível', 'DESPESA', 'CLIENTE', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, 'ABASTECIMENTO', ?, ?)`)
-    .bind(uuid(), aeronaveId, cotista.id, data, vencimento, pago ? body.data_pagamento || null : null, descricao, null, fornecedor?.nome || null, abastecimentoId, pago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.numero_nf || null, body.numero_comanda || null, body.forma_pagamento || null, body.observacao || null, userId, abastecimentoId, body.cliente_id)
+  return db.prepare(`INSERT INTO lancamentos (id, aeronave_id, cotista_aeronave_id, periodicidade, data_emissao, data_vencimento, data_pagamento, descricao, fornecedores_favoritos_id, fornecedor_nome, abastecimentos_id, status, categoria_nome, fluxo, tipo_caixa, valor_centavos, numero_nf, numero_doc, url_nf, url_doc, url_boleto, comprovante_url, forma_pagamento, observacoes, criado_por, origem_tipo, origem_id, cliente_id) VALUES (?, ?, ?, 'EVENTUAL', ?, ?, ?, ?, ?, ?, ?, ?, 'Combustível', 'DESPESA', 'CLIENTE', ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, 'ABASTECIMENTO', ?, ?)`)
+    .bind(uuid(), aeronaveId, cotista.id, data, vencimento, pago ? body.data_pagamento || null : null, descricao, null, fornecedor?.nome || null, abastecimentoId, pago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.numero_nf || null, body.numero_comanda || null, comprovanteUrl, body.forma_pagamento || null, body.observacao || null, userId, abastecimentoId, body.cliente_id)
 }
 
 app.post('/api/interno/abastecimentos', async c => {
   const authenticated = await authenticatedColaborador(c)
   if (!authenticated && !(await checkInternalAuth(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try {
   await garantirTabelaAbastecimentos(c)
   await garantirTabelaFornecedoresCombustivel(c)
   const body = await c.req.json<Record<string, any>>().catch(() => null)
@@ -5761,9 +5784,10 @@ app.post('/api/interno/abastecimentos', async c => {
   const litros = Number(body?.litros)
   const valorUnitario = Number(body?.valor_unitario || 0)
   const valorTotal = Number(body?.valor_total ?? litros * valorUnitario)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !local || !aeronaveId || Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
-  if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
-  if (body?.status === 'pago' && !body?.data_pagamento) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
+  const statusPago = String(body?.status || '').toLowerCase() === 'pago'
+  if (!dataAbastecimentoValida(data) || !local || !aeronaveId || Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
+  if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0 || Math.round(valorTotal * 100) <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
+  if (statusPago && !dataAbastecimentoValida(body?.data_pagamento)) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
   const db = c.env.SHARE_DB
   const id = uuid()
   const userId = authenticated?.id || extractSupabaseUserId(c) || null
@@ -5774,7 +5798,7 @@ app.post('/api/interno/abastecimentos', async c => {
   if (diarioId && (!diario || diario.aeronave_id !== aeronaveId)) return c.json({ error: 'lancamento_diario_invalido_para_aeronave' }, 409)
   if ((diario?.cliente_id && diario.cliente_id !== clienteId) || (diario?.socio_id && diario.socio_id !== socioId)) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
   const abastecimentoStatement = db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, forma_pagamento, data_vencimento_boleto, criado_por, lancamento_diario_id, data_pagamento, banco, voo_emprestado, numero_voo, prazo_envio_cliente_dias, prazo_envio_cliente_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, clienteId, socioId, aeronaveId, data, body?.tipo_combustivel || null, body?.trecho || diario?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, userId, diarioId, body?.status === 'pago' ? body?.data_pagamento : null, body?.banco || null, body?.voo_emprestado ? 1 : diario?.voo_emprestado ? 1 : 0, body?.numero_voo || diario?.numero_voo || null, body?.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body?.prazo_envio_cliente_em || null)
+  .bind(id, clienteId, socioId, aeronaveId, data, body?.tipo_combustivel || null, body?.trecho || diario?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, userId, diarioId, statusPago ? body?.data_pagamento : null, body?.banco || null, body?.voo_emprestado ? 1 : diario?.voo_emprestado ? 1 : 0, body?.numero_voo || diario?.numero_voo || null, body?.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body?.prazo_envio_cliente_em || null)
   const financeiroStatement = await statementFinanceiroAbastecimento(c, id, {
     ...body,
     cliente_id: clienteId,
@@ -5786,29 +5810,91 @@ app.post('/api/interno/abastecimentos', async c => {
   }, userId)
   await db.batch([abastecimentoStatement, financeiroStatement])
   return c.json({ id, success: true }, 201)
+  } catch (error) {
+    return respostaErroAbastecimento(c, error, 'criar')
+  }
 })
 
 app.patch('/api/interno/abastecimentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  try {
   await garantirTabelaAbastecimentos(c)
   await garantirTabelaFornecedoresCombustivel(c)
-  const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  const body = await c.req.json<Record<string, any>>().catch(() => null)
   const id = c.req.param('id')
   const db = c.env.SHARE_DB
-  const statusPago = body.status === 'pago'
-  const dataVencimentoFinanceiro = statusPago ? body.data_pagamento : body.data_vencimento_boleto || body.data
-  const valorCentavos = Math.round(Number(body.valor_total || 0) * 100)
-  const descricaoFinanceira = `Abastecimento ${String(body.trecho || '').trim()}`.trim()
-  const fornecedor = body.fornecedor_id
-    ? await db.prepare('SELECT nome_fornecedor AS nome FROM fornecedores_combustivel WHERE id = ?1').bind(body.fornecedor_id).first<{ nome: string | null }>()
+  if (!body || typeof body !== 'object') return c.json({ error: 'corpo_json_invalido' }, 400)
+  const data = String(body.data || '').trim()
+  const local = String(body.local || '').trim()
+  const aeronaveId = String(body.aeronave_id || '').trim()
+  const clienteId = String(body.cliente_id || '').trim() || null
+  const socioId = String(body.socio_id || '').trim() || null
+  const litros = Number(body.litros)
+  const valorUnitario = Number(body.valor_unitario || 0)
+  const valorTotal = Number(body.valor_total ?? litros * valorUnitario)
+  const statusPago = String(body.status || '').toLowerCase() === 'pago'
+  if (!dataAbastecimentoValida(data) || !local || !aeronaveId || Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
+  if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0 || Math.round(valorTotal * 100) <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
+  if (statusPago && !dataAbastecimentoValida(body.data_pagamento)) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
+
+  const anterior = await db.prepare('SELECT id FROM abastecimentos WHERE id = ?1').bind(id).first<{ id: string }>()
+  if (!anterior) return c.notFound()
+  const atualLancamento = await db.prepare('SELECT id, comprovante_url, aeronave_id, cotista_aeronave_id, cliente_id FROM lancamentos WHERE abastecimentos_id = ?1 LIMIT 1').bind(id).first<{ id: string; comprovante_url: string | null; aeronave_id: string | null; cotista_aeronave_id: string | null; cliente_id: string | null }>()
+  const atualMovimento = await db.prepare('SELECT id, comprovante_url, aeronave_id, socio_id, holding_id FROM movimentos_holding WHERE abastecimentos_id = ?1 LIMIT 1').bind(id).first<{ id: string; comprovante_url: string | null; aeronave_id: string | null; socio_id: string | null; holding_id: string | null }>()
+  const titularSocio = socioId
+    ? await db.prepare('SELECT id, holding_id FROM hold_socios WHERE id = ?1').bind(socioId).first<{ id: string; holding_id: string | null }>()
     : null
-  const result = await db.prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, data_pagamento = ?, banco = ?, voo_emprestado = ?, numero_voo = ?, prazo_envio_cliente_dias = ?, prazo_envio_cliente_em = ? WHERE id = ?`).bind(body.cliente_id || null, body.socio_id || null, body.aeronave_id || null, body.data, body.tipo_combustivel || null, body.trecho || null, body.local, body.numero_comanda || null, body.numero_nf || null, Number(body.litros || 0), Number(body.valor_unitario || 0), Number(body.valor_total || 0), body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, body.lancamento_diario_id || null, statusPago ? body.data_pagamento || null : null, body.banco || null, body.voo_emprestado ? 1 : 0, body.numero_voo || null, body.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body.prazo_envio_cliente_em || null, id).run()
-  if (!result.meta.changes) return c.notFound()
-  await db.batch([
-    db.prepare(`UPDATE lancamentos SET data_emissao = ?, data_vencimento = ?, data_pagamento = ?, descricao = ?, fornecedores_favoritos_id = ?, fornecedor_nome = ?, status = ?, valor_centavos = ?, forma_pagamento = ?, numero_nf = ?, numero_doc = ?, observacoes = ? WHERE abastecimentos_id = ?`).bind(body.data, dataVencimentoFinanceiro, statusPago ? body.data_pagamento : null, descricaoFinanceira, null, fornecedor?.nome || null, statusPago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.forma_pagamento || null, body.numero_nf || null, body.numero_comanda || null, body.observacao || null, id),
-    db.prepare(`UPDATE movimentos_holding SET data_emissao = ?, data_vencimento = ?, data_pagamento = ?, descricao = ?, fornecedor_id = ?, fornecedor_nome = ?, status = ?, valor_centavos = ?, forma_pagamento = ?, numero_nf = ?, numero_doc = ?, observacoes = ? WHERE abastecimentos_id = ?`).bind(body.data, dataVencimentoFinanceiro, statusPago ? body.data_pagamento : null, descricaoFinanceira, null, fornecedor?.nome || null, statusPago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.forma_pagamento || null, body.numero_nf || null, body.numero_comanda || null, body.observacao || null, id),
-  ])
+  if (socioId && !titularSocio) throw new Error('socio_nao_encontrado')
+  const destinoHolding = Boolean(titularSocio?.holding_id)
+  const destinoTabela: 'lancamentos' | 'movimentos_holding' = destinoHolding ? 'movimentos_holding' : 'lancamentos'
+  const registroFinanceiroAtual = atualLancamento || atualMovimento
+  const tabelaAtual: 'lancamentos' | 'movimentos_holding' | null = atualLancamento ? 'lancamentos' : atualMovimento ? 'movimentos_holding' : null
+  const comprovanteAtual = atualLancamento?.comprovante_url || atualMovimento?.comprovante_url || null
+  const cotista = !destinoHolding
+    ? await db.prepare('SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1 AND ' + (socioId ? 'socio_id' : 'cliente_id') + ' = ?2 ORDER BY id LIMIT 1').bind(aeronaveId, socioId || clienteId).first<{ id: string }>()
+    : null
+  if (!destinoHolding && !cotista) throw new Error(socioId ? 'socio_nao_vinculado_a_aeronave' : 'cliente_nao_vinculado_a_aeronave')
+  const mudandoTabela = Boolean(tabelaAtual && tabelaAtual !== destinoTabela)
+  const vinculoLancamentoMudou = Boolean(atualLancamento && (atualLancamento.aeronave_id !== aeronaveId || atualLancamento.cotista_aeronave_id !== cotista?.id || (atualLancamento.cliente_id || null) !== (socioId ? null : clienteId)))
+  const vinculoMovimentoMudou = Boolean(atualMovimento && (atualMovimento.aeronave_id !== aeronaveId || atualMovimento.socio_id !== socioId || atualMovimento.holding_id !== titularSocio?.holding_id))
+  if (atualLancamento && (mudandoTabela || vinculoLancamentoMudou)) {
+    const rateio = await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id = ?1 LIMIT 1').bind(atualLancamento!.id).first<{ id: string }>()
+    if (rateio) throw new Error('abastecimento_com_rateio_nao_pode_mudar_titular')
+  }
+  if (atualMovimento && (mudandoTabela || vinculoMovimentoMudou)) {
+    const rateio = await db.prepare('SELECT id FROM rateio_hold WHERE movimento_holding_id = ?1 LIMIT 1').bind(atualMovimento!.id).first<{ id: string }>()
+    if (rateio) throw new Error('abastecimento_com_rateio_nao_pode_mudar_titular')
+  }
+
+  const userId = extractSupabaseUserId(c) || null
+  const diarioId = String(body.lancamento_diario_id || '').trim() || null
+  if (diarioId) {
+    const diario = await db.prepare('SELECT id, aeronave_id, cliente_id, socio_id FROM lancamentos_diario_bordo WHERE id = ?1').bind(diarioId).first<any>()
+    if (!diario || diario.aeronave_id !== aeronaveId) return c.json({ error: 'lancamento_diario_invalido_para_aeronave' }, 409)
+    if ((diario.cliente_id && diario.cliente_id !== clienteId) || (diario.socio_id && diario.socio_id !== socioId)) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
+  }
+  const bodyFinanceiro = { ...body, cliente_id: clienteId, socio_id: socioId, aeronave_id: aeronaveId, data, valor_total: valorTotal }
+  const financeiroStatement = registroFinanceiroAtual && !mudandoTabela
+    ? (() => {
+      const vencimento = statusPago ? body.data_pagamento : body.data_vencimento_boleto || data
+      const descricao = `Abastecimento ${String(body.trecho || '').trim()}`.trim()
+      const fornecedorId = body.fornecedor_id || null
+      if (destinoTabela === 'lancamentos') {
+        return db.prepare(`UPDATE lancamentos SET aeronave_id = ?, cotista_aeronave_id = ?, cliente_id = ?, data_emissao = ?, data_vencimento = ?, data_pagamento = ?, descricao = ?, fornecedores_favoritos_id = NULL, fornecedor_nome = (SELECT nome_fornecedor FROM fornecedores_combustivel WHERE id = ?), status = ?, valor_centavos = ?, forma_pagamento = ?, numero_nf = ?, numero_doc = ?, observacoes = ? WHERE abastecimentos_id = ?`).bind(aeronaveId, cotista!.id, socioId ? null : clienteId, data, vencimento, statusPago ? body.data_pagamento : null, descricao, fornecedorId, statusPago ? 'PAGO' : 'EM_ABERTO', Math.round(valorTotal * 100), body.forma_pagamento || null, body.numero_nf || null, body.numero_comanda || null, body.observacao || null, id)
+      }
+      return db.prepare(`UPDATE movimentos_holding SET holding_id = ?, socio_id = ?, aeronave_id = ?, data_emissao = ?, data_vencimento = ?, data_pagamento = ?, descricao = ?, fornecedor_id = NULL, fornecedor_nome = (SELECT nome_fornecedor FROM fornecedores_combustivel WHERE id = ?), status = ?, valor_centavos = ?, forma_pagamento = ?, numero_nf = ?, numero_doc = ?, observacoes = ? WHERE abastecimentos_id = ?`).bind(titularSocio!.holding_id, socioId, aeronaveId, data, vencimento, statusPago ? body.data_pagamento : null, descricao, fornecedorId, statusPago ? 'PAGO' : 'EM_ABERTO', Math.round(valorTotal * 100), body.forma_pagamento || null, body.numero_nf || null, body.numero_comanda || null, body.observacao || null, id)
+    })()
+    : await statementFinanceiroAbastecimento(c, id, bodyFinanceiro, userId, comprovanteAtual)
+
+  const abastecimentoStatement = db.prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, data_pagamento = ?, banco = ?, voo_emprestado = ?, numero_voo = ?, prazo_envio_cliente_dias = ?, prazo_envio_cliente_em = ? WHERE id = ?`).bind(clienteId, socioId, aeronaveId, data, body.tipo_combustivel || null, body.trecho || null, local, body.numero_comanda || null, body.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, diarioId, statusPago ? body.data_pagamento : null, body.banco || null, body.voo_emprestado ? 1 : 0, body.numero_voo || null, body.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body.prazo_envio_cliente_em || null, id)
+  const statements = [abastecimentoStatement, financeiroStatement]
+  if (mudandoTabela && tabelaAtual === 'lancamentos') statements.push(db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(atualLancamento!.id))
+  if (mudandoTabela && tabelaAtual === 'movimentos_holding') statements.push(db.prepare('DELETE FROM movimentos_holding WHERE id = ?1').bind(atualMovimento!.id))
+  await db.batch(statements)
   return c.json({ success: true, id })
+  } catch (error) {
+    return respostaErroAbastecimento(c, error, 'atualizar')
+  }
 })
 
 app.delete('/api/interno/abastecimentos/:id', async c => {
@@ -5868,11 +5954,21 @@ app.get('/api/interno/abastecimentos/:id/arquivo/:tipo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const tipo = c.req.param('tipo')
   if (!['comanda', 'nota', 'boleto', 'comprovante'].includes(tipo)) return c.notFound()
-  const column = tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : tipo === 'comprovante' ? 'comprovante_url' : 'comanda_url'
-  const row = await c.env.SHARE_DB.prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?`).bind(c.req.param('id')).first<{ caminho: string | null }>(); if (!row?.caminho) return c.notFound()
-  let objectKey = row.caminho
-  try { const storedUrl = new URL(row.caminho); objectKey = storedUrl.searchParams.get('key') || row.caminho } catch { /* compatibilidade com registros antigos que armazenavam a chave */ }
-  const object = await shareBrasilBucket(c).get(objectKey); if (!object) return c.notFound(); return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `inline; filename="${objectKey.split('/').pop() || 'abastecimento'}"` } })
+  try {
+    const id = c.req.param('id')
+    const row = tipo === 'comprovante'
+      ? await c.env.SHARE_DB.prepare(`SELECT COALESCE((SELECT l.comprovante_url FROM lancamentos l WHERE l.abastecimentos_id = a.id LIMIT 1), (SELECT mh.comprovante_url FROM movimentos_holding mh WHERE mh.abastecimentos_id = a.id LIMIT 1)) AS caminho FROM abastecimentos a WHERE a.id = ?1`).bind(id).first<{ caminho: string | null }>()
+      : await c.env.SHARE_DB.prepare(`SELECT ${tipo === 'nota' ? 'nota_url' : tipo === 'boleto' ? 'boleto_url' : 'comanda_url'} AS caminho FROM abastecimentos WHERE id = ?1`).bind(id).first<{ caminho: string | null }>()
+    if (!row?.caminho) return c.notFound()
+    let objectKey = row.caminho
+    try { const storedUrl = new URL(row.caminho); objectKey = storedUrl.searchParams.get('key') || row.caminho } catch { /* compatibilidade com registros antigos que armazenavam a chave */ }
+    const object = await shareBrasilBucket(c).get(objectKey)
+    if (!object) return c.notFound()
+    return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `inline; filename="${objectKey.split('/').pop() || 'abastecimento'}"` } })
+  } catch (error) {
+    console.error('[abastecimentos:download]', error)
+    return c.json({ error: 'falha_ao_baixar_arquivo', detail: 'Não foi possível baixar o arquivo do abastecimento.' }, 500)
+  }
 })
 
 // ─── Share Brasil: ponto, documentos, senhas e contatos ─────────────────────
