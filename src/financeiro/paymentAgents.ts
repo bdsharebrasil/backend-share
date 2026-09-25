@@ -59,14 +59,20 @@ export async function findPaymentRequestByKey(db: D1Database, key: string): Prom
 
 export async function createPaymentRequest(db: D1Database, input: PaymentRequest, userId: string | null): Promise<Row> {
   const existing = await findPaymentRequestByKey(db, input.idempotency_key)
-  if (existing?.id) return { id: existing.id, idempotent: true }
+  if (existing?.id) {
+    const request = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(existing.id).first<Row>()
+    if (!request) throw new Error('solicitacao_pagamento_nao_encontrada')
+    return { ...request, idempotent: true }
+  }
   const id = crypto.randomUUID()
   await db.batch([
     db.prepare(`INSERT INTO envio_despesas (id, tipo, descricao, valor, data_despesa, vencimento, aeronave_id, observacoes, status, criado_por, grupo_categoria, tipo_caixa, pago_diretamente, fornecedor_id, categoria_id, rateio_linhas_json, anexos_json, periodicidade, tipo_rateio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.data_despesa, input.data_vencimento, input.aeronave_id, input.observacoes, userId, input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', input.tipo === 'cliente' ? 1 : 0, input.fornecedor_id, input.categoria_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio),
     db.prepare(`INSERT INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'IDEMPOTENCY_KEY', ?, 'ENVIO_DESPESA', ?, 'SOLICITACAO')`).bind(crypto.randomUUID(), input.idempotency_key, id),
   ])
-  return { id, status: 'PENDENTE', idempotent: false }
+  const request = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first<Row>()
+  if (!request) throw new Error('solicitacao_pagamento_nao_encontrada')
+  return { ...request, idempotent: false }
 }
 
 export async function convertPaymentRequest(db: D1Database, request: Row, createExpense: (db: D1Database, body: Row, userId: string | null) => Promise<Row>, userId: string | null): Promise<Row> {

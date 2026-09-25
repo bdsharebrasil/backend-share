@@ -7452,17 +7452,30 @@ function dominioEmail(valor: unknown): string | null {
   return enderecoEmail(valor)?.split('@')[1] || null
 }
 function emailArray(value: unknown): string[] {
-  const texto = String(value ?? '').trim()
-  let valores: unknown[]
-  if (Array.isArray(value)) valores = value
-  else {
-    try {
-      const parsed = JSON.parse(texto || '[]')
-      valores = Array.isArray(parsed) ? parsed : typeof parsed === 'string' ? parsed.split(/[;,\s]+/) : []
-    } catch {
-      valores = texto.replace(/^\[|\]$/g, '').split(/[;,\s]+/)
+  const valores: unknown[] = []
+  const adicionar = (item: unknown) => {
+    if (Array.isArray(item)) {
+      item.forEach(adicionar)
+      return
     }
+    const texto = String(item ?? '').trim()
+    if (!texto) return
+    // parseBody({ all: true }) retorna campos repetidos em arrays; o campo JSON
+    // destinatarios pode, portanto, vir como ['["cliente@dominio.com"]'].
+    if (texto.startsWith('[') && texto.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(texto)
+        if (Array.isArray(parsed)) {
+          parsed.forEach(adicionar)
+          return
+        }
+      } catch {
+        // Compatibilidade com entradas legadas separadas por vírgula/ponto e vírgula.
+      }
+    }
+    texto.split(/[;,\s]+/).forEach((parte) => valores.push(parte))
   }
+  adicionar(value)
   return [...new Set(valores.map(normalizarEmail).filter((item): item is string => Boolean(item)))]
 }
 function arrayBufferBase64(buffer: ArrayBuffer): string {
