@@ -7614,7 +7614,7 @@ app.post('/api/interno/emails', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const multipart = c.req.header('content-type')?.includes('multipart/form-data')
-  const body = multipart ? await c.req.parseBody() : await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const body = multipart ? await c.req.parseBody({ all: true }) : await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const destinatarios = emailArray(body.destinatarios)
   const copias = emailArray(body.cc).filter((email) => !destinatarios.includes(email))
   const todosDestinatarios = [...destinatarios, ...copias]
@@ -7635,7 +7635,7 @@ app.post('/api/interno/emails', async c => {
   if (!c.env.RESEND_API_KEY || !emailFrom) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
   const db = c.env.SHARE_DB; const anexos: any[] = []; let erroAnexo: string | null = null
-  for (const id of ids.slice(0, 10)) {
+  for (const id of ids) {
     const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
     if (prefix === 'abastecimento') {
       const column = tipoAbastecimento === 'nota' ? 'nota_url' : tipoAbastecimento === 'boleto' ? 'boleto_url' : 'comanda_url'
