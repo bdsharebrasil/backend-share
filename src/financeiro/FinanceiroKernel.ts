@@ -646,8 +646,8 @@ function linkStatement(
   userId: string | null,
 ): D1PreparedStatement {
   requireTable(schema, 'financeiro_vinculos', ['id', 'origem_tipo', 'origem_id', 'destino_tipo', 'destino_id', 'tipo_vinculo'])
-    return db.prepare(
-      `INSERT OR IGNORE INTO financeiro_vinculos
+  return db.prepare(
+    `INSERT OR IGNORE INTO financeiro_vinculos
        (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
       VALUES (?, ?, ?, ?, ?, ?)`,
   ).bind(id(), origemTipo, origemId, destinoTipo, destinoId, tipoVinculo)
@@ -764,8 +764,8 @@ function holdingAllocationStatements(
     return insertStatement(
       db,
       schema,
-        'rateio_hold',
-        {
+      'rateio_hold',
+      {
         id: id(),
         movimento_holding_id: movimentoId,
         aeronave_id: command.aeronave_id,
@@ -1008,7 +1008,7 @@ export async function createExpense(
         ),
         grupo_categoria: nullableText(
           command.grupo_categoria ||
-            (reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'),
+          (reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'),
         ),
         fluxo: 'SAIDA',
         natureza: 'DESPESA',
@@ -1880,13 +1880,13 @@ async function buildReceiptPagamento(
     const rateioLinhas = Array.isArray(command.rateio_linhas) && command.rateio_linhas.length
       ? command.rateio_linhas
       : [{
-          cotista_id: cotista.id,
-          socio_id: cotista.socio_id,
-          percentual: 100,
-          percentual_sociedade: percentualSociedade,
-          valor_centavos: input.valor_centavos,
-          pago_diretamente: true,
-        }]
+        cotista_id: cotista.id,
+        socio_id: cotista.socio_id,
+        percentual: 100,
+        percentual_sociedade: percentualSociedade,
+        valor_centavos: input.valor_centavos,
+        pago_diretamente: true,
+      }]
     return createExpense(db, {
       ...command,
       recibo_id: receiptId,
@@ -2061,7 +2061,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // O e-mail pode ter sido enviado antes ou depois da criação dos lançamentos.
   // O histórico é opcional e não pode interromper a programação financeira.
   const emailInfo = await db.prepare(
-      `SELECT e.id FROM emails_enviados e
+    `SELECT e.id FROM emails_enviados e
        LEFT JOIN recibo_anexos a
          ON a.id = e.referencia_id
         AND e.referencia_tipo = 'recibo'
@@ -2203,96 +2203,96 @@ async function issueReceiptInternal(
   if (!numero) throw new FinanceError('Número do recibo não encontrado', 'numero_recibo_ausente', 500)
   let financeiroCriado: Row | null = null
   try {
-  if (!existingReceiptId) {
-    await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
-    return {
-      recibo: {
-        id: reciboId,
+    if (!existingReceiptId) {
+      await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
+      return {
+        recibo: {
+          id: reciboId,
+          numero_recibo: numero,
+          tipo_recibo: input.tipo_recibo,
+          pagador_tipo: input.pagador_tipo,
+          pagador_id: input.pagador_id,
+          nome_pagador: body.nome_pagador || null,
+          documento_pagador: body.documento_pagador || null,
+          endereco_pagador: body.endereco_pagador || null,
+          cidade_pagador: body.cidade_pagador || null,
+          uf_pagador: body.uf_pagador || null,
+          recebedor_nome: input.recebedor_nome || null,
+          recebedor_cpf: input.recebedor_cpf || null,
+          recebedor_endereco: input.recebedor_endereco || null,
+          recebedor_cidade: input.recebedor_cidade || null,
+          recebedor_uf: input.recebedor_uf || null,
+          aeronave_id: input.aeronave_id || null,
+          rateado: 0,
+          valor: input.valor_centavos,
+          valor_centavos: input.valor_centavos,
+          descricao: input.descricao,
+          data_emissao: input.data_emissao,
+          data_vencimento: input.data_vencimento || null,
+          categoria_id: input.categoria_movimentacao_id,
+          categoria_movimentacao_id: input.categoria_movimentacao_id,
+          status: 'CRIADO',
+          url_recibo: null,
+          lancamento_id: null,
+        },
+        recibo_id: reciboId,
         numero_recibo: numero,
-        tipo_recibo: input.tipo_recibo,
-        pagador_tipo: input.pagador_tipo,
-        pagador_id: input.pagador_id,
-        nome_pagador: body.nome_pagador || null,
-        documento_pagador: body.documento_pagador || null,
-        endereco_pagador: body.endereco_pagador || null,
-        cidade_pagador: body.cidade_pagador || null,
-        uf_pagador: body.uf_pagador || null,
-        recebedor_nome: input.recebedor_nome || null,
-        recebedor_cpf: input.recebedor_cpf || null,
-        recebedor_endereco: input.recebedor_endereco || null,
-        recebedor_cidade: input.recebedor_cidade || null,
-        recebedor_uf: input.recebedor_uf || null,
-        aeronave_id: input.aeronave_id || null,
-        rateado: 0,
-        valor: input.valor_centavos,
-        valor_centavos: input.valor_centavos,
-        descricao: input.descricao,
-        data_emissao: input.data_emissao,
-        data_vencimento: input.data_vencimento || null,
-        categoria_id: input.categoria_movimentacao_id,
-        categoria_movimentacao_id: input.categoria_movimentacao_id,
-        status: 'CRIADO',
-        url_recibo: null,
         lancamento_id: null,
-      },
-      recibo_id: reciboId,
-      numero_recibo: numero,
-      lancamento_id: null,
-      lancamento_cliente_id: null,
-      rateio_ids: [],
-      rateio_linhas: [],
-      status: 'CRIADO',
-      valor_centavos: input.valor_centavos,
+        lancamento_cliente_id: null,
+        rateio_ids: [],
+        rateio_linhas: [],
+        status: 'CRIADO',
+        valor_centavos: input.valor_centavos,
+      }
     }
-  }
-  const categoriaNome = nullableText(body.categoria_nome) || nullableText(
-    (await db.prepare(`
+    const categoriaNome = nullableText(body.categoria_nome) || nullableText(
+      (await db.prepare(`
       SELECT nome FROM categoria_movimentacao_cliente WHERE id = ?
       UNION ALL
       SELECT nome FROM categoria_movimentacao_share WHERE id = ?
       LIMIT 1
     `).bind(input.categoria_movimentacao_id, input.categoria_movimentacao_id).first<{ nome: string | null }>())?.nome,
-  )
-  const financeiro = financeiroCriado = await buildFinance(db, schema, {
-    ...comando,
-    categoria_nome: categoriaNome,
-  }, input, reciboId, userId)
-  const lancamentoId = text('shareLancamentoId' in financeiro ? financeiro.shareLancamentoId : financeiro.lancamento_id ?? financeiro.id)
-  const rateioLancamentoId = text('clienteLancamentoId' in financeiro ? financeiro.clienteLancamentoId : lancamentoId)
-  await db.prepare('UPDATE recibos SET lancamento_id = ? WHERE id = ?').bind(lancamentoId, reciboId).run()
-  const rateios = input.tipo_recibo === 'recibo_saida'
-    ? await createReceiptAllocations(db, reciboId, rateioLancamentoId)
-    : []
-  await db.batch([
-    linkStatement(db, schema, 'RECIBO', reciboId, 'LANCAMENTO', lancamentoId, 'RECIBO_LANCAMENTO', userId),
-    ...rateios.map((rateio) => linkStatement(db, schema, 'RECIBO', reciboId, 'RATEIO', String(rateio.id), 'RECIBO_RATEIO', userId)),
-    auditStatement(db, schema, 'recibos', reciboId, 'CRIACAO_RECIBO', userId, null, input.valor_centavos, null, null),
-  ])
-  const statusAtual = await db.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
-  const statusFinal = String(statusAtual?.status ?? '').toUpperCase() === 'CRIADO'
-    ? 'PDF_PENDENTE'
-    : String(statusAtual?.status ?? 'PDF_PENDENTE')
-  if (statusFinal === 'PDF_PENDENTE' && String(statusAtual?.status ?? '').toUpperCase() === 'CRIADO') {
-    await updateReceiptStatus(db, reciboId, 'PDF_PENDENTE')
-  }
-  const recibo = {
-    id: reciboId,
-    numero_recibo: numero,
-    tipo_recibo: input.tipo_recibo,
-    pagador_tipo: input.pagador_tipo,
-    pagador_id: input.pagador_id,
-    aeronave_id: input.aeronave_id || null,
-    rateado: rateios.length ? 1 : 0,
-    valor: input.valor_centavos,
-    valor_centavos: input.valor_centavos,
-    descricao: input.descricao,
-    data_emissao: input.data_emissao,
-    categoria_id: input.categoria_movimentacao_id,
-    categoria_movimentacao_id: input.categoria_movimentacao_id,
-    status: statusFinal,
-    lancamento_id: lancamentoId,
-  }
-  return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, lancamento_cliente_id: rateioLancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: statusFinal, valor_centavos: input.valor_centavos }
+    )
+    const financeiro = financeiroCriado = await buildFinance(db, schema, {
+      ...comando,
+      categoria_nome: categoriaNome,
+    }, input, reciboId, userId)
+    const lancamentoId = text('shareLancamentoId' in financeiro ? financeiro.shareLancamentoId : financeiro.lancamento_id ?? financeiro.id)
+    const rateioLancamentoId = text('clienteLancamentoId' in financeiro ? financeiro.clienteLancamentoId : lancamentoId)
+    await db.prepare('UPDATE recibos SET lancamento_id = ? WHERE id = ?').bind(lancamentoId, reciboId).run()
+    const rateios = input.tipo_recibo === 'recibo_saida'
+      ? await createReceiptAllocations(db, reciboId, rateioLancamentoId)
+      : []
+    await db.batch([
+      linkStatement(db, schema, 'RECIBO', reciboId, 'LANCAMENTO', lancamentoId, 'RECIBO_LANCAMENTO', userId),
+      ...rateios.map((rateio) => linkStatement(db, schema, 'RECIBO', reciboId, 'RATEIO', String(rateio.id), 'RECIBO_RATEIO', userId)),
+      auditStatement(db, schema, 'recibos', reciboId, 'CRIACAO_RECIBO', userId, null, input.valor_centavos, null, null),
+    ])
+    const statusAtual = await db.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
+    const statusFinal = String(statusAtual?.status ?? '').toUpperCase() === 'CRIADO'
+      ? 'PDF_PENDENTE'
+      : String(statusAtual?.status ?? 'PDF_PENDENTE')
+    if (statusFinal === 'PDF_PENDENTE' && String(statusAtual?.status ?? '').toUpperCase() === 'CRIADO') {
+      await updateReceiptStatus(db, reciboId, 'PDF_PENDENTE')
+    }
+    const recibo = {
+      id: reciboId,
+      numero_recibo: numero,
+      tipo_recibo: input.tipo_recibo,
+      pagador_tipo: input.pagador_tipo,
+      pagador_id: input.pagador_id,
+      aeronave_id: input.aeronave_id || null,
+      rateado: rateios.length ? 1 : 0,
+      valor: input.valor_centavos,
+      valor_centavos: input.valor_centavos,
+      descricao: input.descricao,
+      data_emissao: input.data_emissao,
+      categoria_id: input.categoria_movimentacao_id,
+      categoria_movimentacao_id: input.categoria_movimentacao_id,
+      status: statusFinal,
+      lancamento_id: lancamentoId,
+    }
+    return { recibo, recibo_id: reciboId, numero_recibo: numero, lancamento_id: lancamentoId, lancamento_cliente_id: rateioLancamentoId, rateio_ids: rateios.map((rateio) => rateio.id), rateio_linhas: rateios, status: statusFinal, valor_centavos: input.valor_centavos }
   } catch (error) {
     const created = await db.prepare('SELECT lancamento_id FROM recibos WHERE id = ?').bind(reciboId).first<{ lancamento_id: string | null }>()
     const lancamentoIds = [...new Set([
