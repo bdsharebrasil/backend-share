@@ -643,9 +643,30 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const totalPago = pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const movimentacoesComFornecedor = await enriquecerFornecedores(db, movimentacoes)
+    const lancIds = movimentacoesComFornecedor.map((row) => String(row.id ?? '')).filter(Boolean)
+    const reativacoes = lancIds.length
+      ? await listar(db, `SELECT r.lancamento_id, rr.justificativa, rr.reativado_em
+           FROM recibo_reativacoes rr
+           JOIN recibos r ON r.id = rr.recibo_id
+          WHERE r.lancamento_id IN (${lancIds.map(() => '?').join(', ')})
+            AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+          ORDER BY rr.reativado_em DESC`, ...lancIds).catch(() => [])
+      : []
+    const reativacaoPorLancamento = new Map<string, Record<string, unknown>>()
+    reativacoes.forEach((row) => {
+      const chave = String(row.lancamento_id ?? '')
+      if (chave && !reativacaoPorLancamento.has(chave)) reativacaoPorLancamento.set(chave, row)
+    })
     const contasPendentes = pagar.filter(contaPendente)
     const contasEmAberto = new Set(contasPendentes.flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
-    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))) })), emails_enviados: emailsEnviados })
+    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({
+      ...row,
+      fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
+      valor: Number(row.valor_centavos || 0) / 100,
+      pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))),
+      justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null,
+      reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null,
+    })), emails_enviados: emailsEnviados })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -1264,8 +1285,70 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
 })
 
 financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
-  await c.env.SHARE_DB.prepare("UPDATE recibos SET status = 'CANCELADO' WHERE id = ?").bind(c.req.param('id')).run()
-  return c.json({ ok: true })
+  try {
+    const db = c.env.SHARE_DB
+    const reciboId = c.req.param('id')
+    const recibo = await db.prepare('SELECT id, status FROM recibos WHERE id = ?').bind(reciboId).first<{ id: string; status: string | null }>()
+    if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    if (String(recibo.status ?? '').toUpperCase() === 'CANCELADO') return c.json({ error: 'recibo_nao_encontrado_ou_ja_cancelado' }, 409)
+
+    // O cancelamento é lógico: preserva o status do recibo e impede que seus
+    // lançamentos/rateios continuem compondo o fluxo financeiro.
+    await db.batch([
+      db.prepare(`UPDATE recibos SET status_anterior = status, status = 'CANCELADO' WHERE id = ? AND UPPER(COALESCE(status, '')) <> 'CANCELADO'`).bind(reciboId),
+      db.prepare(`UPDATE lancamentos SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP
+        WHERE id IN (SELECT lancamento_id FROM recibos WHERE id = ? AND lancamento_id IS NOT NULL)
+           OR (origem_id = ? AND UPPER(COALESCE(origem_tipo, '')) IN ('RECIBO', 'RECIBO_REEMBOLSO'))`).bind(reciboId, reciboId),
+      db.prepare(`UPDATE rateio_despesas SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP
+        WHERE origem_id = ? OR lancamento_id IN (SELECT id FROM lancamentos WHERE origem_id = ?)` ).bind(reciboId, reciboId),
+      db.prepare(`UPDATE rateio_hold SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE origem_id = ?`).bind(reciboId),
+      db.prepare(`UPDATE contas_apagar SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP
+        WHERE lancamentos_id IN (SELECT id FROM lancamentos WHERE origem_id = ? OR id IN (SELECT lancamento_id FROM recibos WHERE id = ?))`).bind(reciboId, reciboId),
+    ])
+    return c.json({ ok: true, status: 'CANCELADO' })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/recibos/:id/reativar', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const reciboId = c.req.param('id')
+    const body = await c.req.json<{ justificativa?: string }>().catch(() => ({} as { justificativa?: string }))
+    const justificativa = String(body.justificativa ?? '').trim()
+    if (justificativa.length < 5) return c.json({ error: 'justificativa_obrigatoria', code: 'justificativa_obrigatoria' }, 400)
+    if (justificativa.length > 1000) return c.json({ error: 'justificativa_muito_longa', code: 'justificativa_muito_longa' }, 400)
+
+    const recibo = await db.prepare('SELECT id, status, status_anterior, url_recibo, lancamento_id FROM recibos WHERE id = ?').bind(reciboId).first<Record<string, unknown>>()
+    if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    if (String(recibo.status ?? '').toUpperCase() !== 'CANCELADO') return c.json({ error: 'recibo_nao_esta_cancelado', code: 'recibo_nao_esta_cancelado' }, 409)
+
+    // Registros antigos não tinham status_anterior; a ordem reproduz o estado
+    // mais provável sem alterar o histórico nem expor a justificativa nele.
+    let restaurar = String(recibo.status_anterior ?? '').trim().toUpperCase()
+    if (!restaurar || restaurar === 'CANCELADO') {
+      const email = await db.prepare(`SELECT e.id FROM emails_enviados e
+        LEFT JOIN recibo_anexos a ON a.id = e.referencia_id AND e.referencia_tipo = 'recibo'
+        WHERE e.status = 'enviado' AND e.referencia_tipo = 'recibo'
+          AND (e.referencia_id = ? OR a.recibo_id = ?) LIMIT 1`).bind(reciboId, reciboId).first().catch(() => null)
+      restaurar = email ? 'EMAIL_ENVIADO' : recibo.url_recibo ? 'EMITIDO' : 'PDF_PENDENTE'
+    }
+
+    const userId = c.get('userId') || null
+    const auditId = crypto.randomUUID()
+    const resultados = await db.batch([
+      db.prepare(`UPDATE recibos SET status = ?, status_anterior = NULL WHERE id = ? AND UPPER(COALESCE(status, '')) = 'CANCELADO'`).bind(restaurar, reciboId),
+      db.prepare(`UPDATE lancamentos SET status = 'EM_ABERTO', atualizado_em = CURRENT_TIMESTAMP
+        WHERE status = 'CANCELADO' AND (id = ? OR origem_id = ?)` ).bind(recibo.lancamento_id ?? null, reciboId),
+      db.prepare(`UPDATE rateio_despesas SET status = 'EM_ABERTO', atualizado_em = CURRENT_TIMESTAMP
+        WHERE status = 'CANCELADO' AND (origem_id = ? OR lancamento_id IN (SELECT id FROM lancamentos WHERE origem_id = ?))`).bind(reciboId, reciboId),
+      db.prepare(`UPDATE rateio_hold SET status = 'EM_ABERTO', atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND origem_id = ?`).bind(reciboId),
+      db.prepare(`UPDATE contas_apagar SET status = 'EM_ABERTO', atualizado_em = CURRENT_TIMESTAMP
+        WHERE status = 'CANCELADO' AND lancamentos_id IN (SELECT id FROM lancamentos WHERE origem_id = ? OR id = ?)` ).bind(reciboId, recibo.lancamento_id ?? null),
+      db.prepare(`INSERT INTO recibo_reativacoes (id, recibo_id, justificativa, status_restaurado, reativado_por) VALUES (?, ?, ?, ?, ?)`).bind(auditId, reciboId, justificativa, restaurar, userId),
+    ])
+    if (!resultados[0].meta.changes) return c.json({ error: 'recibo_nao_esta_cancelado', code: 'recibo_nao_esta_cancelado' }, 409)
+    return c.json({ ok: true, id: reciboId, status: restaurar })
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.post('/recibos/:id/reembolso', async (c) => {

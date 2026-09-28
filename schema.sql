@@ -2344,6 +2344,7 @@ status TEXT
   grupo_categoria TEXT,
 
   status TEXT,
+  status_anterior TEXT,
 
   lancamento_id TEXT,
   criado_por TEXT,
@@ -2356,7 +2357,14 @@ status TEXT
   recebedor_uf TEXT,
   numero_documento_anexo TEXT,
   observacoes TEXT
-, categoria_nome TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE recibos_saida (
+, categoria_nome TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE recibo_reativacoes (
+  id TEXT PRIMARY KEY NOT NULL,
+  recibo_id TEXT NOT NULL REFERENCES recibos(id),
+  justificativa TEXT NOT NULL,
+  status_restaurado TEXT NOT NULL,
+  reativado_por TEXT,
+  reativado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)'), ('CREATE INDEX idx_recibo_reativacoes_recibo ON recibo_reativacoes (recibo_id, reativado_em DESC)'), ('CREATE TABLE recibos_saida (
     id TEXT PRIMARY KEY NOT NULL,
     numero_recibo TEXT NOT NULL,
     sequencia_numeros_recibo_saida_id TEXT,
