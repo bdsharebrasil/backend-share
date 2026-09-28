@@ -6599,7 +6599,11 @@ async function isColaboradorManager(c: Context<{ Bindings: Bindings }>, user: Co
   const result = await c.env.SHARE_DB.prepare("SELECT 1 FROM user_profiles WHERE id = ?1 AND lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro_master', 'gestor_master', 'rh') UNION ALL SELECT 1 FROM usuarios_funcoes WHERE user_id = ?1 AND lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro_master', 'gestor_master', 'rh') LIMIT 1").bind(user.id).first()
   return Boolean(result)
 }
-
+function funcoesColaborador(row: Record<string, any>) {
+  const funcoes = String(row.funcoes_raw || '').split(',').map(item => item.trim()).filter(Boolean)
+  const { funcoes_raw: _funcoesRaw, ...colaborador } = row
+  return { ...colaborador, funcoes }
+}
 async function sincronizarTripulacaoColaborador(c: Context<{ Bindings: Bindings }>, userId: string, body: Record<string, any> = {}) {
   const db = c.env.SHARE_DB
   const perfil = await db.prepare('SELECT id, nome_completo, canac, status, departamento FROM user_profiles WHERE id = ?1').bind(userId).first<any>()
@@ -6626,8 +6630,8 @@ async function sincronizarTripulacaoColaborador(c: Context<{ Bindings: Bindings 
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await c.env.SHARE_DB.prepare("SELECT id, email, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, exame_admissional_realizado, exame_admissional_data, exame_admissional_local, exame_admissional_empresa, exame_admissional_prazo, exame_admissional_documento_id, data_criacao, data_atualizacao FROM user_profiles WHERE lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador' ORDER BY COALESCE(nome_exibicao, nome_completo), email").all()
-  return c.json(result.results)
+  const result = await c.env.SHARE_DB.prepare("SELECT p.id, p.email, p.nome_completo, p.nome_exibicao, p.telefone, p.cidade, p.uf, p.data_nascimento, p.data_admissao, p.cpf, p.rg, p.canac, p.status, p.tipo_user, p.departamento, p.departamentos_email, p.exame_admissional_realizado, p.exame_admissional_data, p.exame_admissional_local, p.exame_admissional_empresa, p.exame_admissional_prazo, p.exame_admissional_documento_id, p.data_criacao, p.data_atualizacao, GROUP_CONCAT(uf.funcao) AS funcoes_raw FROM user_profiles p LEFT JOIN usuarios_funcoes uf ON uf.user_id = p.id WHERE lower(COALESCE(p.tipo_user, 'colaborador')) = 'colaborador' GROUP BY p.id ORDER BY COALESCE(p.nome_exibicao, p.nome_completo), p.email").all<Record<string, any>>()
+  return c.json(result.results.map(funcoesColaborador))
 })
 
 app.post('/api/gestor/gestao-colaborador', async c => {
@@ -6651,7 +6655,7 @@ app.post('/api/gestor/gestao-colaborador', async c => {
     const db = c.env.SHARE_DB
     await db.batch([
       db.prepare(`INSERT INTO user_profiles (id, email, email_envio, nome_completo, nome_exibicao, telefone, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, exame_admissional_realizado, exame_admissional_data, exame_admissional_local, exame_admissional_empresa, exame_admissional_prazo, exame_admissional_documento_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, email, emailEnvio, nome, body.nome_exibicao || nome, body.telefone || null, body.cidade || null, body.uf || null, body.data_nascimento || null, body.data_admissao || null, body.cpf || null, body.rg || null, body.canac || null, 'ativo', 'colaborador', departamento || null, departamento || null, body.exame_admissional_realizado ? 1 : 0, body.exame_admissional_data || null, body.exame_admissional_local || null, body.exame_admissional_empresa || null, body.exame_admissional_prazo || null, body.exame_admissional_documento_id || null),
-      db.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, String(body.funcao || departamento || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')),
+      db.prepare('INSERT INTO usuarios_funcoes (id, user_id, funcao) VALUES (?, ?, ?)').bind(uuid(), id, String(departamento || body.funcao || 'colaborador').trim().toLowerCase().replace(/[\s-]+/g, '_')),
       db.prepare('INSERT INTO assinaturas_email (id, usuario_id, nome, cargo, telefone, endereco, email) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), id, nome, body.cargo || departamento || null, body.telefone || null, null, emailEnvio),
     ])
     await sincronizarTripulacaoColaborador(c, id, { ...body, departamento })
