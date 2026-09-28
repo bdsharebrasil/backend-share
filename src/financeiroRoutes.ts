@@ -1250,14 +1250,22 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     const tipoRateio = String(body.tipo_rateio ?? 'FIXO').toUpperCase()
     const periodicidade = body.periodicidade ? String(body.periodicidade) : 'ÚNICO'
     const linhas = Array.isArray(body.linhas) ? body.linhas as Array<Record<string, unknown>> : []
+    const linhasNormalizadas = linhas.map((linha) => ({
+      ...linha,
+      cotista_id: String(linha.cotista_id ?? '').trim(),
+      percentual_uso: Number(linha.percentual_uso ?? linha.percentual ?? 0),
+    }))
     const valorCentavos = Number(lancamento.valor_centavos ?? receipt.valor ?? 0)
-    const percentualTotal = linhas.reduce((total, linha) => total + Number(linha.percentual_uso ?? 0), 0)
-    if (!aeronaveId || !dataVencimento || !linhas.length || Math.abs(percentualTotal - 100) > 0.01 || !['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA'].includes(tipoRateio)) return c.json({ error: 'dados_de_rateio_invalidos' }, 400)
-    const cotistaIds = linhas.map((linha) => String(linha.cotista_id ?? '').trim()).filter(Boolean)
-    const cotistas = await listar(c.env.SHARE_DB, `SELECT id, aeronave_id, socio_id, percentual_sociedade FROM cotista_aeronave WHERE id IN (${cotistaIds.map(() => '?').join(',')})`, ...cotistaIds)
+    const percentualTotal = linhasNormalizadas.reduce((total, linha) => total + linha.percentual_uso, 0)
+    const cotistaIds = linhasNormalizadas.map((linha) => linha.cotista_id).filter(Boolean)
+    const idsUnicos = new Set(cotistaIds)
+    if (!aeronaveId || !dataVencimento || !linhasNormalizadas.length || cotistaIds.length !== linhasNormalizadas.length || idsUnicos.size !== cotistaIds.length || linhasNormalizadas.some((linha) => !Number.isFinite(linha.percentual_uso) || linha.percentual_uso <= 0) || Math.abs(percentualTotal - 100) > 0.01 || !['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA'].includes(tipoRateio)) return c.json({ error: 'dados_de_rateio_invalidos' }, 400)
+    const cotistas = await listar(c.env.SHARE_DB, `SELECT ca.id, ca.aeronave_id, ca.socio_id, ca.percentual_sociedade, hs.holding_id FROM cotista_aeronave ca LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id IN (${cotistaIds.map(() => '?').join(',')})`, ...cotistaIds)
     if (cotistas.length !== cotistaIds.length || cotistas.some((cotista) => String(cotista.aeronave_id) !== aeronaveId)) return c.json({ error: 'cotistas_invalidos_para_aeronave' }, 400)
+    const holdingIds = [...new Set(cotistas.filter((cotista) => String(cotista.socio_id ?? '').trim()).map((cotista) => String(cotista.holding_id ?? '').trim()).filter(Boolean))]
+    if (holdingIds.length > 1 || cotistas.some((cotista) => String(cotista.socio_id ?? '').trim() && !String(cotista.holding_id ?? '').trim())) return c.json({ error: 'holding_do_cotista_invalida' }, 400)
     const contaId = existing?.id ?? crypto.randomUUID()
-    const rateioIds = linhas.map(() => crypto.randomUUID())
+    const rateioIds = linhasNormalizadas.map(() => crypto.randomUUID())
     // A conta a pagar pertence ao caixa Share; seu FK de categoria aponta
     // para categoria_movimentacao_share. O rateio, por outro lado, usa a
     // categoria selecionada do cliente.
@@ -1268,14 +1276,19 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     const descricao = lancamento.descricao ?? receipt.descricao ?? 'Recibo'
     const dataEmissao = lancamento.data_emissao ?? receipt.data_emissao ?? null
     const documentoUrl = receipt.url_recibo ?? null
+    const movimentoHoldingId = holdingIds.length ? crypto.randomUUID() : null
     const statements = existing ? [] : [c.env.SHARE_DB.prepare(`INSERT INTO contas_apagar (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, lancamentos_id, boleto_url, nf_url, criado_por, origem_tipo, idempotency_key, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECIBO', ?, 'EM_ABERTO')`).bind(contaId, dataVencimento, valorCentavos, categoriaIdConta, categoriaNomeConta, descricao, aeronaveId, lancamentoId, body.boleto_url ?? null, documentoUrl, c.get('userId') || null, `recibo:${reciboId}`)]
-    linhas.forEach((linha, index) => {
+    if (movimentoHoldingId) {
+      const cotistaHolding = cotistas.find((cotista) => String(cotista.holding_id) === holdingIds[0])
+      statements.push(c.env.SHARE_DB.prepare(`INSERT INTO movimentos_holding (id, holding_id, socio_id, aeronave_id, periodicidade, tipo_caixa, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome, fluxo, valor_centavos, status, pago_diretamente, numero_recibo, url_recibo, observacoes, criado_por) VALUES (?, ?, ?, ?, ?, 'HOLD', ?, ?, ?, ?, ?, 'SAIDA', ?, 'EM_ABERTO', 0, ?, ?, ?, ?)`).bind(movimentoHoldingId, holdingIds[0], cotistaHolding?.socio_id ?? null, aeronaveId, periodicidade, dataEmissao, dataVencimento, descricao, categoriaIdRateio, categoriaNomeRateio, valorCentavos, receipt.numero_recibo ?? null, documentoUrl, body.observacoes ?? null, c.get('userId') || null))
+    }
+    linhasNormalizadas.forEach((linha, index) => {
       const cotista = cotistas.find((item) => String(item.id) === String(linha.cotista_id))!
-      const percentual = Number(linha.percentual_uso)
+      const percentual = linha.percentual_uso
       const rateado = Math.round(valorCentavos * percentual / 100)
-      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_holding_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)`
+      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_holding_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)`
       const parametros = String(cotista.socio_id ?? '').trim()
-        ? [rateioIds[index], aeronaveId, cotista.socio_id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl]
+        ? [rateioIds[index], movimentoHoldingId, aeronaveId, cotista.socio_id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl]
         : [rateioIds[index], lancamentoId, aeronaveId, cotista.id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl]
       statements.push(c.env.SHARE_DB.prepare(campos).bind(...parametros))
     })
