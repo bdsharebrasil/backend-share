@@ -304,11 +304,18 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const vencidasAte = c.req.query('vencidasAte')
   const filtros: string[] = []
   const params: unknown[] = []
-  if (status) { filtros.push('status = ?'); params.push(status) }
-  if (cotistaId && table === 'contas_areceber') { filtros.push('cotista_id = ?'); params.push(cotistaId) }
-  if (fornecedorId && table === 'contas_apagar') { filtros.push('fornecedor_id = ?'); params.push(fornecedorId) }
-  if (vencidasAte) { filtros.push("date(data_vencimento) <= date(?)"); params.push(vencidasAte) }
-  const rows = await listar(c.env.SHARE_DB, `SELECT * FROM ${table}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(data_vencimento) ASC, criado_em DESC LIMIT 500`, ...params)
+  const alias = table === 'contas_apagar' ? 'cp' : 'cr'
+  const origem = table === 'contas_apagar' ? ' LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id' : ''
+  if (table === 'contas_apagar') {
+    // Contas a pagar representam somente obrigações do caixa Share/Holding.
+    // Despesas do caixa cliente ficam nos lançamentos/rateios do cliente.
+    filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') <> 'CLIENTE'")
+  }
+  if (status) { filtros.push(`${alias}.status = ?`); params.push(status) }
+  if (cotistaId && table === 'contas_areceber') { filtros.push(`${alias}.cotista_id = ?`); params.push(cotistaId) }
+  if (fornecedorId && table === 'contas_apagar') { filtros.push(`${alias}.fornecedor_id = ?`); params.push(fornecedorId) }
+  if (vencidasAte) { filtros.push(`date(${alias}.data_vencimento) <= date(?)`); params.push(vencidasAte) }
+  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.* FROM ${table} ${alias}${origem}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
   const rowsComFornecedor = await enriquecerFornecedores(c.env.SHARE_DB, rows)
   const mapped = rowsComFornecedor.map(mapConta)
   if (table !== 'contas_areceber') return mapped
