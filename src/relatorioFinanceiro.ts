@@ -295,9 +295,9 @@ export async function sincronizarRelatorioViagemFinanceiro(
       if (payerOnly && payer !== payerOnly) continue
       const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
       const description = payerDescription(report, payer)
-      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_vencimento = ?
+      await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_vencimento = ?
         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
-        .bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), rows[0]?.id || null, kind === 'CLIENTE' ? text(report.cliente_id) || null : null, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
+        .bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), text(report.pdf_path) || null, rows[0]?.id || null, kind === 'CLIENTE' ? text(report.cliente_id) || null : null, existingDueDate, reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).run()
       if (payer === 'tripulante_1' || payer === 'tripulante_2') {
         await db.prepare(`UPDATE contas_apagar SET valor_centavos = ?, descricao = ?, data_vencimento = ?
           WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND idempotency_key = ?`)
@@ -345,6 +345,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
         descricao: description,
         fornecedor_nome: FORNECEDOR_RELATORIO_VIAGEM,
         numero_doc: text(report.numero_relatorio),
+        url_doc: text(report.pdf_path) || null,
         cotista_aeronave_id: allocations[0]?.id || null,
         cliente_id: kind === 'CLIENTE' ? text(report.cliente_id) || null : null,
         categoria_nome: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
