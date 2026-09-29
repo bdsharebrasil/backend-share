@@ -78,6 +78,8 @@ async function resolveContaBancariaId(db: Database, value: unknown): Promise<str
 const id = (): string => crypto.randomUUID()
 
 const upper = (value: unknown): string => text(value).toUpperCase()
+const normalizeRateioType = (value: unknown): string =>
+  upper(value || 'FIXO').replace(/[\s-]+/g, '_')
 
 // Categoria padrão do lançamento de receita e da conta a pagar do recibo.
 // A categoria escolhida no formulário de recibo de pagamento pertence ao
@@ -683,14 +685,13 @@ function clientAllocationStatements(
           categoria_nome: nullableText(
             command.categoria_nome ?? command.categoria,
           ),
-          tipo_rateio: upper(command.tipo_rateio || 'FIXO'),
+          tipo_rateio: normalizeRateioType(command.tipo_rateio),
           percentual_sociedade: line.percentualSociedade,
           percentual_uso: line.percentual,
           valor_total_centavos: amount,
           valor_rateado_centavos: line.valorCentavos,
           valor_total: amount / 100,
           valor_rateado: line.valorCentavos / 100,
-          pago_por_cotista_id: line.pagoPor || (line.pagoDiretamente ? line.cotistaId : null),
           pago_por: line.pagoPor || (line.pagoDiretamente ? line.cotistaId : null),
           pago_diretamente: line.pagoDiretamente ? 1 : 0,
           status: 'EM_ABERTO',
@@ -779,7 +780,7 @@ function holdingAllocationStatements(
           command.categoria_nome ?? command.categoria,
         ),
         numero_voo: nullableText(command.numero_voo),
-        tipo_rateio: upper(command.tipo_rateio || 'FIXO'),
+        tipo_rateio: normalizeRateioType(command.tipo_rateio),
         percentual_sociedade: line.percentual,
         percentual_uso: line.percentual,
         valor_total_centavos: amount,
@@ -819,7 +820,11 @@ export async function createExpense(
   if (existing) return existing
 
   const context = await resolveCotista(db, command)
-  const lines = allocationLines(command)
+  const lines = allocationLines(command).map((line) =>
+    context?.kind === 'HOLDING' && !line.socioId
+      ? { ...line, socioId: context.socioId, holdingId: context.holdingId }
+      : line,
+  )
   const direct = asFlag(
     command.pago_diretamente ?? command.pagoDiretamente,
   )

@@ -2146,7 +2146,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
   id TEXT PRIMARY KEY NOT NULL,
   lancamento_id TEXT REFERENCES lancamentos(id),
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id),
-  cotista_id TEXT NOT NULL REFERENCES cotista_aeronave(id),
+  cotista_id TEXT REFERENCES cotista_aeronave(id),
    data_emissao TEXT,
   data_vencimento TEXT,
   data_pagamento TEXT,
@@ -2169,7 +2169,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
   valor_total_centavos INTEGER NOT NULL CHECK (valor_total_centavos > 0),
   valor_rateado_centavos INTEGER NOT NULL CHECK (valor_rateado_centavos > 0),
   valor_pago_real_centavos INTEGER NOT NULL DEFAULT 0 CHECK (valor_pago_real_centavos >= 0),
-  pago_por_cotista_id TEXT REFERENCES cotista_aeronave(id),
+  pago_por TEXT,
   pago_diretamente INTEGER NOT NULL DEFAULT 0 CHECK (pago_diretamente IN (0, 1)),
 status TEXT
 
