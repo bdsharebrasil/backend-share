@@ -6572,6 +6572,75 @@ async function isMeetingManager(c: Context<{ Bindings: Bindings }>, user: Colabo
   return Boolean(result)
 }
 
+type AniversarioPayload = { nome: string; data_aniversario: string; empresa: string | null; categoria: string; url_avatar: string | null }
+const CATEGORIAS_ANIVERSARIO = new Set(['cliente', 'colaborador', 'fornecedor', 'hotel'])
+function validarAniversarioPayload(body: Record<string, unknown>): { payload?: AniversarioPayload; error?: string } {
+  const nome = String(body.nome || '').trim()
+  if (!nome || nome.length > 160) return { error: 'nome_obrigatorio_ou_invalido' }
+  const data = String(body.data_aniversario || '').trim().slice(0, 10)
+  const partesData = /^(\d{4})-(\d{2})-(\d{2})$/.exec(data)
+  if (!partesData) return { error: 'data_aniversario_invalida' }
+  const [ano, mes, dia] = partesData.slice(1).map(Number)
+  const dataValidada = new Date(Date.UTC(ano, mes - 1, dia))
+  if (dataValidada.getUTCFullYear() !== ano || dataValidada.getUTCMonth() !== mes - 1 || dataValidada.getUTCDate() !== dia) return { error: 'data_aniversario_invalida' }
+  const categoria = String(body.categoria || 'cliente').trim().toLowerCase()
+  if (!CATEGORIAS_ANIVERSARIO.has(categoria)) return { error: 'categoria_invalida' }
+  const empresaValor = String(body.empresa || '').trim()
+  if (empresaValor.length > 160) return { error: 'empresa_invalida' }
+  const avatarValor = String(body.url_avatar || '').trim()
+  let url_avatar: string | null = null
+  if (avatarValor) {
+    try {
+      const url = new URL(avatarValor)
+      if (!['http:', 'https:'].includes(url.protocol) || avatarValor.length > 500) return { error: 'url_avatar_invalida' }
+      url_avatar = url.toString()
+    } catch {
+      return { error: 'url_avatar_invalida' }
+    }
+  }
+  return { payload: { nome, data_aniversario: data, empresa: empresaValor || null, categoria, url_avatar } }
+}
+
+app.get('/api/interno/aniversarios', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const db = c.env.SHARE_DB
+  const [manuais, perfis] = await Promise.all([
+    db.prepare("SELECT id, nome, data_aniversario, empresa, categoria, url_avatar, criado_em, atualizado_em, 'aniversarios' AS origem FROM aniversarios ORDER BY nome COLLATE NOCASE").all(),
+    db.prepare("SELECT 'user_profiles:' || id AS id, COALESCE(NULLIF(trim(nome_exibicao), ''), NULLIF(trim(nome_completo), ''), email) AS nome, data_nascimento AS data_aniversario, departamento AS empresa, 'colaborador' AS categoria, url_avatar, data_criacao AS criado_em, data_atualizacao AS atualizado_em, 'user_profiles' AS origem FROM user_profiles WHERE data_nascimento IS NOT NULL AND trim(data_nascimento) <> '' ORDER BY COALESCE(NULLIF(trim(nome_exibicao), ''), NULLIF(trim(nome_completo), ''), email) COLLATE NOCASE").all(),
+  ])
+  return c.json({ aniversarios: [...(perfis.results || []), ...(manuais.results || [])] })
+})
+
+app.post('/api/interno/aniversarios', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}))
+  const validacao = validarAniversarioPayload(body)
+  if (!validacao.payload) return c.json({ error: validacao.error || 'aniversario_invalido' }, 400)
+  const id = uuid()
+  const item = validacao.payload
+  await c.env.SHARE_DB.prepare('INSERT INTO aniversarios (id, nome, data_aniversario, empresa, categoria, url_avatar) VALUES (?, ?, ?, ?, ?, ?)').bind(id, item.nome, item.data_aniversario, item.empresa, item.categoria, item.url_avatar).run()
+  return c.json({ aniversario: { id, ...item, origem: 'aniversarios' } }, 201)
+})
+
+const atualizarAniversario = async (c: Context<{ Bindings: Bindings }>) => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}))
+  const validacao = validarAniversarioPayload(body)
+  if (!validacao.payload) return c.json({ error: validacao.error || 'aniversario_invalido' }, 400)
+  const item = validacao.payload
+  const result = await c.env.SHARE_DB.prepare('UPDATE aniversarios SET nome = ?, data_aniversario = ?, empresa = ?, categoria = ?, url_avatar = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(item.nome, item.data_aniversario, item.empresa, item.categoria, item.url_avatar, c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ aniversario: { id: c.req.param('id'), ...item, origem: 'aniversarios' }, success: true })
+}
+app.patch('/api/interno/aniversarios/:id', atualizarAniversario)
+app.put('/api/interno/aniversarios/:id', atualizarAniversario)
+app.delete('/api/interno/aniversarios/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM aniversarios WHERE id = ?1').bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+
 app.get('/api/interno/aerodromos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const q = (c.req.query('q') || '').trim(); const termo = `%${q}%`
