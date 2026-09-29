@@ -1,6 +1,7 @@
 type Row = Record<string, unknown>
 type Database = D1Database
 
+import { mensagemFinanceiraStatements } from './financeiroNotifications'
 import {
   allocateReceiptNumber,
   createReceiptAllocations,
@@ -1480,10 +1481,15 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const bank = await resolveContaBancariaId(db, body.conta_bancaria_id ?? body.banco_pagamento ?? body.bancoPagamento)
   if (!bank) throw new FinanceError('Conta bancária do pagamento não encontrada', 'conta_bancaria_obrigatoria')
   const now = new Date().toISOString()
+  const purchase = await db.prepare("SELECT id, descricao, criado_por FROM envio_despesas WHERE lancamento_id = ? AND tipo = 'share' AND status = 'APROVADO' LIMIT 1").bind(lancamentoId).first<Row>()
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
     updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId]),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), idempotencyKey(body)),
+    ...(purchase ? [
+      db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'APROVADO'").bind(purchase.id),
+      ...mensagemFinanceiraStatements(db, nullableText(purchase.criado_por), userId, 'Solicitação de compra concluída', `O pagamento da solicitação “${text(purchase.descricao)}” foi concluído em ${paymentDate}.`),
+    ] : []),
   ]
   await db.batch(statements)
   return { ...(await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()), idempotent: false }
