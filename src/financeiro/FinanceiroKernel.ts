@@ -160,7 +160,10 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
   requireTable(schema, 'contas_areceber', ['id', 'valor_centavos', 'status'])
   requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id', 'status'])
   requireTable(schema, 'rateio_pagamentos', ['id', 'rateio_id', 'conta_receber_id', 'valor_centavos', 'status'])
-  requireTable(schema, 'rateio_hold', ['id', 'movimento_holding_id', 'socio_id'])
+  requireTable(schema, 'rateio_hold', ['id', 'socio_id'])
+  if (!schema.get('rateio_hold')?.has('movimento_id') && !schema.get('rateio_hold')?.has('movimento_holding_id')) {
+    throw new FinanceError('Coluna de movimento ausente em rateio_hold', 'schema_coluna_ausente', 500)
+  }
   requireTable(schema, 'movimentos_holding', ['id'])
   requireTable(schema, 'reembolsos', ['id', 'lancamento_origem_id', 'lancamento_cliente_id'])
   requireTable(schema, 'auditoria_financeira', ['id'])
@@ -279,6 +282,11 @@ function addKnownColumns(
     columns: entries.map(([column]) => column),
     values: entries.map(([, value]) => value),
   }
+}
+
+function holdingMovementColumn(schema: SchemaCache): 'movimento_id' | 'movimento_holding_id' {
+  if (schema.get('rateio_hold')?.has('movimento_id')) return 'movimento_id'
+  return 'movimento_holding_id'
 }
 
 function insertStatement(
@@ -681,7 +689,7 @@ function clientAllocationStatements(
           data_emissao: dateValue(command.data_emissao ?? command.data),
           data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
           periodicidade: nullableText(command.periodicidade),
-          categoria_id: nullableText(command.categoria_id),
+          categoria_id: nullableText(command.categoria_cliente_id),
           categoria_nome: nullableText(
             command.categoria_nome ?? command.categoria,
           ),
@@ -694,14 +702,13 @@ function clientAllocationStatements(
           valor_rateado: line.valorCentavos / 100,
           pago_por: line.pagoPor || (line.pagoDiretamente ? line.cotistaId : null),
           pago_diretamente: line.pagoDiretamente ? 1 : 0,
-          status: 'EM_ABERTO',
-          data_pagamento: null,
+          status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
+          data_pagamento: line.pagoDiretamente ? dateValue(command.data_pagamento ?? command.data) : null,
           descricao_despesa: command.descricao,
           observacoes: nullableText(command.observacoes),
           origem_id: nullableText(command.recibo_id),
           origem_tipo: nullableText(command.recibo_id) ? 'RECIBO' : null,
           numero_recibo: nullableText(command.numero_recibo),
-          numero_voo: nullableText(command.numero_voo),
           url_recibo: nullableText(command.url_recibo),
           anexos_json: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return JSON.stringify(anexos.filter((anexo: Row) => !anexo.cotista_id || anexo.cotista_id === line.cotistaId)) })(),
           numero_nf: (() => { const anexos = Array.isArray(command.anexos_json) ? command.anexos_json : JSON.parse(String(command.anexos_json || '[]')); return anexos.find((anexo: Row) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')?.numero || null })(),
@@ -769,7 +776,7 @@ function holdingAllocationStatements(
       'rateio_hold',
       {
         id: id(),
-        movimento_holding_id: movimentoId,
+        [holdingMovementColumn(schema)]: movimentoId,
         aeronave_id: command.aeronave_id,
         socio_id: line.socioId,
         data_emissao: dateValue(command.data_emissao ?? command.data),
@@ -799,7 +806,7 @@ function holdingAllocationStatements(
         documento_url: nullableText(command.url_recibo),
         criado_por: userId,
       },
-      ['id', 'movimento_holding_id', 'aeronave_id', 'socio_id'],
+      ['id', holdingMovementColumn(schema), 'aeronave_id', 'socio_id'],
     )
   })
 }
@@ -820,11 +827,20 @@ export async function createExpense(
   if (existing) return existing
 
   const context = await resolveCotista(db, command)
-  const lines = allocationLines(command).map((line) =>
-    context?.kind === 'HOLDING' && !line.socioId
-      ? { ...line, socioId: context.socioId, holdingId: context.holdingId }
-      : line,
-  )
+  const rawLines = allocationLines(command)
+  const lines = await Promise.all(rawLines.map(async (line) => {
+    if (line.socioId) return line
+    const row = await db.prepare(`
+      SELECT ca.socio_id, hs.holding_id
+        FROM cotista_aeronave ca
+        LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+       WHERE ca.id = ?
+       LIMIT 1
+    `).bind(line.cotistaId).first<{ socio_id: string | null; holding_id: string | null }>()
+    return row
+      ? { ...line, socioId: nullableText(row.socio_id), holdingId: nullableText(row.holding_id) }
+      : line
+  }))
   const direct = asFlag(
     command.pago_diretamente ?? command.pagoDiretamente,
   )
@@ -854,8 +870,7 @@ export async function createExpense(
           holding_id: context.holdingId,
           socio_id: context.socioId,
           aeronave_id: context.aeronaveId || command.aeronave_id,
-          data: command.data,
-          data_movimento: command.data,
+          data_emissao: command.data,
           descricao: command.descricao,
           fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
           fornecedores_favoritos_id: nullableText(command.fornecedor_id),
@@ -938,6 +953,7 @@ export async function createExpense(
           id: lancamentoId,
           aeronave_id: command.aeronave_id,
           cotista_aeronave_id: command.cotista_aeronave_id,
+          abastecimentos_id: nullableText(command.abastecimentos_id),
           descricao: command.descricao,
           categoria_id: command.tipo_caixa === 'CLIENTE' ? null : nullableText(command.categoria_id),
           categoria_cliente_id: command.tipo_caixa === 'CLIENTE'
@@ -951,7 +967,7 @@ export async function createExpense(
           valor_centavos: amount,
           valor_total: amount / 100,
           valor: amount / 100,
-          status: 'EM_ABERTO',
+          status: 'PAGO',
           data_lancamento: command.data,
           data_emissao: command.data,
           data_pagamento: null,
@@ -961,7 +977,6 @@ export async function createExpense(
           origem_tipo: command.recibo_id ? 'RECIBO' : 'DESPESA',
           origem_id: command.recibo_id || lancamentoId,
           numero_recibo: nullableText(command.numero_recibo),
-          numero_voo: nullableText(command.numero_voo),
           url_recibo: nullableText(command.url_recibo),
           idempotency_key: command.idempotency_key,
           criado_por: userId,
@@ -1049,6 +1064,7 @@ export async function createExpense(
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria,
         ),
+        colaborador_id: nullableText(command.colaborador_id),
         descricao: command.descricao,
         aeronave_id: command.aeronave_id,
         fornecedor_id: nullableText(command.fornecedor_id),
@@ -1147,6 +1163,7 @@ export async function issueRevenue(
         origem_tipo: nullableText(command.origem_tipo) || 'RECEITA',
         origem_id: nullableText(command.origem_id),
         status: 'EM_ABERTO',
+        colaborador_id: nullableText(command.colaborador_id),
         criado_por: userId,
       },
       ['id', 'descricao', 'fluxo', 'valor_centavos'],
@@ -1186,6 +1203,7 @@ export async function issueRevenue(
           id: clientLancamentoId,
           aeronave_id: context?.aeronaveId || command.aeronave_id,
           cotista_aeronave_id: context?.cotistaAeronaveId,
+          cliente_id: context?.clienteId,
           descricao: command.descricao,
           fluxo: 'SAIDA',
           natureza: 'DESPESA',
@@ -1357,6 +1375,7 @@ export async function createReimbursement(
         id: reimbursementId,
         lancamento_origem_id: originalId,
         conta_receber_id: contaReceberId,
+        lancamento_cliente_id: clientLancamentoId,
         cotista_id: context.cotistaAeronaveId,
         valor_centavos: amount,
         status: 'PENDENTE',
@@ -1374,6 +1393,7 @@ export async function createReimbursement(
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
+        categoria_id: nullableText(command.categoria_id),
         categoria_nome: 'REEMBOLSOS ENTRADAS',
         grupo_categoria: 'REEMBOLSOS ENTRADAS',
         fluxo: 'ENTRADA',
@@ -1387,6 +1407,7 @@ export async function createReimbursement(
         data_vencimento: command.data_vencimento || command.data,
         origem_tipo: 'REEMBOLSO',
         origem_id: reimbursementId,
+        colaborador_id: nullableText(command.colaborador_id),
         criado_por: userId,
       },
       ['id', 'descricao', 'fluxo', 'valor_centavos'],
@@ -1400,6 +1421,8 @@ export async function createReimbursement(
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
+        categoria_id: nullableText(command.categoria_cliente_id),
+        categoria_cliente_id: nullableText(command.categoria_cliente_id),
         categoria_nome: nullableText(
           command.categoria_cliente_nome ?? 'REEMBOLSO',
         ),

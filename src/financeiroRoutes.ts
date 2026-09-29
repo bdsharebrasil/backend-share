@@ -1591,7 +1591,7 @@ financeiroRoutes.post('/envios-pagamento/:id/converter', async (c) => {
     if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
     if (request.tipo === 'share' && !['APROVADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
     if (request.tipo !== 'share' && !['PENDENTE', 'APROVADO', 'EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
-    return c.json(await convertPaymentRequest(c.env.SHARE_DB, request, createExpense, c.get('userId') || null))
+    return c.json(await convertPaymentRequest(c.env.SHARE_DB, request, (db, body, uid, options) => createExpense(db, body, uid, options), c.get('userId') || null, createReimbursement))
   } catch (error) { return errorResponse(c, error) }
 })
 
