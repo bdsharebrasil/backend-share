@@ -64,10 +64,23 @@ export async function createPaymentRequest(db: D1Database, input: PaymentRequest
     if (!request) throw new Error('solicitacao_pagamento_nao_encontrada')
     return { ...request, idempotent: true }
   }
+  const cotistaId = input.rateio_linhas[0]?.cotista_id || null
+  const titular = cotistaId
+    ? await db.prepare(`
+        SELECT ca.aeronave_id, ca.socio_id, hs.holding_id
+          FROM cotista_aeronave ca
+          LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+         WHERE ca.id = ?
+         LIMIT 1
+      `).bind(cotistaId).first<{ aeronave_id: string; socio_id: string | null; holding_id: string | null }>()
+    : null
+  if (input.tipo !== 'share' && !titular) throw new Error('cotista_da_aeronave_nao_encontrado')
+  const aeronaveId = input.aeronave_id || titular?.aeronave_id || null
+  const ehHolding = Boolean(titular?.socio_id)
   const id = crypto.randomUUID()
   await db.batch([
     db.prepare(`INSERT INTO envio_despesas (id, tipo, descricao, valor, data_despesa, vencimento, aeronave_id, observacoes, status, criado_por, grupo_categoria, tipo_caixa, pago_diretamente, fornecedor_id, categoria_id, rateio_linhas_json, anexos_json, periodicidade, tipo_rateio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.data_despesa, input.data_vencimento, input.aeronave_id, input.observacoes, userId, input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', input.tipo === 'cliente' ? 1 : 0, input.fornecedor_id, input.categoria_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio),
+      .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.data_despesa, input.data_vencimento, aeronaveId, input.observacoes, userId, ehHolding ? 'CAIXA HOLDING' : input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', ehHolding ? 'HOLDING' : input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', input.tipo === 'cliente' ? 1 : 0, input.fornecedor_id, input.categoria_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio),
     db.prepare(`INSERT INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'IDEMPOTENCY_KEY', ?, 'ENVIO_DESPESA', ?, 'SOLICITACAO')`).bind(crypto.randomUUID(), input.idempotency_key, id),
   ])
   const request = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first<Row>()
@@ -77,14 +90,26 @@ export async function createPaymentRequest(db: D1Database, input: PaymentRequest
 
 export async function convertPaymentRequest(db: D1Database, request: Row, createExpense: (db: D1Database, body: Row, userId: string | null) => Promise<Row>, userId: string | null): Promise<Row> {
   const existing = await db.prepare('SELECT lancamento_id, movimentacao_id FROM envio_despesas WHERE id = ?').bind(request.id).first<Row>()
-  if (existing?.lancamento_id) return { ...existing, idempotent: true }
+  if (existing?.lancamento_id || existing?.movimentacao_id) return { ...existing, idempotent: true }
   const linhas = JSON.parse(String(request.rateio_linhas_json || '[]'))
   const anexos = JSON.parse(String(request.anexos_json || '[]'))
-  const lancamento = await createExpense(db, { idempotency_key: `envio:${request.id}`, tipo: request.tipo, descricao: request.descricao, valor_centavos: Math.round(Number(request.valor || 0) * 100), data: request.data_despesa, data_vencimento: request.vencimento, aeronave_id: request.aeronave_id, categoria_id: request.categoria_id, fornecedor_id: request.fornecedor_id, observacoes: request.observacoes, rateio_linhas: linhas, anexos_json: JSON.stringify(anexos), periodicidade: request.periodicidade, tipo_rateio: request.tipo_rateio, pago_diretamente: request.tipo === 'cliente', tipo_caixa: request.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', reembolsavel: request.tipo === 'reembolso' }, userId)
+  const cotistaAeronaveId = String(linhas[0]?.cotista_id || request.cotista_id || '').trim() || null
+  const titular = cotistaAeronaveId
+    ? await db.prepare(`
+        SELECT ca.aeronave_id, ca.socio_id, hs.holding_id
+          FROM cotista_aeronave ca
+          LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+         WHERE ca.id = ?
+         LIMIT 1
+      `).bind(cotistaAeronaveId).first<{ aeronave_id: string; socio_id: string | null; holding_id: string | null }>()
+    : null
+  const ehHolding = Boolean(titular?.socio_id || String(request.tipo_caixa || '').toUpperCase() === 'HOLDING')
+  const lancamento = await createExpense(db, { idempotency_key: `envio:${request.id}`, tipo: request.tipo, descricao: request.descricao, valor_centavos: Math.round(Number(request.valor || 0) * 100), data: request.data_despesa, data_vencimento: request.vencimento, aeronave_id: request.aeronave_id || titular?.aeronave_id, cotista_aeronave_id: cotistaAeronaveId, socio_id: titular?.socio_id || null, holding_id: titular?.holding_id || null, categoria_id: request.categoria_id, fornecedor_id: request.fornecedor_id, observacoes: request.observacoes, rateio_linhas: linhas, anexos_json: JSON.stringify(anexos), periodicidade: request.periodicidade, tipo_rateio: request.tipo_rateio, pago_diretamente: request.tipo === 'cliente', tipo_caixa: ehHolding ? 'HOLDING' : request.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', reembolsavel: request.tipo === 'reembolso' }, userId)
   const lancamentoId = String(lancamento.lancamento_id ?? lancamento.id)
+  const destinoTipo = ehHolding ? 'MOVIMENTO_HOLDING' : 'LANCAMENTO'
   await db.batch([
-    db.prepare('UPDATE envio_despesas SET lancamento_id = ?, movimentacao_id = ?, status = ? WHERE id = ? AND lancamento_id IS NULL').bind(lancamentoId, lancamentoId, 'CONVERTIDO', request.id),
-    db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'ENVIO_DESPESA', ?, 'LANCAMENTO', ?, 'CONVERSAO')`).bind(crypto.randomUUID(), request.id, lancamentoId),
+    db.prepare('UPDATE envio_despesas SET lancamento_id = ?, movimentacao_id = ?, movimentos_holding_id = ?, status = ? WHERE id = ? AND lancamento_id IS NULL').bind(ehHolding ? null : lancamentoId, lancamentoId, ehHolding ? lancamentoId : null, 'CONVERTIDO', request.id),
+    db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'ENVIO_DESPESA', ?, ?, ?, 'CONVERSAO')`).bind(crypto.randomUUID(), request.id, destinoTipo, lancamentoId),
   ])
-  return { id: request.id, lancamento_id: lancamentoId, movimentacao_id: lancamentoId, idempotent: false }
+  return { id: request.id, lancamento_id: ehHolding ? null : lancamentoId, movimentacao_id: lancamentoId, idempotent: false }
 }
