@@ -8568,6 +8568,132 @@ for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
   })
 }
 
+const CTM_MIMES_DOCUMENTOS = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+function ctmTipoArquivoDocumento(file: File): string | null {
+  const type = String(file.type || '').toLowerCase()
+  if (CTM_MIMES_DOCUMENTOS.has(type)) return type
+  const extensao = file.name.toLowerCase().split('.').pop()
+  const porExtensao: Record<string, string> = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }
+  return porExtensao[extensao || ''] || null
+}
+function ctmDataDocumento(value: unknown): string | null | undefined {
+  const raw = String(value ?? '').trim().slice(0, 10)
+  if (!raw) return null
+  const partes = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw)
+  if (!partes) return undefined
+  const [ano, mes, dia] = partes.slice(1).map(Number)
+  const data = new Date(Date.UTC(ano, mes - 1, dia))
+  if (data.getUTCFullYear() !== ano || data.getUTCMonth() !== mes - 1 || data.getUTCDate() !== dia) return undefined
+  return raw
+}
+function ctmDiasAlerta(value: unknown): number | null {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const dias = Number(raw)
+  return Number.isInteger(dias) && dias >= 0 && dias <= 3650 ? dias : null
+}
+function ctmNomeDocumento(value: unknown, fallback = ''): string {
+  return String(value ?? fallback).trim().slice(0, 180)
+}
+app.get('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = c.req.param('aeronaveId')
+  const existe = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
+  if (!existe) return c.notFound()
+  const rows = await c.env.SHARE_DB.prepare(`SELECT id, nome, descricao, tipo_arquivo, tamanho_arquivo, enviado_por, criado_em, aeronave_id, tipo_documento, data_validade, atualizado_em, dias_alerta
+    FROM documentos_aeronave WHERE aeronave_id = ?1
+    ORDER BY CASE WHEN data_validade IS NULL OR trim(data_validade) = '' THEN 1 ELSE 0 END, date(data_validade), lower(nome)`).bind(aeronaveId).all()
+  return c.json({ documentos: rows.results.map((row: any) => ({ ...row, arquivo_url: `/api/ctm/aeronaves/${encodeURIComponent(aeronaveId)}/documentos/${encodeURIComponent(String(row.id))}/arquivo` })) })
+})
+app.post('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = c.req.param('aeronaveId')
+  const existe = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
+  if (!existe) return c.notFound()
+  const form = await c.req.formData().catch((): FormData | null => null)
+  if (!form) return c.json({ error: 'formulario_invalido' }, 400)
+  const arquivoValor = form.get('arquivo') as unknown
+  if (!arquivoValor || typeof arquivoValor !== 'object' || !('size' in arquivoValor) || Number(arquivoValor.size) <= 0) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  const arquivo = arquivoValor as File
+  if (arquivo.size > 25 * 1024 * 1024) return c.json({ error: 'arquivo_excede_25mb' }, 413)
+  const tipoArquivo = ctmTipoArquivoDocumento(arquivo)
+  if (!tipoArquivo) return c.json({ error: 'somente_pdf_ou_imagem_jpg_png_webp_gif_permitidos' }, 415)
+  const nome = ctmNomeDocumento(form.get('nome'), arquivo.name.replace(/\.[^.]+$/, ''))
+  if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const descricao = String(form.get('descricao') || '').trim()
+  if (descricao.length > 2000) return c.json({ error: 'descricao_excede_limite' }, 400)
+  const tipoDocumento = String(form.get('tipo_documento') || 'outro').trim().slice(0, 100) || 'outro'
+  const dataValidade = ctmDataDocumento(form.get('data_validade'))
+  if (dataValidade === undefined) return c.json({ error: 'data_validade_invalida' }, 400)
+  const diasAlerta = form.has('dias_alerta') ? ctmDiasAlerta(form.get('dias_alerta')) : 30
+  if (diasAlerta === null) return c.json({ error: 'dias_alerta_invalido' }, 400)
+  const userId = extractSupabaseUserId(c) || 'interno'
+  const arquivoComTipo = new File([arquivo], arquivo.name, { type: tipoArquivo })
+  let caminho: string | null = null
+  try {
+    caminho = await salvarArquivoShareBrasil(c, userId, arquivoComTipo, `ctm/documentos_aeronaves/${aeronaveId}`)
+    const id = uuid()
+    await c.env.SHARE_DB.prepare(`INSERT INTO documentos_aeronave
+      (id, nome, descricao, caminho_arquivo, tipo_arquivo, tamanho_arquivo, enviado_por, aeronave_id, tipo_documento, data_validade, dias_alerta)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, nome, descricao || null, caminho, tipoArquivo, arquivo.size, userId, aeronaveId, tipoDocumento, dataValidade, diasAlerta).run()
+    const row = await c.env.SHARE_DB.prepare(`SELECT id, nome, descricao, tipo_arquivo, tamanho_arquivo, enviado_por, criado_em, aeronave_id, tipo_documento, data_validade, atualizado_em, dias_alerta
+      FROM documentos_aeronave WHERE id = ?1 AND aeronave_id = ?2`).bind(id, aeronaveId).first<any>()
+    return c.json({ documento: { ...row, arquivo_url: `/api/ctm/aeronaves/${encodeURIComponent(aeronaveId)}/documentos/${encodeURIComponent(id)}/arquivo` } }, 201)
+  } catch (error) {
+    if (caminho) await shareBrasilBucket(c).delete(caminho).catch(() => undefined)
+    log.error('[ctm/documentos-aeronave] upload falhou', error)
+    return c.json({ error: 'falha_ao_salvar_documento_aeronave' }, 500)
+  }
+})
+app.patch('/api/ctm/aeronaves/:aeronaveId/documentos/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = c.req.param('aeronaveId')
+  const id = c.req.param('id')
+  const db = c.env.SHARE_DB
+  const atual = await db.prepare('SELECT id, nome, descricao, tipo_documento, data_validade, dias_alerta FROM documentos_aeronave WHERE id = ?1 AND aeronave_id = ?2').bind(id, aeronaveId).first<any>()
+  if (!atual) return c.notFound()
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+  const nome = body.nome === undefined ? String(atual.nome || '') : ctmNomeDocumento(body.nome)
+  if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const descricao = body.descricao === undefined ? atual.descricao : String(body.descricao || '').trim() || null
+  if (descricao && String(descricao).length > 2000) return c.json({ error: 'descricao_excede_limite' }, 400)
+  const tipoDocumento = body.tipo_documento === undefined ? atual.tipo_documento : String(body.tipo_documento || 'outro').trim().slice(0, 100) || 'outro'
+  const dataValidade = ctmDataDocumento(body.data_validade === undefined ? atual.data_validade : body.data_validade)
+  if (dataValidade === undefined) return c.json({ error: 'data_validade_invalida' }, 400)
+  const diasAlerta = body.dias_alerta === undefined ? Number(atual.dias_alerta ?? 30) : ctmDiasAlerta(body.dias_alerta)
+  if (!Number.isInteger(diasAlerta) || Number(diasAlerta) < 0 || Number(diasAlerta) > 3650) return c.json({ error: 'dias_alerta_invalido' }, 400)
+  await db.prepare(`UPDATE documentos_aeronave SET nome = ?, descricao = ?, tipo_documento = ?, data_validade = ?, dias_alerta = ?, atualizado_em = datetime('now')
+    WHERE id = ? AND aeronave_id = ?`).bind(nome, descricao, tipoDocumento, dataValidade, diasAlerta, id, aeronaveId).run()
+  const documento = await db.prepare(`SELECT id, nome, descricao, tipo_arquivo, tamanho_arquivo, enviado_por, criado_em, aeronave_id, tipo_documento, data_validade, atualizado_em, dias_alerta
+    FROM documentos_aeronave WHERE id = ?1 AND aeronave_id = ?2`).bind(id, aeronaveId).first<any>()
+  return c.json({ documento: { ...documento, arquivo_url: `/api/ctm/aeronaves/${encodeURIComponent(aeronaveId)}/documentos/${encodeURIComponent(id)}/arquivo` }, success: true })
+})
+app.delete('/api/ctm/aeronaves/:aeronaveId/documentos/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = c.req.param('aeronaveId')
+  const id = c.req.param('id')
+  const db = c.env.SHARE_DB
+  const atual = await db.prepare('SELECT caminho_arquivo FROM documentos_aeronave WHERE id = ?1 AND aeronave_id = ?2').bind(id, aeronaveId).first<{ caminho_arquivo: string }>()
+  if (!atual) return c.notFound()
+  await db.prepare('DELETE FROM documentos_aeronave WHERE id = ?1 AND aeronave_id = ?2').bind(id, aeronaveId).run()
+  await shareBrasilBucket(c).delete(atual.caminho_arquivo).catch(error => log.warn('[ctm/documentos-aeronave] arquivo R2 não removido', error))
+  return c.json({ success: true })
+})
+app.get('/api/ctm/aeronaves/:aeronaveId/documentos/:id/arquivo', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, nome, tipo_arquivo FROM documentos_aeronave WHERE id = ?1 AND aeronave_id = ?2').bind(c.req.param('id'), c.req.param('aeronaveId')).first<{ caminho_arquivo: string; nome: string; tipo_arquivo: string | null }>()
+  if (!row) return c.notFound()
+  const object = await shareBrasilBucket(c).get(row.caminho_arquivo)
+  if (!object) return c.notFound()
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('Content-Type', row.tipo_arquivo || object.httpMetadata?.contentType || 'application/octet-stream')
+  headers.set('Content-Disposition', `inline; filename="${shareBrasilFileName(row.nome)}"`)
+  headers.set('Cache-Control', 'private, no-store')
+  headers.set('X-Content-Type-Options', 'nosniff')
+  return new Response(object.body, { headers })
+})
+
 const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
 const WORKER_URL = 'https://api.share-brasil.com'
 
