@@ -4523,9 +4523,9 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   }
   await db.prepare(`UPDATE solicitacoes_reserva_voo
     SET horario_previsto_agendamento = ?1,
-        status = CASE WHEN status IN ('aprovada', 'em_voo') THEN 'em_voo' ELSE status END,
+        status = CASE WHEN ?2 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'em_rota', 'em rota', 'em_voo', 'em voo') THEN 'em_voo' ELSE status END,
         atualizado_em = CURRENT_TIMESTAMP
-    WHERE id = ?2`).bind(acionamento, idSolicitacao).run()
+    WHERE id = ?3`).bind(acionamento, horarioDep, idSolicitacao).run()
   const pernas = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(principalId).all<any>()
   const principal = criadas[0]
   return c.json({
