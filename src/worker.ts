@@ -5427,6 +5427,37 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     const shareLancamentoId = crypto.randomUUID(); const clienteLancamentoId = crypto.randomUUID(); const contaId = crypto.randomUUID()
     const periodicidade = body.periodicidade || 'ÚNICO'; const tipoRateio = body.tipo_rateio || 'FIXO'
     const idempotencyBase = `RELATORIO_DESPESA_VIAGEM:${id}:REEMBOLSO_CLIENTE`
+    if (report.socio_id) {
+      const socio = await db.prepare('SELECT holding_id FROM hold_socios WHERE id = ?1 LIMIT 1').bind(report.socio_id).first<{ holding_id: string | null }>()
+      if (!socio?.holding_id) return c.json({ error: 'holding_do_socio_nao_encontrada' }, 409)
+      const existingHolding = await db.prepare(`SELECT cr.id, cr.movimentos_id
+        FROM contas_areceber cr
+        WHERE cr.idempotency_key = ?1 LIMIT 1`).bind(`${idempotencyBase}:CONTA_RECEBER`).first<{ id: string; movimentos_id: string | null }>()
+      const movimentoExistente = await db.prepare(`SELECT fv.destino_id AS id
+        FROM financeiro_vinculos fv INNER JOIN movimentos_holding mh ON mh.id = fv.destino_id
+        WHERE fv.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND fv.origem_id = ?1
+          AND fv.destino_tipo = 'MOVIMENTO_HOLDING' LIMIT 1`).bind(id).first<{ id: string }>()
+      const movimentoId = movimentoExistente?.id || crypto.randomUUID()
+      const statements: D1PreparedStatement[] = []
+      if (!movimentoExistente) {
+        statements.push(db.prepare(`INSERT INTO movimentos_holding
+          (id, holding_id, socio_id, aeronave_id, periodicidade, tipo_caixa, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome, grupo_categoria, fluxo, valor_centavos, status, pago_diretamente, url_doc, observacoes, criado_por)
+          VALUES (?, ?, ?, ?, ?, 'HOLD', ?, ?, ?, ?, 'RELATORIO DE VIAGEM', 'DESPESAS DE VIAGEM', 'SAIDA', ?, 'EM_ABERTO', 0, ?, ?, ?)`)
+          .bind(movimentoId, socio.holding_id, report.socio_id, report.aeronave_id, periodicidade, hoje, body.data_vencimento, descricao, categoriaId, valorCentavos, report.pdf_path || null, `Origem: relatório ${report.numero_relatorio}`, user.id))
+        statements.push(db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
+          VALUES (?, 'RELATORIO_DESPESA_VIAGEM', ?, 'MOVIMENTO_HOLDING', ?, 'RELATORIO_MOVIMENTO_HOLDING')`).bind(crypto.randomUUID(), id, movimentoId))
+      }
+      const contaIdHolding = existingHolding?.id || contaId
+      statements.push(existingHolding
+        ? db.prepare('UPDATE contas_areceber SET data_vencimento = ?, valor_centavos = ?, movimentos_id = ?, lancamentos_id = NULL WHERE id = ?').bind(body.data_vencimento, valorCentavos, movimentoId, contaIdHolding)
+        : db.prepare(`INSERT INTO contas_areceber (id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, cotista_id, movimentos_id, lancamentos_id, status, criado_por, origem_tipo, idempotency_key)
+          VALUES (?, ?, ?, ?, 'RELATORIO DE VIAGEM', ?, ?, ?, ?, NULL, 'EM_ABERTO', ?, 'RELATORIO_DESPESA_VIAGEM', ?)`)
+          .bind(contaIdHolding, body.data_vencimento, valorCentavos, categoria?.id || null, descricao, report.aeronave_id, cotista.id, movimentoId, user.id, `${idempotencyBase}:CONTA_RECEBER`))
+      statements.push(db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', data_vencimento_reembolso = ?, enviado_para_cliente_em = COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP), programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id))
+      await db.batch(statements)
+      await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
+      return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaIdHolding, movimento_holding_id: movimentoId, relatorio: await buscarRelatorioViagemComNomes(c, id), message: existingHolding ? 'Reembolso já enviado ao cliente.' : 'Reembolso programado ao cliente.' })
+    }
     const existing = await db.prepare('SELECT id FROM contas_areceber WHERE idempotency_key = ? LIMIT 1').bind(`${idempotencyBase}:CONTA_RECEBER`).first<{ id: string }>()
     if (existing) {
       // O primeiro envio pode ter sido concluído antes da persistência do ID
