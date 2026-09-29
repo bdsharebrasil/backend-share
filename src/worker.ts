@@ -3543,6 +3543,10 @@ app.patch('/api/interno/tripulacao/:id', async c => {
   return c.json({ success: true })
 })
 
+function ehCma(tipo: string | null | undefined) {
+  return String(tipo || '').trim().toUpperCase() === 'CMA'
+}
+
 app.post('/api/interno/tripulacao/:id/habilitacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string; classe_cma?: string; validade_cma?: string; fs_rh?: string }>().catch(() => ({} as any))
@@ -3550,14 +3554,25 @@ app.post('/api/interno/tripulacao/:id/habilitacoes', async c => {
   const tripulante = await c.env.SHARE_DB.prepare('SELECT id FROM tripulacao WHERE id = ?1').bind(c.req.param('id')).first()
   if (!tripulante) return c.notFound()
   const id = uuid()
-  await c.env.SHARE_DB.prepare('INSERT INTO habilitacoes_tripulante (id, tripulacao_id, tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.tipo_habilitacao.trim(), body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null).run()
+  const tipo = body.tipo_habilitacao.trim()
+  const cma = ehCma(tipo)
+  await c.env.SHARE_DB.prepare('INSERT INTO habilitacoes_tripulante (id, tripulacao_id, tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), cma ? 'CMA' : tipo, cma ? null : body.data_validade || null, cma ? body.classe_cma?.trim() || null : null, cma ? body.validade_cma || body.data_validade || null : null, body.fs_rh?.trim() || null).run()
   return c.json({ id, ...body }, 201)
 })
 
 app.patch('/api/interno/tripulacao/habilitacoes/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<{ tipo_habilitacao?: string; data_validade?: string | null; classe_cma?: string | null; validade_cma?: string | null; fs_rh?: string | null }>().catch(() => ({} as any))
-  const result = await c.env.SHARE_DB.prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = COALESCE(?1, tipo_habilitacao), data_validade = ?2, classe_cma = ?3, validade_cma = ?4, fs_rh = ?5 WHERE id = ?6').bind(body.tipo_habilitacao?.trim() || null, body.data_validade || null, body.classe_cma?.trim() || null, body.validade_cma || null, body.fs_rh?.trim() || null, c.req.param('id')).run()
+  const current = await c.env.SHARE_DB.prepare('SELECT tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh FROM habilitacoes_tripulante WHERE id = ?1').bind(c.req.param('id')).first<{ tipo_habilitacao: string; data_validade: string | null; classe_cma: string | null; validade_cma: string | null; fs_rh: string | null }>()
+  if (!current) return c.notFound()
+  const tipo = body.tipo_habilitacao?.trim() || current.tipo_habilitacao
+  const cma = ehCma(tipo)
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key)
+  const dataValidade = cma ? null : has('data_validade') ? body.data_validade || null : current.data_validade
+  const classeCma = cma ? (has('classe_cma') ? body.classe_cma?.trim() || null : current.classe_cma) : null
+  const validadeCma = cma ? (has('validade_cma') ? body.validade_cma || null : current.validade_cma) : null
+  const fsRh = has('fs_rh') ? body.fs_rh?.trim() || null : current.fs_rh
+  const result = await c.env.SHARE_DB.prepare('UPDATE habilitacoes_tripulante SET tipo_habilitacao = ?1, data_validade = ?2, classe_cma = ?3, validade_cma = ?4, fs_rh = ?5 WHERE id = ?6').bind(tipo, dataValidade, classeCma, validadeCma, fsRh, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
