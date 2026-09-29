@@ -2,6 +2,9 @@ import { Hono } from 'hono'
 import {
   createExpense,
   createReimbursement,
+  createSubmittedReimbursement,
+  createExternalReceivable,
+  createDirectExternalExpense,
   enqueueFinance,
   FinanceError,
   issueRevenue,
@@ -114,22 +117,22 @@ financeiroRoutes.post('/configuracoes/:tipo', async (c) => {
     if (table === 'fornecedores_favoritos') {
       const nome = configText(body.nome_completo ?? body.nome)
       if (!nome) return c.json({ error: 'nome_fornecedor_obrigatorio' }, 400)
-      columns = ['id','nome_completo','apelido','documento','telefone','endereco','cidade','uf','pessoa_contato','categoria_fornecedor']
+      columns = ['id', 'nome_completo', 'apelido', 'documento', 'telefone', 'endereco', 'cidade', 'uf', 'pessoa_contato', 'categoria_fornecedor']
       values = [id, nome, configText(body.apelido) || null, configText(body.documento) || null, configText(body.telefone) || null, configText(body.endereco) || null, configText(body.cidade) || null, configText(body.uf) || null, configText(body.pessoa_contato) || null, configText(body.categoria_fornecedor, 'nenhum')]
     } else if (table === 'contas_bancarias') {
       const banco = configText(body.banco); const nome = configText(body.nome || body.razao_social, banco)
       if (!banco || !nome) return c.json({ error: 'banco_e_nome_obrigatorios' }, 400)
-      columns = ['id','razao_social','cnpj','chave_pix','nome','banco','numero_conta','tipo_caixa','cliente_id','holding_id','ativo']
+      columns = ['id', 'razao_social', 'cnpj', 'chave_pix', 'nome', 'banco', 'numero_conta', 'tipo_caixa', 'cliente_id', 'holding_id', 'ativo']
       values = [id, configText(body.razao_social, nome), configText(body.cnpj, 'NAO_INFORMADO'), configText(body.chave_pix, 'NAO_INFORMADO'), nome, banco, configText(body.numero_conta) || null, configText(body.tipo_caixa, 'SHARE').toUpperCase(), configText(body.cliente_id) || null, configText(body.holding_id) || null, body.ativo === false ? 0 : 1]
     } else if (table === 'categoria_movimentacao_share') {
       const nome = configText(body.nome)
       if (!nome) return c.json({ error: 'nome_categoria_obrigatorio' }, 400)
-      columns = ['id','nome','tipo','grupo_categoria','tipo_despesa','reembolsavel','categoria_cliente_id','criado_por']
+      columns = ['id', 'nome', 'tipo', 'grupo_categoria', 'tipo_despesa', 'reembolsavel', 'categoria_cliente_id', 'criado_por']
       values = [id, nome, configText(body.tipo).toLowerCase() || null, configText(body.grupo_categoria) || null, configText(body.tipo_despesa) || null, body.reembolsavel ? 1 : 0, configText(body.categoria_cliente_id) || null, userId]
     } else {
       const nome = configText(body.nome)
       if (!nome) return c.json({ error: 'nome_categoria_obrigatorio' }, 400)
-      columns = ['id','nome','subcategoria_1','subcategoria_2','subcategoria_3','subcategoria_4']
+      columns = ['id', 'nome', 'subcategoria_1', 'subcategoria_2', 'subcategoria_3', 'subcategoria_4']
       values = [id, nome, configText(body.subcategoria_1) || null, configText(body.subcategoria_2) || null, configText(body.subcategoria_3) || null, configText(body.subcategoria_4) || null]
     }
     const placeholders = columns.map(() => '?').join(', ')
@@ -207,8 +210,11 @@ async function enriquecerFornecedores(db: D1Database, rows: Record<string, unkno
 }
 
 function mapConta(row: Record<string, unknown>): Record<string, unknown> {
+  const documento = row.numero_nf ?? row.numero_recibo ?? row.numero_doc ?? row.numero_demonstrativo ?? null
+  const documentoUrl = row.url_demonstrativo ?? row.url_nf ?? row.url_recibo ?? row.url_boleto ?? row.url_doc ?? row.lancamento_boleto_url ?? row.lancamento_nf_url ?? row.boleto_url ?? row.nf_url ?? null
   return {
     id: row.id,
+    dataEmissao: row.lancamento_data_emissao ?? row.data_emissao ?? row.data ?? null,
     dataVencimento: row.data_vencimento,
     valor: Number(row.valor ?? Number(row.valor_centavos ?? 0) / 100),
     categoriaId: row.categoria_id ?? null,
@@ -225,6 +231,8 @@ function mapConta(row: Record<string, unknown>): Record<string, unknown> {
     dataPagamento: row.data_pagamento ?? row.data_recebimento ?? null,
     bancoPagamento: row.banco_pagamento ?? row.banco_recebimento ?? null,
     comprovantePagamentoUrl: row.comprovante_pagamento_url ?? row.comprovante_recebimento_url ?? null,
+    documento,
+    documentoUrl,
     lancamentoId: row.lancamento_id ?? row.lancamentos_id ?? row.lancamento_receita_id ?? null,
     status: row.status,
     solicitanteNome: row.solicitante_nome ?? null,
@@ -290,13 +298,15 @@ async function dashboardShare(c: any) {
   const payables = pagar.map((row) => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao ?? row.lancamento_descricao, fornecedor: row.fornecedor_nome ?? 'Não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', cotistaCliente: row.cotista_aeronave_id ?? 'Share Brasil', valor: valorReais(row), status: statusFinanceiro(row.status), documento: row.numero_nf ?? row.numero_doc ?? '', banco: row.banco_pagamento_nome ?? null }))
   const receivables = receber.map((row) => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao_real ?? 'Recebimento', cliente: row.cotista_id ?? 'Cliente não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', valor: valorReais(row), status: statusFinanceiro(row.status), banco: row.banco_recebimento ?? null, nf: row.numero_nf ?? row.numero_doc ?? null }))
   const reimbursements = reembolsos.map((row) => { const totalCentavos = Number(row.valor_centavos ?? 0); const recebidoCentavos = Number(row.valor_recebido_centavos ?? 0); return { id: row.id, despesa: row.descricao ?? 'Reembolso', aeronave: row.aeronave ?? 'Todas', clienteCotista: row.cotista_nome ?? row.cotista_id ?? 'Não informado', valorTotal: totalCentavos / 100, valorDevido: totalCentavos / 100, valorRecebido: recebidoCentavos / 100, valorPendente: Math.max(0, totalCentavos - recebidoCentavos) / 100, status: statusFinanceiro(row.status), pagoPor: 'Share Brasil', origem: 'D1 / reembolsos' } })
-  return c.json({ live: true, kpis: [
-    { label: 'A pagar', value: total(pagar).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${pagar.length} títulos`, helper: 'obrigações no D1', tone: 'warning' },
-    { label: 'A receber', value: total(receber).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${receber.length} títulos`, helper: 'recebíveis no D1', tone: 'info' },
-    { label: 'Reembolsos pendentes', value: total(reembolsos.filter((row) => !['RECEBIDO', 'REEMBOLSADO'].includes(String(row.status).toUpperCase()))).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${reembolsos.length} registros`, helper: 'aptos para acompanhamento', tone: 'special' },
-    { label: 'Entradas no período', value: total(entradas).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${entradas.length} lançamentos`, helper: 'caixa realizado', tone: 'success' },
-    { label: 'Saídas no período', value: total(saidas).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${saidas.length} lançamentos`, helper: 'despesas registradas', tone: 'default' },
-  ], cashFlow: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), categories: categorias.map((row, index) => ({ name: row.nome, value: Number(row.valor ?? 0) / 100, fill: ['var(--chart-cyan)', 'var(--chart-blue)', 'var(--chart-indigo)', 'var(--chart-violet)', 'var(--chart-slate)'][index % 5] })), payables, receivables, reimbursements, salaries: [] })
+  return c.json({
+    live: true, kpis: [
+      { label: 'A pagar', value: total(pagar).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${pagar.length} títulos`, helper: 'obrigações no D1', tone: 'warning' },
+      { label: 'A receber', value: total(receber).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${receber.length} títulos`, helper: 'recebíveis no D1', tone: 'info' },
+      { label: 'Reembolsos pendentes', value: total(reembolsos.filter((row) => !['RECEBIDO', 'REEMBOLSADO'].includes(String(row.status).toUpperCase()))).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${reembolsos.length} registros`, helper: 'aptos para acompanhamento', tone: 'special' },
+      { label: 'Entradas no período', value: total(entradas).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${entradas.length} lançamentos`, helper: 'caixa realizado', tone: 'success' },
+      { label: 'Saídas no período', value: total(saidas).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }), delta: `${saidas.length} lançamentos`, helper: 'despesas registradas', tone: 'default' },
+    ], cashFlow: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), categories: categorias.map((row, index) => ({ name: row.nome, value: Number(row.valor ?? 0) / 100, fill: ['var(--chart-cyan)', 'var(--chart-blue)', 'var(--chart-indigo)', 'var(--chart-violet)', 'var(--chart-slate)'][index % 5] })), payables, receivables, reimbursements, salaries: []
+  })
 }
 
 async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber') {
@@ -307,7 +317,7 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const filtros: string[] = []
   const params: unknown[] = []
   const alias = table === 'contas_apagar' ? 'cp' : 'cr'
-  const origem = table === 'contas_apagar' ? ' LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id' : ''
+  const origem = table === 'contas_apagar' ? ' LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id' : ' LEFT JOIN lancamentos l ON l.id = cr.lancamentos_id'
   if (table === 'contas_apagar') {
     filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') = 'SHARE'")
     filtros.push('COALESCE(l.reembolsavel, 0) = 0')
@@ -318,7 +328,7 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   if (cotistaId && table === 'contas_areceber') { filtros.push(`${alias}.cotista_id = ?`); params.push(cotistaId) }
   if (fornecedorId && table === 'contas_apagar') { filtros.push(`${alias}.fornecedor_id = ?`); params.push(fornecedorId) }
   if (vencidasAte) { filtros.push(`date(${alias}.data_vencimento) <= date(?)`); params.push(vencidasAte) }
-  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.* FROM ${table} ${alias}${origem}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
+  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc FROM ${table} ${alias}${origem}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
   const rowsComFornecedor = await enriquecerFornecedores(c.env.SHARE_DB, rows)
   const mapped = rowsComFornecedor.map(mapConta)
   if (table !== 'contas_areceber') return mapped
@@ -744,14 +754,16 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     })
     const contasPendentes = pagar.filter(contaPendente)
     const contasEmAberto = new Set(contasPendentes.flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
-    return c.json({ resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({
-      ...row,
-      fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
-      valor: Number(row.valor_centavos || 0) / 100,
-      pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))),
-      justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null,
-      reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null,
-    })), emails_enviados: emailsEnviados })
+    return c.json({
+      resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({
+        ...row,
+        fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
+        valor: Number(row.valor_centavos || 0) / 100,
+        pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))),
+        justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null,
+        reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null,
+      })), emails_enviados: emailsEnviados
+    })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -1062,35 +1074,35 @@ financeiroRoutes.post('/recibos/leitura-demonstrativo', async (c) => {
     const payload = { imageBase64: base64, mimeType, tipo }
     const resposta = c.env.GEMINI_API_KEY
       ? await (async () => {
-          const modelos = ['gemini-flash-latest', 'gemini-3.6-flash']
-          let aiRes: Response | null = null
-          const maxAttempts = 3
-          for (const modelo of modelos) {
-            let attempts = 0
-            while (attempts < maxAttempts) {
-              const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
-              aiRes = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT(tipo) }] },
-                  contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
-                  generationConfig: { response_mime_type: 'application/json' },
-                }),
-              })
-              if (aiRes.status !== 503) return aiRes
-              attempts++
-              if (attempts < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 2000 * attempts))
-            }
+        const modelos = ['gemini-flash-latest', 'gemini-3.6-flash']
+        let aiRes: Response | null = null
+        const maxAttempts = 3
+        for (const modelo of modelos) {
+          let attempts = 0
+          while (attempts < maxAttempts) {
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY as string)}`
+            aiRes = await fetch(apiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                systemInstruction: { parts: [{ text: DEMONSTRATIVO_IA_PROMPT(tipo) }] },
+                contents: [{ role: 'user', parts: [{ text: `Tipo do demonstrativo: ${tipo}. Extraia os dados para revisão manual; não crie nem altere registros.` }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
+                generationConfig: { response_mime_type: 'application/json' },
+              }),
+            })
+            if (aiRes.status !== 503) return aiRes
+            attempts++
+            if (attempts < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 2000 * attempts))
           }
-          return aiRes
-        })()
+        }
+        return aiRes
+      })()
       : c.env.SUPABASE_URL && c.env.SUPABASE_ANON_KEY
         ? await fetch(`${c.env.SUPABASE_URL.replace(/\/$/, '')}/functions/v1/demonstrativo-ocr`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', apikey: c.env.SUPABASE_ANON_KEY, Authorization: c.req.header('Authorization') || '' },
-            body: JSON.stringify(payload),
-          })
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: c.env.SUPABASE_ANON_KEY, Authorization: c.req.header('Authorization') || '' },
+          body: JSON.stringify(payload),
+        })
         : null
     if (!resposta) return c.json({ error: 'servico_de_leitura_ia_nao_configurado' }, 503)
     if (!resposta.ok) return c.json({ error: 'falha_na_leitura_por_ia', details: await resposta.text() }, 502)
@@ -1204,22 +1216,24 @@ financeiroRoutes.get('/recibos', async (c) => {
     lista.push(rateio)
     rateiosPorRecibo.set(String(rateio.recibo_id), lista)
   }
-  return c.json({ recibos: recibos.map((recibo) => {
-    const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
-    return {
-      ...recibo,
-      pdf_anexo_id: pdfAnexoPorRecibo.get(String(recibo.id))?.id ?? null,
-      pdf_url: recibo.url_recibo ?? null,
-      nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? recibo.nome_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.nome ?? recibo.nome_pagador ?? null : 'Share Brasil',
-      documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? recibo.documento_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.documento ?? recibo.documento_pagador ?? null : recibo.documento_pagador ?? null,
-      endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? recibo.endereco_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.endereco ?? recibo.endereco_pagador ?? null : recibo.endereco_pagador ?? null,
-      cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? recibo.cidade_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.cidade ?? recibo.cidade_pagador ?? null : recibo.cidade_pagador ?? null,
-      uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? recibo.uf_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.uf ?? recibo.uf_pagador ?? null : recibo.uf_pagador ?? null,
-      rateio_linhas: rateiosPorRecibo.get(String(recibo.id)) ?? [],
-      conta_pagar_id: contaProgramadaPorRecibo.get(String(recibo.id)) ?? null,
-      despesa_programada: contaProgramadaPorRecibo.has(String(recibo.id)) || rateioCriadoPorRecibo.has(String(recibo.id)),
-    }
-  }) })
+  return c.json({
+    recibos: recibos.map((recibo) => {
+      const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
+      return {
+        ...recibo,
+        pdf_anexo_id: pdfAnexoPorRecibo.get(String(recibo.id))?.id ?? null,
+        pdf_url: recibo.url_recibo ?? null,
+        nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? recibo.nome_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.nome ?? recibo.nome_pagador ?? null : 'Share Brasil',
+        documento_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.documento ?? recibo.documento_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.documento ?? recibo.documento_pagador ?? null : recibo.documento_pagador ?? null,
+        endereco_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.endereco ?? recibo.endereco_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.endereco ?? recibo.endereco_pagador ?? null : recibo.endereco_pagador ?? null,
+        cidade_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.cidade ?? recibo.cidade_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.cidade ?? recibo.cidade_pagador ?? null : recibo.cidade_pagador ?? null,
+        uf_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.uf ?? recibo.uf_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.uf ?? recibo.uf_pagador ?? null : recibo.uf_pagador ?? null,
+        rateio_linhas: rateiosPorRecibo.get(String(recibo.id)) ?? [],
+        conta_pagar_id: contaProgramadaPorRecibo.get(String(recibo.id)) ?? null,
+        despesa_programada: contaProgramadaPorRecibo.has(String(recibo.id)) || rateioCriadoPorRecibo.has(String(recibo.id)),
+      }
+    })
+  })
 })
 
 financeiroRoutes.get('/recibos/opcoes', async (c) => {
@@ -1489,7 +1503,8 @@ financeiroRoutes.post('/envios-pagamento', async (c) => {
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'dados_de_envio_invalidos', code: 'dados_de_envio_invalidos' }, 400)
     }
-    return c.json(await createPaymentRequest(c.env.SHARE_DB, input, c.get('userId') || null), 201)
+    const result = await createPaymentRequest(c.env.SHARE_DB, input, c.get('userId') || null)
+    return c.json(result, result.idempotent ? 200 : 201)
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -1591,7 +1606,15 @@ financeiroRoutes.post('/envios-pagamento/:id/converter', async (c) => {
     if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
     if (request.tipo === 'share' && !['APROVADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
     if (request.tipo !== 'share' && !['PENDENTE', 'APROVADO', 'EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
-    return c.json(await convertPaymentRequest(c.env.SHARE_DB, request, (db, body, uid, options) => createExpense(db, body, uid, options), c.get('userId') || null, createReimbursement))
+    return c.json(await convertPaymentRequest(
+      c.env.SHARE_DB,
+      request,
+      (db, body, uid, options) => createExpense(db, body, uid, options),
+      c.get('userId') || null,
+      createSubmittedReimbursement,
+      createExternalReceivable,
+      createDirectExternalExpense,
+    ))
   } catch (error) { return errorResponse(c, error) }
 })
 
