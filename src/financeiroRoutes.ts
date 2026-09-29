@@ -17,6 +17,7 @@ import {
   validateFinanceSchema,
 } from './financeiro/FinanceiroKernel'
 import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } from './financeiro/paymentAgents'
+import { mensagemFinanceiraStatements } from './financeiro/financeiroNotifications'
 
 type Bindings = {
   SHARE_DB: D1Database
@@ -226,6 +227,7 @@ function mapConta(row: Record<string, unknown>): Record<string, unknown> {
     comprovantePagamentoUrl: row.comprovante_pagamento_url ?? row.comprovante_recebimento_url ?? null,
     lancamentoId: row.lancamento_id ?? row.lancamentos_id ?? row.lancamento_receita_id ?? null,
     status: row.status,
+    solicitanteNome: row.solicitante_nome ?? null,
     criadoEm: row.criado_em,
     atualizadoEm: row.atualizado_em,
   }
@@ -266,7 +268,7 @@ async function dashboardShare(c: any) {
   const where = filtros.length ? `WHERE ${filtros.join(' AND ')}` : ''
   const [lancamentos, pagar, receber, reembolsos, categorias] = await Promise.all([
     listar(db, `SELECT l.*, a.matricula_registro AS aeronave, cb.banco AS banco_pagamento_nome FROM lancamentos l LEFT JOIN aeronave a ON a.id = l.aeronave_id LEFT JOIN contas_bancarias cb ON cb.id = l.conta_bancaria_id ${where} ORDER BY date(COALESCE(l.data_emissao, l.criado_em)) DESC LIMIT 1000`, ...params),
-    listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id, a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id LEFT JOIN aeronave a ON a.id = cp.aeronave_id ${aeronave && aeronave !== 'Todas as aeronaves' ? 'WHERE a.matricula_registro = ?' : ''} ORDER BY date(cp.data_vencimento) ASC LIMIT 500`, ...(aeronave && aeronave !== 'Todas as aeronaves' ? [aeronave] : [])),
+    listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id, a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id LEFT JOIN aeronave a ON a.id = cp.aeronave_id WHERE COALESCE(UPPER(l.tipo_caixa), 'SHARE') = 'SHARE' AND COALESCE(l.reembolsavel, 0) = 0 AND UPPER(COALESCE(cp.origem_tipo, '')) <> 'RELATORIO_DESPESA_VIAGEM' AND UPPER(COALESCE(cp.categoria_nome, '')) NOT LIKE '%REEMBOLS%' ${aeronave && aeronave !== 'Todas as aeronaves' ? 'AND a.matricula_registro = ?' : ''} ORDER BY date(cp.data_vencimento) ASC LIMIT 500`, ...(aeronave && aeronave !== 'Todas as aeronaves' ? [aeronave] : [])),
     listar(db, `SELECT cr.*, l.numero_doc, l.numero_nf, l.aeronave_id, a.matricula_registro AS aeronave, COALESCE(l.descricao, cr.descricao) AS descricao_real FROM contas_areceber cr LEFT JOIN lancamentos l ON l.id = cr.lancamentos_id LEFT JOIN aeronave a ON a.id = cr.aeronave_id ${aeronave && aeronave !== 'Todas as aeronaves' ? 'WHERE a.matricula_registro = ?' : ''} ORDER BY date(cr.data_vencimento) ASC LIMIT 500`, ...(aeronave && aeronave !== 'Todas as aeronaves' ? [aeronave] : [])),
     listar(db, `SELECT r.*, l.descricao, l.aeronave_id, a.matricula_registro AS aeronave, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, r.cotista_id) AS cotista_nome, COALESCE((SELECT SUM(rp.valor_centavos) FROM rateio_pagamentos rp WHERE rp.conta_receber_id = r.conta_receber_id AND rp.status = 'CONFIRMADO'), 0) AS valor_recebido_centavos FROM reembolsos r LEFT JOIN lancamentos l ON l.id = r.lancamento_origem_id LEFT JOIN aeronave a ON a.id = l.aeronave_id LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY r.criado_em DESC LIMIT 500`),
     listar(db, `SELECT COALESCE(l.categoria_nome, 'Sem categoria') AS nome, SUM(CASE WHEN l.fluxo IN ('SAIDA','DESPESA') THEN l.valor_centavos ELSE 0 END) AS valor FROM lancamentos l LEFT JOIN aeronave a ON a.id = l.aeronave_id ${where} GROUP BY COALESCE(l.categoria_nome, 'Sem categoria') ORDER BY valor DESC LIMIT 12`, ...params),
@@ -307,9 +309,10 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const alias = table === 'contas_apagar' ? 'cp' : 'cr'
   const origem = table === 'contas_apagar' ? ' LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id' : ''
   if (table === 'contas_apagar') {
-    // Contas a pagar representam somente obrigações do caixa Share/Holding.
-    // Despesas do caixa cliente ficam nos lançamentos/rateios do cliente.
-    filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') <> 'CLIENTE'")
+    filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') = 'SHARE'")
+    filtros.push('COALESCE(l.reembolsavel, 0) = 0')
+    filtros.push("UPPER(COALESCE(cp.origem_tipo, '')) <> 'RELATORIO_DESPESA_VIAGEM'")
+    filtros.push("UPPER(COALESCE(cp.categoria_nome, '')) NOT LIKE '%REEMBOLS%'")
   }
   if (status) { filtros.push(`${alias}.status = ?`); params.push(status) }
   if (cotistaId && table === 'contas_areceber') { filtros.push(`${alias}.cotista_id = ?`); params.push(cotistaId) }
@@ -371,6 +374,74 @@ financeiroRoutes.get('/contas-apagar', async (c) => {
 
 financeiroRoutes.get('/contas-areceber', async (c) => {
   try { return c.json(await consultarContas(c, 'contas_areceber')) } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const [envios, reembolsos] = await Promise.all([
+      listar(db, `SELECT e.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email, e.criado_por) AS solicitante_nome
+        FROM envio_despesas e LEFT JOIN user_profiles u ON u.id = e.criado_por
+        WHERE e.tipo IN ('cliente', 'reembolso') ORDER BY e.criado_em DESC LIMIT 500`),
+      listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id,
+          a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
+          COALESCE(u.nome_exibicao, u.nome_completo, u.email, cp.colaborador_id) AS solicitante_nome
+        FROM contas_apagar cp
+        LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id
+        LEFT JOIN aeronave a ON a.id = cp.aeronave_id
+        LEFT JOIN user_profiles u ON u.id = cp.colaborador_id
+        WHERE (COALESCE(l.reembolsavel, 0) = 1
+          OR UPPER(COALESCE(cp.origem_tipo, '')) = 'RELATORIO_DESPESA_VIAGEM'
+          OR UPPER(COALESCE(cp.categoria_nome, '')) LIKE '%REEMBOLS%')
+          AND UPPER(cp.status) NOT IN ('PAGO', 'CANCELADO')
+        ORDER BY date(cp.data_vencimento) ASC LIMIT 500`),
+    ])
+    return c.json({ envios, reembolsos: reembolsos.map(mapConta) })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.get('/movimentos-holding/pendentes', async (c) => {
+  try {
+    const movimentos = await listar(c.env.SHARE_DB, `SELECT mh.id, mh.holding_id, h.nome AS holding_nome,
+        mh.socio_id, hs.nome AS socio_nome, mh.aeronave_id, a.matricula_registro AS aeronave,
+        mh.data_emissao, mh.data_vencimento, mh.descricao, mh.categoria_nome, mh.valor_centavos,
+        mh.status, mh.fornecedor_nome,
+        COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_holding_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
+        COALESCE((SELECT SUM(rh.valor_pago_real_centavos) FROM rateio_hold rh WHERE rh.movimento_holding_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS pago_centavos
+      FROM movimentos_holding mh
+      LEFT JOIN holdings h ON h.id = mh.holding_id
+      LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
+      LEFT JOIN aeronave a ON a.id = mh.aeronave_id
+      WHERE mh.tipo_caixa = 'HOLD' AND UPPER(mh.fluxo) = 'SAIDA'
+        AND UPPER(mh.status) IN ('EM_ABERTO', 'EM_ATRASO', 'AGUARDANDO_REEMBOLSO')
+        AND COALESCE(mh.pago_diretamente, 0) = 0
+      ORDER BY date(mh.data_vencimento) ASC, mh.criado_em DESC LIMIT 500`)
+    return c.json({ movimentos })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/movimentos-holding/:id/baixa', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const movimentoId = c.req.param('id')
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const dataPagamento = String(body.data_pagamento ?? '').trim()
+    const bancoId = String(body.conta_bancaria_id ?? '').trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dataPagamento) || !bancoId) return c.json({ error: 'data_e_conta_bancaria_obrigatorias' }, 400)
+    const movimento = await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(movimentoId).first<Record<string, unknown>>()
+    if (!movimento) return c.json({ error: 'movimento_holding_nao_encontrado' }, 404)
+    if (String(movimento.status).toUpperCase() === 'PAGO') return c.json({ ...movimento, idempotent: true })
+    if (String(movimento.status).toUpperCase() === 'CANCELADO') return c.json({ error: 'movimento_holding_cancelado' }, 409)
+    const conta = await db.prepare("SELECT id FROM contas_bancarias WHERE id = ? AND tipo_caixa = 'HOLDING' AND holding_id = ? AND ativo = 1").bind(bancoId, movimento.holding_id).first()
+    if (!conta) return c.json({ error: 'conta_bancaria_holding_invalida' }, 400)
+    await db.batch([
+      db.prepare("UPDATE movimentos_holding SET status = 'PAGO', data_pagamento = ?, conta_bancaria_id = ?, forma_pagamento = ?, comprovante_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(dataPagamento, bancoId, body.forma_pagamento ?? null, body.comprovante_url ?? null, movimentoId),
+      db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_holding_id = ? AND status <> 'CANCELADO'")
+        .bind(dataPagamento, movimentoId),
+    ])
+    return c.json({ ...(await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(movimentoId).first()), idempotent: false })
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.get('/recibos-saida', async (c) => {
@@ -543,7 +614,7 @@ financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
     const opcional = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
     const [categorias, contas, cotistas, holdings] = await Promise.all([
       opcional('SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
-      opcional('SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco'),
+      opcional('SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
       opcional("SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, ca.aeronave_id, ca.percentual_sociedade FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY nome"),
       opcional('SELECT id, nome, conta_bancaria FROM holdings ORDER BY nome'),
     ])
@@ -554,11 +625,18 @@ financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
 financeiroRoutes.get('/share/opcoes', async (c) => {
   try {
     const db = c.env.SHARE_DB
-    const [categorias, contas, empresas] = await Promise.all([
-      listar(db, 'SELECT id, nome, tipo, grupo_categoria AS grupo, tipo_despesa AS classificacao, empresa_id, 0 AS reembolsavel FROM categoria_movimentacao_share ORDER BY nome'),
-      listar(db, 'SELECT id, banco, numero_conta, tipo_conta FROM contas_bancarias ORDER BY banco'),
+    const tipoCaixa = c.req.query('tipo_caixa')
+    const holdingId = c.req.query('holding_id')
+    const filtroConta = tipoCaixa === 'HOLDING' || tipoCaixa === 'SHARE' ? `WHERE tipo_caixa = ? AND ativo = 1${holdingId && tipoCaixa === 'HOLDING' ? ' AND holding_id = ?' : ''}` : ''
+    const parametrosConta = tipoCaixa === 'HOLDING' && holdingId ? [tipoCaixa, holdingId] : [tipoCaixa]
+    const consultas = [
+      listar(db, 'SELECT id, nome, tipo, grupo_categoria AS grupo, tipo_despesa AS classificacao, NULL AS empresa_id, COALESCE(reembolsavel, 0) AS reembolsavel FROM categoria_movimentacao_share ORDER BY nome'),
+      filtroConta
+        ? listar(db, `SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias ${filtroConta} ORDER BY banco`, ...parametrosConta)
+        : listar(db, 'SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
       listar(db, 'SELECT id, razao_social, cnpj FROM empresa ORDER BY razao_social'),
-    ])
+    ]
+    const [categorias, contas, empresas] = await Promise.all(consultas)
     return c.json({ categorias, contas_bancarias: contas, empresas })
   } catch (error) { return errorResponse(c, error) }
 })
@@ -1451,7 +1529,9 @@ financeiroRoutes.post('/envios-pagamento', async (c) => {
 
 financeiroRoutes.get('/envios-pagamento', async (c) => {
   const tipo = c.req.query('tipo')
-  const query = tipo ? 'SELECT * FROM envio_despesas WHERE tipo = ? ORDER BY criado_em DESC LIMIT 200' : 'SELECT * FROM envio_despesas ORDER BY criado_em DESC LIMIT 200'
+  const query = `SELECT e.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email, e.criado_por) AS solicitante_nome
+    FROM envio_despesas e LEFT JOIN user_profiles u ON u.id = e.criado_por
+    ${tipo ? 'WHERE e.tipo = ?' : ''} ORDER BY e.criado_em DESC LIMIT 200`
   const result = tipo ? await c.env.SHARE_DB.prepare(query).bind(tipo).all() : await c.env.SHARE_DB.prepare(query).all()
   return c.json({ envios: result.results ?? [] })
 })
@@ -1526,16 +1606,25 @@ financeiroRoutes.patch('/envios-pagamento/:id', async (c) => {
 })
 
 financeiroRoutes.post('/envios-pagamento/:id/aprovar', async (c) => {
-  const result = await c.env.SHARE_DB.prepare("UPDATE envio_despesas SET status = 'APROVADO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'PENDENTE'").bind(c.req.param('id')).run()
+  const db = c.env.SHARE_DB
+  const id = c.req.param('id')
+  const request = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first<Record<string, unknown>>()
+  if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  if (request.tipo !== 'share') return c.json({ error: 'somente_solicitacoes_de_compra_share_podem_ser_aprovadas' }, 409)
+  const result = await db.prepare("UPDATE envio_despesas SET status = 'APROVADO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'PENDENTE'").bind(id).run()
   if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
-  return c.json({ ok: true, id: c.req.param('id'), status: 'APROVADO' })
+  const userId = c.get('userId') || null
+  const statements = mensagemFinanceiraStatements(db, String(request.criado_por ?? '') || null, userId, 'Solicitação de compra aprovada', `Sua solicitação “${String(request.descricao ?? '')}” foi aprovada e está aguardando o pagamento.`)
+  if (statements.length) await db.batch(statements)
+  return c.json({ ok: true, id, status: 'APROVADO' })
 })
 
 financeiroRoutes.post('/envios-pagamento/:id/converter', async (c) => {
   try {
     const request = await c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
     if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
-    if (!['PENDENTE', 'APROVADO', 'EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
+    if (request.tipo === 'share' && !['APROVADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
+    if (request.tipo !== 'share' && !['PENDENTE', 'APROVADO', 'EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
     return c.json(await convertPaymentRequest(c.env.SHARE_DB, request, createExpense, c.get('userId') || null))
   } catch (error) { return errorResponse(c, error) }
 })
