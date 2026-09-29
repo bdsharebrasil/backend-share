@@ -4458,7 +4458,7 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const db = c.env.SHARE_DB
   const idSolicitacao = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const voo = await db.prepare('SELECT aeronave_id, piloto_id, copiloto_id, data_agendada FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
+  const voo = await db.prepare('SELECT aeronave_id, piloto_id, copiloto_id, data_agendada, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
   if (!voo) return c.notFound()
   const tripulantes = (Array.isArray(body.tripulantes) && body.tripulantes.length
     ? body.tripulantes
@@ -4471,12 +4471,19 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
     // Verifica jornada aberta em QUALQUER voo (não só nesta solicitação): um tripulante não pode
     // estar em duas jornadas simultâneas, senão os limites de 9h/44h/176h ficam furados enquanto
     // a jornada duplicada nunca é encerrada (e por isso nunca soma nos acumulados).
-    const aberta = await db.prepare("SELECT id, solicitacao_id FROM jornadas_voo WHERE tripulante_id = ?1 AND status <> 'encerrada' LIMIT 1")
-      .bind(item.tripulante_id).first<{ id: string; solicitacao_id: string }>()
+    const aberta = await db.prepare(`SELECT j.id, j.solicitacao_id, s.numero_voo,
+        COALESCE(t.nome_completo, f.nome_completo) AS tripulante_nome
+      FROM jornadas_voo j
+      LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id
+      LEFT JOIN tripulacao t ON t.id = j.tripulante_id
+      LEFT JOIN tripulacao_freelancer f ON f.id = j.tripulante_id
+      WHERE j.tripulante_id = ?1 AND j.status <> 'encerrada' LIMIT 1`)
+      .bind(item.tripulante_id).first<{ id: string; solicitacao_id: string; numero_voo: string | null; tripulante_nome: string | null }>()
     if (aberta) {
       return c.json({
         error: aberta.solicitacao_id === idSolicitacao ? 'jornada_ja_iniciada' : 'tripulante_em_jornada_outro_voo',
         tripulante_id: item.tripulante_id, jornada_id: aberta.id, solicitacao_id: aberta.solicitacao_id,
+        numero_voo: aberta.numero_voo || voo.numero_voo || null, tripulante_nome: aberta.tripulante_nome || null,
         detail: aberta.solicitacao_id === idSolicitacao ? undefined : 'Este tripulante já tem uma jornada em aberto em outro voo. Encerre-a antes de iniciar uma nova.',
       }, 409)
     }
