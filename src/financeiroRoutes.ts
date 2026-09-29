@@ -869,40 +869,6 @@ financeiroRoutes.post('/reembolsos', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
-financeiroRoutes.get('/reembolsos/pendentes', async (c) => {
-  try {
-    const rows = await listar(c.env.SHARE_DB, `SELECT r.id, r.conta_receber_id, r.lancamento_origem_id, r.cotista_id, r.valor_centavos, r.status, r.criado_em, cr.data_vencimento, cr.data_recebimento, cr.banco_recebimento, l.descricao, a.matricula_registro AS aeronave, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, r.cotista_id) AS cotista_nome, COALESCE((SELECT SUM(rp.valor_centavos) FROM rateio_pagamentos rp WHERE rp.conta_receber_id = r.conta_receber_id AND rp.status = 'CONFIRMADO'), 0) AS valor_recebido_centavos FROM reembolsos r LEFT JOIN contas_areceber cr ON cr.id = r.conta_receber_id LEFT JOIN lancamentos l ON l.id = r.lancamento_origem_id LEFT JOIN aeronave a ON a.id = l.aeronave_id LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE UPPER(COALESCE(r.status, '')) NOT IN ('REEMBOLSADO', 'CANCELADO') ORDER BY date(COALESCE(cr.data_vencimento, r.criado_em)) ASC, r.criado_em DESC LIMIT 500`)
-    return c.json(rows.map((row) => { const total = Number(row.valor_centavos ?? 0); const recebido = Number(row.valor_recebido_centavos ?? 0); return { ...row, valor_total_centavos: total, valor_devido_centavos: total, valor_recebido_centavos: recebido, valor_pendente_centavos: Math.max(0, total - recebido) } }))
-  } catch (error) { return errorResponse(c, error) }
-})
-
-financeiroRoutes.post('/reembolsos/baixa-consolidada', async (c) => {
-  try {
-    const body = await c.req.json<Record<string, any>>()
-    const ids = Array.isArray(body.reembolso_ids) ? body.reembolso_ids.map(String).filter(Boolean) : []
-    if (!ids.length) return c.json({ error: 'reembolso_ids_obrigatorio' }, 400)
-    if (!body.tipo_pagador || !body.data_pagamento) return c.json({ error: 'pagador_e_data_obrigatorios' }, 400)
-    const db = c.env.SHARE_DB; const placeholders = ids.map(() => '?').join(',')
-    const reembolsos = await db.prepare(`SELECT id, conta_receber_id FROM reembolsos WHERE id IN (${placeholders})`).bind(...ids).all<{ id: string; conta_receber_id: string | null }>()
-    const contas = (reembolsos.results ?? []).filter((row) => row.conta_receber_id)
-    if (contas.length !== ids.length) return c.json({ error: 'reembolso_ou_conta_receber_nao_encontrado' }, 404)
-    const pendentes = await Promise.all(contas.map(async (row) => {
-      const conta = await db.prepare('SELECT id, valor_centavos, lancamentos_id FROM contas_areceber WHERE id = ?').bind(row.conta_receber_id).first<{ id: string; valor_centavos: number; lancamentos_id: string }>()
-      const pago = await db.prepare("SELECT COALESCE(SUM(valor_centavos), 0) AS total FROM rateio_pagamentos WHERE conta_receber_id = ? AND status = 'CONFIRMADO'").bind(row.conta_receber_id).first<{ total: number }>()
-      return { ...row, conta, pendente: Math.max(0, Number(conta?.valor_centavos ?? 0) - Number(pago?.total ?? 0)) }
-    }))
-    const total = pendentes.reduce((sum, row) => sum + row.pendente, 0); const informado = Number(body.valor_centavos ?? Math.round(Number(body.valor ?? 0) * 100))
-    if (!Number.isInteger(informado) || informado !== total) return c.json({ error: 'valor_consolidado_invalido', esperado_centavos: total }, 400)
-    const resultados = []
-    for (const row of pendentes) {
-      const rateios = await db.prepare("SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(row.conta?.lancamentos_id).all<{ id: string; valor_rateado_centavos: number; valor_pago_real_centavos: number }>()
-      let restante = row.pendente; const distribuicao = (rateios.results ?? []).map((rateio) => { const saldo = Math.max(0, Number(rateio.valor_rateado_centavos) - Number(rateio.valor_pago_real_centavos ?? 0)); const valor = Math.min(restante, saldo); restante -= valor; return { rateio_id: rateio.id, valor_centavos: valor } }).filter((item) => item.valor_centavos > 0)
-      resultados.push(await settleReceivable(db, String(row.conta_receber_id), { data_recebimento: body.data_pagamento, conta_bancaria_id: body.conta_bancaria_id ?? body.banco, comprovante_url: body.comprovante_url ?? body.comprovante, idempotency_key: `${body.idempotency_key ?? `reembolso-consolidado:${body.data_pagamento}`}:${row.id}`, pagamentos: [{ tipo_pagador: body.tipo_pagador, pagador_cotista_id: body.pagador_cotista_id ?? null, pagador_holding_id: body.pagador_holding_id ?? null, valor_centavos: row.pendente, data_pagamento: body.data_pagamento, conta_bancaria_id: body.conta_bancaria_id ?? body.banco, comprovante_url: body.comprovante_url ?? body.comprovante, rateios: distribuicao }] }, c.get('userId') || null))
-    }
-    return c.json({ ok: true, valor_centavos: total, contas_baixadas: resultados.length, resultados })
-  } catch (error) { return errorResponse(c, error) }
-})
-
 financeiroRoutes.get('/salarios/resumo', async (c) => {
   try {
     const db = c.env.SHARE_DB
