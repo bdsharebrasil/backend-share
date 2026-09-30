@@ -631,7 +631,7 @@ financeiroRoutes.post('/recibos-saida/:id/dar-baixa', async (c) => {
 financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
   try {
     const db = c.env.SHARE_DB
-    const opcional = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
+    const opcional = async (sql: string) => (await db.prepare(sql).all().catch((error) => { console.warn('[financeiro/opcoes] consulta opcional indisponível', error); return { results: [] } })).results ?? []
     const [categorias, contas, cotistas, holdings] = await Promise.all([
       opcional('SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
       opcional('SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
@@ -1275,7 +1275,7 @@ financeiroRoutes.get('/recibos', async (c) => {
 
 financeiroRoutes.get('/recibos/opcoes', async (c) => {
   const db = c.env.SHARE_DB
-  const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
+  const read = async (sql: string) => (await db.prepare(sql).all().catch((error) => { console.warn('[financeiro/lancamentos] consulta opcional indisponível', error); return { results: [] } })).results ?? []
   const [clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categoriasCliente] = await Promise.all([
     read('SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status, codigo_cliente FROM cliente ORDER BY razao_social'),
     read("SELECT id, nome_completo, nome_exibicao, cpf, endereco, cidade, uf, email, telefone, canac, nome_banco, tipo_conta, conta_numero, agencia_numero, pix, 'user_profiles' AS origem FROM user_profiles ORDER BY nome_completo"),
@@ -1556,7 +1556,7 @@ financeiroRoutes.get('/envios-pagamento', async (c) => {
 
 financeiroRoutes.get('/envios-pagamento/opcoes', async (c) => {
   const db = c.env.SHARE_DB
-  const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
+  const read = async (sql: string) => (await db.prepare(sql).all().catch((error) => { console.warn('[financeiro/envios] consulta opcional indisponível', error); return { results: [] } })).results ?? []
   const [fornecedores, fornecedoresCombustivel, aeronaves, voos, categorias, categoriasCliente] = await Promise.all([
     read('SELECT id, COALESCE(apelido, nome_completo) AS label FROM fornecedores_favoritos ORDER BY label'),
     read('SELECT * FROM fornecedores_combustivel ORDER BY nome_cidade, nome_fornecedor'),
@@ -1570,7 +1570,7 @@ financeiroRoutes.get('/envios-pagamento/opcoes', async (c) => {
 
 financeiroRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => {
   const db = c.env.SHARE_DB
-  const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
+  const read = async (sql: string) => (await db.prepare(sql).all().catch((error) => { console.warn('[financeiro/anexos] consulta opcional indisponível', error); return { results: [] } })).results ?? []
   const [recibos, relatorios, abastecimentos] = await Promise.all([
     read(`SELECT r.id, r.numero_recibo, r.descricao, r.descricao AS descricao_servico, r.data_emissao, COALESCE(a.id, r.id) AS anexo_id, a.nome_arquivo, a.tipo_arquivo, COALESCE(r.url_recibo, '/api/financeiro/recibos/anexos/' || a.id || '/arquivo') AS arquivo_url FROM recibos r LEFT JOIN recibo_anexos a ON a.recibo_id = r.id AND (UPPER(COALESCE(a.finalidade, '')) = 'PDF' OR a.tipo_arquivo = 'application/pdf') WHERE a.id IS NOT NULL OR r.url_recibo IS NOT NULL ORDER BY r.data_emissao DESC, r.numero_recibo LIMIT 300`),
     read(`SELECT r.id, r.numero_voo, r.numero_relatorio, COALESCE(r.pdf_url, '/api/financeiro/relatorios-despesa-viagem/' || r.id || '/pdf') AS arquivo_url, r.id AS anexo_id, 'relatorio.pdf' AS nome_arquivo, 'application/pdf' AS tipo_arquivo FROM relatorio_despesa_viagem r WHERE r.pdf_path IS NOT NULL OR r.pdf_url IS NOT NULL ORDER BY r.criado_em DESC, r.numero_relatorio LIMIT 300`),

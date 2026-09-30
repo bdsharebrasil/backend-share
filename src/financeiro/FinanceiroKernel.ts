@@ -1943,10 +1943,15 @@ export async function processFinanceQueue(
     'erro',
     'processado_em',
   ])
+  await db.prepare(`UPDATE financeiro_fila
+      SET status = CASE WHEN tentativas >= 5 THEN 'ERRO' ELSE 'PENDENTE' END,
+          erro = CASE WHEN tentativas >= 5 THEN 'limite_de_tentativas_excedido' ELSE 'claim_expirado' END
+    WHERE status = 'PROCESSANDO'
+      AND datetime(criado_em) < datetime('now', '-15 minutes')`).run()
   const rows = await db
     .prepare(
       `SELECT * FROM financeiro_fila
-        WHERE status = 'PENDENTE'
+        WHERE status = 'PENDENTE' AND tentativas < 5
         ORDER BY criado_em
         LIMIT ?`,
     )

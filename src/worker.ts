@@ -8709,26 +8709,11 @@ app.get('/api/ctm/aeronaves/:aeronaveId/documentos/:id/arquivo', async c => {
   return new Response(object.body, { headers })
 })
 
-const PREFETCH_ICAOS = ['SBGR', 'SBSP', 'SBRJ', 'SBCY', 'SBCF', 'SBBR']
-const WORKER_URL = 'https://api.share-brasil.com'
-
 export default {
   fetch: app.fetch,
   async scheduled(_event: any, _env: Bindings, ctx: ExecutionContext) {
-    const tasks = [
-      // Processa a fila financeira no próprio Worker. A fila usa somente
-      // tabelas existentes; migrations são a única forma de alterar o D1.
-      _env.SHARE_DB
-        ? processFinanceQueue(_env.SHARE_DB, null, 50)
-        : Promise.resolve([]),
-      // Aquece weather e notam dos principais aeródromos
-      ...PREFETCH_ICAOS.flatMap(icao => [
-        fetch(`${WORKER_URL}/api/weather/${icao}`),
-        fetch(`${WORKER_URL}/api/notam/${icao}`),
-      ]),
-      // Aquece o rotaer-all para /nearest e /geiloc/nearby responderem do cache
-      fetch(`${WORKER_URL}/api/nearest?lat=-23.5&lon=-46.6`),
-    ]
-    ctx.waitUntil(Promise.allSettled(tasks))
+    // O cron executa apenas jobs locais: chamadas HTTP ao próprio Worker
+    // criavam latência e duplicavam autenticação sem garantir consistência.
+    if (_env.SHARE_DB) ctx.waitUntil(processFinanceQueue(_env.SHARE_DB, null, 50))
   },
 }
