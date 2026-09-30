@@ -1195,6 +1195,10 @@ financeiroRoutes.get('/recibos', async (c) => {
   const busca = c.req.query('q')?.trim()
   const dataInicial = c.req.query('data_inicial')
   const dataFinal = c.req.query('data_final')
+  const limitParam = Number(c.req.query('limit') ?? 100)
+  const offsetParam = Number(c.req.query('offset') ?? 0)
+  const limit = Number.isInteger(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 100
+  const offset = Number.isInteger(offsetParam) ? Math.max(offsetParam, 0) : 0
   if (status) { filtros.push('status = ?'); params.push(status) }
   if (beneficiarioTipo) { filtros.push('beneficiario_tipo = ?'); params.push(beneficiarioTipo) }
   if (busca) {
@@ -1203,7 +1207,11 @@ financeiroRoutes.get('/recibos', async (c) => {
   }
   if (dataInicial) { filtros.push('date(data_emissao) >= date(?)'); params.push(dataInicial) }
   if (dataFinal) { filtros.push('date(data_emissao) <= date(?)'); params.push(dataFinal) }
-  const result = await db.prepare(`SELECT * FROM recibos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY criado_em DESC`).bind(...params).all<Record<string, unknown>>()
+  const where = filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''
+  const [result, totalResult] = await Promise.all([
+    db.prepare(`SELECT * FROM recibos${where} ORDER BY criado_em DESC LIMIT ? OFFSET ?`).bind(...params, limit, offset).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS total FROM recibos${where}`).bind(...params).first<{ total: number }>(),
+  ])
   const recibos = result.results ?? []
   const cotistaIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cotista_aeronave').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
   const clienteIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cliente').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
@@ -1243,7 +1251,9 @@ financeiroRoutes.get('/recibos', async (c) => {
     lista.push(rateio)
     rateiosPorRecibo.set(String(rateio.recibo_id), lista)
   }
+  const total = Number(totalResult?.total ?? 0)
   return c.json({
+    pagina: { limit, offset, total, has_more: offset + recibos.length < total },
     recibos: recibos.map((recibo) => {
       const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
       return {
@@ -1609,10 +1619,23 @@ financeiroRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) => {
 
 financeiroRoutes.patch('/envios-pagamento/:id', async (c) => {
   const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
-  const allowed = new Set(['PENDENTE', 'APROVADO', 'CONVERTIDO', 'CANCELADO', 'EMAIL_ENVIADO'])
-  if (!body.status || !allowed.has(body.status)) return c.json({ error: 'status_solicitacao_invalido' }, 400)
-  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, c.req.param('id')).run()
-  return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first().then((row) => c.json(row))
+  const requested = String(body.status ?? '').toUpperCase()
+  const id = c.req.param('id')
+  const current = await c.env.SHARE_DB.prepare('SELECT id, tipo, status FROM envio_despesas WHERE id = ?').bind(id).first<{ id: string; tipo: string; status: string }>()
+  if (!current) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  const currentStatus = String(current.status ?? '').toUpperCase()
+  const transitions: Record<string, string[]> = {
+    PENDENTE: current.tipo === 'share' ? ['APROVADO', 'CANCELADO'] : ['EMAIL_ENVIADO', 'CANCELADO'],
+    APROVADO: ['EMAIL_ENVIADO', 'CANCELADO'],
+    EMAIL_ENVIADO: ['CANCELADO'],
+    CONVERTIDO: [],
+    CANCELADO: [],
+  }
+  if (!transitions[currentStatus]?.includes(requested)) {
+    return c.json({ error: 'transicao_status_solicitacao_invalida', de: currentStatus, para: requested }, 409)
+  }
+  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = ?').bind(requested, id, current.status).run()
+  return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row) => c.json(row))
 })
 
 financeiroRoutes.post('/envios-pagamento/:id/aprovar', async (c) => {
