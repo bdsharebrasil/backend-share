@@ -833,7 +833,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
              r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
-             r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por_cotista_id AS pago_por, 'CLIENTE' AS tipo_caixa,
+             r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'CLIENTE' AS tipo_caixa,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes, 'rateio_despesas' AS origem_rateio
         FROM rateio_despesas r
         ${filtrosCliente.length ? `WHERE ${filtrosCliente.join(' AND ')}` : ''}
@@ -841,7 +841,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       SELECT r.id, r.aeronave_id, r.socio_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
              r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
-             r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por_socio_id AS pago_por, 'HOLDING' AS tipo_caixa,
+             r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'HOLDING' AS tipo_caixa,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes, 'rateio_hold' AS origem_rateio
         FROM rateio_hold r
         ${filtrosHolding.length ? `WHERE ${filtrosHolding.join(' AND ')}` : ''}
@@ -1230,7 +1230,7 @@ financeiroRoutes.get('/recibos', async (c) => {
     ? await listar(db, `SELECT c.id AS conta_pagar_id, l.origem_id AS recibo_id FROM contas_apagar c INNER JOIN lancamentos l ON l.id = c.lancamentos_id WHERE c.status <> 'CANCELADO' AND l.origem_tipo IN ('RECIBO', 'RECIBO_REEMBOLSO') AND l.origem_id IN (${reciboIds.map(() => '?').join(', ')})`, ...reciboIds)
     : []
   const rateiosCriados = reciboIds.length
-    ? await listar(db, `SELECT DISTINCT origem_id AS recibo_id FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id IN (${reciboIds.map(() => '?').join(', ')}) UNION SELECT DISTINCT origem_id AS recibo_id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id IN (${reciboIds.map(() => '?').join(', ')})`, ...reciboIds, ...reciboIds).catch(() => [])
+    ? await listar(db, `SELECT DISTINCT l.origem_id AS recibo_id FROM rateio_despesas rd INNER JOIN lancamentos l ON l.id = rd.lancamento_id WHERE l.origem_tipo = 'RECIBO' AND l.origem_id IN (${reciboIds.map(() => '?').join(', ')}) UNION SELECT DISTINCT origem_id AS recibo_id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id IN (${reciboIds.map(() => '?').join(', ')})`, ...reciboIds, ...reciboIds).catch(() => [])
     : []
   const contaProgramadaPorRecibo = new Map(contasProgramadas.map((row) => [String(row.recibo_id), String(row.conta_pagar_id)]))
   const rateioCriadoPorRecibo = new Set(rateiosCriados.map((row) => String(row.recibo_id)))
@@ -1344,7 +1344,7 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     if (!lancamentoId) return c.json({ error: 'lancamento_do_recibo_nao_encontrado' }, 409)
     if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
     const existing = await c.env.SHARE_DB.prepare(`SELECT id FROM contas_apagar WHERE lancamentos_id = ? AND status <> 'CANCELADO' LIMIT 1`).bind(lancamentoId).first<{ id: string }>()
-    const existingRateio = await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_despesas WHERE origem_id = ? AND origem_tipo = 'RECIBO' LIMIT 1`).bind(reciboId).first<{ id: string }>().catch(() => null)
+    const existingRateio = await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_despesas WHERE lancamento_id = ? LIMIT 1`).bind(lancamentoId).first<{ id: string }>().catch(() => null)
     const existingRateioHold = existingRateio
       ? null
       : await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_hold WHERE origem_id = ? AND origem_tipo = 'RECIBO' LIMIT 1`).bind(reciboId).first<{ id: string }>().catch(() => null)
@@ -1393,10 +1393,10 @@ financeiroRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
       const cotista = cotistas.find((item) => String(item.id) === String(linha.cotista_id))!
       const percentual = linha.percentual_uso
       const rateado = Math.round(valorCentavos * percentual / 100)
-      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)`
+      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?)`
       const parametros = String(cotista.socio_id ?? '').trim()
         ? [rateioIds[index], movimentoHoldingId, aeronaveId, cotista.socio_id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl]
-        : [rateioIds[index], lancamentoId, aeronaveId, cotista.id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl]
+        : [rateioIds[index], lancamentoId, aeronaveId, cotista.id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, documentoUrl]
       statements.push(c.env.SHARE_DB.prepare(campos).bind(...parametros))
     })
     await c.env.SHARE_DB.batch(statements)
@@ -1423,21 +1423,18 @@ financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
         .bind(recibo.lancamento_id ?? null, reciboId).all<{ id: string; status: string | null }>(),
       db.prepare(`SELECT id, status FROM movimentos_holding WHERE id IN (
           SELECT movimento_id FROM rateio_hold WHERE origem_id = ?1
-          UNION SELECT movimentos_id FROM contas_areceber WHERE origem_id = ?1
           UNION SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2
         )`).bind(reciboId, recibo.lancamento_id ?? null).all<{ id: string; status: string | null }>(),
       db.prepare(`SELECT id, status FROM rateio_despesas
-        WHERE origem_id = ?1 OR lancamento_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2)))`)
+        WHERE lancamento_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))`)
         .bind(reciboId, recibo.lancamento_id ?? null).all<{ id: string; status: string | null }>(),
       db.prepare(`SELECT id, status FROM rateio_hold WHERE origem_id = ?1
-        OR movimento_id IN (SELECT movimentos_id FROM contas_areceber WHERE origem_id = ?1
-          UNION SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2)`)
+        OR movimento_id IN (SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2)`)
         .bind(reciboId, recibo.lancamento_id ?? null).all<{ id: string; status: string | null }>(),
       db.prepare(`SELECT id, status FROM contas_apagar WHERE lancamentos_id IN (
         SELECT id FROM lancamentos WHERE id = ?1 OR origem_id = ?2 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?1)
       )`).bind(recibo.lancamento_id ?? null, reciboId).all<{ id: string; status: string | null }>(),
-      db.prepare(`SELECT id, status FROM contas_areceber WHERE origem_id = ?1
-        OR lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))
+      db.prepare(`SELECT id, status FROM contas_areceber WHERE lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))
         OR id IN (SELECT conta_receber_id FROM reembolsos WHERE lancamento_origem_id = ?2)`)
         .bind(reciboId, recibo.lancamento_id ?? null).all<{ id: string; status: string | null }>(),
       db.prepare('SELECT id, status FROM reembolsos WHERE lancamento_origem_id = ?').bind(recibo.lancamento_id ?? null).all<{ id: string; status: string | null }>(),
@@ -1464,19 +1461,16 @@ financeiroRoutes.post('/recibos/:id/cancelar', async (c) => {
            OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?1)`).bind(recibo.lancamento_id ?? null, reciboId),
       db.prepare(`UPDATE movimentos_holding SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE id IN (
           SELECT movimento_id FROM rateio_hold WHERE origem_id = ?1
-          UNION SELECT movimentos_id FROM contas_areceber WHERE origem_id = ?1
           UNION SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2
         )`).bind(reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE rateio_despesas SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP
-        WHERE origem_id = ?1 OR lancamento_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2)))`).bind(reciboId, recibo.lancamento_id ?? null),
+        WHERE lancamento_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))`).bind(reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE rateio_hold SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE origem_id = ?1
-        OR movimento_id IN (SELECT movimentos_id FROM contas_areceber WHERE origem_id = ?1
-          UNION SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2)`).bind(reciboId, recibo.lancamento_id ?? null),
+        OR movimento_id IN (SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2)`).bind(reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE contas_apagar SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE lancamentos_id IN (
         SELECT id FROM lancamentos WHERE id = ?1 OR origem_id = ?2 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?1)
       )`).bind(recibo.lancamento_id ?? null, reciboId),
-      db.prepare(`UPDATE contas_areceber SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE origem_id = ?1
-        OR lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))
+      db.prepare(`UPDATE contas_areceber SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))
         OR id IN (SELECT conta_receber_id FROM reembolsos WHERE lancamento_origem_id = ?2)`).bind(reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE reembolsos SET status_anterior = status, status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE lancamento_origem_id = ?`).bind(recibo.lancamento_id ?? null),
     ])
@@ -1508,13 +1502,12 @@ financeiroRoutes.post('/recibos/:id/reativar', async (c) => {
         WHERE status = 'CANCELADO' AND (id = ? OR origem_id = ? OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?))`).bind(recibo.lancamento_id ?? null, reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE movimentos_holding SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND id IN (
           SELECT movimento_id FROM rateio_hold WHERE origem_id = ?1
-          UNION SELECT movimentos_id FROM contas_areceber WHERE origem_id = ?1
           UNION SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2
         )`).bind(reciboId, recibo.lancamento_id ?? null),
-      db.prepare(`UPDATE rateio_despesas SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND (origem_id = ?1 OR lancamento_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2)))`).bind(reciboId, recibo.lancamento_id ?? null),
-      db.prepare(`UPDATE rateio_hold SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND (origem_id = ?1 OR movimento_id IN (SELECT movimentos_id FROM contas_areceber WHERE origem_id = ?1 UNION SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2))`).bind(reciboId, recibo.lancamento_id ?? null),
+      db.prepare(`UPDATE rateio_despesas SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND lancamento_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2))`).bind(reciboId, recibo.lancamento_id ?? null),
+      db.prepare(`UPDATE rateio_hold SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND (origem_id = ?1 OR movimento_id IN (SELECT cr.movimentos_id FROM contas_areceber cr INNER JOIN reembolsos r ON r.conta_receber_id = cr.id WHERE r.lancamento_origem_id = ?2))`).bind(reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE contas_apagar SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?1 OR origem_id = ?2 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?1))`).bind(recibo.lancamento_id ?? null, reciboId),
-      db.prepare(`UPDATE contas_areceber SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND (origem_id = ?1 OR lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2)) OR id IN (SELECT conta_receber_id FROM reembolsos WHERE lancamento_origem_id = ?2))`).bind(reciboId, recibo.lancamento_id ?? null),
+      db.prepare(`UPDATE contas_areceber SET status = COALESCE(status_anterior, 'EM_ABERTO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND (lancamentos_id IN (SELECT id FROM lancamentos WHERE id = ?2 OR origem_id = ?1 OR id IN (SELECT lancamento_cliente_id FROM reembolsos WHERE lancamento_origem_id = ?2)) OR id IN (SELECT conta_receber_id FROM reembolsos WHERE lancamento_origem_id = ?2))`).bind(reciboId, recibo.lancamento_id ?? null),
       db.prepare(`UPDATE reembolsos SET status = COALESCE(status_anterior, 'AGUARDANDO_REEMBOLSO'), status_anterior = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE status = 'CANCELADO' AND lancamento_origem_id = ?`).bind(recibo.lancamento_id ?? null),
       db.prepare(`INSERT INTO recibo_reativacoes (id, recibo_id, justificativa, status_restaurado, reativado_por) VALUES (?, ?, ?, ?, ?)`).bind(auditId, reciboId, justificativa, restaurar, userId),
     ])

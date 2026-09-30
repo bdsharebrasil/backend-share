@@ -5975,7 +5975,7 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
     if (rateio) throw new Error('abastecimento_com_rateio_nao_pode_mudar_titular')
   }
   if (atualMovimento && (mudandoTabela || vinculoMovimentoMudou)) {
-    const rateio = await db.prepare('SELECT id FROM rateio_hold WHERE movimento_holding_id = ?1 LIMIT 1').bind(atualMovimento!.id).first<{ id: string }>()
+    const rateio = await db.prepare('SELECT id FROM rateio_hold WHERE movimento_id = ?1 LIMIT 1').bind(atualMovimento!.id).first<{ id: string }>()
     if (rateio) throw new Error('abastecimento_com_rateio_nao_pode_mudar_titular')
   }
 
@@ -6016,7 +6016,7 @@ app.delete('/api/interno/abastecimentos/:id', async c => {
   const id = c.req.param('id')
   const exists = await db.prepare('SELECT id FROM abastecimentos WHERE id = ?1').bind(id).first<{ id: string }>()
   if (!exists) return c.notFound()
-  const rateios = await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id IN (SELECT id FROM lancamentos WHERE abastecimentos_id = ?1) UNION ALL SELECT id FROM rateio_hold WHERE movimento_holding_id IN (SELECT id FROM movimentos_holding WHERE abastecimentos_id = ?1) LIMIT 1').bind(id).first<{ id: string }>()
+  const rateios = await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id IN (SELECT id FROM lancamentos WHERE abastecimentos_id = ?1) UNION ALL SELECT id FROM rateio_hold WHERE movimento_id IN (SELECT id FROM movimentos_holding WHERE abastecimentos_id = ?1) LIMIT 1').bind(id).first<{ id: string }>()
   if (rateios) return c.json({ error: 'abastecimento_com_rateio_nao_pode_ser_excluido' }, 409)
   await db.batch([
     db.prepare('DELETE FROM lancamentos WHERE abastecimentos_id = ?1').bind(id),
@@ -7558,7 +7558,7 @@ async function inserirRateioFinanceiro(c: Context<{ Bindings: Bindings }>, body:
       percentual_uso: pct,
       valor_total_centavos: valorTotalCentavos,
       valor_rateado_centavos: valorRateadoCentavos,
-      pago_por_cotista_id: body.tipo === 'cliente' ? row.id : (body.pago_por || null),
+      pago_por: body.tipo === 'cliente' ? row.id : (body.pago_por || null),
       pago_diretamente: regra.pagoDiretamente ? 1 : 0,
       status: regra.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
       data_pagamento: regra.pagoDiretamente ? (body.data_despesa || null) : null,
@@ -8076,7 +8076,7 @@ async function inserirRateioHolding(db: any, row: Record<string, any>) {
   const valorRateadoCentavos = row.valor_rateado_centavos != null ? Number(row.valor_rateado_centavos) : Math.round(Number(row.valor_rateado || 0) * 100)
   await inserirLinhaDinamica(db, 'rateio_hold', {
     id: row.id,
-    movimento_holding_id: row.movimentos_holding_id ?? row.movimento_holding_id,
+    movimento_id: row.movimentos_holding_id ?? row.movimento_id ?? row.movimento_holding_id,
     aeronave_id: row.aeronave_id,
     holding_id: row.holding_id,
     socio_id: row.socio_id,
@@ -8090,7 +8090,7 @@ async function inserirRateioHolding(db: any, row: Record<string, any>) {
     valor_total_centavos: valorTotalCentavos,
     valor_rateado_centavos: valorRateadoCentavos,
     valor_pago_real_centavos: row.valor_pago_real_centavos ?? 0,
-    pago_por_socio_id: row.pago_por_socio_id ?? row.pago_por,
+    pago_por: row.pago_por_socio_id ?? row.pago_por,
     pago_diretamente: row.pago_diretamente,
     status: String(row.status || 'EM_ABERTO').toUpperCase() === 'PENDENTE' ? 'EM_ABERTO' : String(row.status || 'EM_ABERTO').toUpperCase(),
     data_pagamento: row.data_pagamento,
@@ -8244,7 +8244,7 @@ async function gerarFinanceiroNfSaida(
     lancamentoId = movimentoId
     await inserirRateioHolding(db, {
       id: rateioId,
-      movimento_holding_id: movimentoId,
+      movimento_id: movimentoId,
       holding_id: ctx.holding_id,
       socio_id: ctx.socio_id,
       cotista_id: ctx.cotista_id,
@@ -8253,7 +8253,7 @@ async function gerarFinanceiroNfSaida(
       aeronave_id: ctx.aeronave_id,
       tipo_rateio: 'FIXO',
       periodicidade: 'MENSAL',
-      pago_por_socio_id: ctx.socio_id,
+      pago_por: ctx.socio_id,
       pago_diretamente: 1,
       percentual_sociedade: 100,
       percentual_uso: 100,

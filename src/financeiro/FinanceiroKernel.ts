@@ -869,7 +869,7 @@ function holdingAllocationStatements(
         valor_rateado_centavos: line.valorCentavos,
         valor_pago_real_centavos:
           line.valorPagoRealCentavos ?? (line.pagoDiretamente ? line.valorCentavos : 0),
-        pago_por_socio_id: line.pagoPor,
+        pago_por: line.pagoPor,
         pago_diretamente: line.pagoDiretamente ? 1 : 0,
         status: line.pagoDiretamente ? 'PAGO' : 'EM_ABERTO',
         data_pagamento: line.pagoDiretamente ? dateValue(command.data_pagamento ?? command.data) : null,
@@ -1776,7 +1776,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
     ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
-    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_holding_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
+    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
       db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('APROVADO', 'CONVERTIDO')").bind(purchase.id),
@@ -1814,10 +1814,10 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const clientLancamento = await db.prepare('SELECT aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome FROM lancamentos WHERE id = ?').bind(rateioLancamentoId).first<Row>()
     if (!clientLancamento?.aeronave_id || !reimbursement.cotista_id) throw new FinanceError('Dados do reembolso incompletos para gerar o rateio', 'reembolso_incompleto')
     const rateioId = id()
-    statements.push(db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente, origem_id, origem_tipo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'FIXO', 'ÚNICO', 'AGUARDANDO_REEMBOLSO', ?, 0, ?, 'RECIBO_REEMBOLSO')`).bind(
+    statements.push(db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'FIXO', 'ÚNICO', 'AGUARDANDO_REEMBOLSO', ?, 0)`).bind(
       rateioId, rateioLancamentoId, clientLancamento.aeronave_id, reimbursement.cotista_id, clientLancamento.data_emissao, clientLancamento.data_vencimento,
       clientLancamento.categoria_id ?? null, clientLancamento.categoria_nome ?? 'REEMBOLSO', Number(cotista?.percentual_sociedade ?? 0), 100,
-      total, total, clientLancamento.descricao ?? 'Reembolso de despesa', reimbursement.id,
+      total, total, clientLancamento.descricao ?? 'Reembolso de despesa',
     ))
     rateios = { results: [{ id: rateioId, valor_rateado_centavos: total }] }
   }
@@ -2326,8 +2326,8 @@ export async function enviarReciboPagamentoParaRateio(
   if (!receipt) throw new FinanceError('Recibo de pagamento não encontrado', 'recibo_pagamento_nao_encontrado', 404)
 
   const existingClient = await db.prepare(
-    `SELECT id FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
-  ).bind(receiptId).first<{ id: string }>().catch(() => null)
+    `SELECT id FROM rateio_despesas WHERE lancamento_id = ?1 LIMIT 1`,
+  ).bind(receipt.lancamento_id ?? null).first<{ id: string }>().catch(() => null)
   const existingHolding = await db.prepare(
     `SELECT id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
@@ -2351,12 +2351,12 @@ export async function enviarReciboPagamentoParaRateio(
   })
   const rateios = await db.prepare(
     `SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor
-       FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1
+       FROM rateio_despesas WHERE lancamento_id = ?1
      UNION ALL
      SELECT rh.id, ca.id AS cotista_id, rh.percentual_uso AS percentual, rh.valor_rateado_centavos AS valor
        FROM rateio_hold rh LEFT JOIN cotista_aeronave ca ON ca.socio_id = rh.socio_id AND ca.aeronave_id = rh.aeronave_id
       WHERE rh.origem_tipo = 'RECIBO' AND rh.origem_id = ?1`,
-  ).bind(receiptId).all<{ id: string; cotista_id: string | null; percentual: number | null; valor: number }>().catch(() => ({ results: [] as { id: string; cotista_id: string | null; percentual: number | null; valor: number }[] }))
+  ).bind(receipt.lancamento_id ?? null, receiptId).all<{ id: string; cotista_id: string | null; percentual: number | null; valor: number }>().catch(() => ({ results: [] as { id: string; cotista_id: string | null; percentual: number | null; valor: number }[] }))
   if (!rateios.results?.length) throw new FinanceError('Não foi possível criar o rateio do recibo', 'rateio_nao_criado', 500)
   const reciboRateioExistente = await db.prepare('SELECT id FROM recibo_rateio WHERE recibo_id = ?1 LIMIT 1').bind(receiptId).first<{ id: string }>().catch(() => null)
   if (!reciboRateioExistente) {
