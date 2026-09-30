@@ -5760,8 +5760,8 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
     db.prepare('SELECT * FROM fornecedores_combustivel ORDER BY nome_cidade, nome_fornecedor').all(),
     db.prepare('SELECT id, nome, designativo_icao FROM aerodromo ORDER BY designativo_icao').all(),
     aeronaveId
-      ? db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.holding_id, l.socio_id, l.socio_tomador_emprestimo_id, l.cliente_tomador_emprestimo_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, c.razao_social AS cliente_nome, s.nome AS socio_nome, ab.id AS abastecimento_id, ab.numero_comanda AS abastecimento_numero_comanda, ab.numero_nf AS abastecimento_numero_nf, ab.litros AS abastecimento_litros, ab.valor_unitario AS abastecimento_valor_unitario, ab.valor_total AS abastecimento_valor_total, ab.desconto AS abastecimento_desconto, ab.fornecedor_id AS abastecimento_fornecedor_id, ab.tipo_combustivel AS abastecimento_tipo_combustivel FROM lancamentos_diario_bordo l LEFT JOIN abastecimentos ab ON ab.lancamento_diario_id = l.id LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.aeronave_id = ?1 ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 100').bind(aeronaveId).all()
-      : db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.holding_id, l.socio_id, l.socio_tomador_emprestimo_id, l.cliente_tomador_emprestimo_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, ab.id AS abastecimento_id, ab.numero_comanda AS abastecimento_numero_comanda, ab.numero_nf AS abastecimento_numero_nf, ab.litros AS abastecimento_litros, ab.valor_unitario AS abastecimento_valor_unitario, ab.valor_total AS abastecimento_valor_total, ab.desconto AS abastecimento_desconto, ab.fornecedor_id AS abastecimento_fornecedor_id, ab.tipo_combustivel AS abastecimento_tipo_combustivel FROM lancamentos_diario_bordo l LEFT JOIN abastecimentos ab ON ab.lancamento_diario_id = l.id ORDER BY date(l.data_registro) DESC LIMIT 100').all(),
+      ? db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.holding_id, l.socio_id, l.socio_tomador_emprestimo_id, l.cliente_tomador_emprestimo_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, c.razao_social AS cliente_nome, s.nome AS socio_nome, h.nome AS holding_nome, ct.razao_social AS cliente_tomador_nome, st.nome AS socio_tomador_nome, ab.id AS abastecimento_id, ab.numero_comanda AS abastecimento_numero_comanda, ab.numero_nf AS abastecimento_numero_nf, ab.litros AS abastecimento_litros, ab.valor_unitario AS abastecimento_valor_unitario, ab.valor_total AS abastecimento_valor_total, ab.desconto AS abastecimento_desconto, ab.fornecedor_id AS abastecimento_fornecedor_id, ab.tipo_combustivel AS abastecimento_tipo_combustivel FROM lancamentos_diario_bordo l LEFT JOIN abastecimentos ab ON ab.lancamento_diario_id = l.id LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id LEFT JOIN holdings h ON h.id = l.holding_id LEFT JOIN cliente ct ON ct.id = l.cliente_tomador_emprestimo_id LEFT JOIN hold_socios st ON st.id = l.socio_tomador_emprestimo_id WHERE l.aeronave_id = ?1 ORDER BY date(l.data_registro) DESC, l.id DESC').bind(aeronaveId).all()
+      : db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.holding_id, l.socio_id, l.socio_tomador_emprestimo_id, l.cliente_tomador_emprestimo_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, c.razao_social AS cliente_nome, h.nome AS holding_nome, so.nome AS socio_nome, ct.razao_social AS cliente_tomador_nome, st.nome AS socio_tomador_nome, ab.id AS abastecimento_id, ab.numero_comanda AS abastecimento_numero_comanda, ab.numero_nf AS abastecimento_numero_nf, ab.litros AS abastecimento_litros, ab.valor_unitario AS abastecimento_valor_unitario, ab.valor_total AS abastecimento_valor_total, ab.desconto AS abastecimento_desconto, ab.fornecedor_id AS abastecimento_fornecedor_id, ab.tipo_combustivel AS abastecimento_tipo_combustivel FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN holdings h ON h.id = l.holding_id LEFT JOIN hold_socios so ON so.id = l.socio_id LEFT JOIN cliente ct ON ct.id = l.cliente_tomador_emprestimo_id LEFT JOIN hold_socios st ON st.id = l.socio_tomador_emprestimo_id LEFT JOIN abastecimentos ab ON ab.lancamento_diario_id = l.id ORDER BY date(l.data_registro) DESC').all(),
   ])
   return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronave.results, fornecedores: fornecedores.results, aerodromos: aerodromos.results, diarios: diarios.results })
 })
@@ -5844,9 +5844,10 @@ function respostaErroAbastecimento(c: Context<{ Bindings: Bindings }>, error: un
   }
   const conhecido = errosConhecidos[codigo]
   if (!conhecido) console.error(`[abastecimentos:${operacao}]`, error)
+  const detalheTecnico = codigo && /SQLITE|D1|constraint|column|table|bind|FOREIGN/i.test(codigo) ? codigo : null
   return c.json({
     error: conhecido ? codigo : `falha_ao_${operacao}_abastecimento`,
-    detail: conhecido?.detalhe || `Não foi possível ${operacao === 'criar' ? 'criar' : 'atualizar'} o abastecimento.`,
+    detail: conhecido?.detalhe || detalheTecnico || `Não foi possível ${operacao === 'criar' ? 'criar' : 'atualizar'} o abastecimento.`,
   }, conhecido?.status || 500)
 }
 
@@ -5919,7 +5920,7 @@ app.post('/api/interno/abastecimentos', async c => {
     if (diario.socio_id) socioId = diario.socio_id
   }
   if ((diario?.cliente_id && body?.cliente_id && diario.cliente_id !== body.cliente_id) || (diario?.socio_id && body?.socio_id && diario.socio_id !== body.socio_id)) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
-  if (!clienteId && !socioId) {
+  if (!clienteId && !socioId && diario) {
     const vinculos = await db.prepare('SELECT cliente_id, socio_id FROM cotista_aeronave WHERE aeronave_id = ?1 ORDER BY id').bind(aeronaveId).all<{ cliente_id: string | null; socio_id: string | null }>()
     if (vinculos.results.length === 1) { clienteId = vinculos.results[0].cliente_id || null; socioId = vinculos.results[0].socio_id || null }
   }
