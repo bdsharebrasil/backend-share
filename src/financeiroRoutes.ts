@@ -2,8 +2,6 @@ import { Hono } from 'hono'
 import {
   createExpense,
   createReimbursement,
-  createSubmittedReimbursement,
-  createExternalReceivable,
   createDirectExternalExpense,
   enqueueFinance,
   FinanceError,
@@ -142,6 +140,18 @@ financeiroRoutes.post('/configuracoes/:tipo', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.get('/fornecedores-combustivel', async (c) => {
+  try {
+    const fornecedores = await listar(c.env.SHARE_DB, 'SELECT * FROM fornecedores_combustivel ORDER BY nome_cidade COLLATE NOCASE, nome_fornecedor COLLATE NOCASE')
+    return c.json(fornecedores)
+  } catch (error) { return errorResponse(c, error) }
+})
+financeiroRoutes.get('/fornecedores-favoritos', async (c) => {
+  try {
+    const fornecedores = await listar(c.env.SHARE_DB, 'SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo) COLLATE NOCASE, nome_completo COLLATE NOCASE')
+    return c.json(fornecedores)
+  } catch (error) { return errorResponse(c, error) }
+})
 financeiroRoutes.delete('/configuracoes/:tipo/:id', async (c) => {
   try {
     const table = CONFIG_TABLES[c.req.param('tipo') as keyof typeof CONFIG_TABLES]
@@ -845,6 +855,11 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.get('/balanco', async (c) => {
+  const url = new URL(c.req.url)
+  url.pathname = '/cotista/dashboard'
+  return financeiroRoutes.fetch(new Request(url, c.req.raw), c.env, c.executionCtx)
+})
 financeiroRoutes.post('/lancamentos/despesa', async (c) => {
   try {
     const body = await c.req.json()
@@ -1173,10 +1188,22 @@ financeiroRoutes.post('/recibos/gerar-demonstrativo', async (c) => {
 
 financeiroRoutes.get('/recibos', async (c) => {
   const db = c.env.SHARE_DB
+  const filtros: string[] = []
+  const params: unknown[] = []
   const status = c.req.query('status')
-  const result = status
-    ? await db.prepare('SELECT * FROM recibos WHERE status = ? ORDER BY criado_em DESC LIMIT 200').bind(status).all<Record<string, unknown>>()
-    : await db.prepare('SELECT * FROM recibos ORDER BY criado_em DESC LIMIT 200').all<Record<string, unknown>>()
+  const beneficiarioTipo = c.req.query('beneficiario_tipo')
+  const busca = c.req.query('q')?.trim()
+  const dataInicial = c.req.query('data_inicial')
+  const dataFinal = c.req.query('data_final')
+  if (status) { filtros.push('status = ?'); params.push(status) }
+  if (beneficiarioTipo) { filtros.push('beneficiario_tipo = ?'); params.push(beneficiarioTipo) }
+  if (busca) {
+    filtros.push("LOWER(COALESCE(numero_recibo, '') || ' ' || COALESCE(descricao, '') || ' ' || COALESCE(nome_pagador, '') || ' ' || COALESCE(numero_documento_anexo, '')) LIKE LOWER(?)")
+    params.push(`%${busca}%`)
+  }
+  if (dataInicial) { filtros.push('date(data_emissao) >= date(?)'); params.push(dataInicial) }
+  if (dataFinal) { filtros.push('date(data_emissao) <= date(?)'); params.push(dataFinal) }
+  const result = await db.prepare(`SELECT * FROM recibos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY criado_em DESC`).bind(...params).all<Record<string, unknown>>()
   const recibos = result.results ?? []
   const cotistaIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cotista_aeronave').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
   const clienteIds = [...new Set(recibos.filter((row) => row.pagador_tipo === 'cliente').map((row) => String(row.pagador_id ?? '')).filter(Boolean))]
@@ -1520,13 +1547,15 @@ financeiroRoutes.get('/envios-pagamento', async (c) => {
 financeiroRoutes.get('/envios-pagamento/opcoes', async (c) => {
   const db = c.env.SHARE_DB
   const read = async (sql: string) => (await db.prepare(sql).all().catch(() => ({ results: [] }))).results ?? []
-  const [fornecedores, aeronaves, categorias, categoriasCliente] = await Promise.all([
+  const [fornecedores, fornecedoresCombustivel, aeronaves, voos, categorias, categoriasCliente] = await Promise.all([
     read('SELECT id, COALESCE(apelido, nome_completo) AS label FROM fornecedores_favoritos ORDER BY label'),
+    read('SELECT * FROM fornecedores_combustivel ORDER BY nome_cidade, nome_fornecedor'),
     read('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro'),
+    read("SELECT numero_voo, MAX(data_agendada) AS ultima_data, aeronave_id FROM solicitacoes_reserva_voo WHERE NULLIF(TRIM(numero_voo), '') IS NOT NULL GROUP BY numero_voo, aeronave_id ORDER BY ultima_data DESC, numero_voo"),
     read('SELECT id, nome, grupo_categoria, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_share ORDER BY nome'),
     read('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
   ])
-  return c.json({ fornecedores, aeronaves, voos: [], categorias, categorias_cliente: categoriasCliente })
+  return c.json({ fornecedores, fornecedores_combustivel: fornecedoresCombustivel, aeronaves, voos, categorias, categorias_cliente: categoriasCliente })
 })
 
 financeiroRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => {
@@ -1609,11 +1638,8 @@ financeiroRoutes.post('/envios-pagamento/:id/converter', async (c) => {
     return c.json(await convertPaymentRequest(
       c.env.SHARE_DB,
       request,
-      (db, body, uid, options) => createExpense(db, body, uid, options),
+      { createExpense, createReimbursement, createDirectExternalExpense },
       c.get('userId') || null,
-      createSubmittedReimbursement,
-      createExternalReceivable,
-      createDirectExternalExpense,
     ))
   } catch (error) { return errorResponse(c, error) }
 })

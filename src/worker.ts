@@ -3045,7 +3045,7 @@ app.get('/api/portal/disponibilidade', async c => {
     c.env.SHARE_DB.prepare("SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, status FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
     c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
   ])
-  return c.json({ from, to, aeronave: aircraft.results, reservas: reservations.results })
+  return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
 })
 
 app.get('/api/portal/solicitacoes', async c => {
@@ -3114,7 +3114,7 @@ app.get('/api/interno/dashboard/operacoes', async c => {
       LIMIT 50`).bind(dataReferencia).all(),
   ])
   const aeronavesAtivas = await c.env.SHARE_DB.prepare("SELECT COUNT(*) AS total FROM aeronave WHERE lower(status) = 'ativa'").first<{ total: number }>()
-  return c.json({ data_referencia: dataReferencia, resumo: { voos_hoje: Number(resumo?.voos_hoje || 0), pendencias: Number(resumo?.pendencias || 0), reservas_abertas: Number(resumo?.reservas_abertas || 0), aeronave_ativas: Number(aeronavesAtivas?.total || 0) }, solicitacoes: solicitacoes.results })
+  return c.json({ data_referencia: dataReferencia, resumo: { voos_hoje: Number(resumo?.voos_hoje || 0), pendencias: Number(resumo?.pendencias || 0), reservas_abertas: Number(resumo?.reservas_abertas || 0), aeronaves_ativas: Number(aeronavesAtivas?.total || 0) }, solicitacoes: solicitacoes.results })
 })
 
 // ─── Operações: diário de bordo (D1) ─────────────────────────────────────────
@@ -6396,7 +6396,7 @@ app.get('/api/sharebrasil/clientes', async c => {
     db.prepare('SELECT * FROM documentos_socio ORDER BY criado_em DESC').all().catch(() => ({ results: [] as any[] })),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all().catch(() => ({ results: [] as any[] })),
   ])
-  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronave.results, aeronave: aeronave.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
+  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, vinculos: vinculos.results, aeronaves: aeronave.results, documentos: documentos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/clientes/documentos/${item.id}/arquivo` })), documentos_socios: documentosSocios.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/socios/documentos/${item.id}/arquivo` })) })
 })
 
 app.post('/api/sharebrasil/holdings', async c => {
