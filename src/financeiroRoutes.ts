@@ -235,6 +235,9 @@ function mapConta(row: Record<string, unknown>): Record<string, unknown> {
     fornecedorId: row.fornecedor_id ?? row.fornecedores_favoritos_id ?? null,
     fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
     cotistaId: row.cotista_id ?? null,
+    tipoCaixa: row.tipo_caixa ?? (row.movimentos_id ? 'HOLDING' : 'SHARE'),
+    holdingId: row.holding_id ?? null,
+    movimentoHoldingId: row.movimentos_id ?? null,
     boletoUrl: row.boleto_url ?? null,
     nfUrl: row.nf_url ?? null,
     nfSaidaId: row.nf_saida_id ?? null,
@@ -405,9 +408,11 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
         WHERE e.tipo IN ('cliente', 'reembolso') ORDER BY e.criado_em DESC LIMIT 500`),
       listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id,
           a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
+          mh.holding_id, CASE WHEN cp.movimentos_id IS NOT NULL THEN 'HOLDING' ELSE COALESCE(l.tipo_caixa, 'SHARE') END AS tipo_caixa,
           COALESCE(u.nome_exibicao, u.nome_completo, u.email, cp.colaborador_id) AS solicitante_nome
         FROM contas_apagar cp
         LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id
+        LEFT JOIN movimentos_holding mh ON mh.id = cp.movimentos_id
         LEFT JOIN aeronave a ON a.id = cp.aeronave_id
         LEFT JOIN user_profiles u ON u.id = cp.colaborador_id
         WHERE (COALESCE(l.reembolsavel, 0) = 1

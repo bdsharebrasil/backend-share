@@ -1743,12 +1743,18 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   if (upper(row.status) === 'CANCELADO') throw new FinanceError('Conta cancelada não pode ser paga', 'conta_cancelada')
 
   const lancamentoId = nullableText(row.lancamentos_id ?? row.lancamento_id)
-  if (!lancamentoId) throw new FinanceError('Conta a pagar sem lançamento vinculado', 'lancamento_obrigatorio')
-  // lancamentos não tem coluna "natureza"; a direção da despesa vem de fluxo.
-  const lancamento = await db.prepare('SELECT id, tipo_caixa, fluxo, status FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
-  if (!lancamento) throw new FinanceError('Lançamento da conta a pagar não encontrado', 'lancamento_nao_encontrado')
-  const caixa = upper(lancamento.tipo_caixa)
-  const fluxo = upper(lancamento.fluxo)
+  const movimentoHoldingId = nullableText(row.movimentos_id)
+  if (!lancamentoId && !movimentoHoldingId) throw new FinanceError('Conta a pagar sem lançamento ou movimento vinculado', 'origem_obrigatoria')
+  const lancamento = lancamentoId
+    ? await db.prepare('SELECT id, tipo_caixa, fluxo, status FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
+    : null
+  const movimentoHolding = movimentoHoldingId
+    ? await db.prepare('SELECT id, holding_id, fluxo, status FROM movimentos_holding WHERE id = ?').bind(movimentoHoldingId).first<Row>()
+    : null
+  if (lancamentoId && !lancamento) throw new FinanceError('Lançamento da conta a pagar não encontrado', 'lancamento_nao_encontrado')
+  if (movimentoHoldingId && !movimentoHolding) throw new FinanceError('Movimento Holding da conta a pagar não encontrado', 'movimento_holding_nao_encontrado')
+  const caixa = movimentoHolding ? 'HOLDING' : upper(lancamento?.tipo_caixa)
+  const fluxo = upper(movimentoHolding?.fluxo ?? lancamento?.fluxo)
   if (!['SHARE', 'HOLDING'].includes(caixa) || !['SAIDA', 'DESPESA'].includes(fluxo)) {
     throw new FinanceError('A conta a pagar deve estar vinculada a uma despesa Share ou Holding', 'conta_pagar_origem_invalida')
   }
@@ -1757,13 +1763,20 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const amount = asPositiveCents(row.valor_centavos)
   const bank = await resolveContaBancariaId(db, body.conta_bancaria_id ?? body.banco_pagamento ?? body.bancoPagamento)
   if (!bank) throw new FinanceError('Conta bancária do pagamento não encontrada', 'conta_bancaria_obrigatoria')
+  if (movimentoHolding) {
+    const bankRow = await db.prepare("SELECT id FROM contas_bancarias WHERE id = ? AND tipo_caixa = 'HOLDING' AND holding_id = ? AND ativo = 1").bind(bank, movimentoHolding.holding_id).first<Row>()
+    if (!bankRow) throw new FinanceError('A conta bancária não pertence à holding do movimento', 'conta_bancaria_holding_invalida')
+  }
   const now = new Date().toISOString()
   // A solicitação de compra fica APROVADO até a conversão e CONVERTIDO depois;
   // nos dois casos a baixa deve concluí-la e avisar o solicitante.
-  const purchase = await db.prepare("SELECT id, descricao, criado_por FROM envio_despesas WHERE lancamento_id = ? AND tipo = 'share' AND status IN ('APROVADO', 'CONVERTIDO') LIMIT 1").bind(lancamentoId).first<Row>()
+  const purchase = lancamentoId
+    ? await db.prepare("SELECT id, descricao, criado_por FROM envio_despesas WHERE lancamento_id = ? AND tipo = 'share' AND status IN ('APROVADO', 'CONVERTIDO') LIMIT 1").bind(lancamentoId).first<Row>()
+    : null
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
-    updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId]),
+    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
+    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_holding_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
       db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('APROVADO', 'CONVERTIDO')").bind(purchase.id),

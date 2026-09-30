@@ -186,6 +186,7 @@ async function addTripulantePayableStatements(
   description: string,
   dueDate: string,
   lancamentoId: string | null,
+  movimentoHoldingId: string | null,
   userId: string | null,
 ): Promise<string | null> {
   if (!['tripulante_1', 'tripulante_2'].includes(payer)) return null
@@ -204,11 +205,11 @@ async function addTripulantePayableStatements(
     if (!['PAGO', 'CANCELADO'].includes(text(existing.status).toUpperCase())) {
       statements.push(db.prepare(`UPDATE contas_apagar SET
         data_vencimento = ?, valor_centavos = ?, categoria_nome = 'DESPESAS REEMBOLSÁVEIS',
-        descricao = ?, aeronave_id = ?, lancamentos_id = COALESCE(?, lancamentos_id),
+        descricao = ?, aeronave_id = ?, lancamentos_id = COALESCE(?, lancamentos_id), movimentos_id = COALESCE(?, movimentos_id),
         colaborador_id = ?, tripulante_id = ?, atualizado_em = CURRENT_TIMESTAMP
         WHERE id = ?`).bind(
         dueDate, amountCentavos, description, text(report.aeronave_id), lancamentoId,
-        colaboradorId, tripulanteId, payableId,
+        movimentoHoldingId, colaboradorId, tripulanteId, payableId,
       ))
     }
   } else {
@@ -220,6 +221,7 @@ async function addTripulantePayableStatements(
       descricao: description,
       aeronave_id: text(report.aeronave_id),
       lancamentos_id: lancamentoId,
+      movimentos_id: movimentoHoldingId,
       colaborador_id: colaboradorId,
       tripulante_id: tripulanteId,
       status: 'EM_ABERTO',
@@ -364,7 +366,13 @@ export async function sincronizarRelatorioViagemFinanceiro(
       if (payer === 'tripulante_2' && !text(report.tripulante_id_2)) throw new Error('tripulante_2_obrigatorio_para_despesa')
       const description = payerDescription(report, payer)
       let lancamentoId: string | null = null
+      let movimentoHoldingId: string | null = null
       if (kind === 'HOLDING') {
+        const movimento = await db.prepare(`SELECT destino_id AS id FROM financeiro_vinculos fv
+          INNER JOIN movimentos_holding mh ON mh.id = fv.destino_id
+          WHERE fv.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND fv.origem_id = ?1
+            AND fv.destino_tipo = 'MOVIMENTO_HOLDING' AND mh.descricao = ?2 LIMIT 1`).bind(reportId, description).first<{ id: string }>()
+        movimentoHoldingId = text(movimento?.id) || null
         await db.prepare(`UPDATE movimentos_holding SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, url_doc = ?, data_vencimento = ?
           WHERE id IN (SELECT destino_id FROM financeiro_vinculos WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND destino_tipo = 'MOVIMENTO_HOLDING')
             AND descricao = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), text(report.pdf_path) || null, existingDueDate, reportId, description).run()
@@ -414,10 +422,10 @@ export async function sincronizarRelatorioViagemFinanceiro(
           await addRateiosCliente(db, statements, report, allocate(amountCentavos, rows), amountCentavos, lancamentoId, payer, description, userId)
         }
       }
-      if (kind === 'CLIENTE' && (payer === 'tripulante_1' || payer === 'tripulante_2')) {
+      if ((kind === 'CLIENTE' || kind === 'HOLDING') && (payer === 'tripulante_1' || payer === 'tripulante_2')) {
         await addTripulantePayableStatements(
           db, statements, report, payer, amountCentavos, description,
-          calcularVencimentoReembolsoTripulante(report), lancamentoId, userId,
+          calcularVencimentoReembolsoTripulante(report), lancamentoId, movimentoHoldingId, userId,
         )
       }
     }
@@ -444,6 +452,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     if (!allocations.length && kind === 'HOLDING') continue
 
     let lancamentoId: string | null = null
+    let movimentoHoldingId: string | null = null
     const tripulanteUserId = payer === 'tripulante_1'
       ? await findTripulanteUserId(db, report.tripulacao_id)
       : payer === 'tripulante_2'
@@ -493,12 +502,13 @@ export async function sincronizarRelatorioViagemFinanceiro(
     } else {
       const movimentoId = await addRateiosHolding(db, statements, report, allocations, amountCentavos, payer, description, userId)
       destinos.push({ tipo: 'MOVIMENTO_HOLDING', id: movimentoId })
+      movimentoHoldingId = movimentoId
     }
 
-    if (kind === 'CLIENTE' && (payer === 'tripulante_1' || payer === 'tripulante_2')) {
+    if ((kind === 'CLIENTE' || kind === 'HOLDING') && (payer === 'tripulante_1' || payer === 'tripulante_2')) {
       const payableId = await addTripulantePayableStatements(
         db, statements, report, payer, amountCentavos, description,
-        calcularVencimentoReembolsoTripulante(report), lancamentoId, userId,
+        calcularVencimentoReembolsoTripulante(report), lancamentoId, movimentoHoldingId, userId,
       )
       if (payableId) destinos.push({ tipo: 'CONTA_PAGAR', id: payableId })
     }

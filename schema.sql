@@ -351,6 +351,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   boleto_url TEXT,
   nf_url TEXT,
   lancamentos_id TEXT REFERENCES lancamentos(id),
+  movimentos_id TEXT REFERENCES movimentos_holding(id),
   banco_recebimento  TEXT REFERENCES contas_bancarias(id),
   colaborador_id TEXT REFERENCES user_profiles(id),
   status TEXT NOT NULL DEFAULT ''EM_ABERTO'' CHECK (status IN (''EM_ABERTO'',''EM_ATRASO'',''PAGO'',''CANCELADO'')),
