@@ -1000,7 +1000,8 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     const body = await c.req.json<Record<string, unknown>>()
     const atual = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
     if (!atual) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
-    const allowed = ['descricao', 'data_emissao', 'data_vencimento', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'observacoes', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+    if (body.status != null && !['EM_ABERTO', 'PENDENTE', 'PAGO', 'RECEBIDO', 'ATRASADO', 'EM_ATRASO', 'CANCELADO'].includes(String(body.status).toUpperCase())) return c.json({ error: 'status_lancamento_invalido' }, 400)
+    const allowed = ['descricao', 'data_emissao', 'data_vencimento', 'data_pagamento', 'status', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'observacoes', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
     const values = allowed.filter((field) => Object.prototype.hasOwnProperty.call(body, field)).map((field) => [field, body[field] ?? null] as const)
     if (body.valor_centavos != null || body.valorCentavos != null) {
       const amount = Number(body.valor_centavos ?? body.valorCentavos)
