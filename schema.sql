@@ -1357,6 +1357,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ferias (
   tentativas INTEGER NOT NULL DEFAULT 0,
   erro TEXT,
   processado_em TEXT,
+  processando_em TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )'), ('CREATE TABLE financeiro_vinculos (
   id TEXT PRIMARY KEY NOT NULL,
@@ -2509,7 +2510,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reembolsos (
     ON DELETE CASCADE
 )'), ('CREATE TABLE sequencia_numeros_recibos (
   id TEXT PRIMARY KEY NOT NULL,
-  cotista_aeronave_id TEXT NOT NULL,
+  cotista_aeronave_id TEXT,
   codigo_cliente TEXT NOT NULL,
   ano TEXT NOT NULL,
   proximo_numero INTEGER NOT NULL DEFAULT 1,

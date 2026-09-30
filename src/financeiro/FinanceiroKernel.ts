@@ -157,8 +157,13 @@ export function resolveReembolsoModo(
 const CATEGORIA_SHARE_RECIBO = '73355581-c479-4a5d-b90b-90b3332f198e'
 
 type SchemaCache = Map<string, Set<string>>
+type CachedSchema = { schema: SchemaCache; expiresAt: number }
+const SCHEMA_CACHE_TTL_MS = 60_000
+const schemaCacheByDatabase = new WeakMap<object, CachedSchema>()
 
 async function loadSchema(db: Database): Promise<SchemaCache> {
+  const cached = schemaCacheByDatabase.get(db as unknown as object)
+  if (cached && cached.expiresAt > Date.now()) return cached.schema
   const tables = [
     'lancamentos',
     'contas_apagar',
@@ -194,6 +199,7 @@ async function loadSchema(db: Database): Promise<SchemaCache> {
       new Set((result.results || []).map((column) => String(column.name))),
     )
   }
+  schemaCacheByDatabase.set(db as unknown as object, { schema, expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS })
   return schema
 }
 
@@ -237,7 +243,7 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
   requireTable(schema, 'reembolsos', ['id', 'lancamento_origem_id', 'lancamento_cliente_id'])
   requireTable(schema, 'auditoria_financeira', ['id'])
   requireTable(schema, 'financeiro_vinculos', ['id', 'origem_tipo', 'origem_id', 'destino_tipo', 'destino_id', 'tipo_vinculo'])
-  requireTable(schema, 'financeiro_fila', ['id', 'operacao', 'payload_json', 'status'])
+  requireTable(schema, 'financeiro_fila', ['id', 'operacao', 'payload_json', 'status', 'processando_em'])
 }
 
 const FRONTEND_CONTRACT_FIELDS = new Set([
@@ -1961,7 +1967,7 @@ export async function processFinanceQueue(
       SET status = CASE WHEN tentativas >= 5 THEN 'ERRO' ELSE 'PENDENTE' END,
           erro = CASE WHEN tentativas >= 5 THEN 'limite_de_tentativas_excedido' ELSE 'claim_expirado' END
     WHERE status = 'PROCESSANDO'
-      AND datetime(criado_em) < datetime('now', '-15 minutes')`).run()
+      AND datetime(COALESCE(processando_em, criado_em)) < datetime('now', '-15 minutes')`).run()
   const rows = await db
     .prepare(
       `SELECT * FROM financeiro_fila
@@ -1979,6 +1985,7 @@ export async function processFinanceQueue(
         .prepare(
           `UPDATE financeiro_fila
               SET status = 'PROCESSANDO',
+                  processando_em = CURRENT_TIMESTAMP,
                   tentativas = tentativas + 1
             WHERE id = ?
               AND status = 'PENDENTE'`,
@@ -2012,6 +2019,7 @@ export async function processFinanceQueue(
           `UPDATE financeiro_fila
               SET status = 'PROCESSADO',
                   processado_em = CURRENT_TIMESTAMP,
+                  processando_em = NULL,
                   erro = NULL
             WHERE id = ?
               AND status = 'PROCESSANDO'`,
@@ -2025,6 +2033,7 @@ export async function processFinanceQueue(
         .prepare(
           `UPDATE financeiro_fila
               SET status = 'ERRO',
+                  processando_em = NULL,
                   erro = ?
             WHERE id = ?
               AND status = 'PROCESSANDO'`,

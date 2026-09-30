@@ -75,30 +75,18 @@ export function receiptStatusIsValid(status: string): boolean {
 }
 
 export async function allocateReceiptNumber(db: D1Database, cotistaId: string | null, codigo: string, ano: string): Promise<string> {
-  const anoCurto = ano.slice(-2)
-  const existentes = await db.prepare('SELECT numero_recibo FROM recibos WHERE numero_recibo LIKE ?').bind(`REC-${codigo}%`).all<{ numero_recibo: string }>()
-  const padrao = new RegExp(`^REC-${codigo}(\\d+)/(?:${ano}|${anoCurto})$`)
-  const maiorExistente = (existentes.results ?? []).reduce((maior, item) => {
-    const match = String(item.numero_recibo ?? '').match(padrao)
-    return Math.max(maior, match ? Number(match[1]) : 0)
-  }, 0)
-  const existente = cotistaId ? await db.prepare(
-    'SELECT id, proximo_numero FROM sequencia_numeros_recibos WHERE codigo_cliente = ? AND ano = ?',
-  ).bind(codigo, ano).first<{ id: string; proximo_numero: number }>() : null
-  const numero = Math.max(Number(existente?.proximo_numero || 1), maiorExistente + 1)
-
-  if (existente) {
-    await db.prepare(
-      'UPDATE sequencia_numeros_recibos SET proximo_numero = ?, cotista_aeronave_id = ? WHERE id = ?',
-    ).bind(numero + 1, cotistaId, existente.id).run()
-  } else if (cotistaId) {
-    await db.prepare(`
-      INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
-      VALUES (?, ?, ?, ?, ?)
-    `).bind(crypto.randomUUID(), cotistaId, codigo, ano, numero + 1).run()
-  }
-
-  return `REC-${codigo}${String(numero).padStart(3, '0')}/${anoCurto}`
+  const codigoCliente = String(codigo || 'SHARE').trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'SHARE'
+  const anoCompleto = String(ano)
+  const row = await db.prepare(`
+    INSERT INTO sequencia_numeros_recibos (id, cotista_aeronave_id, codigo_cliente, ano, proximo_numero)
+    VALUES (?1, ?2, ?3, ?4, 2)
+    ON CONFLICT(codigo_cliente, ano) DO UPDATE SET
+      proximo_numero = sequencia_numeros_recibos.proximo_numero + 1,
+      cotista_aeronave_id = COALESCE(excluded.cotista_aeronave_id, sequencia_numeros_recibos.cotista_aeronave_id)
+    RETURNING proximo_numero - 1 AS numero
+  `).bind(crypto.randomUUID(), cotistaId, codigoCliente, anoCompleto).first<{ numero: number }>()
+  if (!row) throw new Error('falha_ao_gerar_sequencia_numeros_recibos')
+  return `REC-${codigoCliente}${String(row.numero).padStart(3, '0')}/${anoCompleto.slice(-2)}`
 }
 
 export async function createReceiptRecord(db: D1Database, input: ReceiptInput, id: string, number: string, userId: string | null): Promise<void> {
