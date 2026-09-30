@@ -720,6 +720,19 @@ financeiroRoutes.get('/lancamentos', async (c) => {
     if (inicio) { filtros.push('date(COALESCE(data_emissao, criado_em)) >= date(?)'); params.push(inicio) }
     if (fim) { filtros.push('date(COALESCE(data_emissao, criado_em)) <= date(?)'); params.push(fim) }
     if (caixa) { filtros.push('tipo_caixa = ?'); params.push(caixa.toUpperCase()) }
+    // Reembolsos de tripulantes originados em relatório de viagem são contas
+    // a pagar e aparecem em Solicitações de pagamento. Apenas despesas do
+    // próprio caixa Share (incluindo payer=sharebrasil) permanecem aqui.
+    if (caixa?.toUpperCase() === 'SHARE') {
+      filtros.push(`NOT (
+        UPPER(COALESCE(origem_tipo, '')) = 'RELATORIO_DESPESA_VIAGEM'
+        AND (
+          COALESCE(reembolsavel, 0) = 1
+          OR UPPER(COALESCE(categoria_nome, '')) LIKE '%REEMBOLS%'
+          OR UPPER(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
+        )
+      )`)
+    }
     const rows = await listar(c.env.SHARE_DB, `SELECT * FROM lancamentos${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(data_emissao, criado_em)) DESC, criado_em DESC LIMIT 500`, ...params)
     return c.json({ lancamentos: await enriquecerFornecedores(c.env.SHARE_DB, rows) })
   } catch (error) { return errorResponse(c, error) }
