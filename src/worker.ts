@@ -3512,6 +3512,36 @@ async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>
   return null
 }
 
+app.get('/api/interno/tripulacao/:id/jornadas', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const db = c.env.SHARE_DB
+  const tripulanteId = c.req.param('id')
+  const inicio = c.req.query('inicio') || '2000-01-01'
+  const fim = c.req.query('fim') || '2099-12-31'
+  const tripulante = await db.prepare(`SELECT COALESCE(t.nome_completo, f.nome_completo) AS nome_completo,
+      COALESCE(t.canac, f.canac) AS canac
+    FROM (SELECT ?1 AS id) x
+    LEFT JOIN tripulacao t ON t.id = x.id
+    LEFT JOIN tripulacao_freelancer f ON f.id = x.id`).bind(tripulanteId).first<{ nome_completo: string | null; canac: string | null }>()
+  if (!tripulante?.nome_completo) return c.notFound()
+  const jornadas = await db.prepare(`SELECT j.id, j.solicitacao_id, j.aeronave_id, j.tripulante_id, j.funcao_tripulante,
+      j.jornada_principal_id, j.numero_jornada, j.data, j.horario_acionamento, j.horario_apresentacao,
+      j.horario_pouso, j.horario_corte, j.minutos_pos_corte, j.minutos_jornada, j.nivel_alerta, j.status,
+      j.observacoes, s.numero_voo, s.origem, s.destino, a.matricula_registro, a.modelo
+    FROM jornadas_voo j
+    LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id
+    LEFT JOIN aeronave a ON a.id = j.aeronave_id
+    WHERE j.tripulante_id = ?1 AND date(j.data) BETWEEN date(?2) AND date(?3)
+    ORDER BY date(j.data) DESC, j.numero_jornada DESC`).bind(tripulanteId, inicio, fim).all<any>()
+  const resultado = await Promise.all((jornadas.results || []).map(async (jornada: any) => {
+    const pernas = await db.prepare(`SELECT id, jornada_id, numero, origem, destino, 0 AS numero_passageiros,
+        horario_ac, horario_dep, horario_pouso, horario_corte, status, lancamento_diario_id
+      FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero`).bind(jornada.id).all<any>()
+    return { ...jornada, tripulante_nome: tripulante.nome_completo, pernas: pernas.results || [], historico: [] }
+  }))
+  return c.json({ tripulante_id: tripulanteId, tripulante_nome: tripulante.nome_completo, canac: tripulante.canac, inicio, fim, jornadas: resultado })
+})
+
 app.get('/api/interno/tripulacao/gestao', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = c.env.SHARE_DB
@@ -3523,6 +3553,19 @@ app.get('/api/interno/tripulacao/gestao', async c => {
   ])
   return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronaves: aeronave.results })
 })
+app.get('/api/interno/tripulacao-freelancer/:id/foto', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const row = await c.env.SHARE_DB.prepare('SELECT url_avatar FROM tripulacao_freelancer WHERE id = ?1').bind(c.req.param('id')).first<{ url_avatar: string | null }>()
+  if (!row?.url_avatar) return c.notFound()
+  if (/^https?:\/\//i.test(row.url_avatar)) return c.redirect(row.url_avatar, 302)
+  const object = await bucketParaChaveColaborador(c, row.url_avatar).get(row.url_avatar)
+  if (!object) return c.notFound()
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('Cache-Control', 'private, max-age=300')
+  return new Response(object.body, { headers })
+})
+
 app.get('/api/interno/tripulacao/:id/foto', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const row = await c.env.SHARE_DB.prepare('SELECT up.url_avatar FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE t.id = ?1').bind(c.req.param('id')).first<{ url_avatar: string | null }>()
@@ -3815,8 +3858,8 @@ app.get('/api/interno/agendamento', async c => {
       FROM aeronave a
       LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
       ORDER BY a.matricula_registro`).all().catch(error => { log.error('[agendamento] aeronaves indisponíveis', error); return { results: [] } }),
-    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive') ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
-    db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all().catch(error => { log.error('[agendamento] freelancers indisponíveis', error); return { results: [] } }),
+    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, CASE WHEN up.url_avatar IS NOT NULL THEN '/api/interno/tripulacao/' || t.id || '/foto' ELSE NULL END AS foto_url, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive') ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
+    db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, CASE WHEN url_avatar IS NOT NULL THEN '/api/interno/tripulacao-freelancer/' || id || '/foto' ELSE NULL END AS foto_url, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all().catch(error => { log.error('[agendamento] freelancers indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
         CASE WHEN EXISTS (SELECT 1 FROM tripulacao t WHERE t.id = e.tripulacao_id) THEN 'tripulacao' ELSE 'freelancer' END AS tripulante_origem,
         e.data_inicio, e.data_fim, e.status, e.observacoes
