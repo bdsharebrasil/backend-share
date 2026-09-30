@@ -4285,7 +4285,15 @@ app.get('/api/interno/agendamento/:id/jornada', async c => {
   }
   const idSolicitacao = c.req.param('id')
   const jornadas = await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE solicitacao_id = ?1 ORDER BY numero_jornada DESC').bind(idSolicitacao).all<any>()
-  const registros = (jornadas.results || []).map(normalizarJornadaRegistro)
+  const registrosBase = (jornadas.results || []).map(normalizarJornadaRegistro)
+  const registros = await Promise.all(registrosBase.map(async (registro: any) => {
+    if (!registro.tripulante_id) return registro
+    const tripulante = await c.env.SHARE_DB.prepare(`SELECT COALESCE(t.nome_completo, f.nome_completo) AS tripulante_nome
+      FROM (SELECT ?1 AS id) x
+      LEFT JOIN tripulacao t ON t.id = x.id
+      LEFT JOIN tripulacao_freelancer f ON f.id = x.id`).bind(registro.tripulante_id).first<{ tripulante_nome: string | null }>()
+    return { ...registro, tripulante_nome: tripulante?.tripulante_nome || null }
+  }))
   const principal = registros.find((j: any) => j.status !== 'encerrada' && !j.jornada_principal_id)
     || registros.find((j: any) => j.status !== 'encerrada')
     || registros[0]
@@ -4462,8 +4470,10 @@ app.post('/api/interno/agendamento/:id/jornada', async c => {
   const db = c.env.SHARE_DB
   const idSolicitacao = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  const voo = await db.prepare('SELECT aeronave_id, piloto_id, copiloto_id, data_agendada, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
+  const voo = await db.prepare('SELECT aeronave_id, piloto_id, copiloto_id, data_agendada, numero_voo, status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
   if (!voo) return c.notFound()
+  const statusVoo = String(voo.status || '').trim().toLowerCase()
+  if (statusVoo === 'encerrada' || statusVoo === 'concluida') return c.json({ error: 'agendamento_encerrado', detail: 'Operações encerradas são somente leitura e não podem receber nova jornada.' }, 409)
   const tripulantes = (Array.isArray(body.tripulantes) && body.tripulantes.length
     ? body.tripulantes
     : [{ tripulante_id: voo.piloto_id, funcao: 'PIC' }, { tripulante_id: voo.copiloto_id, funcao: 'SIC' }]
@@ -4619,7 +4629,7 @@ app.post('/api/interno/agendamento/:id/finalizar', async c => {
   const id = c.req.param('id')
   const agendamento = await c.env.SHARE_DB.prepare('SELECT id, status, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<any>()
   if (!agendamento) return c.notFound()
-  if (agendamento.status === 'encerrada') return c.json({ success: true, status: 'encerrada', id, numero_voo: agendamento.numero_voo })
+  if (['encerrada', 'concluida'].includes(String(agendamento.status || '').trim().toLowerCase())) return c.json({ error: 'agendamento_ja_encerrado', detail: 'A operação já está encerrada e não pode ser concluída novamente.' }, 409)
   const jornadas = await c.env.SHARE_DB.prepare('SELECT status FROM jornadas_voo WHERE solicitacao_id = ?1').bind(id).all<any>()
   if (!jornadas.results?.length) return c.json({ error: 'jornada_obrigatoria', detail: 'Registre pelo menos uma jornada antes de finalizar o agendamento.' }, 409)
   if (jornadas.results.some((j: any) => j.status !== 'encerrada')) return c.json({ error: 'jornadas_pendentes', detail: 'Encerre todas as jornadas antes de finalizar o agendamento.' }, 409)
