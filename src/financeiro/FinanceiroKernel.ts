@@ -77,6 +77,14 @@ async function resolveContaBancariaId(db: Database, value: unknown): Promise<str
 
 const id = (): string => crypto.randomUUID()
 
+async function stableIdForKey(key: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const hex = [...digest.slice(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 const upper = (value: unknown): string => text(value).toUpperCase()
 const normalizeRateioType = (value: unknown): string =>
   upper(value || 'FIXO').replace(/[\s-]+/g, '_')
@@ -1483,6 +1491,484 @@ export async function createReimbursement(
     lancamentoClienteId: clientLancamentoId,
     valor_centavos: amount,
     status: 'PENDENTE',
+    idempotent: false,
+  }
+}
+
+/** Gera a despesa Share e as cobranças de reembolso individualizadas por cotista. */
+export async function createSubmittedReimbursement(db: Database, body: Row, userId: string | null): Promise<Row> {
+  const schema = await loadSchema(db)
+  const command = normalizeCommand(body, userId, { internal: true })
+  const originalId = text(command.lancamento_origem_id ?? command.lancamento_id)
+  const baseKey = text(command.idempotency_key)
+  if (!originalId) throw new FinanceError('Lançamento de origem obrigatório', 'lancamento_origem_obrigatorio')
+  if (!baseKey) throw new FinanceError('Chave de idempotência obrigatória', 'idempotency_key_obrigatoria')
+
+  const amount = asPositiveCents(command.valor_centavos)
+  const aeronaveId = nullableText(command.aeronave_id)
+  const lines = allocationLines({ ...command, sem_rateio: false })
+  if (!aeronaveId) throw new FinanceError('Aeronave obrigatória para rateio', 'rateio_aeronave_obrigatoria')
+  if (!lines.length) throw new FinanceError('Rateio de aeronave obrigatório para o reembolso', 'rateio_obrigatorio')
+  await validateAllocationLines(db, { ...command, aeronave_id: aeronaveId }, lines, amount)
+
+  const lineContexts = await Promise.all(lines.map(async (line) => {
+    const row = await db.prepare(`SELECT ca.aeronave_id, ca.socio_id, ca.percentual_sociedade, hs.holding_id
+      FROM cotista_aeronave ca LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+      WHERE ca.id = ? LIMIT 1`).bind(line.cotistaId).first<Row>()
+    if (!row || row.aeronave_id !== aeronaveId) {
+      throw new FinanceError('Cotista do rateio não pertence à aeronave', 'rateio_cotistas_invalidos')
+    }
+    return {
+      line: { ...line, socioId: nullableText(row.socio_id), holdingId: nullableText(row.holding_id) },
+      percentualSociedade: Number(row.percentual_sociedade ?? line.percentualSociedade),
+      kind: row.socio_id ? 'HOLDING' as const : 'CLIENTE' as const,
+    }
+  }))
+
+  const modeText = upper(command.modo_cobranca ?? command.modo_cobranca_reembolso ?? 'RATEIO')
+  const consolidated = ['RESPONSAVEL', 'CONSOLIDADO', 'RESPONSAVEL_UNICO', 'COTISTA_RESPONSAVEL'].includes(modeText)
+  let groups: Array<{ key: string; chargeCotistaId: string; kind: 'CLIENTE' | 'HOLDING'; lines: typeof lineContexts }>
+  if (consolidated) {
+    const responsibleId = nullableText(command.cotista_responsavel_id ?? command.responsavel_cotista_id)
+    if (!responsibleId) throw new FinanceError('Cotista responsável obrigatório para cobrança consolidada', 'cotista_responsavel_obrigatorio')
+    const responsible = await resolveCotista(db, { ...command, cotista_aeronave_id: responsibleId, socio_id: null })
+    if (!responsible || responsible.aeronaveId !== aeronaveId) {
+      throw new FinanceError('Cotista responsável precisa pertencer à aeronave', 'reembolso_cotista_invalido')
+    }
+    const lineKinds = new Set(lineContexts.map((item) => item.kind))
+    if (lineKinds.size !== 1 || !lineKinds.has(responsible.kind)) {
+      throw new FinanceError('Cobrança consolidada não pode misturar caixas de cliente e holding', 'rateio_misto_cliente_holding_nao_suportado', 409)
+    }
+    groups = [{ key: `responsavel:${responsibleId}`, chargeCotistaId: responsibleId, kind: responsible.kind, lines: lineContexts }]
+  } else {
+    groups = lineContexts.map(({ line, kind }, index) => ({
+      key: `rateio:${index}:${line.cotistaId}`,
+      chargeCotistaId: line.cotistaId,
+      kind,
+      lines: [lineContexts[index]],
+    }))
+  }
+
+  const deterministicReimbursementIds = await Promise.all(groups.map(({ key }) => stableIdForKey(`reembolso:${baseKey}:${key}`)))
+  const placeholders = deterministicReimbursementIds.map(() => '?').join(', ')
+  const existingRows = (await db.prepare(`SELECT id, conta_receber_id, valor_centavos FROM reembolsos WHERE id IN (${placeholders})`)
+    .bind(...deterministicReimbursementIds).all<Row>()).results || []
+  if (existingRows.length) {
+    if (existingRows.length !== groups.length) throw new FinanceError('Conversão de reembolso parcialmente persistida', 'reembolso_conversao_incompleta', 409)
+    const existingById = new Map(existingRows.map((row) => [String(row.id), row]))
+    const orderedRows = deterministicReimbursementIds.map((reimbursementId) => existingById.get(reimbursementId)!)
+    return {
+      id: orderedRows[0].id,
+      charges: orderedRows,
+      contaReceberIds: orderedRows.map((item) => item.conta_receber_id),
+      valor_centavos: orderedRows.reduce((sum, item) => sum + Number(item.valor_centavos || 0), 0),
+      idempotent: true,
+    }
+  }
+
+  const statements: D1PreparedStatement[] = []
+  const results: Array<{ id: string; contaReceberId: string; lancamentoId: string; clientLedgerId: string | null; movementId: string | null; valor_centavos: number }> = []
+  const movementColumn = holdingMovementColumn(schema)
+  for (const [groupIndex, group] of groups.entries()) {
+    const chargeAmount = group.lines.reduce((sum, item) => sum + item.line.valorCentavos, 0)
+    if (!Number.isInteger(chargeAmount) || chargeAmount <= 0) throw new FinanceError('Valor de cobrança inválido', 'valor_centavos_invalido')
+    const chargeKey = `${baseKey}:${group.key}`
+    const reimbursementId = deterministicReimbursementIds[groupIndex]
+    const shareIncomeId = await stableIdForKey(`reembolso:${chargeKey}:SHARE`)
+    const accountId = await stableIdForKey(`reembolso:${chargeKey}:receber`)
+    const clientLedgerId = group.kind === 'CLIENTE' ? await stableIdForKey(`reembolso:${chargeKey}:cliente`) : null
+    const holdingMovementId = group.kind === 'HOLDING' ? await stableIdForKey(`reembolso:${chargeKey}:holding`) : null
+    const chargeCotista = await resolveCotista(db, { cotista_aeronave_id: group.chargeCotistaId })
+    if (!chargeCotista || chargeCotista.aeronaveId !== aeronaveId || chargeCotista.kind !== group.kind) {
+      throw new FinanceError('Cotista responsável inválido para o tipo de caixa', 'reembolso_cotista_invalido')
+    }
+    statements.push(
+      insertStatement(db, schema, 'reembolsos', {
+        id: reimbursementId,
+        lancamento_origem_id: originalId,
+        conta_receber_id: accountId,
+        lancamento_cliente_id: clientLedgerId || holdingMovementId,
+        cotista_id: chargeCotista.cotistaAeronaveId,
+        colaborador_id: nullableText(command.colaborador_id),
+        valor_centavos: chargeAmount,
+        status: 'PENDENTE',
+        idempotency_key: chargeKey,
+        criado_por: userId,
+      }, ['id', 'lancamento_origem_id', 'valor_centavos']),
+      insertStatement(db, schema, 'lancamentos', {
+        id: shareIncomeId,
+        aeronave_id: aeronaveId,
+        cotista_aeronave_id: chargeCotista.cotistaAeronaveId,
+        descricao: command.descricao || 'Reembolso de despesa',
+        categoria_id: nullableText(command.categoria_id),
+        categoria_nome: 'REEMBOLSOS ENTRADAS',
+        grupo_categoria: 'REEMBOLSOS ENTRADAS',
+        fluxo: 'ENTRADA',
+        natureza: 'REEMBOLSO',
+        tipo_caixa: 'SHARE',
+        valor_centavos: chargeAmount,
+        valor_total: chargeAmount / 100,
+        valor: chargeAmount / 100,
+        status: 'AGUARDANDO_REEMBOLSO',
+        data_emissao: command.data,
+        data_vencimento: command.data_vencimento || command.data,
+        origem_tipo: 'REEMBOLSO',
+        origem_id: reimbursementId,
+        idempotency_key: `${chargeKey}:SHARE`,
+        colaborador_id: nullableText(command.colaborador_id),
+        criado_por: userId,
+      }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
+    )
+
+    if (group.kind === 'HOLDING') {
+      const movementData = await db.prepare('SELECT holding_id FROM hold_socios WHERE id = ?')
+        .bind(chargeCotista.socioId).first<{ holding_id: string | null }>()
+      statements.push(insertStatement(db, schema, 'movimentos_holding', {
+        id: holdingMovementId,
+        holding_id: movementData?.holding_id || chargeCotista.holdingId,
+        socio_id: chargeCotista.socioId,
+        aeronave_id: aeronaveId,
+        data_emissao: command.data,
+        data_vencimento: command.data_vencimento || command.data,
+        descricao: command.descricao || 'Reembolso de despesa',
+        categoria_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
+        categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome ?? 'REEMBOLSO'),
+        grupo_categoria: 'REEMBOLSO',
+        fluxo: 'SAIDA',
+        natureza: 'DESPESA',
+        tipo_caixa: 'HOLD',
+        valor_centavos: chargeAmount,
+        valor: chargeAmount / 100,
+        status: 'EM_ABERTO',
+        pago_diretamente: 0,
+        observacoes: nullableText(command.observacoes),
+        idempotency_key: `${chargeKey}:HOLDING`,
+        criado_por: userId,
+      }, ['id', 'aeronave_id']))
+      for (const { line, percentualSociedade } of group.lines) {
+        if (!line.socioId) throw new FinanceError('Rateio de holding precisa de socio_id', 'socio_holding_obrigatorio')
+        const anexos = Array.isArray(command.anexos_json)
+          ? command.anexos_json
+          : JSON.parse(String(command.anexos_json || '[]'))
+        statements.push(insertStatement(db, schema, 'rateio_hold', {
+          id: await stableIdForKey(`reembolso:${chargeKey}:rateio:${line.cotistaId}`),
+          [movementColumn]: holdingMovementId,
+          aeronave_id: aeronaveId,
+          socio_id: line.socioId,
+          data_emissao: command.data,
+          data_vencimento: command.data_vencimento || command.data,
+          categoria_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
+          categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome ?? 'REEMBOLSO'),
+          tipo_rateio: normalizeRateioType(command.tipo_rateio),
+          percentual_sociedade: percentualSociedade,
+          percentual_uso: line.percentual,
+          valor_total_centavos: chargeAmount,
+          valor_rateado_centavos: line.valorCentavos,
+          valor_total: chargeAmount / 100,
+          valor_rateado: line.valorCentavos / 100,
+          pago_por_socio_id: null,
+          pago_diretamente: 0,
+          status: 'AGUARDANDO_REEMBOLSO',
+          descricao_despesa: command.descricao,
+          observacoes: nullableText(command.observacoes),
+          origem_tipo: 'REEMBOLSO',
+          origem_id: reimbursementId,
+          anexos_json: JSON.stringify(anexos.filter((anexo: Row) => !anexo.cotista_id || anexo.cotista_id === line.cotistaId)),
+        }, ['id', movementColumn, 'aeronave_id', 'socio_id']))
+      }
+    } else {
+      statements.push(insertStatement(db, schema, 'lancamentos', {
+        id: clientLedgerId,
+        aeronave_id: aeronaveId,
+        cotista_aeronave_id: chargeCotista.cotistaAeronaveId,
+        descricao: command.descricao || 'Reembolso de despesa',
+        categoria_id: null,
+        categoria_cliente_id: nullableText(command.categoria_cliente_id),
+        categoria_nome: nullableText(command.categoria_cliente_nome ?? 'REEMBOLSO'),
+        grupo_categoria: 'REEMBOLSO',
+        fluxo: 'SAIDA',
+        natureza: 'DESPESA',
+        tipo_caixa: 'CLIENTE',
+        valor_centavos: chargeAmount,
+        valor_total: chargeAmount / 100,
+        valor: chargeAmount / 100,
+        status: 'EM_ABERTO',
+        data_emissao: command.data,
+        data_vencimento: command.data_vencimento || command.data,
+        origem_tipo: 'REEMBOLSO',
+        origem_id: reimbursementId,
+        criado_por: userId,
+      }, ['id', 'descricao', 'fluxo', 'valor_centavos']))
+      const allocationCommand = {
+        ...command,
+        valor_centavos: chargeAmount,
+        categoria_cliente_id: command.categoria_cliente_id,
+        tipo_rateio: command.tipo_rateio,
+        rateio_linhas: group.lines.map(({ line }) => ({
+          cotista_id: line.cotistaId,
+          percentual: line.percentual,
+          percentual_sociedade: line.percentualSociedade,
+          valor_centavos: line.valorCentavos,
+          pago_diretamente: false,
+        })),
+      }
+      statements.push(...clientAllocationStatements(db, schema, allocationCommand, clientLedgerId, group.lines.map(({ line }) => line), userId))
+    }
+
+    statements.push(
+      insertStatement(db, schema, 'contas_areceber', {
+        id: accountId,
+        data_vencimento: command.data_vencimento || command.data,
+        valor_centavos: chargeAmount,
+        categoria_id: nullableText(command.categoria_id),
+        categoria_nome: 'REEMBOLSOS ENTRADAS',
+        descricao: command.descricao || 'Reembolso de despesa',
+        aeronave_id: aeronaveId,
+        cotista_id: chargeCotista.cotistaAeronaveId,
+        lancamentos_id: shareIncomeId,
+        movimentos_id: holdingMovementId,
+        origem_tipo: 'REEMBOLSO',
+        idempotency_key: `${chargeKey}:CONTA_RECEBER`,
+        criado_por: userId,
+        status: 'EM_ABERTO',
+      }, ['id', 'valor_centavos']),
+      auditStatement(db, schema, 'reembolsos', reimbursementId, 'CRIACAO_REEMBOLSO', userId, null, chargeAmount, nullableText(command.motivo), chargeKey),
+    )
+    results.push({ id: reimbursementId, contaReceberId: accountId, lancamentoId: shareIncomeId, clientLedgerId, movementId: holdingMovementId, valor_centavos: chargeAmount })
+  }
+
+  await db.batch(statements)
+  return {
+    id: results[0]?.id,
+    charges: results,
+    contaReceberIds: results.map((item) => item.contaReceberId),
+    lancamentoId: results[0]?.lancamentoId,
+    lancamentoClienteId: results[0]?.clientLedgerId,
+    movimentoHoldingId: results[0]?.movementId,
+    valor_centavos: results.reduce((sum, item) => sum + item.valor_centavos, 0),
+    status: 'PENDENTE',
+    idempotent: false,
+  }
+}
+
+/** Cria o espelho Share e a cobrança de um destinatário externo. */
+export async function createExternalReceivable(db: Database, body: Row, userId: string | null): Promise<Row> {
+  const schema = await loadSchema(db)
+  const type = upper(body.tipo)
+  if (!['CLIENTE', 'HOLDING'].includes(type)) throw new FinanceError('Destino externo inválido', 'destino_externo_invalido')
+  const destinationId = text(body.destino_id)
+  const amount = asPositiveCents(body.valor_centavos)
+  const key = nullableText(body.idempotency_key)
+  if (!destinationId || !key) throw new FinanceError('Destino e chave de idempotência obrigatórios', 'destino_externo_invalido')
+  const accountKey = `${key}:CONTA_RECEBER`
+  const accountId = await stableIdForKey(accountKey)
+  const existing = await db.prepare('SELECT * FROM contas_areceber WHERE id = ? LIMIT 1').bind(accountId).first<Row>()
+  if (existing) return { contaReceberId: existing.id, lancamentoId: existing.lancamentos_id, movimentoHoldingId: existing.movimentos_id, idempotent: true }
+
+  let cotista: Row | null = null
+  let socio: Row | null = null
+  if (type === 'CLIENTE') {
+    const owner = await db.prepare('SELECT id FROM cliente WHERE id = ?').bind(destinationId).first<Row>()
+    if (!owner) throw new FinanceError('Cliente externo não encontrado', 'destino_externo_nao_encontrado', 404)
+    cotista = await db.prepare('SELECT id, aeronave_id FROM cotista_aeronave WHERE cliente_id = ? AND aeronave_id = ? ORDER BY id LIMIT 1')
+      .bind(destinationId, body.aeronave_id || '').first<Row>()
+  } else {
+    socio = await db.prepare('SELECT id, holding_id FROM hold_socios WHERE holding_id = ? ORDER BY id LIMIT 1').bind(destinationId).first<Row>()
+    if (!socio) throw new FinanceError('Holding externa não encontrada', 'destino_externo_nao_encontrado', 404)
+  }
+
+  const shareLedgerId = await stableIdForKey(`${key}:SHARE`)
+  const receivingLedgerId = type === 'CLIENTE' ? await stableIdForKey(`${key}:CLIENTE`) : null
+  const movementId = type === 'HOLDING' ? await stableIdForKey(`${key}:HOLDING`) : null
+  const sourceOriginId = text(body.origem_id) || key
+  const statements: D1PreparedStatement[] = [insertStatement(db, schema, 'lancamentos', {
+    id: shareLedgerId,
+    aeronave_id: nullableText(body.aeronave_id),
+    cotista_aeronave_id: cotista?.id || null,
+    descricao: body.descricao,
+    categoria_id: nullableText(body.categoria_id),
+    categoria_nome: 'REEMBOLSOS ENTRADAS',
+    grupo_categoria: 'REEMBOLSOS ENTRADAS',
+    fluxo: 'ENTRADA',
+    natureza: 'REEMBOLSO',
+    tipo_caixa: 'SHARE',
+    valor_centavos: amount,
+    valor_total: amount / 100,
+    valor: amount / 100,
+    status: 'AGUARDANDO_REEMBOLSO',
+    data_emissao: body.data,
+    data_vencimento: body.data_vencimento || body.data,
+    origem_tipo: 'ENVIO_DESPESA_EXTERNO',
+    origem_id: sourceOriginId,
+    idempotency_key: `${key}:SHARE`,
+    criado_por: userId,
+  }, ['id', 'descricao', 'fluxo', 'valor_centavos'])]
+
+  if (type === 'CLIENTE') {
+    statements.push(insertStatement(db, schema, 'lancamentos', {
+      id: receivingLedgerId,
+      aeronave_id: nullableText(body.aeronave_id),
+      cotista_aeronave_id: cotista?.id || null,
+      descricao: body.descricao,
+      categoria_cliente_id: nullableText(body.categoria_cliente_id),
+      categoria_nome: nullableText(body.categoria_cliente_nome ?? 'REEMBOLSO EXTERNO'),
+      grupo_categoria: 'REEMBOLSO',
+      fluxo: 'SAIDA',
+      natureza: 'DESPESA',
+      tipo_caixa: 'CLIENTE',
+      valor_centavos: amount,
+      valor_total: amount / 100,
+      valor: amount / 100,
+      status: 'EM_ABERTO',
+      data_emissao: body.data,
+      data_vencimento: body.data_vencimento || body.data,
+      origem_tipo: 'ENVIO_DESPESA_EXTERNO',
+      origem_id: sourceOriginId,
+      observacoes: `Destino externo CLIENTE:${destinationId}`,
+      criado_por: userId,
+    }, ['id', 'descricao', 'fluxo', 'valor_centavos']))
+  } else {
+    statements.push(insertStatement(db, schema, 'movimentos_holding', {
+      id: movementId,
+      holding_id: destinationId,
+      socio_id: socio?.id || null,
+      aeronave_id: nullableText(body.aeronave_id),
+      data_emissao: body.data,
+      data_vencimento: body.data_vencimento || body.data,
+      descricao: body.descricao,
+      categoria_id: nullableText(body.categoria_cliente_id ?? body.categoria_id),
+      categoria_nome: nullableText(body.categoria_cliente_nome ?? 'REEMBOLSO EXTERNO'),
+      grupo_categoria: 'REEMBOLSO',
+      fluxo: 'SAIDA',
+      natureza: 'DESPESA',
+      tipo_caixa: 'HOLD',
+      valor_centavos: amount,
+      valor: amount / 100,
+      status: 'EM_ABERTO',
+      pago_diretamente: 0,
+      observacoes: nullableText(body.observacoes),
+      idempotency_key: `${key}:HOLDING`,
+      criado_por: userId,
+    }, ['id', 'aeronave_id']))
+  }
+
+  const reimbursementId = await stableIdForKey(`${key}:REEMBOLSO`)
+  statements.push(
+    insertStatement(db, schema, 'reembolsos', {
+      id: reimbursementId,
+      lancamento_origem_id: text(body.lancamento_origem_id ?? body.origem_id) || sourceOriginId,
+      conta_receber_id: accountId,
+      lancamento_cliente_id: receivingLedgerId || movementId,
+      cotista_id: cotista?.id || null,
+      valor_centavos: amount,
+      status: 'PENDENTE',
+      idempotency_key: `${key}:REEMBOLSO`,
+      criado_por: userId,
+    }, ['id', 'lancamento_origem_id', 'valor_centavos']),
+    insertStatement(db, schema, 'contas_areceber', {
+      id: accountId,
+      data_vencimento: body.data_vencimento || body.data,
+      valor_centavos: amount,
+      categoria_id: nullableText(body.categoria_id),
+      categoria_nome: 'REEMBOLSOS ENTRADAS',
+      descricao: body.descricao,
+      aeronave_id: nullableText(body.aeronave_id),
+      cotista_id: cotista?.id || null,
+      lancamentos_id: shareLedgerId,
+      movimentos_id: movementId,
+      origem_tipo: 'ENVIO_DESPESA_EXTERNO',
+      idempotency_key: accountKey,
+      criado_por: userId,
+      status: 'EM_ABERTO',
+    }, ['id', 'valor_centavos']),
+  )
+  statements.push(linkStatement(db, schema, 'ENVIO_DESPESA_EXTERNO', sourceOriginId, type === 'HOLDING' ? 'MOVIMENTO_HOLDING' : 'LANCAMENTO', movementId || receivingLedgerId || shareLedgerId, 'COBRANCA_EXTERNA', userId))
+  await db.batch(statements)
+  return { id: reimbursementId, contaReceberId: accountId, lancamentoId: shareLedgerId, lancamentoClienteId: receivingLedgerId, movimentoHoldingId: movementId, valor_centavos: amount, idempotent: false }
+}
+
+/** Registra uma despesa externa quitada diretamente no caixa do cliente ou holding. */
+export async function createDirectExternalExpense(db: Database, body: Row, userId: string | null): Promise<Row> {
+  const schema = await loadSchema(db)
+  const type = upper(body.tipo)
+  const destinationId = text(body.destino_id)
+  const amount = asPositiveCents(body.valor_centavos)
+  const key = nullableText(body.idempotency_key)
+  if (!['CLIENTE', 'HOLDING'].includes(type) || !destinationId || !key) {
+    throw new FinanceError('Destino externo inválido', 'destino_externo_invalido')
+  }
+  if (type === 'CLIENTE') {
+    const owner = await db.prepare('SELECT id FROM cliente WHERE id = ?').bind(destinationId).first<Row>()
+    if (!owner) throw new FinanceError('Cliente externo não encontrado', 'destino_externo_nao_encontrado', 404)
+  } else {
+    const owner = await db.prepare('SELECT id FROM holdings WHERE id = ?').bind(destinationId).first<Row>()
+    if (!owner) throw new FinanceError('Holding externa não encontrada', 'destino_externo_nao_encontrado', 404)
+  }
+
+  const ledgerId = await stableIdForKey(`${key}:CAIXA`)
+  const existing = type === 'HOLDING'
+    ? await db.prepare('SELECT id FROM movimentos_holding WHERE id = ?').bind(ledgerId).first<Row>()
+    : await db.prepare('SELECT id FROM lancamentos WHERE id = ?').bind(ledgerId).first<Row>()
+  if (existing) return {
+    id: ledgerId,
+    lancamento_id: type === 'CLIENTE' ? ledgerId : null,
+    movimento_holding_id: type === 'HOLDING' ? ledgerId : null,
+    idempotent: true,
+  }
+
+  const statement = type === 'HOLDING'
+    ? insertStatement(db, schema, 'movimentos_holding', {
+      id: ledgerId,
+      holding_id: destinationId,
+      aeronave_id: nullableText(body.aeronave_id),
+      data_emissao: body.data,
+      data_vencimento: body.data_vencimento || body.data,
+      descricao: body.descricao,
+      categoria_id: nullableText(body.categoria_cliente_id ?? body.categoria_id),
+      categoria_nome: nullableText(body.categoria_cliente_nome ?? 'DESPESA DIRETA'),
+      grupo_categoria: 'CAIXA HOLDING',
+      fluxo: 'SAIDA',
+      natureza: 'DESPESA',
+      tipo_caixa: 'HOLD',
+      valor_centavos: amount,
+      valor: amount / 100,
+      pago_diretamente: 1,
+      status: 'PAGO',
+      observacoes: `Destino externo HOLDING:${destinationId}`,
+      idempotency_key: key,
+      criado_por: userId,
+    }, ['id', 'aeronave_id'])
+    : insertStatement(db, schema, 'lancamentos', {
+      id: ledgerId,
+      aeronave_id: nullableText(body.aeronave_id),
+      descricao: body.descricao,
+      categoria_cliente_id: nullableText(body.categoria_cliente_id),
+      categoria_nome: nullableText(body.categoria_cliente_nome ?? 'DESPESA DIRETA'),
+      grupo_categoria: 'CAIXA CLIENTE',
+      fluxo: 'SAIDA',
+      natureza: 'DESPESA',
+      tipo_caixa: 'CLIENTE',
+      valor_centavos: amount,
+      valor_total: amount / 100,
+      valor: amount / 100,
+      status: 'PAGO',
+      data_emissao: body.data,
+      pago_diretamente: 1,
+      origem_tipo: 'ENVIO_DESPESA_EXTERNO',
+      origem_id: text(body.origem_id) || key,
+      idempotency_key: key,
+      observacoes: `Destino externo CLIENTE:${destinationId}`,
+      criado_por: userId,
+    }, ['id', 'descricao', 'fluxo', 'valor_centavos'])
+  await db.batch([
+    statement,
+    linkStatement(db, schema, 'IDEMPOTENCY_KEY', key, type === 'HOLDING' ? 'MOVIMENTO_HOLDING' : 'LANCAMENTO', ledgerId, 'CAIXA_EXTERNO', userId),
+  ])
+  return {
+    id: ledgerId,
+    lancamento_id: type === 'CLIENTE' ? ledgerId : null,
+    movimento_holding_id: type === 'HOLDING' ? ledgerId : null,
+    valor_centavos: amount,
     idempotent: false,
   }
 }
