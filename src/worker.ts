@@ -5920,6 +5920,7 @@ app.post('/api/interno/abastecimentos', async c => {
     if (diario.socio_id) socioId = diario.socio_id
   }
   if ((diario?.cliente_id && body?.cliente_id && diario.cliente_id !== body.cliente_id) || (diario?.socio_id && body?.socio_id && diario.socio_id !== body.socio_id)) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
+  const numeroVooGravado = diario ? (String(diario.numero_voo || '').trim() || null) : numeroVooSolicitado
   if (!clienteId && !socioId && diario) {
     const vinculos = await db.prepare('SELECT cliente_id, socio_id FROM cotista_aeronave WHERE aeronave_id = ?1 ORDER BY id').bind(aeronaveId).all<{ cliente_id: string | null; socio_id: string | null }>()
     if (vinculos.results.length === 1) { clienteId = vinculos.results[0].cliente_id || null; socioId = vinculos.results[0].socio_id || null }
@@ -5932,7 +5933,7 @@ app.post('/api/interno/abastecimentos', async c => {
     ? Boolean(diario?.voo_emprestado)
     : ['1', 'true', 'sim', 'yes'].includes(String(body.voo_emprestado).toLowerCase())
   const abastecimentoStatement = db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, forma_pagamento, data_vencimento_boleto, criado_por, lancamento_diario_id, data_pagamento, banco, voo_emprestado, numero_voo, prazo_envio_cliente_dias, prazo_envio_cliente_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-  .bind(id, clienteId, socioId, aeronaveId, data, body?.tipo_combustivel || null, body?.trecho || diario?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, userId, diarioId, statusPago ? body?.data_pagamento : null, body?.banco || null, vooEmprestado ? 1 : 0, body?.numero_voo || diario?.numero_voo || null, body?.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body?.prazo_envio_cliente_em || null)
+  .bind(id, clienteId, socioId, aeronaveId, data, body?.tipo_combustivel || null, body?.trecho || diario?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, userId, diarioId, statusPago ? body?.data_pagamento : null, body?.banco || null, vooEmprestado ? 1 : 0, numeroVooGravado, body?.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body?.prazo_envio_cliente_em || null)
   const financeiroStatement = (clienteId || socioId) ? await statementFinanceiroAbastecimento(c, id, {
     ...body,
     cliente_id: clienteId,
