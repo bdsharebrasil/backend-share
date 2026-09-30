@@ -3688,7 +3688,7 @@ app.get('/api/interno/abastecimentos/precos', async c => {
 app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
-  await garantirTabelaChecklistPlano(c)
+  await validarTabelaChecklistPlano(c)
   const rows = await c.env.SHARE_DB.prepare(`SELECT p.id, p.numero_voo, p.adep, p.ades, p.data_voo, p.eobt, p.payload_json, p.criado_em AS created_at, cp.status AS checklist_status
     FROM planos_voo p LEFT JOIN checklists_planos_voo cp ON cp.plano_voo_id = p.id
     ORDER BY p.criado_em DESC LIMIT 50`).all<any>()
@@ -3712,24 +3712,13 @@ app.post('/api/interno/planos-voo', async c => {
   return c.json({ id, created_at: new Date().toISOString() }, 201)
 })
 
-async function garantirTabelaChecklistPlano(c: Context<{ Bindings: Bindings }>) {
-  await c.env.SHARE_DB.prepare(`CREATE TABLE IF NOT EXISTS checklists_planos_voo (
-    id TEXT PRIMARY KEY NOT NULL,
-    plano_voo_id TEXT NOT NULL UNIQUE,
-    itens_json TEXT NOT NULL DEFAULT '{}',
-    observacoes TEXT NULL,
-    status TEXT NOT NULL DEFAULT 'rascunho',
-    executado_por TEXT NULL,
-    executado_por_nome TEXT NULL,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    concluido_em TEXT NULL
-  )`).run()
+async function validarTabelaChecklistPlano(c: Context<{ Bindings: Bindings }>) {
+  await validateWorkerSchema(c, [{ table: 'checklists_planos_voo', columns: ['id', 'plano_voo_id', 'itens_json', 'status'] }])
 }
 
 app.get('/api/interno/planos-voo/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaChecklistPlano(c)
+  await validarTabelaChecklistPlano(c)
   const row = await c.env.SHARE_DB.prepare('SELECT id, plano_voo_id, itens_json, observacoes, status, executado_por AS usuario_id, executado_por_nome, criado_em, atualizado_em, concluido_em FROM checklists_planos_voo WHERE plano_voo_id = ?1').bind(c.req.param('id')).first<any>()
   if (!row) return c.json(null)
   return c.json({ ...row, itens: JSON.parse(row.itens_json || '{}') })
@@ -3737,7 +3726,7 @@ app.get('/api/interno/planos-voo/:id/checklist', async c => {
 
 app.post('/api/interno/planos-voo/:id/checklist', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaChecklistPlano(c)
+  await validarTabelaChecklistPlano(c)
   const plano = await c.env.SHARE_DB.prepare('SELECT id FROM planos_voo WHERE id = ?1').bind(c.req.param('id')).first()
   if (!plano) return c.notFound()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
