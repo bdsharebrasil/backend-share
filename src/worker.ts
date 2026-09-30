@@ -5753,16 +5753,17 @@ app.get('/api/interno/abastecimentos/opcoes', async c => {
   const db = c.env.SHARE_DB
   const aeronaveId = c.req.query('aeronave_id') || ''
   await garantirTabelaFornecedoresCombustivel(c)
-  const [clientes, socios, aeronave, fornecedores, diarios] = await Promise.all([
+  const [clientes, socios, aeronave, fornecedores, aerodromos, diarios] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare('SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare('SELECT * FROM fornecedores_combustivel ORDER BY nome_cidade, nome_fornecedor').all(),
+    db.prepare('SELECT id, nome, designativo_icao FROM aerodromo ORDER BY designativo_icao').all(),
     aeronaveId
-      ? db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.socio_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, c.razao_social AS cliente_nome, s.nome AS socio_nome FROM lancamentos_diario_bordo l LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.aeronave_id = ?1 ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 100').bind(aeronaveId).all()
-      : db.prepare('SELECT id, data_registro, numero_voo, aeronave_id, cliente_id, socio_id, aerodromo_partida, aerodromo_chegada, trecho, local_combustivel, voo_emprestado FROM lancamentos_diario_bordo ORDER BY date(data_registro) DESC LIMIT 100').all(),
+      ? db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.socio_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, c.razao_social AS cliente_nome, s.nome AS socio_nome, ab.id AS abastecimento_id, ab.numero_comanda AS abastecimento_numero_comanda, ab.numero_nf AS abastecimento_numero_nf, ab.litros AS abastecimento_litros, ab.valor_unitario AS abastecimento_valor_unitario, ab.valor_total AS abastecimento_valor_total, ab.desconto AS abastecimento_desconto, ab.fornecedor_id AS abastecimento_fornecedor_id, ab.tipo_combustivel AS abastecimento_tipo_combustivel FROM lancamentos_diario_bordo l LEFT JOIN abastecimentos ab ON ab.lancamento_diario_id = l.id LEFT JOIN cliente c ON c.id = l.cliente_id LEFT JOIN hold_socios s ON s.id = l.socio_id WHERE l.aeronave_id = ?1 ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 100').bind(aeronaveId).all()
+      : db.prepare('SELECT l.id, l.data_registro, l.numero_voo, l.aeronave_id, l.cliente_id, l.socio_id, l.aerodromo_partida, l.aerodromo_chegada, l.trecho, l.local_combustivel, l.voo_emprestado, ab.id AS abastecimento_id, ab.numero_comanda AS abastecimento_numero_comanda, ab.numero_nf AS abastecimento_numero_nf, ab.litros AS abastecimento_litros, ab.valor_unitario AS abastecimento_valor_unitario, ab.valor_total AS abastecimento_valor_total, ab.desconto AS abastecimento_desconto, ab.fornecedor_id AS abastecimento_fornecedor_id, ab.tipo_combustivel AS abastecimento_tipo_combustivel FROM lancamentos_diario_bordo l LEFT JOIN abastecimentos ab ON ab.lancamento_diario_id = l.id ORDER BY date(l.data_registro) DESC LIMIT 100').all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronave.results, fornecedores: fornecedores.results, diarios: diarios.results })
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronave.results, fornecedores: fornecedores.results, aerodromos: aerodromos.results, diarios: diarios.results })
 })
 
 app.get('/api/fornecedores-favoritos', async c => {
@@ -5822,7 +5823,8 @@ app.get('/api/interno/abastecimentos', async c => {
   if (valorMax && Number.isFinite(Number(valorMax))) { conditions.push(`a.valor_total <= ?${index++}`); binds.push(Number(valorMax)) }
   if (busca) { conditions.push(`(lower(COALESCE(a.local, '')) LIKE ?${index} OR lower(COALESCE(a.trecho, '')) LIKE ?${index} OR lower(COALESCE(a.numero_comanda, '')) LIKE ?${index} OR lower(COALESCE(a.numero_nf, '')) LIKE ?${index})`); binds.push(`%${busca.toLowerCase()}%`); index++ }
   const result = await c.env.SHARE_DB.prepare(`SELECT a.*, COALESCE((SELECT l.comprovante_url FROM lancamentos l WHERE l.abastecimentos_id = a.id LIMIT 1), (SELECT mh.comprovante_url FROM movimentos_holding mh WHERE mh.abastecimentos_id = a.id LIMIT 1)) AS comprovante_url, c.razao_social AS cliente_nome, s.nome AS socio_nome, ar.matricula_registro, ar.fabricante, ar.modelo, f.nome_fornecedor AS fornecedor_nome, u.nome_completo AS criado_por_nome FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id LEFT JOIN user_profiles u ON u.id = a.criado_por WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`).bind(...binds).all()
-  return c.json({ abastecimentos: result.results })
+  const resumoMensal = await c.env.SHARE_DB.prepare(`SELECT strftime('%Y-%m', a.data) AS mes, COALESCE(a.cliente_id, a.socio_id) AS cotista_id, COALESCE(c.razao_social, s.nome, 'Cotista não informado') AS cotista_nome, COUNT(*) AS quantidade FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id WHERE ${conditions.join(' AND ')} GROUP BY strftime('%Y-%m', a.data), COALESCE(a.cliente_id, a.socio_id), COALESCE(c.razao_social, s.nome, 'Cotista não informado') ORDER BY mes DESC, cotista_nome`).bind(...binds).all()
+  return c.json({ abastecimentos: result.results, resumo_mensal: resumoMensal.results })
 })
 
 function dataAbastecimentoValida(value: unknown): value is string {
@@ -5838,6 +5840,7 @@ function respostaErroAbastecimento(c: Context<{ Bindings: Bindings }>, error: un
     socio_nao_vinculado_a_aeronave: { detalhe: 'O sócio não está vinculado à aeronave selecionada.', status: 409 },
     cliente_nao_vinculado_a_aeronave: { detalhe: 'O cliente não está vinculado à aeronave selecionada.', status: 409 },
     abastecimento_com_rateio_nao_pode_mudar_titular: { detalhe: 'Não é possível alterar o titular ou a aeronave de um abastecimento cujo lançamento já possui rateio.', status: 409 },
+    abastecimento_duplicado: { detalhe: 'Já existe um abastecimento para este voo e aeronave.', status: 409 },
   }
   const conhecido = errosConhecidos[codigo]
   if (!conhecido) console.error(`[abastecimentos:${operacao}]`, error)
@@ -5889,30 +5892,47 @@ app.post('/api/interno/abastecimentos', async c => {
   const data = String(body?.data || '').trim()
   const local = String(body?.local || '').trim()
   const aeronaveId = String(body?.aeronave_id || '').trim()
-  const clienteId = String(body?.cliente_id || '').trim() || null
-  const socioId = String(body?.socio_id || '').trim() || null
+  let clienteId = String(body?.cliente_id || '').trim() || null
+  let socioId = String(body?.socio_id || '').trim() || null
   const litros = Number(body?.litros)
   const valorUnitario = Number(body?.valor_unitario || 0)
   const valorTotal = Number(body?.valor_total ?? litros * valorUnitario)
   const statusPago = String(body?.status || '').toLowerCase() === 'pago'
-  if (!dataAbastecimentoValida(data) || !local || !aeronaveId || Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
+  if (!dataAbastecimentoValida(data) || !local || !aeronaveId) return c.json({ error: 'data_local_aeronave_obrigatorios' }, 400)
   if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0 || Math.round(valorTotal * 100) <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
   if (statusPago && !dataAbastecimentoValida(body?.data_pagamento)) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
   const db = c.env.SHARE_DB
   const id = uuid()
   const userId = authenticated?.id || extractSupabaseUserId(c) || null
-  const diarioId = String(body?.lancamento_diario_id || '').trim() || null
-  const diario = diarioId
+  const numeroVooSolicitado = String(body?.numero_voo || '').trim() || null
+  let diarioId = String(body?.lancamento_diario_id || '').trim() || null
+  let diario = diarioId
     ? await db.prepare('SELECT id, aeronave_id, cliente_id, socio_id, numero_voo, data_registro, trecho, local_combustivel, voo_emprestado FROM lancamentos_diario_bordo WHERE id = ?1').bind(diarioId).first<any>()
     : null
+  if (!diario && numeroVooSolicitado) {
+    diario = await db.prepare('SELECT id, aeronave_id, cliente_id, socio_id, numero_voo, data_registro, trecho, local_combustivel, voo_emprestado FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND lower(trim(numero_voo)) = lower(trim(?2)) ORDER BY date(data_registro) DESC, id DESC LIMIT 1').bind(aeronaveId, numeroVooSolicitado).first<any>()
+    diarioId = diario?.id || null
+  }
   if (diarioId && (!diario || diario.aeronave_id !== aeronaveId)) return c.json({ error: 'lancamento_diario_invalido_para_aeronave' }, 409)
-  if ((diario?.cliente_id && diario.cliente_id !== clienteId) || (diario?.socio_id && diario.socio_id !== socioId)) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
+  if (diario) {
+    if (diario.cliente_id) clienteId = diario.cliente_id
+    if (diario.socio_id) socioId = diario.socio_id
+  }
+  if ((diario?.cliente_id && body?.cliente_id && diario.cliente_id !== body.cliente_id) || (diario?.socio_id && body?.socio_id && diario.socio_id !== body.socio_id)) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
+  if (!clienteId && !socioId) {
+    const vinculos = await db.prepare('SELECT cliente_id, socio_id FROM cotista_aeronave WHERE aeronave_id = ?1 ORDER BY id').bind(aeronaveId).all<{ cliente_id: string | null; socio_id: string | null }>()
+    if (vinculos.results.length === 1) { clienteId = vinculos.results[0].cliente_id || null; socioId = vinculos.results[0].socio_id || null }
+  }
+  const existentePorVoo = numeroVooSolicitado
+    ? await db.prepare('SELECT id FROM abastecimentos WHERE aeronave_id = ?1 AND lower(trim(numero_voo)) = lower(trim(?2)) LIMIT 1').bind(aeronaveId, numeroVooSolicitado).first<{ id: string }>()
+    : diarioId ? await db.prepare('SELECT id FROM abastecimentos WHERE lancamento_diario_id = ?1 LIMIT 1').bind(diarioId).first<{ id: string }>() : null
+  if (existentePorVoo) throw new Error('abastecimento_duplicado')
   const vooEmprestado = body?.voo_emprestado == null
     ? Boolean(diario?.voo_emprestado)
     : ['1', 'true', 'sim', 'yes'].includes(String(body.voo_emprestado).toLowerCase())
   const abastecimentoStatement = db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, forma_pagamento, data_vencimento_boleto, criado_por, lancamento_diario_id, data_pagamento, banco, voo_emprestado, numero_voo, prazo_envio_cliente_dias, prazo_envio_cliente_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
   .bind(id, clienteId, socioId, aeronaveId, data, body?.tipo_combustivel || null, body?.trecho || diario?.trecho || null, local, body?.numero_comanda || null, body?.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body?.desconto == null ? null : Number(body.desconto), body?.fornecedor_id || null, body?.status || 'pendente', body?.observacao || null, body?.forma_pagamento || null, body?.data_vencimento_boleto || null, userId, diarioId, statusPago ? body?.data_pagamento : null, body?.banco || null, vooEmprestado ? 1 : 0, body?.numero_voo || diario?.numero_voo || null, body?.prazo_envio_cliente_dias == null ? null : Number(body.prazo_envio_cliente_dias), body?.prazo_envio_cliente_em || null)
-  const financeiroStatement = await statementFinanceiroAbastecimento(c, id, {
+  const financeiroStatement = (clienteId || socioId) ? await statementFinanceiroAbastecimento(c, id, {
     ...body,
     cliente_id: clienteId,
     socio_id: socioId,
@@ -5920,8 +5940,8 @@ app.post('/api/interno/abastecimentos', async c => {
     data,
     valor_total: valorTotal,
     trecho: body?.trecho || diario?.trecho || '',
-  }, userId)
-  await db.batch([abastecimentoStatement, financeiroStatement])
+  }, userId) : null
+  await db.batch([abastecimentoStatement, ...(financeiroStatement ? [financeiroStatement] : [])])
   return c.json({ id, success: true }, 201)
   } catch (error) {
     return respostaErroAbastecimento(c, error, 'criar')
