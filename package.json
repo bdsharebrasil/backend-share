@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "type-check": "tsc --noEmit --pretty false"
+    "type-check": "tsc --noEmit --pretty false",
+    "test:relatorio-financeiro": "node --experimental-strip-types --test tests/relatorioFinanceiro.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

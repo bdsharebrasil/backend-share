@@ -4968,14 +4968,14 @@ async function persistirMetadadosFinanceirosRelatorio(
   dataVencimento?: string | null,
 ) {
   const prefixo = `RELATORIO_DESPESA_VIAGEM:${relatorioId}`
+  // contas_apagar não tem origem_id; os dois reembolsos usam chaves idempotentes próprias.
   const contas = await db.prepare(`SELECT
       MAX(CASE WHEN idempotency_key = ?1 THEN id END) AS conta_tripulante_1,
       MAX(CASE WHEN idempotency_key = ?2 THEN id END) AS conta_tripulante_2
     FROM contas_apagar
-    WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?3`).bind(
+    WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND idempotency_key IN (?1, ?2)`).bind(
     `${prefixo}:tripulante_1:CONTA_PAGAR`,
     `${prefixo}:tripulante_2:CONTA_PAGAR`,
-    relatorioId,
   ).first<{ conta_tripulante_1: string | null; conta_tripulante_2: string | null }>()
   await db.prepare(`UPDATE relatorio_despesa_viagem SET
       gerado_por_usuario_id = COALESCE(gerado_por_usuario_id, ?1),
@@ -5431,15 +5431,16 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
         ? 'aprovado'
         : 'aguardando_aprovacao'
     const segundoAplicavel = requerAprovacaoTripulanteRelatorio(report.despesas, 2)
-    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN CURRENT_TIMESTAMP WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, id).run()
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, id).run()
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
-    if (body.aprovado) {
+    if (body.aprovado && updated.status === 'aprovado') {
       try {
-        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id, pos === 1 ? 'tripulante_1' : 'tripulante_2')
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id)
         await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, colaborador.id)
       } catch (error: any) {
-        log.warn('[relatorio-despesa-viagem:aprovacao-direta-financeiro]', error?.message || error)
+        log.error('[relatorio-despesa-viagem:aprovacao-direta-financeiro]', error?.message || error)
+        return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'A aprovação foi registrada, mas a conta a pagar não pôde ser gerada. Reenvie a aprovação para tentar novamente.' }, 500)
       }
     }
     if (!body.aprovado) await notifyReportRejection(c, updated, String(body.observacoes || '').trim(), colaborador.id)
@@ -5461,6 +5462,15 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', a
     } else {
       return c.json({ error: 'aguarde_aprovacao_de_todos_os_tripulantes' }, 409)
     }
+  }
+  const relatorioAprovado = await buscarRelatorioViagemComNomes(c, row.id)
+  if (!relatorioAprovado) return c.notFound()
+  try {
+    await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, relatorioAprovado, user.id)
+    await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id)
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:programacao-financeira]', error?.message || error)
+    return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'O relatório está aprovado, mas a conta a pagar não pôde ser gerada. Tente novamente.' }, 500)
   }
   return c.json({ descricao: `Relatório Despesa de Viagem - ${row.numero_relatorio}`, valor: Math.max(0, Number(row.total_valor || 0) - Number(row.total_cliente || 0)), fornecedor: 'Share Brasil', grupo_categoria_id: 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', subcategoria: 'RELATORIO DE VIAGEM', aeronave_id: row.aeronave_id, aeronave_matricula: row.aeronave_matricula, cliente_id: row.cliente_id, socio_id: row.socio_id, periodicidade: '', tipo_rateio: '', pdf_url: row.pdf_url, pdf_path: row.pdf_path })
 })
@@ -5536,7 +5546,6 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
       }
       await db.batch([
         db.prepare("UPDATE lancamentos SET data_vencimento = ?, url_doc = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, report.pdf_path || null, id),
-        db.prepare("UPDATE contas_apagar SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, id),
         db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', data_vencimento_reembolso = ?, enviado_para_cliente_em = COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP), programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
       ])
       await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
@@ -5552,7 +5561,6 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
           AND id IN (?, ?)`)
         .bind(body.email_enviado_id, id, clienteLancamentoId, shareLancamentoId) : null,
       db.prepare("UPDATE lancamentos SET data_vencimento = ?, url_doc = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, report.pdf_path || null, id),
-      db.prepare("UPDATE contas_apagar SET data_vencimento = ? WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(body.data_vencimento, id),
       db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', enviado_para_cliente_em = CURRENT_TIMESTAMP, data_vencimento_reembolso = ?, programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id),
     ].filter(Boolean) as D1PreparedStatement[])
     await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
@@ -5581,7 +5589,7 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
       : nextTripulante1Status === 'aprovado' && (!requiredSecond || nextTripulante2Status === 'aprovado')
         ? 'aprovado'
         : 'aguardando_aprovacao'
-    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN CURRENT_TIMESTAMP ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN CURRENT_TIMESTAMP WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, row.id).run()
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, row.id).run()
     const decidedBy = pos === 1 ? row.user1_id : row.user2_id || ''
     const updatedForNotification = await buscarRelatorioViagemComNomes(c, row.id)
     if (updatedForNotification) {
@@ -5591,14 +5599,15 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
         log.warn('[relatorio-despesa-viagem:aprovacao-publica-notificacao]', error?.message || error)
       }
     }
-    if (body.aprovado) {
+    if (body.aprovado && updatedForNotification?.status === 'aprovado') {
       const updated = await buscarRelatorioViagemComNomes(c, row.id)
       if (!updated) return c.notFound()
       try {
-        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, extractSupabaseUserId(c), pos === 1 ? 'tripulante_1' : 'tripulante_2')
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, extractSupabaseUserId(c))
         await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, extractSupabaseUserId(c))
       } catch (error: any) {
-        log.warn('[relatorio-despesa-viagem:aprovacao-publica-financeiro]', error?.message || error)
+        log.error('[relatorio-despesa-viagem:aprovacao-publica-financeiro]', error?.message || error)
+        return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'A aprovação foi registrada, mas a conta a pagar não pôde ser gerada. Reenvie a aprovação para tentar novamente.' }, 500)
       }
     }
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, row.id), aprovado: body.aprovado })
