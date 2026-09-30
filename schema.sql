@@ -2189,7 +2189,7 @@ status TEXT
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 , documento_url TEXT, documento_numero TEXT, origem_id TEXT, origem_tipo TEXT, numero_nf TEXT, numero_recibo TEXT, numero_boleto TEXT, numero_demonstrativo TEXT, url_demonstrativo TEXT, url_nf TEXT, url_recibo TEXT, url_boleto  TEXT, url_doc TEXT)'), ('CREATE TABLE rateio_hold (
   id TEXT PRIMARY KEY NOT NULL,
-  movimento_holding_id TEXT REFERENCES movimentos_holding(id),
+  movimento_id TEXT REFERENCES movimentos_holding(id),
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id),
   socio_id TEXT NOT NULL REFERENCES hold_socios(id),
    data_emissao TEXT,
@@ -2212,7 +2212,7 @@ status TEXT
   valor_total_centavos INTEGER NOT NULL CHECK (valor_total_centavos > 0),
   valor_rateado_centavos INTEGER NOT NULL CHECK (valor_rateado_centavos > 0),
   valor_pago_real_centavos INTEGER NOT NULL DEFAULT 0 CHECK (valor_pago_real_centavos >= 0),
-  pago_por_socio_id TEXT REFERENCES hold_socios(id),
+  pago_por TEXT REFERENCES hold_socios(id),
   pago_diretamente INTEGER NULL DEFAULT 0 CHECK (pago_diretamente IN (0, 1)),
   status TEXT NOT NULL CHECK (status IN (''EM_ABERTO'', ''PAGO'',''PAGO_DIRETAMENTE'', ''RECEBIDO'',''SAIDA'',''ESTORNO'', ''EM_ATRASO'',  ''ENTRADA'', ''AGUARDANDO_REEMBOLSO'', ''REEMBOLSADO'', ''CANCELADO'')),
   descricao_despesa TEXT,

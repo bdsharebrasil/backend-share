@@ -1771,7 +1771,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   // A solicitação de compra fica APROVADO até a conversão e CONVERTIDO depois;
   // nos dois casos a baixa deve concluí-la e avisar o solicitante.
   const purchase = lancamentoId
-    ? await db.prepare("SELECT id, descricao, criado_por FROM envio_despesas WHERE lancamento_id = ? AND tipo = 'share' AND status IN ('APROVADO', 'CONVERTIDO') LIMIT 1").bind(lancamentoId).first<Row>()
+    ? await db.prepare("SELECT id, descricao, criado_por, solicitacao_compra_id FROM envio_despesas WHERE lancamento_id = ? AND tipo = 'share' AND status IN ('APROVADO', 'CONVERTIDO') LIMIT 1").bind(lancamentoId).first<Row>()
     : null
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
@@ -1780,6 +1780,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
       db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('APROVADO', 'CONVERTIDO')").bind(purchase.id),
+      ...(purchase.solicitacao_compra_id ? [db.prepare("UPDATE solicitacoes_compra SET status = 'CONCLUIDA', data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?").bind(purchase.solicitacao_compra_id)] : []),
       ...mensagemFinanceiraStatements(db, nullableText(purchase.criado_por), userId, 'Solicitação de compra concluída', `O pagamento da solicitação “${text(purchase.descricao)}” foi concluído em ${paymentDate}.`),
     ] : []),
   ]

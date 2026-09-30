@@ -30,12 +30,12 @@ SELECT l.id, hs.holding_id, r.socio_id, l.aeronave_id,
 
 -- Caso existam rateios de cliente legados, converte-os para rateio_hold.
 INSERT OR IGNORE INTO rateio_hold
-  (id, movimento_holding_id, aeronave_id, socio_id, data_emissao,
+  (id, movimento_id, aeronave_id, socio_id, data_emissao,
    data_vencimento, data_pagamento, data_competencia_demonstrativo,
    categoria_id, categoria_nome, subcategoria_1, subcategoria_2,
    subcategoria_3, subcategoria_4, tipo_rateio, periodicidade,
    percentual_sociedade, percentual_uso, valor_total_centavos,
-   valor_rateado_centavos, valor_pago_real_centavos, pago_por_socio_id,
+   valor_rateado_centavos, valor_pago_real_centavos, pago_por,
    pago_diretamente, status, descricao_despesa, observacoes, origem_id,
    origem_tipo, documento_numero, documento_url)
 SELECT rd.id, rd.lancamento_id, rd.aeronave_id, r.socio_id,
