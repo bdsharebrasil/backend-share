@@ -28,15 +28,11 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE _cf_KV (
     data_vencimento_boleto TEXT,
     criado_por TEXT,
     lancamento_diario_id TEXT,
-    data_pagamento TEXT,
-    banco TEXT,
     voo_emprestado INT,
     numero_voo TEXT,
-    prazo_envio_cliente_dias INT,
-    prazo_envio_cliente_em TEXT,
+    prazo_envio_cliente TEXT,
 
-    FOREIGN KEY (socio_id) REFERENCES hold_socios(id),
-    FOREIGN KEY (fornecedor_id) REFERENCES fornecedores_combustivel(id)
+    FOREIGN KEY (socio_id) REFERENCES hold_socios(id)
 )'), ('CREATE TABLE fornecedores_combustivel (
   id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
   nome_cidade TEXT NOT NULL,
