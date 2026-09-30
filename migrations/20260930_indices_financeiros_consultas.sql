@@ -8,3 +8,9 @@ CREATE INDEX IF NOT EXISTS idx_recibos_criado_em
 
 CREATE INDEX IF NOT EXISTS idx_envio_despesas_status_tipo_criado
   ON envio_despesas (status, tipo, criado_em DESC);
+
+CREATE INDEX IF NOT EXISTS idx_auditoria_financeira_idempotencia
+  ON auditoria_financeira (entidade, entidade_id, operacao, idempotency_key);
+
+CREATE INDEX IF NOT EXISTS idx_financeiro_vinculos_idempotencia
+  ON financeiro_vinculos (origem_tipo, origem_id, destino_tipo);

@@ -137,8 +137,16 @@ export async function convertPaymentRequest(
   handlers: ConvertHandlers,
   userId: string | null,
 ): Promise<Row> {
-  const existing = await db.prepare('SELECT lancamento_id, movimentacao_id FROM envio_despesas WHERE id = ?').bind(request.id).first<Row>()
+  const previousStatus = String(request.status || 'PENDENTE').toUpperCase()
+  const existing = await db.prepare('SELECT lancamento_id, movimentacao_id, status FROM envio_despesas WHERE id = ?').bind(request.id).first<Row>()
   if (existing?.lancamento_id || existing?.movimentacao_id) return { ...existing, idempotent: true }
+  const claim = await db.prepare(`UPDATE envio_despesas SET status = 'PROCESSANDO', atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = ? AND lancamento_id IS NULL AND movimentacao_id IS NULL`).bind(request.id, previousStatus).run()
+  if (!claim.meta.changes) {
+    const current = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(request.id).first<Row>()
+    if (current?.lancamento_id || current?.movimentacao_id) return { ...current, idempotent: true }
+    throw new Error('solicitacao_em_processamento')
+  }
   const linhas = JSON.parse(String(request.rateio_linhas_json || '[]')) as Row[]
   const anexos = JSON.parse(String(request.anexos_json || '[]'))
   const cotistaAeronaveId = String(linhas[0]?.cotista_id || request.cotista_id || '').trim() || null
@@ -197,15 +205,16 @@ export async function convertPaymentRequest(
     origem_tipo_conta: request.tipo === 'share' ? 'SOLICITACAO_COMPRA' : 'SOLICITACAO_PAGAMENTO',
   }
 
-  // Envio cliente direto: o cotista pagou; o rateio guarda quem deve a quem.
-  const lancamento = request.tipo === 'cliente' && handlers.createDirectExternalExpense
-    ? await handlers.createDirectExternalExpense(db, comando, userId, { internal: true })
-    : await handlers.createExpense(db, comando, userId, { internal: true })
-  const lancamentoId = String(lancamento.lancamento_id ?? lancamento.id)
+  try {
+    // Envio cliente direto: o cotista pagou; o rateio guarda quem deve a quem.
+    const lancamento = request.tipo === 'cliente' && handlers.createDirectExternalExpense
+      ? await handlers.createDirectExternalExpense(db, comando, userId, { internal: true })
+      : await handlers.createExpense(db, comando, userId, { internal: true })
+    const lancamentoId = String(lancamento.lancamento_id ?? lancamento.id)
 
-  let reimbursement: Row | null = null
-  if (request.tipo === 'reembolso' && handlers.createReimbursement && !ehHolding) {
-    reimbursement = await handlers.createReimbursement(db, {
+    let reimbursement: Row | null = null
+    if (request.tipo === 'reembolso' && handlers.createReimbursement && !ehHolding) {
+      reimbursement = await handlers.createReimbursement(db, {
       idempotency_key: `reembolso:${request.id}`,
       lancamento_origem_id: lancamentoId,
       lancamento_id: lancamentoId,
@@ -223,12 +232,16 @@ export async function convertPaymentRequest(
       rateio_linhas: linhas,
       tipo_rateio: request.tipo_rateio,
       periodicidade: request.periodicidade,
-    }, userId, { internal: true })
+      }, userId, { internal: true })
+    }
+    const destinoTipo = ehHolding ? 'MOVIMENTO_HOLDING' : 'LANCAMENTO'
+    await db.batch([
+      db.prepare('UPDATE envio_despesas SET lancamento_id = ?, movimentacao_id = ?, movimentos_holding_id = ?, status = ? WHERE id = ? AND status = ? AND lancamento_id IS NULL').bind(ehHolding ? null : lancamentoId, lancamentoId, ehHolding ? lancamentoId : null, 'CONVERTIDO', request.id, 'PROCESSANDO'),
+      db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'ENVIO_DESPESA', ?, ?, ?, 'CONVERSAO')`).bind(crypto.randomUUID(), request.id, destinoTipo, lancamentoId),
+    ])
+    return { id: request.id, lancamento_id: ehHolding ? null : lancamentoId, movimentacao_id: lancamentoId, reimbursement, idempotent: false }
+  } catch (error) {
+    await db.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = ? AND lancamento_id IS NULL AND movimentacao_id IS NULL').bind(previousStatus, request.id, 'PROCESSANDO').run().catch(() => undefined)
+    throw error
   }
-  const destinoTipo = ehHolding ? 'MOVIMENTO_HOLDING' : 'LANCAMENTO'
-  await db.batch([
-    db.prepare('UPDATE envio_despesas SET lancamento_id = ?, movimentacao_id = ?, movimentos_holding_id = ?, status = ? WHERE id = ? AND lancamento_id IS NULL').bind(ehHolding ? null : lancamentoId, lancamentoId, ehHolding ? lancamentoId : null, 'CONVERTIDO', request.id),
-    db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'ENVIO_DESPESA', ?, ?, ?, 'CONVERSAO')`).bind(crypto.randomUUID(), request.id, destinoTipo, lancamentoId),
-  ])
-  return { id: request.id, lancamento_id: ehHolding ? null : lancamentoId, movimentacao_id: lancamentoId, reimbursement, idempotent: false }
 }

@@ -1734,6 +1734,11 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const schema = await loadSchema(db)
   const row = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()
   if (!row) throw new FinanceError('Conta a pagar não encontrada', 'nao_encontrado', 404)
+  const requestKey = idempotencyKey(body)
+  if (requestKey) {
+    const prior = await db.prepare("SELECT id FROM auditoria_financeira WHERE entidade = 'contas_apagar' AND entidade_id = ? AND operacao = 'BAIXA' AND idempotency_key = ? LIMIT 1").bind(payableId, requestKey).first<Row>()
+    if (prior) return { ...row, idempotent: true }
+  }
   if (upper(row.status) === 'PAGO') return { ...row, idempotent: true }
   if (upper(row.status) === 'CANCELADO') throw new FinanceError('Conta cancelada não pode ser paga', 'conta_cancelada')
 
@@ -1759,7 +1764,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
     updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId]),
-    auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), idempotencyKey(body)),
+    auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
       db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('APROVADO', 'CONVERTIDO')").bind(purchase.id),
       ...mensagemFinanceiraStatements(db, nullableText(purchase.criado_por), userId, 'Solicitação de compra concluída', `O pagamento da solicitação “${text(purchase.descricao)}” foi concluído em ${paymentDate}.`),
@@ -1789,17 +1794,19 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   let rateios = rateioLancamentoId
     ? await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
     : { results: [] as Row[] }
+  const statements: D1PreparedStatement[] = []
 
   if (reimbursement && rateioLancamentoId && !(rateios.results || []).length) {
     const cotista = await db.prepare('SELECT percentual_sociedade FROM cotista_aeronave WHERE id = ?').bind(reimbursement.cotista_id).first<Row>()
     const clientLancamento = await db.prepare('SELECT aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome FROM lancamentos WHERE id = ?').bind(rateioLancamentoId).first<Row>()
     if (!clientLancamento?.aeronave_id || !reimbursement.cotista_id) throw new FinanceError('Dados do reembolso incompletos para gerar o rateio', 'reembolso_incompleto')
-    await db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente, origem_id, origem_tipo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'FIXO', 'ÚNICO', 'AGUARDANDO_REEMBOLSO', ?, 0, ?, 'RECIBO_REEMBOLSO')`).bind(
-      id(), rateioLancamentoId, clientLancamento.aeronave_id, reimbursement.cotista_id, clientLancamento.data_emissao, clientLancamento.data_vencimento,
+    const rateioId = id()
+    statements.push(db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente, origem_id, origem_tipo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'FIXO', 'ÚNICO', 'AGUARDANDO_REEMBOLSO', ?, 0, ?, 'RECIBO_REEMBOLSO')`).bind(
+      rateioId, rateioLancamentoId, clientLancamento.aeronave_id, reimbursement.cotista_id, clientLancamento.data_emissao, clientLancamento.data_vencimento,
       clientLancamento.categoria_id ?? null, clientLancamento.categoria_nome ?? 'REEMBOLSO', Number(cotista?.percentual_sociedade ?? 0), 100,
       total, total, clientLancamento.descricao ?? 'Reembolso de despesa', reimbursement.id,
-    ).run()
-    rateios = await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
+    ))
+    rateios = { results: [{ id: rateioId, valor_rateado_centavos: total }] }
   }
   const allowed = new Map((rateios.results || []).map(r => [String(r.id), Number(r.valor_rateado_centavos)]))
   const rateioPadraoId = (rateios.results || []).length === 1 ? String(rateios.results![0].id) : null
@@ -1814,7 +1821,6 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const confirmadoAnterior = [...existingByRateio.values()].reduce((sum, value) => sum + value, 0)
   const acceptedPayments: RealPayment[] = []
   const distributed = new Map<string, number>()
-  const statements: D1PreparedStatement[] = []
   let newTotal = 0
   for (const payment of payments) {
     const paymentKey = nullableText(payment.idempotency_key) || `${receivableId}:${payment.tipo_pagador}:${payment.valor_centavos}:${payment.data_pagamento || body.data_recebimento || body.dataRecebimento || ''}`
@@ -1874,11 +1880,11 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     if (client && allPaid) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: lastDate, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
   }
   statements.push(auditStatement(db, schema, 'contas_areceber', receivableId, 'BAIXA', userId, newTotal, finalTotal, nullableText(body.motivo), nullableText(body.idempotency_key)))
+  if (reimbursement && novoStatusConta === 'RECEBIDO') {
+    statements.push(db.prepare("UPDATE reembolsos SET status = 'REEMBOLSADO', recebido_em = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'REEMBOLSADO'").bind(lastDate, reimbursement.id))
+  }
   await db.batch(statements)
   const updated = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
-  if (reimbursement && novoStatusConta === 'RECEBIDO') {
-    await db.prepare("UPDATE reembolsos SET status = 'REEMBOLSADO', recebido_em = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(lastDate, reimbursement.id).run()
-  }
   const updatedRateios = rateioLancamentoId
     ? await db.prepare('SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(rateioLancamentoId).all<Row>()
     : { results: [] as Row[] }
