@@ -800,7 +800,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const [receber, pagar, movimentacoes, emailsEnviados] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
       listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
-      listar(db, 'SELECT * FROM lancamentos ORDER BY criado_em DESC LIMIT 100'),
+      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, hs.email_principal AS socio_email FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN hold_socios hs ON hs.id = l.socio_id ORDER BY l.criado_em DESC LIMIT 100`),
       listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em, email_enviado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
@@ -831,6 +831,8 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     return c.json({
       resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({
         ...row,
+        destinatario_email: row.destinatario_email ?? row.socio_email ?? null,
+        anexos: (() => { try { const valor = JSON.parse(String(row.anexos_json || '[]')); return Array.isArray(valor) ? valor : [] } catch { return [] } })(),
         fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
         valor: Number(row.valor_centavos || 0) / 100,
         pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))),
@@ -840,6 +842,77 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     })
   } catch (error) { return errorResponse(c, error) }
 })
+
+async function origemRateio(db: D1Database, origemTipo: string, origemId: string) {
+  if (origemTipo === 'lancamentos') {
+    const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
+    if (!lancamento) return null
+    return { kind: 'cliente' as const, source: lancamento, movimentoId: null }
+  }
+  if (origemTipo === 'rateio_hold') {
+    const rateio = await db.prepare('SELECT * FROM rateio_hold WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
+    if (!rateio) return null
+    const movimentoId = String(rateio.movimento_id ?? rateio.movimentos_id ?? '').trim()
+    const movimento = movimentoId ? await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(movimentoId).first<Record<string, unknown>>() : null
+    if (!movimento) return null
+    return { kind: 'holding' as const, source: movimento, movimentoId }
+  }
+  return null
+}
+
+financeiroRoutes.get('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId/rateio-opcoes', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const origem = await origemRateio(db, c.req.param('origemTipo'), c.req.param('origemId'))
+    if (!origem) return c.json({ error: 'movimentacao_nao_encontrada' }, 404)
+    const aeronaveId = String(origem.source.aeronave_id ?? '').trim()
+    if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria_para_rateio' }, 409)
+    const rows = origem.kind === 'cliente'
+      ? await listar(db, `SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, ca.id) AS nome, COALESCE(ca.percentual_sociedade, 0) AS percentual_sugerido FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.aeronave_id = ? ORDER BY nome`, aeronaveId)
+      : await listar(db, `SELECT DISTINCT hs.id, COALESCE(hs.nome, hs.id) AS nome, COALESCE(ca.percentual_sociedade, 0) AS percentual_sugerido FROM hold_socios hs LEFT JOIN cotista_aeronave ca ON ca.socio_id = hs.id AND ca.aeronave_id = ? WHERE hs.id IN (SELECT socio_id FROM cotista_aeronave WHERE aeronave_id = ? AND socio_id IS NOT NULL) ORDER BY nome`, aeronaveId, aeronaveId)
+    return c.json({ origem_tipo: c.req.param('origemTipo'), origem_id: c.req.param('origemId'), valor_centavos: Number(origem.source.valor_centavos ?? origem.source.valor_rateado_centavos ?? 0), cotistas: rows })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId/rateio', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const origem = await origemRateio(db, c.req.param('origemTipo'), c.req.param('origemId'))
+    if (!origem) return c.json({ error: 'movimentacao_nao_encontrada' }, 404)
+    const body = await c.req.json<Record<string, unknown>>()
+    const linhas = Array.isArray(body.linhas) ? body.linhas as Array<Record<string, unknown>> : []
+    const total = linhas.reduce((sum, line) => sum + Number(line.percentual ?? 0), 0)
+    if (!linhas.length || Math.abs(total - 100) > 0.01) return c.json({ error: 'percentuais_devem_totalizar_100' }, 400)
+    const aeronaveId = String(origem.source.aeronave_id ?? '').trim()
+    const valorTotal = Number(origem.source.valor_centavos ?? origem.source.valor_rateado_centavos ?? 0)
+    if (!aeronaveId || !Number.isInteger(valorTotal) || valorTotal <= 0) return c.json({ error: 'valor_ou_aeronave_invalidos' }, 400)
+    const dataEmissao = String(origem.source.data_emissao ?? origem.source.data ?? new Date().toISOString().slice(0, 10)).slice(0, 10)
+    const dataVencimento = String(body.data_vencimento ?? dataEmissao).slice(0, 10)
+    const periodicidade = String(body.periodicidade ?? 'EVENTUAL').toUpperCase()
+    const tipoRateio = String(body.tipo_rateio ?? 'EXTRA').toUpperCase()
+    const descricao = String(origem.source.descricao ?? origem.source.descricao_despesa ?? 'Despesa financeira')
+    const categoriaId = origem.source.categoria_id ?? null
+    const categoriaNome = origem.source.categoria_nome ?? null
+    const rateioIds: string[] = []
+    const statements: D1PreparedStatement[] = []
+    for (const linha of linhas) {
+      const id = crypto.randomUUID(); rateioIds.push(id)
+      const percentual = Number(linha.percentual); const rateado = Math.round(valorTotal * percentual / 100)
+      if (origem.kind === 'cliente') {
+        const cotista = await db.prepare('SELECT id, percentual_sociedade FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(String(linha.cotista_id ?? ''), aeronaveId).first<{ id: string; percentual_sociedade: number | null }>()
+        if (!cotista) return c.json({ error: 'cotista_cliente_invalido' }, 400)
+        statements.push(db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'PENDENTE', ?, 0)`).bind(id, c.req.param('origemId'), aeronaveId, cotista.id, dataEmissao, dataVencimento, categoriaId, categoriaNome, Number(cotista.percentual_sociedade ?? 0), percentual, valorTotal, rateado, tipoRateio, periodicidade, descricao))
+      } else {
+        const socio = await db.prepare('SELECT id FROM hold_socios WHERE id = ?').bind(String(linha.cotista_id ?? '')).first<{ id: string }>()
+        if (!socio || !origem.movimentoId) return c.json({ error: 'socio_holding_invalido' }, 400)
+        statements.push(db.prepare(`INSERT INTO rateio_hold (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'EM_ABERTO', ?)`).bind(id, origem.movimentoId, aeronaveId, socio.id, dataEmissao, dataVencimento, categoriaId, categoriaNome, percentual, valorTotal, rateado, tipoRateio, periodicidade, descricao))
+      }
+    }
+    await db.batch(statements)
+    return c.json({ ok: true, rateio_ids: rateioIds }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
 
 financeiroRoutes.get('/dashboard/financeiro/movimentacoes', async (c) => {
   try {

@@ -6181,7 +6181,12 @@ async function marcarEmailEnviadoParaOrigens(
     let lancamentoIds: string[] = []
     let movimentoIds: string[] = []
 
-    if (prefix === 'recibo') {
+    if (prefix === 'lancamento') {
+      lancamentoIds.push(rawId)
+    } else if (prefix === 'movimento_holding') {
+      movimentoIds.push(rawId)
+    } else if (prefix === 'recibo') {
+
       // Aceita recibo:<id do recibo> e recibo:<id do anexo>.
       const reciboDireto = await db.prepare('SELECT id, lancamento_id FROM recibos WHERE id = ?1').bind(rawId).first<{ id: string; lancamento_id: string | null }>()
       const anexo = reciboDireto ? null : await db.prepare('SELECT recibo_id FROM recibo_anexos WHERE id = ?1').bind(rawId).first<{ recibo_id: string | null }>()
@@ -7819,6 +7824,18 @@ app.post('/api/interno/emails', async c => {
         try { key = new URL(row.caminho).searchParams.get('key') || key } catch { /* chave legada */ }
         const bucket = shareBrasilBucket(c); const object = bucket ? await bucket.get(key) : null
         if (object) anexos.push({ filename: key.split('/').pop() || `abastecimento-${tipoAbastecimento}`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/octet-stream' })
+      }
+      continue
+    }
+    if (prefix === 'lancamento') {
+      const row = await db.prepare('SELECT anexos_json, url_doc, url_nf, url_boleto, url_demonstrativo FROM lancamentos WHERE id = ?1').bind(rawId).first<any>().catch(() => null)
+      let anexosLancamento: any[] = []
+      try { const parsed = JSON.parse(String(row?.anexos_json || '[]')); if (Array.isArray(parsed)) anexosLancamento = parsed } catch { /* formato legado inválido */ }
+      const urls = [row?.url_doc, row?.url_nf, row?.url_boleto, row?.url_demonstrativo].filter(Boolean).map((url) => ({ url: String(url), nome: 'Documento da despesa' }))
+      for (const anexo of [...anexosLancamento, ...urls]) {
+        const caminho = chaveStorageDeUrl(anexo.url || anexo.url_arquivo || anexo.caminho_arquivo)
+        const object = caminho && shareBrasilBucket(c) ? await shareBrasilBucket(c).get(caminho) : null
+        if (object) anexos.push({ filename: anexo.nome || anexo.filename || 'documento-da-despesa', content: arrayBufferBase64(await object.arrayBuffer()), content_type: anexo.tipo || anexo.tipo_arquivo || object.httpMetadata?.contentType || 'application/octet-stream' })
       }
       continue
     }
