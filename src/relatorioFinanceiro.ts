@@ -343,6 +343,9 @@ export async function sincronizarRelatorioViagemFinanceiro(
   report: ReportRow,
   userId: string | null,
 ): Promise<{ idempotent: boolean; destinos: Array<{ tipo: string; id: string }> }> {
+  const numeroVooId = text(report.numero_voo)
+    ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 LIMIT 1').bind(text(report.numero_voo)).first<{ id: string }>())?.id || null
+    : null
   const reportId = text(report.id)
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
   const expenses = expensesFromReport(report)
@@ -382,8 +385,8 @@ export async function sincronizarRelatorioViagemFinanceiro(
           LIMIT 1`).bind(reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).first<{ id: string }>()
         lancamentoId = text(lancamentoExistente?.id) || null
         if (lancamentoId) {
-          await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_vencimento = ?
-            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), text(report.pdf_path) || null, rows[0]?.id || null, text(report.cliente_id) || null, existingDueDate, lancamentoId).run()
+          await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, periodicidade = 'EVENTUAL', url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_vencimento = ?
+            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, text(report.cliente_id) || null, existingDueDate, lancamentoId).run()
         } else if (payer === 'tripulante_1' || payer === 'tripulante_2') {
           const tripulanteId = payer === 'tripulante_1' ? report.tripulacao_id : report.tripulante_id_2
           const tripulanteUserId = await findTripulanteUserId(db, tripulanteId)
@@ -398,6 +401,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
             descricao: description,
             fornecedor_nome: FORNECEDOR_RELATORIO_VIAGEM,
             numero_doc: text(report.numero_relatorio),
+            numero_voo: numeroVooId,
             url_doc: text(report.pdf_path) || null,
             cotista_aeronave_id: rows[0]?.id || null,
             cliente_id: text(report.cliente_id) || null,
@@ -407,7 +411,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
             fluxo: 'SAIDA',
             tipo_caixa: 'SHARE',
             valor_centavos: amountCentavos,
-            pago_por: tripulanteUserId,
+            pago_por: null,
             pago_diretamente: 0,
             reembolsavel: 1,
             reembolso_quitado: 0,
@@ -468,10 +472,12 @@ export async function sincronizarRelatorioViagemFinanceiro(
         colaborador_id: tripulanteUserId,
         data_emissao: dateValue(report.data_inicio, fallbackDate),
         data_vencimento: dueDate,
+        periodicidade: 'EVENTUAL',
         data_pagamento: null,
         descricao: description,
         fornecedor_nome: FORNECEDOR_RELATORIO_VIAGEM,
         numero_doc: text(report.numero_relatorio),
+        numero_voo: numeroVooId,
         url_doc: text(report.pdf_path) || null,
         cotista_aeronave_id: allocations[0]?.id || null,
         cliente_id: kind === 'CLIENTE' ? text(report.cliente_id) || null : null,
@@ -481,7 +487,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
         fluxo: 'SAIDA',
         tipo_caixa: 'SHARE',
         valor_centavos: amountCentavos,
-        pago_por: tripulanteUserId,
+        pago_por: null,
         pago_diretamente: 0,
         reembolsavel: reembolsavel ? 1 : 0,
         reembolso_quitado: 0,
