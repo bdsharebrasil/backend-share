@@ -3879,7 +3879,7 @@ app.get('/api/interno/agendamento', async c => {
   const tripulantes = [...tripulacao.results, ...freelancers.results]
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
   const escala = agendamentos.results
-    .filter((item: any) => item.status === 'aprovada' && (item.piloto_id || item.copiloto_id))
+    .filter((item: any) => ['aprovada', 'em_voo', 'em_rota'].includes(String(item.status || '').toLowerCase()) && (item.piloto_id || item.copiloto_id))
     .map((item: any) => ({
       id: item.id,
       data_agendada: item.data_agendada,
