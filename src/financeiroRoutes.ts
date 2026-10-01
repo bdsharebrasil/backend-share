@@ -763,6 +763,151 @@ financeiroRoutes.get('/notas-saida', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+async function categoriaClienteNota(db: D1Database, id: string, subcategoria: string | null) {
+  if (!id) return { id: null, nome: null, subcategoria }
+  const row = await db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente WHERE id = ?').bind(id).first<Record<string, unknown>>()
+  if (!row) return { id: null, nome: null, subcategoria }
+  const subcategorias = [row.subcategoria_1, row.subcategoria_2, row.subcategoria_3, row.subcategoria_4].map((value) => String(value ?? '').trim()).filter(Boolean)
+  return { id: String(row.id), nome: String(row.nome ?? '').trim() || null, subcategoria: subcategoria || subcategorias[0] || null }
+}
+
+function documentoSaidaRow(db: D1Database, id: string) {
+  return db.prepare(`SELECT n.*, cr.id AS contas_areceber_id
+    FROM notas_fiscais_saida n
+    LEFT JOIN contas_areceber cr ON cr.nf_saida_id = n.id
+    WHERE n.id = ?`).bind(id).first<Record<string, unknown>>()
+}
+
+financeiroRoutes.post('/notas-saida', async (c) => {
+  try {
+    await validateFinanceSchema(c.env.SHARE_DB)
+    const db = c.env.SHARE_DB
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const numero = String(body.numero ?? '').trim()
+    const cotistaId = String(body.cotista_id ?? body.cotista_aeronave_id ?? '').trim()
+    const aeronaveId = String(body.aeronave_id ?? '').trim()
+    const dataEmissao = String(body.data_emissao ?? '').trim()
+    const dataVencimento = String(body.data_vencimento ?? dataEmissao).trim()
+    const descricao = String(body.descricao_servico ?? body.descricao ?? '').trim()
+    const valor = Number(body.valor_total ?? body.valor ?? 0)
+    const categoriaReceitaId = String(body.categoria_receita_id ?? '').trim()
+    const categoriaClienteId = String(body.categoria_id ?? '').trim()
+    if (!numero || !cotistaId || !aeronaveId || !categoriaReceitaId || !(valor > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao) || !descricao) {
+      return c.json({ error: 'numero, cotista_id, aeronave_id, categoria_receita_id, valor_total, data_emissao e descricao_servico são obrigatórios' }, 400)
+    }
+    const cotista = await db.prepare('SELECT id FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(cotistaId, aeronaveId).first()
+    if (!cotista) return c.json({ error: 'cotista_aeronave_invalido' }, 400)
+    const categoriaReceita = await db.prepare('SELECT id, nome FROM categoria_movimentacao_share WHERE id = ?').bind(categoriaReceitaId).first<{ id: string; nome: string }>()
+    if (!categoriaReceita) return c.json({ error: 'categoria_receita_invalida' }, 400)
+    const categoriaCliente = await categoriaClienteNota(db, categoriaClienteId, String(body.subcategoria_1 ?? '').trim() || null)
+    if (categoriaClienteId && !categoriaCliente.id) return c.json({ error: 'categoria_despesa_invalida' }, 400)
+    const id = crypto.randomUUID()
+    const financeiro = await issueRevenue(db, {
+      idempotency_key: `nf_saida:${id}`,
+      valor_centavos: Math.round(valor * 100),
+      descricao,
+      data: dataEmissao,
+      data_emissao: dataEmissao,
+      data_vencimento: dataVencimento,
+      aeronave_id: aeronaveId,
+      cotista_aeronave_id: cotistaId,
+      categoria_id: categoriaReceitaId,
+      categoria_nome: body.categoria_receita_nome ?? categoriaReceita.nome,
+      categoria_cliente_id: categoriaCliente.id,
+      categoria_cliente_nome: categoriaCliente.nome,
+      categoria_despesa_subcategoria: categoriaCliente.subcategoria,
+      origem_tipo: 'NF_SAIDA',
+      origem_id: id,
+      periodicidade: 'MENSAL',
+    }, c.get('userId') || null)
+    try {
+      await db.prepare(`INSERT INTO notas_fiscais_saida
+        (id, numero, cotista_id, aeronave_id, valor_total, percentual, descricao_servico, nome_categoria,
+         categoria_id, subcategoria_1, data_emissao, data_vencimento, status, arquivo_pdf_url, lancamentos_id, criado_por)
+        VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(id, numero, cotistaId, aeronaveId, valor, descricao, body.categoria_receita_nome ?? categoriaReceita.nome,
+          categoriaCliente.id, categoriaCliente.subcategoria, dataEmissao, dataVencimento,
+          ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO', body.arquivo_pdf_url ? String(body.arquivo_pdf_url) : null,
+          financeiro.lancamento_id ?? financeiro.id ?? null, c.get('userId') || null).run()
+      if (financeiro.contaReceberId) {
+        await db.prepare('UPDATE contas_areceber SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id, financeiro.contaReceberId).run()
+      }
+    } catch (error) {
+      await db.prepare('DELETE FROM notas_fiscais_saida WHERE id = ?').bind(id).run().catch(() => undefined)
+      throw error
+    }
+    return c.json({ nota: await documentoSaidaRow(db, id) }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.patch('/notas-saida/:id', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    if (!(await documentoSaidaRow(db, id))) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const fields: Array<[string, unknown]> = []
+    const add = (column: string, value: unknown) => { if (value !== undefined) fields.push([column, value === '' ? null : value]) }
+    add('numero', body.numero); add('cotista_id', body.cotista_id ?? body.cotista_aeronave_id); add('aeronave_id', body.aeronave_id)
+    add('data_emissao', body.data_emissao); add('data_vencimento', body.data_vencimento); add('valor_total', body.valor_total ?? body.valor)
+    add('nome_categoria', body.nome_categoria); add('descricao_servico', body.descricao_servico ?? body.descricao); add('status', body.status)
+    add('arquivo_pdf_url', body.arquivo_pdf_url)
+    if (!fields.length) return c.json({ error: 'nenhum_campo_atualizavel' }, 400)
+    const assignments = fields.map(([column]) => `${column} = ?`).join(', ')
+    await db.prepare(`UPDATE notas_fiscais_saida SET ${assignments}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...fields.map(([, value]) => value), id).run()
+    return c.json({ nota: await documentoSaidaRow(db, id) })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.delete('/notas-saida/:id', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    const nota = await documentoSaidaRow(db, id)
+    if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const contaId = String(nota.contas_areceber_id ?? '').trim()
+    const lancamentoId = String(nota.lancamentos_id ?? '').trim()
+    const conta = contaId ? await db.prepare('SELECT lancamentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null }>() : null
+    const lancamentos = [...new Set([lancamentoId, conta?.lancamentos_id ?? ''].filter(Boolean))]
+    const espelhos = lancamentos.length ? await listar(db, `SELECT id FROM lancamentos WHERE origem_id IN (${lancamentos.map(() => '?').join(', ')})`, ...lancamentos) : []
+    lancamentos.push(...espelhos.map((row) => String(row.id)).filter(Boolean))
+    const ids = [...new Set(lancamentos)]
+    const statements: D1PreparedStatement[] = []
+    if (ids.length) {
+      const placeholders = ids.map(() => '?').join(', ')
+      const rateios = await listar(db, `SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`, ...ids)
+      const rateioIds = rateios.map((row) => String(row.id)).filter(Boolean)
+      if (rateioIds.length) statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioIds.map(() => '?').join(', ')})`).bind(...rateioIds))
+      statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
+      statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE origem_id IN (${placeholders}) OR destino_id IN (${placeholders}) OR origem_id = ? OR destino_id = ?`).bind(...ids, ...ids, id, id))
+      statements.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
+    } else {
+      statements.push(db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ? OR destino_id = ?').bind(id, id))
+    }
+    if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
+    statements.push(db.prepare('DELETE FROM notas_fiscais_saida WHERE id = ?').bind(id))
+    await db.batch(statements)
+    return c.json({ ok: true, id })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
+  try {
+    const nota = await documentoSaidaRow(c.env.SHARE_DB, c.req.param('id'))
+    if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const contaId = String(nota.contas_areceber_id ?? '').trim()
+    if (!contaId) return c.json({ error: 'conta_a_receber_nao_vinculada' }, 409)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const conta = await settleReceivable(c.env.SHARE_DB, contaId, {
+      data_recebimento: body.data_pagamento ?? body.data_recebimento,
+      banco_recebimento: body.conta_bancaria ?? body.banco_recebimento,
+      forma_pagamento: body.forma_pagamento,
+      comprovante_recebimento_url: body.comprovante_url,
+    }, c.get('userId') || null)
+    return c.json({ ok: true, conta })
+  } catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.post('/notas-saida/anexos', async (c) => {
   try {
     const bucket = storage(c)

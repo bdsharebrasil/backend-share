@@ -1282,6 +1282,8 @@ export async function issueRevenue(
       ? id()
       : null
 
+  const documentoSaida = ['RECIBO_SAIDA', 'NF_SAIDA'].includes(upper(command.origem_tipo))
+
   const statements: D1PreparedStatement[] = [
     insertStatement(
       db,
@@ -1295,7 +1297,7 @@ export async function issueRevenue(
         descricao: command.descricao,
         fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-        fluxo: upper(command.origem_tipo) === 'RECIBO_SAIDA' ? 'RECEITA' : 'ENTRADA',
+        fluxo: documentoSaida ? 'RECEITA' : 'ENTRADA',
         natureza: 'RECEITA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
@@ -1344,7 +1346,7 @@ export async function issueRevenue(
 
   if (clientLancamentoId) {
     const clientRateioId = id()
-    const reciboSaida = upper(command.origem_tipo) === 'RECIBO_SAIDA'
+    const reciboSaida = documentoSaida
     statements.push(
       insertStatement(
         db,
