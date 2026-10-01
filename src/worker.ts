@@ -7797,7 +7797,7 @@ app.post('/api/interno/emails', async c => {
   const destinatarios = emailArray(body.destinatarios)
   const copias = emailArray(body.cc).filter((email) => !destinatarios.includes(email))
   const todosDestinatarios = [...destinatarios, ...copias]
-  const assunto = String(body.assunto || '').trim(); const mensagem = [String(body.mensagem || '').trim(), String(body.dados_bancarios || '').trim()].filter(Boolean).join('\n\n'); const ids = Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
+  const assunto = String(body.assunto || '').trim(); const mensagem = [String(body.mensagem || '').trim(), String(body.dados_bancarios || '').trim()].filter(Boolean).join('\n\n'); const ids = [...new Set(Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })())]
   const referencias = Array.isArray(body.referencias) ? body.referencias.map(String) : (() => { try { const parsed = JSON.parse(String(body.referencias || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
   const origens = [...new Set([...referencias, ...ids])]
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
@@ -7836,6 +7836,16 @@ app.post('/api/interno/emails', async c => {
         const caminho = chaveStorageDeUrl(anexo.url || anexo.url_arquivo || anexo.caminho_arquivo)
         const object = caminho && shareBrasilBucket(c) ? await shareBrasilBucket(c).get(caminho) : null
         if (object) anexos.push({ filename: anexo.nome || anexo.filename || 'documento-da-despesa', content: arrayBufferBase64(await object.arrayBuffer()), content_type: anexo.tipo || anexo.tipo_arquivo || object.httpMetadata?.contentType || 'application/octet-stream' })
+      }
+      continue
+    }
+    if (prefix === 'movimento_holding' || prefix === 'movimentos_holding') {
+      const row = await db.prepare('SELECT url_doc, url_nf, url_boleto, comprovante_url FROM movimentos_holding WHERE id = ?1').bind(rawId).first<any>().catch(() => null)
+      const urls = [row?.url_doc, row?.url_nf, row?.url_boleto, row?.comprovante_url].filter(Boolean).map((url) => ({ url: String(url), nome: 'Documento da despesa' }))
+      for (const anexo of urls) {
+        const caminho = chaveStorageDeUrl(anexo.url)
+        const object = caminho && shareBrasilBucket(c) ? await shareBrasilBucket(c).get(caminho) : null
+        if (object) anexos.push({ filename: caminho.split('/').pop() || 'documento-da-despesa', content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/octet-stream' })
       }
       continue
     }

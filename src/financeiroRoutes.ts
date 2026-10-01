@@ -794,6 +794,26 @@ financeiroRoutes.get('/notas-saida/anexos/:id/arquivo', async (c) => {
   return c.body(await object.arrayBuffer(), 200, { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' })
 })
 
+function anexosDashboardFinanceiro(row: Record<string, unknown>, prefix: 'lancamento' | 'movimento_holding') {
+  const origemId = String(row.id ?? '')
+  if (!origemId) return []
+  let anexosJson: unknown[] = []
+  try {
+    const parsed = JSON.parse(String(row.anexos_json || '[]'))
+    if (Array.isArray(parsed)) anexosJson = parsed
+  } catch { /* mantém os anexos por URL */ }
+  const urls: Array<[string, string]> = [
+    ['url_nf', 'Nota fiscal'],
+    ['url_boleto', 'Boleto'],
+    ['url_doc', 'Documento'],
+    ['url_demonstrativo', 'Demonstrativo'],
+    ['comprovante_url', 'Comprovante'],
+  ]
+  const itens = anexosJson.map((anexo: any) => ({ id: `${prefix}:${origemId}`, nome: anexo?.nome || anexo?.filename || 'Documento anexado' }))
+  for (const [campo, nome] of urls) if (row[campo]) itens.push({ id: `${prefix}:${origemId}`, nome })
+  return itens
+}
+
 financeiroRoutes.get('/dashboard/financeiro', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -833,8 +853,8 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const contasEmAberto = new Set(contasPendentes.flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
     return c.json({
       resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length },
-      lancamentos: lancamentosComFornecedor.map((row) => ({ ...row, destinatario_email: row.destinatario_email ?? null, anexos: (() => { try { const valor = JSON.parse(String(row.anexos_json || '[]')); return Array.isArray(valor) ? valor : [] } catch { return [] } })(), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))), justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null, reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null })),
-      movimentos_holding: movimentosHoldingComFornecedor.map((row) => ({ ...row, tipo_caixa: 'HOLDING', fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id].some((id) => contasEmAberto.has(String(id))) })),
+      lancamentos: lancamentosComFornecedor.map((row) => ({ ...row, destinatario_email: row.destinatario_email ?? null, anexos: anexosDashboardFinanceiro(row, 'lancamento'), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))), justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null, reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null })),
+      movimentos_holding: movimentosHoldingComFornecedor.map((row) => ({ ...row, tipo_caixa: 'HOLDING', anexos: anexosDashboardFinanceiro(row, 'movimento_holding'), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id].some((id) => contasEmAberto.has(String(id))) })),
       movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100 })),
       emails_enviados: emailsEnviados
     })
