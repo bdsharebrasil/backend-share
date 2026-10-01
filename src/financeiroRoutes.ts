@@ -800,7 +800,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const [receber, pagar, movimentacoes, emailsEnviados] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
       listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
-      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, hs.email_principal AS socio_email FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN hold_socios hs ON hs.id = l.socio_id ORDER BY l.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id ORDER BY l.criado_em DESC LIMIT 100`),
       listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em, email_enviado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
@@ -831,7 +831,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     return c.json({
       resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({
         ...row,
-        destinatario_email: row.destinatario_email ?? row.socio_email ?? null,
+        destinatario_email: row.destinatario_email ?? null,
         anexos: (() => { try { const valor = JSON.parse(String(row.anexos_json || '[]')); return Array.isArray(valor) ? valor : [] } catch { return [] } })(),
         fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
         valor: Number(row.valor_centavos || 0) / 100,
