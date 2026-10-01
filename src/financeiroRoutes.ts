@@ -820,8 +820,8 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const [receber, pagar, movimentacoes, movimentosHolding, emailsEnviados] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
       listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
-      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id ORDER BY l.criado_em DESC LIMIT 100`),
-      listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id ORDER BY mh.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(ca.codigo_cliente, (SELECT ca_cliente.codigo_cliente FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id ORDER BY l.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome, (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.aeronave_id = mh.aeronave_id AND ca.socio_id = mh.socio_id LIMIT 1) AS codigo_cliente FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id ORDER BY mh.criado_em DESC LIMIT 100`),
       listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em, email_enviado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
