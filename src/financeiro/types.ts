@@ -58,6 +58,7 @@ export type LancamentoConsolidado = {
 
 export type SaldoCotista = {
   cotista: string
+  cotistaId?: string
   totalPagoCentavos: number
   totalDevidoCentavos: number
   saldoCentavos: number

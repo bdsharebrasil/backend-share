@@ -876,9 +876,12 @@ financeiroRoutes.get('/dashboard/financeiro/movimentacoes', async (c) => {
 function calcularCompensacaoBalanco(rows: Record<string, unknown>[]) {
   const devido = new Map<string, number>()
   const pago = new Map<string, number>()
+  const nomes = new Map<string, string>()
   for (const row of rows) {
     const participante = String(row.participante_id ?? '').trim()
-    const valorDevido = Math.max(0, Number(row.valor_centavos ?? 0))
+    const nome = String(row.participante_nome ?? '').trim()
+    if (participante && nome) nomes.set(participante, nome)
+    const valorDevido = Math.max(0, Number(row.valor_rateado_centavos ?? row.valor_centavos ?? 0))
     if (participante) devido.set(participante, (devido.get(participante) || 0) + valorDevido)
     const pagador = String(row.pago_por ?? '').trim() || (Number(row.pago_diretamente || 0) ? participante : '')
     const valorPago = Math.max(0, Number(row.valor_pago_centavos ?? 0))
@@ -888,7 +891,7 @@ function calcularCompensacaoBalanco(rows: Record<string, unknown>[]) {
   const saldos = ids.map((cotista) => {
     const totalPagoCentavos = pago.get(cotista) || 0
     const totalDevidoCentavos = devido.get(cotista) || 0
-    return { cotista, totalPagoCentavos, totalDevidoCentavos, saldoCentavos: totalPagoCentavos - totalDevidoCentavos }
+    return { cotista: nomes.get(cotista) || cotista, cotistaId: cotista, totalPagoCentavos, totalDevidoCentavos, saldoCentavos: totalPagoCentavos - totalDevidoCentavos }
   }).sort((a, b) => Math.abs(b.saldoCentavos) - Math.abs(a.saldoCentavos))
   const matriz: Record<string, Record<string, number>> = {}
   for (const credor of ids) matriz[credor] = Object.fromEntries(ids.map((devedor) => [devedor, 0]))
@@ -924,20 +927,28 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
     const rows = await listar(c.env.SHARE_DB, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
-             r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
+             r.data_vencimento, 'SAIDA' AS fluxo, CASE WHEN l.tipo_caixa = 'CLIENTE' AND (SELECT COUNT(*) FROM rateio_despesas rd_total WHERE rd_total.lancamento_id = r.lancamento_id AND rd_total.status <> 'CANCELADO') = 1 THEN COALESCE(NULLIF(l.valor_centavos, 0), r.valor_rateado_centavos) ELSE r.valor_rateado_centavos END AS valor_centavos,
+             CASE WHEN l.tipo_caixa = 'CLIENTE' AND (SELECT COUNT(*) FROM rateio_despesas rd_total WHERE rd_total.lancamento_id = r.lancamento_id AND rd_total.status <> 'CANCELADO') = 1 THEN COALESCE(NULLIF(l.valor_centavos, 0), r.valor_rateado_centavos) ELSE r.valor_rateado_centavos END AS valor_rateado_centavos,
              r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'CLIENTE' AS tipo_caixa,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
-             'rateio_despesas' AS origem_rateio, NULL AS local
+             'rateio_despesas' AS origem_rateio, NULL AS local,
+             COALESCE(cl.razao_social, ca.codigo_cliente, r.cotista_id) AS participante_nome
         FROM rateio_despesas r
+        LEFT JOIN lancamentos l ON l.id = r.lancamento_id
+        LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id
+        LEFT JOIN cliente cl ON cl.id = ca.cliente_id
         ${filtrosCliente.length ? `WHERE ${filtrosCliente.join(' AND ')}` : ''}
       UNION ALL
       SELECT r.id, r.aeronave_id, r.socio_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
              r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
+             r.valor_rateado_centavos AS valor_rateado_centavos,
              r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'HOLDING' AS tipo_caixa,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
-             'rateio_hold' AS origem_rateio, NULL AS local
+             'rateio_hold' AS origem_rateio, NULL AS local,
+             COALESCE(hs.nome, r.socio_id) AS participante_nome
         FROM rateio_hold r
+        LEFT JOIN hold_socios hs ON hs.id = r.socio_id
         ${filtrosHolding.length ? `WHERE ${filtrosHolding.join(' AND ')}` : ''}
       UNION ALL
       SELECT a.id, a.aeronave_id, ca.id AS participante_id, a.data,
@@ -946,13 +957,16 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              l.fornecedores_favoritos_id AS fornecedor_id, 'Combustível' AS categoria_nome, 'OPERACIONAL' AS grupo_categoria,
              COALESCE(l.data_vencimento, a.data) AS data_vencimento, 'SAIDA' AS fluxo,
              COALESCE(l.valor_centavos, CAST(ROUND(COALESCE(a.valor_total, 0) * 100) AS INTEGER)) AS valor_centavos,
+             COALESCE(l.valor_centavos, CAST(ROUND(COALESCE(a.valor_total, 0) * 100) AS INTEGER)) AS valor_rateado_centavos,
              0 AS valor_pago_centavos, NULL AS pago_por, 'CLIENTE' AS tipo_caixa,
              0 AS pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado,
              COALESCE(l.status, a.status, 'PENDENTE') AS status, a.observacao AS observacoes,
-             'abastecimento' AS origem_rateio, COALESCE(ad.designativo_icao, a.local) AS local
+             'abastecimento' AS origem_rateio, COALESCE(ad.designativo_icao, a.local) AS local,
+             COALESCE(cl.razao_social, ca.codigo_cliente, a.cliente_id) AS participante_nome
         FROM abastecimentos a
         LEFT JOIN lancamentos l ON l.abastecimentos_id = a.id AND l.tipo_caixa = 'CLIENTE'
         LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = a.aeronave_id AND ca.cliente_id = a.cliente_id
+        LEFT JOIN cliente cl ON cl.id = a.cliente_id
         LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local))
         WHERE NOT EXISTS (
           SELECT 1 FROM rateio_despesas rd
@@ -965,7 +979,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
         ${fim ? 'AND date(a.data) <= date(?)' : ''}
       ORDER BY data DESC, id DESC LIMIT 1000
     `, ...paramsCliente, ...paramsHolding, ...[aeronaveId, cotistaId, inicio, fim].filter((value) => value))
-    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, local: row.local ?? null, rateios: [] }))
+    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: 'SAIDA', valorCentavos: Number(row.valor_centavos || row.valor_rateado_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, local: row.local ?? null, rateios: [] }))
     const saidas = lancamentos.reduce((total, row) => total + row.valorCentavos / 100, 0)
     const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()
     const porCategoria = new Map<string, { valor: number; quantidade: number; grupo: string }>()
