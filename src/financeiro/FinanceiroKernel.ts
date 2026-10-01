@@ -161,7 +161,7 @@ type CachedSchema = { schema: SchemaCache; expiresAt: number }
 const SCHEMA_CACHE_TTL_MS = 60_000
 const schemaCacheByDatabase = new WeakMap<object, CachedSchema>()
 
-async function loadSchema(db: Database): Promise<SchemaCache> {
+export async function loadSchema(db: Database): Promise<SchemaCache> {
   const cached = schemaCacheByDatabase.get(db as unknown as object)
   if (cached && cached.expiresAt > Date.now()) return cached.schema
   const tables = [
@@ -361,7 +361,7 @@ function addKnownColumns(
   }
 }
 
-function holdingMovementColumn(schema: SchemaCache): 'movimento_id' | 'movimento_holding_id' {
+export function holdingMovementColumn(schema: SchemaCache): 'movimento_id' | 'movimento_holding_id' {
   if (schema.get('rateio_hold')?.has('movimento_id')) return 'movimento_id'
   return 'movimento_holding_id'
 }
