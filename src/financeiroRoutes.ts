@@ -780,7 +780,6 @@ function documentoSaidaRow(db: D1Database, id: string) {
 
 financeiroRoutes.post('/notas-saida', async (c) => {
   try {
-    await validateFinanceSchema(c.env.SHARE_DB)
     const db = c.env.SHARE_DB
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const numero = String(body.numero ?? '').trim()
@@ -823,17 +822,28 @@ financeiroRoutes.post('/notas-saida', async (c) => {
     try {
       await db.prepare(`INSERT INTO notas_fiscais_saida
         (id, numero, cotista_id, aeronave_id, valor_total, percentual, descricao_servico, nome_categoria,
-         categoria_id, subcategoria_1, data_emissao, data_vencimento, status, arquivo_pdf_url, lancamentos_id, criado_por)
-        VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         categoria_id, subcategoria_1, data_emissao, data_vencimento, status, arquivo_pdf_url, lancamentos_id)
+        VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind(id, numero, cotistaId, aeronaveId, valor, descricao, body.categoria_receita_nome ?? categoriaReceita.nome,
-          categoriaCliente.id, categoriaCliente.subcategoria, dataEmissao, dataVencimento,
+          categoriaReceitaId, categoriaCliente.subcategoria, dataEmissao, dataVencimento,
           ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO', body.arquivo_pdf_url ? String(body.arquivo_pdf_url) : null,
-          financeiro.lancamento_id ?? financeiro.id ?? null, c.get('userId') || null).run()
+          financeiro.lancamento_id ?? financeiro.id ?? null).run()
       if (financeiro.contaReceberId) {
         await db.prepare('UPDATE contas_areceber SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id, financeiro.contaReceberId).run()
       }
     } catch (error) {
       await db.prepare('DELETE FROM notas_fiscais_saida WHERE id = ?').bind(id).run().catch(() => undefined)
+      const lancamentoIds = [financeiro.lancamento_id, financeiro.lancamentoClienteId].map((value) => String(value ?? '').trim()).filter(Boolean)
+      if (lancamentoIds.length) {
+        const placeholders = lancamentoIds.map(() => '?').join(', ')
+        await db.batch([
+          db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders}))`).bind(...lancamentoIds),
+          db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...lancamentoIds),
+          db.prepare(`DELETE FROM financeiro_vinculos WHERE origem_id IN (${placeholders}) OR destino_id IN (${placeholders})`).bind(...lancamentoIds, ...lancamentoIds),
+          db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...lancamentoIds),
+        ]).catch(() => undefined)
+      }
+      if (financeiro.contaReceberId) await db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(financeiro.contaReceberId).run().catch(() => undefined)
       throw error
     }
     return c.json({ nota: await documentoSaidaRow(db, id) }, 201)
@@ -898,11 +908,25 @@ financeiroRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
     const contaId = String(nota.contas_areceber_id ?? '').trim()
     if (!contaId) return c.json({ error: 'conta_a_receber_nao_vinculada' }, 409)
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const dataPagamento = body.data_pagamento ?? body.data_recebimento
+    const contaBancaria = body.conta_bancaria_id ?? body.conta_bancaria ?? body.banco_recebimento
+    const pagamentos = Array.isArray(body.pagamentos) && body.pagamentos.length
+      ? body.pagamentos
+      : [{
+          tipo_pagador: 'COTISTA',
+          pagador_cotista_id: nota.cotista_id,
+          valor_centavos: Math.round(Number(nota.valor_total ?? 0) * 100),
+          data_pagamento: dataPagamento,
+          conta_bancaria_id: contaBancaria,
+          forma_pagamento: body.forma_pagamento,
+          comprovante_url: body.comprovante_url,
+        }]
     const conta = await settleReceivable(c.env.SHARE_DB, contaId, {
-      data_recebimento: body.data_pagamento ?? body.data_recebimento,
-      banco_recebimento: body.conta_bancaria ?? body.banco_recebimento,
+      data_recebimento: dataPagamento,
+      conta_bancaria_id: contaBancaria,
       forma_pagamento: body.forma_pagamento,
-      comprovante_recebimento_url: body.comprovante_url,
+      comprovante_url: body.comprovante_url,
+      pagamentos,
     }, c.get('userId') || null)
     return c.json({ ok: true, conta })
   } catch (error) { return errorResponse(c, error) }
