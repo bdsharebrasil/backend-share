@@ -778,6 +778,38 @@ function documentoSaidaRow(db: D1Database, id: string) {
     WHERE n.id = ?`).bind(id).first<Record<string, unknown>>()
 }
 
+function notaSaidaStatements(db: D1Database, nota: {
+  id: string
+  numero: string
+  cotistaId: string
+  aeronaveId: string
+  valor: number
+  descricao: string
+  categoriaNome: string
+  categoriaId: string
+  subcategoria: string | null
+  dataEmissao: string
+  dataVencimento: string
+  status: string
+  arquivoPdfUrl: string | null
+  lancamentoId: string
+  contaReceberId: string
+}): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = []
+  statements.push(db.prepare(`INSERT INTO notas_fiscais_saida
+    (id, numero, cotista_id, aeronave_id, valor_total, percentual, descricao_servico, nome_categoria,
+     categoria_id, subcategoria_1, data_emissao, data_vencimento, status, arquivo_pdf_url, lancamentos_id)
+    VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(nota.id, nota.numero, nota.cotistaId, nota.aeronaveId, nota.valor, nota.descricao,
+      nota.categoriaNome, nota.categoriaId, nota.subcategoria, nota.dataEmissao, nota.dataVencimento,
+      nota.status, nota.arquivoPdfUrl, nota.lancamentoId))
+  statements.push(db.prepare(`UPDATE contas_areceber
+    SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ? AND (nf_saida_id IS NULL OR nf_saida_id = ?)`)
+    .bind(nota.id, nota.contaReceberId, nota.id))
+  return statements
+}
+
 financeiroRoutes.post('/notas-saida', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -801,8 +833,24 @@ financeiroRoutes.post('/notas-saida', async (c) => {
     const categoriaCliente = await categoriaClienteNota(db, categoriaClienteId, String(body.subcategoria_1 ?? '').trim() || null)
     if (categoriaClienteId && !categoriaCliente.id) return c.json({ error: 'categoria_despesa_invalida' }, 400)
     const id = crypto.randomUUID()
+    const requestKey = String(body.idempotency_key ?? '').trim() || id
+    const idempotencyKey = `nf_saida:${requestKey}`
+    const dadosNota = {
+      numero,
+      cotistaId,
+      aeronaveId,
+      valor,
+      descricao,
+      categoriaNome: String(body.categoria_receita_nome ?? categoriaReceita.nome),
+      categoriaId: categoriaReceitaId,
+      subcategoria: categoriaCliente.subcategoria,
+      dataEmissao,
+      dataVencimento,
+      status: ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO',
+      arquivoPdfUrl: body.arquivo_pdf_url ? String(body.arquivo_pdf_url) : null,
+    }
     const financeiro = await issueRevenue(db, {
-      idempotency_key: `nf_saida:${id}`,
+      idempotency_key: idempotencyKey,
       valor_centavos: Math.round(valor * 100),
       descricao,
       data: dataEmissao,
@@ -818,35 +866,35 @@ financeiroRoutes.post('/notas-saida', async (c) => {
       origem_tipo: 'NF_SAIDA',
       origem_id: id,
       periodicidade: 'MENSAL',
-    }, c.get('userId') || null)
-    try {
-      await db.prepare(`INSERT INTO notas_fiscais_saida
-        (id, numero, cotista_id, aeronave_id, valor_total, percentual, descricao_servico, nome_categoria,
-         categoria_id, subcategoria_1, data_emissao, data_vencimento, status, arquivo_pdf_url, lancamentos_id)
-        VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(id, numero, cotistaId, aeronaveId, valor, descricao, body.categoria_receita_nome ?? categoriaReceita.nome,
-          categoriaReceitaId, categoriaCliente.subcategoria, dataEmissao, dataVencimento,
-          ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO', body.arquivo_pdf_url ? String(body.arquivo_pdf_url) : null,
-          financeiro.lancamento_id ?? financeiro.id ?? null).run()
-      if (financeiro.contaReceberId) {
-        await db.prepare('UPDATE contas_areceber SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id, financeiro.contaReceberId).run()
+    }, c.get('userId') || null, {}, ({ lancamentoId, contaReceberId }) =>
+      notaSaidaStatements(db, { ...dadosNota, id, lancamentoId, contaReceberId }))
+
+    if (financeiro.idempotent) {
+      const conta = await db.prepare(`SELECT id, nf_saida_id, lancamentos_id
+        FROM contas_areceber WHERE idempotency_key = ? LIMIT 1`).bind(idempotencyKey)
+        .first<{ id: string; nf_saida_id: string | null; lancamentos_id: string | null }>()
+      if (!conta?.id || !conta.lancamentos_id) return c.json({ error: 'operacao_financeira_incompleta' }, 409)
+      const notaExistente = conta.nf_saida_id
+        ? await documentoSaidaRow(db, conta.nf_saida_id)
+        : await db.prepare('SELECT id FROM notas_fiscais_saida WHERE lancamentos_id = ? LIMIT 1')
+          .bind(conta.lancamentos_id).first<{ id: string }>()
+      if (notaExistente) {
+        if (!conta.nf_saida_id) {
+          await db.prepare(`UPDATE contas_areceber SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP
+            WHERE id = ? AND nf_saida_id IS NULL`).bind(notaExistente.id, conta.id).run()
+        }
+        return c.json({ nota: await documentoSaidaRow(db, String(notaExistente.id)) }, 200)
       }
-    } catch (error) {
-      await db.prepare('DELETE FROM notas_fiscais_saida WHERE id = ?').bind(id).run().catch(() => undefined)
-      const lancamentoIds = [financeiro.lancamento_id, financeiro.lancamentoClienteId].map((value) => String(value ?? '').trim()).filter(Boolean)
-      if (lancamentoIds.length) {
-        const placeholders = lancamentoIds.map(() => '?').join(', ')
-        await db.batch([
-          db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders}))`).bind(...lancamentoIds),
-          db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...lancamentoIds),
-          db.prepare(`DELETE FROM financeiro_vinculos WHERE origem_id IN (${placeholders}) OR destino_id IN (${placeholders})`).bind(...lancamentoIds, ...lancamentoIds),
-          db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...lancamentoIds),
-        ]).catch(() => undefined)
-      }
-      if (financeiro.contaReceberId) await db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(financeiro.contaReceberId).run().catch(() => undefined)
-      throw error
+      const notaId = conta.nf_saida_id || id
+      await db.batch(notaSaidaStatements(db, {
+        ...dadosNota, id: notaId, lancamentoId: conta.lancamentos_id, contaReceberId: conta.id,
+      }))
+      return c.json({ nota: await documentoSaidaRow(db, notaId) }, 200)
     }
-    return c.json({ nota: await documentoSaidaRow(db, id) }, 201)
+
+    const nota = await documentoSaidaRow(db, id)
+    if (!nota) return c.json({ error: 'nota_saida_nao_persistida' }, 500)
+    return c.json({ nota }, 201)
   } catch (error) { return errorResponse(c, error) }
 })
 

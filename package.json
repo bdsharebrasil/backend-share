@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "type-check": "tsc --noEmit --pretty false",
-    "test:relatorio-financeiro": "node --experimental-strip-types --test tests/relatorioFinanceiro.test.mjs"
+    "test:relatorio-financeiro": "node --experimental-strip-types --test tests/relatorioFinanceiro.test.mjs",
+    "test": "tsx --test tests/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -18,6 +19,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.3.3",
     "wrangler": "^4.63.0"
   }

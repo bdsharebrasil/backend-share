@@ -1263,6 +1263,11 @@ export async function issueRevenue(
   body: Row,
   userId: string | null,
   options: NormalizeOptions = {},
+  buildAdditionalStatements?: (context: {
+    lancamentoId: string
+    contaReceberId: string
+    lancamentoClienteId: string | null
+  }) => D1PreparedStatement[],
 ): Promise<Row> {
   const schema = await loadSchema(db)
   const command = normalizeCommand({ ...body, fluxo: 'ENTRADA' }, userId, options)
@@ -1381,7 +1386,7 @@ export async function issueRevenue(
           periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
           numero_recibo: nullableText(command.numero_recibo),
           url_recibo: nullableText(command.url_recibo),
-          origem_tipo: reciboSaida ? 'RECIBO_SAIDA' : 'RECEITA',
+          origem_tipo: documentoSaida ? upper(command.origem_tipo) : 'RECEITA',
           origem_id: lancamentoId,
           status: 'EM_ABERTO',
           criado_por: userId,
@@ -1418,7 +1423,7 @@ export async function issueRevenue(
           status: reciboSaida ? 'AGUARDANDO_REEMBOLSO' : 'PAGO_DIRETAMENTE',
           numero_recibo: nullableText(command.numero_recibo),
           url_recibo: nullableText(command.url_recibo),
-          origem_tipo: reciboSaida ? 'RECIBO_SAIDA' : 'RECEITA',
+          origem_tipo: documentoSaida ? upper(command.origem_tipo) : 'RECEITA',
           origem_id: lancamentoId,
         },
         ['id', 'lancamento_id'],
@@ -1469,6 +1474,14 @@ export async function issueRevenue(
       nullableText(command.idempotency_key),
     ),
   )
+
+  if (buildAdditionalStatements) {
+    statements.push(...buildAdditionalStatements({
+      lancamentoId,
+      contaReceberId,
+      lancamentoClienteId: clientLancamentoId,
+    }))
+  }
 
   await db.batch(statements)
   return {
