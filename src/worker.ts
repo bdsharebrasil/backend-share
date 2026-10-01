@@ -3407,7 +3407,9 @@ app.post('/api/interno/diario-bordo/lancamentos', async c => {
   const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
   if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
     await garantirTabelaAbastecimentos(c)
-    await db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(uuid(), abastecimento.cliente_id || null, abastecimento.socio_id || null, aeronaveId, abastecimento.data || data, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimento.local || row.local_combustivel || String(body.aerodromo_partida || ''), abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Criado no Diário de Bordo', extractSupabaseUserId(c), id, diarioBoolean(body.voo_emprestado), row.numero_voo || null).run()
+    const abastecimentoLocal = await normalizarLocalAbastecimento(db, abastecimento.local || row.local_combustivel || String(body.aerodromo_partida || ''))
+    if (!abastecimentoLocal) return c.json({ error: 'local_abastecimento_invalido' }, 400)
+    await db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(uuid(), abastecimento.cliente_id || null, abastecimento.socio_id || null, aeronaveId, abastecimento.data || data, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Criado no Diário de Bordo', extractSupabaseUserId(c), id, diarioBoolean(body.voo_emprestado), row.numero_voo || null).run()
   }
   await recalcularDiarioMes(c, diarioMesId)
   const inserted = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
@@ -3445,7 +3447,9 @@ app.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
     await garantirTabelaAbastecimentos(c)
     const abastecimento = body.abastecimento
     const existente = await db.prepare('SELECT id FROM abastecimentos WHERE lancamento_diario_id = ?1 ORDER BY date(data) DESC, id DESC LIMIT 1').bind(id).first<{ id: string }>()
-    const valores = [abastecimento.cliente_id || null, abastecimento.socio_id || null, current.aeronave_id, abastecimento.data || row.data_registro, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimento.local || row.local_combustivel || row.aerodromo_partida, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Atualizado no Diário de Bordo', extractSupabaseUserId(c), diarioBoolean(body.voo_emprestado ?? current.voo_emprestado), row.numero_voo || current.numero_voo || null]
+    const abastecimentoLocal = await normalizarLocalAbastecimento(db, abastecimento.local || row.local_combustivel || row.aerodromo_partida)
+    if (!abastecimentoLocal) return c.json({ error: 'local_abastecimento_invalido' }, 400)
+    const valores = [abastecimento.cliente_id || null, abastecimento.socio_id || null, current.aeronave_id, abastecimento.data || row.data_registro, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Atualizado no Diário de Bordo', extractSupabaseUserId(c), diarioBoolean(body.voo_emprestado ?? current.voo_emprestado), row.numero_voo || current.numero_voo || null]
     if (existente) {
       await db.prepare('UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, numero_nf=?, litros=?, valor_unitario=?, valor_total=?, status=?, observacao=?, criado_por=?, voo_emprestado=?, numero_voo=? WHERE id=?').bind(...valores, existente.id).run()
     } else {
@@ -4014,19 +4018,20 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   const alertas = Object.entries(body.alertas || {}).filter(([, texto]) => String(texto || '').trim()).map(([item, texto]) => `${item}: ${String(texto).trim()}`).slice(0, 10)
   if (status === 'concluido' && alertas.length < Object.values(body.respostas || body.itens || {}).filter((resposta: any) => resposta?.status === 'alerta').length) return c.json({ error: 'justificativa_alerta_obrigatoria', detail: 'Todo item marcado como alerta precisa de uma justificativa.' }, 400)
   const a = body.abastecimento || {}
-  if (status === 'concluido' && precisaAbastecer && (!a.data || !a.local || !a.tipo_combustivel || Number(a.litros) <= 0 || Number(a.valor_unitario) < 0)) {
+  const localIcao = await normalizarLocalAbastecimento(c.env.SHARE_DB, a.local)
+  if (status === 'concluido' && precisaAbastecer && (!a.data || !localIcao || !a.tipo_combustivel || Number(a.litros) <= 0 || Number(a.valor_unitario) < 0)) {
     return c.json({ error: 'abastecimento_incompleto', detail: 'Para concluir o checklist, preencha data, tipo de combustível, local, litros e valor unitário do abastecimento.' }, 400)
   }
   let abastecimentoId = precisaAbastecer ? existente?.abastecimento_id || null : null
-  if (precisaAbastecer && a.data && a.local && Number(a.litros) > 0) {
+  if (precisaAbastecer && a.data && localIcao && Number(a.litros) > 0) {
     let pagador = { cliente_id: a.cliente_id || agendamento.cliente_id || null, socio_id: a.socio_id || agendamento.socio_id || null }
     if (a.lancamento_diario_id) {
       const trecho = await c.env.SHARE_DB.prepare('SELECT cliente_id, socio_id FROM lancamentos_diario_bordo WHERE id = ?1 AND aeronave_id = ?2').bind(a.lancamento_diario_id, agendamento.aeronave_id).first<{ cliente_id: string | null; socio_id: string | null }>()
       if (!trecho) return c.json({ error: 'trecho_diario_invalido', detail: 'O último trecho informado não pertence à aeronave deste agendamento.' }, 400)
       pagador = { cliente_id: trecho.cliente_id, socio_id: trecho.socio_id }
     }
-    const valores = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, a.numero_nf || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, a.prazo_envio_cliente || null]
-    const valoresInsert = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, a.local, a.numero_comanda || null, a.numero_nf || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, a.prazo_envio_cliente || null]
+    const valores = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, localIcao, a.numero_comanda || null, a.numero_nf || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, a.prazo_envio_cliente || null]
+    const valoresInsert = [pagador.cliente_id, pagador.socio_id, agendamento.aeronave_id, a.data, a.tipo_combustivel, a.trecho || `${agendamento.origem} X ${agendamento.destino}`, localIcao, a.numero_comanda || null, a.numero_nf || null, Number(a.litros), Number(a.valor_unitario), Math.max(0, Number(a.litros) * Number(a.valor_unitario) - Number(a.desconto || 0)), Number(a.desconto || 0), a.fornecedor_id || null, 'pendente', null, userId, a.lancamento_diario_id || null, agendamento.voo_emprestado === 'sim' ? 1 : 0, agendamento.numero_voo || null, a.prazo_envio_cliente || null]
     if (abastecimentoId) {
       await c.env.SHARE_DB.prepare(`UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, numero_nf=?, litros=?, valor_unitario=?, valor_total=?, desconto=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, lancamento_diario_id=?, voo_emprestado=?, numero_voo=?, prazo_envio_cliente=? WHERE id=?`).bind(...valores, abastecimentoId).run()
     } else {
@@ -5881,6 +5886,16 @@ async function statementFinanceiroAbastecimento(c: Context<{ Bindings: Bindings 
     .bind(uuid(), aeronaveId, cotista.id, data, vencimento, pago ? body.data_pagamento || null : null, descricao, body.fornecedor_id || null, fornecedor?.nome || null, abastecimentoId, pago ? 'PAGO' : 'EM_ABERTO', valorCentavos, body.numero_nf || null, body.numero_comanda || null, comprovanteUrl, body.forma_pagamento || null, body.observacao || null, userId, abastecimentoId, body.cliente_id)
 }
 
+
+async function normalizarLocalAbastecimento(db: D1Database, valor: unknown): Promise<string | null> {
+  const local = String(valor ?? '').trim()
+  if (!local) return null
+  const aerodromo = await db.prepare(
+    'SELECT designativo_icao FROM aerodromo WHERE id = ?1 OR upper(trim(designativo_icao)) = upper(trim(?1)) LIMIT 1'
+  ).bind(local).first<{ designativo_icao: string }>()
+  return aerodromo?.designativo_icao?.trim().toUpperCase() || null
+}
+
 app.post('/api/interno/abastecimentos', async c => {
   const authenticated = await authenticatedColaborador(c)
   if (!authenticated && !(await checkInternalAuth(c))) return c.json({ error: 'internal_auth_required' }, 401)
@@ -5889,7 +5904,7 @@ app.post('/api/interno/abastecimentos', async c => {
   await garantirTabelaFornecedoresCombustivel(c)
   const body = await c.req.json<Record<string, any>>().catch(() => null)
   const data = String(body?.data || '').trim()
-  const local = String(body?.local || '').trim()
+  const localInformado = String(body?.local || '').trim()
   const aeronaveId = String(body?.aeronave_id || '').trim()
   let clienteId = String(body?.cliente_id || '').trim() || null
   let socioId = String(body?.socio_id || '').trim() || null
@@ -5897,6 +5912,7 @@ app.post('/api/interno/abastecimentos', async c => {
   const valorUnitario = Number(body?.valor_unitario || 0)
   const valorTotal = Number(body?.valor_total ?? litros * valorUnitario)
   const statusPago = String(body?.status || '').toLowerCase() === 'pago'
+  const local = await normalizarLocalAbastecimento(c.env.SHARE_DB, localInformado)
   if (!dataAbastecimentoValida(data) || !local || !aeronaveId) return c.json({ error: 'data_local_aeronave_obrigatorios' }, 400)
   if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0 || Math.round(valorTotal * 100) <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
   if (statusPago && !dataAbastecimentoValida(body?.data_pagamento)) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
@@ -5958,7 +5974,7 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
   const db = c.env.SHARE_DB
   if (!body || typeof body !== 'object') return c.json({ error: 'corpo_json_invalido' }, 400)
   const data = String(body.data || '').trim()
-  const local = String(body.local || '').trim()
+  const localInformado = String(body.local || '').trim()
   const aeronaveId = String(body.aeronave_id || '').trim()
   const clienteId = String(body.cliente_id || '').trim() || null
   const socioId = String(body.socio_id || '').trim() || null
@@ -5966,6 +5982,7 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
   const valorUnitario = Number(body.valor_unitario || 0)
   const valorTotal = Number(body.valor_total ?? litros * valorUnitario)
   const statusPago = String(body.status || '').toLowerCase() === 'pago'
+  const local = await normalizarLocalAbastecimento(db, localInformado)
   if (!dataAbastecimentoValida(data) || !local || !aeronaveId || Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
   if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0 || Math.round(valorTotal * 100) <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
   if (statusPago && !dataAbastecimentoValida(body.data_pagamento)) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)

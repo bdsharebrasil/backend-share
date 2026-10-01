@@ -926,7 +926,8 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              r.documento_numero AS numero_doc, r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
              r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'CLIENTE' AS tipo_caixa,
-             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes, 'rateio_despesas' AS origem_rateio
+             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
+             'rateio_despesas' AS origem_rateio, NULL AS local
         FROM rateio_despesas r
         ${filtrosCliente.length ? `WHERE ${filtrosCliente.join(' AND ')}` : ''}
       UNION ALL
@@ -934,12 +935,37 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              r.documento_numero AS numero_doc, NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
              r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'HOLDING' AS tipo_caixa,
-             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes, 'rateio_hold' AS origem_rateio
+             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
+             'rateio_hold' AS origem_rateio, NULL AS local
         FROM rateio_hold r
         ${filtrosHolding.length ? `WHERE ${filtrosHolding.join(' AND ')}` : ''}
+      UNION ALL
+      SELECT a.id, a.aeronave_id, ca.id AS participante_id, a.data,
+             COALESCE(l.descricao, 'Abastecimento ' || COALESCE(a.trecho, '')) AS descricao,
+             COALESCE(a.numero_nf, a.numero_comanda) AS numero_doc,
+             l.fornecedores_favoritos_id AS fornecedor_id, 'Combustível' AS categoria_nome, 'OPERACIONAL' AS grupo_categoria,
+             COALESCE(l.data_vencimento, a.data) AS data_vencimento, 'SAIDA' AS fluxo,
+             COALESCE(l.valor_centavos, CAST(ROUND(COALESCE(a.valor_total, 0) * 100) AS INTEGER)) AS valor_centavos,
+             0 AS valor_pago_centavos, NULL AS pago_por, 'CLIENTE' AS tipo_caixa,
+             0 AS pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado,
+             COALESCE(l.status, a.status, 'PENDENTE') AS status, a.observacao AS observacoes,
+             'abastecimento' AS origem_rateio, COALESCE(ad.designativo_icao, a.local) AS local
+        FROM abastecimentos a
+        LEFT JOIN lancamentos l ON l.abastecimentos_id = a.id AND l.tipo_caixa = 'CLIENTE'
+        LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = a.aeronave_id AND ca.cliente_id = a.cliente_id
+        LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local))
+        WHERE NOT EXISTS (
+          SELECT 1 FROM rateio_despesas rd
+          JOIN lancamentos lr ON lr.id = rd.lancamento_id
+          WHERE lr.abastecimentos_id = a.id
+        )
+        ${aeronaveId ? 'AND a.aeronave_id = ?' : ''}
+        ${cotistaId ? 'AND ca.id = ?' : ''}
+        ${inicio ? 'AND date(a.data) >= date(?)' : ''}
+        ${fim ? 'AND date(a.data) <= date(?)' : ''}
       ORDER BY data DESC, id DESC LIMIT 1000
-    `, ...paramsCliente, ...paramsHolding)
-    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, rateios: [] }))
+    `, ...paramsCliente, ...paramsHolding, ...[aeronaveId, cotistaId, inicio, fim].filter((value) => value))
+    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: 'SAIDA', valorCentavos: Number(row.valor_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, local: row.local ?? null, rateios: [] }))
     const saidas = lancamentos.reduce((total, row) => total + row.valorCentavos / 100, 0)
     const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()
     const porCategoria = new Map<string, { valor: number; quantidade: number; grupo: string }>()
