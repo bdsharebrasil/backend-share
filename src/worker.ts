@@ -3577,7 +3577,16 @@ app.get('/api/interno/tripulacao-freelancer/:id/foto', async c => {
 
 app.get('/api/interno/tripulacao/:id/foto', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  const row = await c.env.SHARE_DB.prepare('SELECT up.url_avatar FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE t.id = ?1').bind(c.req.param('id')).first<{ url_avatar: string | null }>()
+  const row = await c.env.SHARE_DB.prepare(`SELECT up.url_avatar
+    FROM tripulacao t
+    LEFT JOIN user_profiles up ON up.id = COALESCE(t.user_id, (
+      SELECT p.id FROM user_profiles p
+      WHERE (NULLIF(trim(t.canac), '') IS NOT NULL AND lower(trim(p.canac)) = lower(trim(t.canac)))
+         OR lower(trim(p.nome_completo)) = lower(trim(t.nome_completo))
+      ORDER BY CASE WHEN NULLIF(trim(t.canac), '') IS NOT NULL AND lower(trim(p.canac)) = lower(trim(t.canac)) THEN 0 ELSE 1 END, p.id
+      LIMIT 1
+    ))
+    WHERE t.id = ?1`).bind(c.req.param('id')).first<{ url_avatar: string | null }>()
   const avatar = row?.url_avatar?.trim() || ''
   if (!avatar) return c.notFound()
   if (/^https?:\/\//i.test(avatar)) return c.redirect(avatar, 302)
@@ -3869,7 +3878,7 @@ app.get('/api/interno/agendamento', async c => {
       FROM aeronave a
       LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
       ORDER BY a.matricula_registro`).all().catch(error => { log.error('[agendamento] aeronaves indisponíveis', error); return { results: [] } }),
-    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, CASE WHEN up.url_avatar IS NOT NULL THEN '/api/interno/tripulacao/' || t.id || '/foto' ELSE NULL END AS foto_url, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive') ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
+    db.prepare("SELECT t.id, t.nome_completo, t.canac, t.status, t.tipo_licenca, up.url_avatar AS url_avatar, CASE WHEN up.url_avatar IS NOT NULL THEN '/api/interno/tripulacao/' || t.id || '/foto' ELSE NULL END AS foto_url, 'tripulacao' AS origem FROM tripulacao t LEFT JOIN user_profiles up ON up.id = COALESCE(t.user_id, (SELECT p.id FROM user_profiles p WHERE (NULLIF(trim(t.canac), '') IS NOT NULL AND lower(trim(p.canac)) = lower(trim(t.canac))) OR lower(trim(p.nome_completo)) = lower(trim(t.nome_completo)) ORDER BY CASE WHEN NULLIF(trim(t.canac), '') IS NOT NULL AND lower(trim(p.canac)) = lower(trim(t.canac)) THEN 0 ELSE 1 END, p.id LIMIT 1)) WHERE lower(COALESCE(t.status, 'ativo')) = 'ativo' AND lower(COALESCE(up.status, 'ativo')) NOT IN ('inativo', 'inactive') ORDER BY t.nome_completo").all().catch(error => { log.error('[agendamento] tripulação indisponível', error); return { results: [] } }),
     db.prepare("SELECT id, nome_completo, canac, status, NULL AS tipo_licenca, url_avatar, CASE WHEN url_avatar IS NOT NULL THEN '/api/interno/tripulacao-freelancer/' || id || '/foto' ELSE NULL END AS foto_url, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all().catch(error => { log.error('[agendamento] freelancers indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT e.id, e.tripulacao_id AS tripulante_id,
         CASE WHEN EXISTS (SELECT 1 FROM tripulacao t WHERE t.id = e.tripulacao_id) THEN 'tripulacao' ELSE 'freelancer' END AS tripulante_origem,
