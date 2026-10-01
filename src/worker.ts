@@ -3578,8 +3578,10 @@ app.get('/api/interno/tripulacao-freelancer/:id/foto', async c => {
 app.get('/api/interno/tripulacao/:id/foto', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const row = await c.env.SHARE_DB.prepare('SELECT up.url_avatar FROM tripulacao t LEFT JOIN user_profiles up ON up.id = t.user_id WHERE t.id = ?1').bind(c.req.param('id')).first<{ url_avatar: string | null }>()
-  if (!row?.url_avatar) return c.notFound()
-  const object = await bucketParaChaveColaborador(c, row.url_avatar).get(row.url_avatar)
+  const avatar = row?.url_avatar?.trim() || ''
+  if (!avatar) return c.notFound()
+  if (/^https?:\/\//i.test(avatar)) return c.redirect(avatar, 302)
+  const object = await bucketParaChaveColaborador(c, avatar).get(avatar)
   if (!object) return c.notFound()
   const headers = new Headers()
   object.writeHttpMetadata(headers)
