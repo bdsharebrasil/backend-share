@@ -979,6 +979,19 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+financeiroRoutes.get('/cotista/voos-emprestimos', async (c) => {
+  try {
+    const cotistaId = String(c.req.query('cotista_id') || '').trim()
+    const tipo = String(c.req.query('tipo') || 'cliente').trim().toLowerCase()
+    const aeronaveExcluida = String(c.req.query('excluir_aeronave_id') || '').trim()
+    if (!cotistaId || !['cliente', 'socio'].includes(tipo)) return c.json({ voos_emprestimos: [] })
+    const filtros = [`a.voo_emprestado = 1`, `a.${tipo === 'socio' ? 'socio_id' : 'cliente_id'} = ?`]
+    const params: unknown[] = [cotistaId]
+    if (aeronaveExcluida) { filtros.push('a.aeronave_id <> ?'); params.push(aeronaveExcluida) }
+    const rows = await listar(c.env.SHARE_DB, `SELECT a.id, a.numero_voo, a.data, a.trecho, a.local, a.litros, a.valor_total, a.status, a.numero_comanda, a.numero_nf, a.aeronave_id, ar.matricula_registro, ar.fabricante, ar.modelo, COALESCE(ad.designativo_icao, a.local) AS local_icao FROM abastecimentos a LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local)) WHERE ${filtros.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`, ...params)
+    return c.json({ voos_emprestimos: rows })
+  } catch (error) { return errorResponse(c, error) }
+})
 financeiroRoutes.get('/balanco', async (c) => {
   const url = new URL(c.req.url)
   url.pathname = '/cotista/dashboard'
