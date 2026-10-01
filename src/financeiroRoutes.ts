@@ -797,10 +797,11 @@ financeiroRoutes.get('/notas-saida/anexos/:id/arquivo', async (c) => {
 financeiroRoutes.get('/dashboard/financeiro', async (c) => {
   try {
     const db = c.env.SHARE_DB
-    const [receber, pagar, movimentacoes, emailsEnviados] = await Promise.all([
+    const [receber, pagar, movimentacoes, movimentosHolding, emailsEnviados] = await Promise.all([
       listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
       listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
       listar(db, `SELECT l.*, cl.email_principal AS destinatario_email FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id ORDER BY l.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id ORDER BY mh.criado_em DESC LIMIT 100`),
       listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em, email_enviado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
@@ -811,8 +812,10 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     }
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const totalPago = pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
-    const movimentacoesComFornecedor = await enriquecerFornecedores(db, movimentacoes)
-    const lancIds = movimentacoesComFornecedor.map((row) => String(row.id ?? '')).filter(Boolean)
+    const lancamentosComFornecedor = await enriquecerFornecedores(db, movimentacoes)
+    const movimentosHoldingComFornecedor = await enriquecerFornecedores(db, movimentosHolding)
+    const movimentacoesComFornecedor = [...lancamentosComFornecedor, ...movimentosHoldingComFornecedor]
+    const lancIds = lancamentosComFornecedor.map((row) => String(row.id ?? '')).filter(Boolean)
     const reativacoes = lancIds.length
       ? await listar(db, `SELECT r.lancamento_id, rr.justificativa, rr.reativado_em
            FROM recibo_reativacoes rr
@@ -829,16 +832,11 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const contasPendentes = pagar.filter(contaPendente)
     const contasEmAberto = new Set(contasPendentes.flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
     return c.json({
-      resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length }, movimentacoes: movimentacoesComFornecedor.map((row) => ({
-        ...row,
-        destinatario_email: row.destinatario_email ?? null,
-        anexos: (() => { try { const valor = JSON.parse(String(row.anexos_json || '[]')); return Array.isArray(valor) ? valor : [] } catch { return [] } })(),
-        fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
-        valor: Number(row.valor_centavos || 0) / 100,
-        pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))),
-        justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null,
-        reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null,
-      })), emails_enviados: emailsEnviados
+      resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length },
+      lancamentos: lancamentosComFornecedor.map((row) => ({ ...row, destinatario_email: row.destinatario_email ?? null, anexos: (() => { try { const valor = JSON.parse(String(row.anexos_json || '[]')); return Array.isArray(valor) ? valor : [] } catch { return [] } })(), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))), justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null, reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null })),
+      movimentos_holding: movimentosHoldingComFornecedor.map((row) => ({ ...row, tipo_caixa: 'HOLDING', fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id].some((id) => contasEmAberto.has(String(id))) })),
+      movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100 })),
+      emails_enviados: emailsEnviados
     })
   } catch (error) { return errorResponse(c, error) }
 })
@@ -848,6 +846,11 @@ async function origemRateio(db: D1Database, origemTipo: string, origemId: string
     const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
     if (!lancamento) return null
     return { kind: 'cliente' as const, source: lancamento, movimentoId: null }
+  }
+  if (origemTipo === 'movimentos_holding') {
+    const movimento = await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
+    if (!movimento) return null
+    return { kind: 'holding' as const, source: movimento, movimentoId: origemId }
   }
   if (origemTipo === 'rateio_hold') {
     const rateio = await db.prepare('SELECT * FROM rateio_hold WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
