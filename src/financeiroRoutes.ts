@@ -1254,8 +1254,8 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
     const rows = await listar(c.env.SHARE_DB, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
-             r.data_vencimento, 'SAIDA' AS fluxo, CASE WHEN l.tipo_caixa = 'CLIENTE' AND (SELECT COUNT(*) FROM rateio_despesas rd_total WHERE rd_total.lancamento_id = r.lancamento_id AND rd_total.status <> 'CANCELADO') = 1 THEN COALESCE(NULLIF(l.valor_centavos, 0), r.valor_rateado_centavos) ELSE r.valor_rateado_centavos END AS valor_centavos,
-             CASE WHEN l.tipo_caixa = 'CLIENTE' AND (SELECT COUNT(*) FROM rateio_despesas rd_total WHERE rd_total.lancamento_id = r.lancamento_id AND rd_total.status <> 'CANCELADO') = 1 THEN COALESCE(NULLIF(l.valor_centavos, 0), r.valor_rateado_centavos) ELSE r.valor_rateado_centavos END AS valor_rateado_centavos,
+             r.data_vencimento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
+             r.valor_rateado_centavos AS valor_rateado_centavos,
              r.valor_pago_real_centavos AS valor_pago_centavos, r.pago_por AS pago_por, 'CLIENTE' AS tipo_caixa,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
              'rateio_despesas' AS origem_rateio, NULL AS local,
