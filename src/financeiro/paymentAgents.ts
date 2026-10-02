@@ -101,17 +101,22 @@ export async function createPaymentRequest(db: D1Database, input: PaymentRequest
     return { ...request, idempotent: true }
   }
   const cotistaId = input.rateio_linhas[0]?.cotista_id || null
-  const titular = cotistaId
-    ? await db.prepare(`
-        SELECT ca.aeronave_id, ca.cliente_id, ca.socio_id, hs.holding_id
+  const cotistaIds = [...new Set(input.rateio_linhas.map((linha) => linha.cotista_id))]
+  const titulares = input.tipo !== 'share' && cotistaIds.length
+    ? (await db.prepare(`
+        SELECT ca.id, ca.aeronave_id, ca.cliente_id, ca.socio_id, hs.holding_id
           FROM cotista_aeronave ca
           LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
-         WHERE ca.id = ?
-         LIMIT 1
-      `).bind(cotistaId).first<{ aeronave_id: string; cliente_id: string | null; socio_id: string | null; holding_id: string | null }>()
-    : null
+         WHERE ca.id IN (${cotistaIds.map(() => '?').join(', ')})
+      `).bind(...cotistaIds).all<{ id: string; aeronave_id: string; cliente_id: string | null; socio_id: string | null; holding_id: string | null }>()).results ?? []
+    : []
+  if (input.tipo !== 'share' && titulares.length !== cotistaIds.length) throw new Error('cotista_da_aeronave_nao_encontrado')
+  const titular = titulares.find((item) => item.id === cotistaId) ?? null
   if (input.tipo !== 'share' && !titular) throw new Error('cotista_da_aeronave_nao_encontrado')
   const aeronaveId = input.aeronave_id || titular?.aeronave_id || null
+  if (input.tipo !== 'share' && titulares.some((item) => item.aeronave_id !== aeronaveId)) {
+    throw new Error('cotista_nao_vinculado_a_aeronave_informada')
+  }
   const ehHolding = Boolean(titular?.socio_id)
   const id = crypto.randomUUID()
   const solicitacaoCompraId = input.tipo === 'share' && userId ? crypto.randomUUID() : null

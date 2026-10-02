@@ -26,15 +26,30 @@ class FakeStatement {
     }
     return null
   }
+  async all() {
+    if (this.sql.includes('FROM cotista_aeronave ca')) {
+      return {
+        results: this.values.map((id) => ({
+          id,
+          aeronave_id: this.db.cotistas[id]?.aeronave_id ?? 'aeronave-1',
+          cliente_id: this.db.cotistas[id]?.cliente_id ?? 'cliente-1',
+          socio_id: null,
+          holding_id: null,
+        })),
+      }
+    }
+    return { results: [] }
+  }
   async run() {
     return { success: true, meta: { changes: 1 } }
   }
 }
 
-function fakeDb() {
+function fakeDb({ cotistas = {} } = {}) {
   return {
     statements: [],
     insertValues: null,
+    cotistas,
     prepare(sql) {
       const statement = new FakeStatement(this, sql)
       this.statements.push(statement)
@@ -110,6 +125,22 @@ test('rejeita despesas de cliente cujo rateio não fecha o valor informado', () 
     })),
     /rateio_linhas inválido/,
   )
+})
+
+test('rejeita rateio direto com cotista de outra aeronave', async () => {
+  const input = validatePaymentRequest(clientPayload({
+    rateio_linhas: [
+      { cotista_id: 'cotista-1', percentual: 50, percentual_sociedade: 50, valor_centavos: 6173 },
+      { cotista_id: 'cotista-2', percentual: 50, percentual_sociedade: 50, valor_centavos: 6172 },
+    ],
+  }))
+  const db = fakeDb({ cotistas: { 'cotista-2': { aeronave_id: 'aeronave-2' } } })
+
+  await assert.rejects(
+    createPaymentRequest(db, input, 'usuario-1'),
+    /cotista_nao_vinculado_a_aeronave_informada/,
+  )
+  assert.equal(db.statements.some((statement) => statement.sql.includes('INSERT INTO envio_despesas')), false)
 })
 
 test('converte despesas de cliente mantendo o rateio e o pagador em cada linha', async () => {
