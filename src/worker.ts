@@ -7832,12 +7832,11 @@ app.post('/api/interno/emails', async c => {
     if (prefix === 'abastecimento') {
       const column = tipoAbastecimento === 'nota' ? 'nota_url' : tipoAbastecimento === 'boleto' ? 'boleto_url' : 'comanda_url'
       const row = await db.prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
-      if (row?.caminho) {
-        let key = row.caminho
-        try { key = new URL(row.caminho).searchParams.get('key') || key } catch { /* chave legada */ }
-        const bucket = shareBrasilBucket(c); const object = bucket ? await bucket.get(key) : null
-        if (object) anexos.push({ filename: key.split('/').pop() || `abastecimento-${tipoAbastecimento}`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/octet-stream' })
-      }
+      if (!row?.caminho) { erroAnexo = `anexo_abastecimento_nao_encontrado:${rawId}:${tipoAbastecimento}`; continue }
+      const key = chaveStorageDeUrl(row.caminho)
+      const bucket = shareBrasilBucket(c); const object = key && bucket ? await bucket.get(key) : null
+      if (object) anexos.push({ filename: key.split('/').pop() || `abastecimento-${tipoAbastecimento}`, content: arrayBufferBase64(await object.arrayBuffer()), content_type: object.httpMetadata?.contentType || 'application/octet-stream' })
+      else erroAnexo = `anexo_abastecimento_indisponivel:${rawId}:${tipoAbastecimento}`
       continue
     }
     if (prefix === 'lancamento') {

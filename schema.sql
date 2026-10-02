@@ -1239,7 +1239,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_internos (
   movimentacao_id TEXT,
   rateio_id TEXT,
   cotista_id TEXT
-, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT ''[]'', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT ''[]'', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT ''[]'')'), ('CREATE TABLE escala_tripulacao (
+, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT ''[]'', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT ''[]'', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT ''[]'', valor_total_despesa REAL)'), ('CREATE TABLE escala_tripulacao (
     id TEXT PRIMARY KEY NOT NULL,
 
     tripulacao_id TEXT NOT NULL,

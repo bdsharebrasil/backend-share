@@ -2122,6 +2122,12 @@ financeiroRoutes.patch('/envios-pagamento/:id', async (c) => {
   const current = await c.env.SHARE_DB.prepare('SELECT id, tipo, status FROM envio_despesas WHERE id = ?').bind(id).first<{ id: string; tipo: string; status: string }>()
   if (!current) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
   const currentStatus = String(current.status ?? '').toUpperCase()
+  if (currentStatus === 'CONVERTIDO' && requested === 'EMAIL_ENVIADO') {
+    await c.env.SHARE_DB.prepare(`UPDATE envio_despesas
+      SET email_enviado = 1, email_enviado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = 'CONVERTIDO'`).bind(id).run()
+    return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row) => c.json(row))
+  }
   const transitions: Record<string, string[]> = {
     PENDENTE: current.tipo === 'share' ? ['APROVADO', 'CANCELADO'] : ['EMAIL_ENVIADO', 'CANCELADO'],
     APROVADO: ['EMAIL_ENVIADO', 'CANCELADO'],
