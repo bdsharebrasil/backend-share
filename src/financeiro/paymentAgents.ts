@@ -120,11 +120,11 @@ export async function createPaymentRequest(db: D1Database, input: PaymentRequest
   const ehHolding = Boolean(titular?.socio_id)
   const id = crypto.randomUUID()
   const solicitacaoCompraId = input.tipo === 'share' && userId ? crypto.randomUUID() : null
-  // O pagador/responsável pertence ao envio e é preservado na conversão.
-  const pagador = input.cotista_pagador_id || (input.tipo !== 'share' ? cotistaId : null)
+  // O fluxo de cliente não define pagador antes da baixa; os demais preservam o responsável informado.
+  const pagador = input.tipo === 'cliente' ? null : input.cotista_pagador_id || (input.tipo !== 'share' ? cotistaId : null)
   const statements = [
     db.prepare(`INSERT INTO envio_despesas (id, tipo, descricao, valor, valor_total_despesa, data_despesa, vencimento, aeronave_id, observacoes, status, criado_por, grupo_categoria, tipo_caixa, pago_diretamente, pago_por, fornecedor_id, categoria_id, categoria_cliente_id, rateio_linhas_json, anexos_json, periodicidade, tipo_rateio, colaborador_id, abastecimento_json, solicitacao_compra_id, criado_em, fornecedor, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.valor_total_despesa_centavos != null ? input.valor_total_despesa_centavos / 100 : null, input.data_despesa, input.data_vencimento, aeronaveId, input.observacoes, userId, ehHolding ? 'CAIXA HOLDING' : input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', ehHolding ? 'HOLDING' : input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', input.tipo === 'cliente' ? 1 : 0, pagador, input.fornecedor_id, input.categoria_id, input.categoria_cliente_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio, input.colaborador_id, input.abastecimento ? JSON.stringify(input.abastecimento) : null, solicitacaoCompraId, input.fornecedor, input.categoria_nome, input.subcategoria_1, input.subcategoria_2, input.subcategoria_3, input.subcategoria_4),
+      .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.valor_total_despesa_centavos != null ? input.valor_total_despesa_centavos / 100 : null, input.data_despesa, input.data_vencimento, aeronaveId, input.observacoes, userId, ehHolding ? 'CAIXA HOLDING' : input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', ehHolding ? 'HOLDING' : input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', 0, pagador, input.fornecedor_id, input.categoria_id, input.categoria_cliente_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio, input.colaborador_id, input.abastecimento ? JSON.stringify(input.abastecimento) : null, solicitacaoCompraId, input.fornecedor, input.categoria_nome, input.subcategoria_1, input.subcategoria_2, input.subcategoria_3, input.subcategoria_4),
     db.prepare(`INSERT INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'IDEMPOTENCY_KEY', ?, 'ENVIO_DESPESA', ?, 'SOLICITACAO')`).bind(crypto.randomUUID(), input.idempotency_key, id),
   ]
   if (solicitacaoCompraId) {
@@ -161,7 +161,11 @@ export async function convertPaymentRequest(
     if (current?.lancamento_id || current?.movimentacao_id) return { ...current, idempotent: true }
     throw new Error('solicitacao_em_processamento')
   }
-  const linhas = JSON.parse(String(request.rateio_linhas_json || '[]')) as Row[]
+  const linhasRecebidas = JSON.parse(String(request.rateio_linhas_json || '[]')) as Row[]
+  // O envio representa uma obrigação ainda em aberto. A baixa real é que registra o pagamento.
+  const linhas: Row[] = request.tipo === 'cliente'
+    ? linhasRecebidas.map((linha) => ({ ...linha, pago_por: null, pago_diretamente: false, valor_pago_real_centavos: 0 }))
+    : linhasRecebidas
   const anexos = JSON.parse(String(request.anexos_json || '[]'))
   const cotistaAeronaveId = String(linhas[0]?.cotista_id || request.cotista_id || '').trim() || null
   const titular = cotistaAeronaveId
@@ -185,7 +189,7 @@ export async function convertPaymentRequest(
   const valorCentavos = Math.round(Number(request.valor || 0) * 100)
   const totalDespesa = Number(request.valor_total_despesa || 0)
   const totalDespesaCentavos = totalDespesa > 0 ? Math.round(totalDespesa * 100) : null
-  const pagador = String(request.pago_por || linhas[0]?.cotista_id || cotistaAeronaveId || '').trim() || null
+  const pagador = request.tipo === 'cliente' ? null : String(request.pago_por || linhas[0]?.cotista_id || cotistaAeronaveId || '').trim() || null
   const semRateio = request.tipo === 'share' || (request.tipo === 'reembolso' && !ehHolding)
 
   const comando: Row = {
@@ -216,7 +220,7 @@ export async function convertPaymentRequest(
     anexos_json: anexos,
     periodicidade: request.periodicidade,
     tipo_rateio: request.tipo_rateio,
-    pago_diretamente: request.tipo === 'cliente',
+    pago_diretamente: false,
     tipo_caixa: ehHolding ? 'HOLDING' : request.tipo === 'cliente' ? 'CLIENTE' : 'SHARE',
     reembolsavel: request.tipo === 'reembolso',
     // Marca a conta a pagar gerada: não aparece em "Contas a pagar" da empresa.
@@ -224,7 +228,7 @@ export async function convertPaymentRequest(
   }
 
   try {
-    // Envio cliente direto: o cotista pagou; o rateio guarda quem deve a quem.
+    // O envio direto cria o rateio em aberto; apenas a baixa pode confirmar pagamento.
     const lancamento = request.tipo === 'cliente' && handlers.createDirectExternalExpense
       ? await handlers.createDirectExternalExpense(db, comando, userId, { internal: true })
       : await handlers.createExpense(db, comando, userId, { internal: true })

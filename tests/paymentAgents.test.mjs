@@ -101,7 +101,7 @@ test('schema-base mantém a coluna para restaurações e testes', async () => {
   assert.match(schema.slice(start, end), /valor_total_despesa REAL/)
 })
 
-test('persiste o valor integral, vencimento, rateio e anexo atribuído ao cotista', async () => {
+test('persiste a solicitação direta em aberto, com valor integral, rateio e anexo', async () => {
   const input = validatePaymentRequest(clientPayload())
   const db = fakeDb()
   const result = await createPaymentRequest(db, input, 'usuario-1')
@@ -109,10 +109,11 @@ test('persiste o valor integral, vencimento, rateio e anexo atribuído ao cotist
 
   assert.ok(insert)
   assert.match(insert.sql, /valor_total_despesa/)
+  assert.match(insert.sql, /'PENDENTE'/)
   assert.equal(db.insertValues[4], 123.45)
   assert.equal(result.valor_total_despesa, 123.45)
-  assert.equal(db.insertValues[12], 1)
-  assert.equal(db.insertValues[13], 'cotista-1')
+  assert.equal(db.insertValues[12], 0)
+  assert.equal(db.insertValues[13], null)
   assert.equal(db.insertValues[6], '2026-10-15')
   assert.deepEqual(JSON.parse(String(db.insertValues[17])), input.rateio_linhas)
   assert.deepEqual(JSON.parse(String(db.insertValues[18])), input.anexos)
@@ -143,7 +144,7 @@ test('rejeita rateio direto com cotista de outra aeronave', async () => {
   assert.equal(db.statements.some((statement) => statement.sql.includes('INSERT INTO envio_despesas')), false)
 })
 
-test('converte despesas de cliente mantendo o rateio e o pagador em cada linha', async () => {
+test('converte envio direto com rateio em aberto até a baixa do pagamento', async () => {
   const db = fakeDb()
   let comandoCapturado
   const request = {
@@ -175,12 +176,12 @@ test('converte despesas de cliente mantendo o rateio e o pagador em cada linha',
   }, 'usuario-1')
 
   assert.equal(comandoCapturado.tipo_caixa, 'CLIENTE')
-  assert.equal(comandoCapturado.pago_diretamente, true)
-  assert.equal(comandoCapturado.cotista_pagador_id, 'cotista-1')
-  assert.equal(comandoCapturado.rateio_linhas[0].pago_diretamente, true)
-  assert.equal(comandoCapturado.rateio_linhas[0].pago_por, 'cotista-1')
-  assert.equal(comandoCapturado.rateio_linhas[0].valor_pago_real_centavos, 6173)
+  assert.equal(comandoCapturado.pago_diretamente, false)
+  assert.equal(comandoCapturado.cotista_pagador_id, null)
+  assert.equal(comandoCapturado.rateio_linhas[0].pago_diretamente, false)
+  assert.equal(comandoCapturado.rateio_linhas[0].pago_por, null)
+  assert.equal(comandoCapturado.rateio_linhas[0].valor_pago_real_centavos, 0)
   assert.equal(comandoCapturado.rateio_linhas[1].pago_diretamente, false)
-  assert.equal(comandoCapturado.rateio_linhas[1].pago_por, 'cotista-1')
+  assert.equal(comandoCapturado.rateio_linhas[1].pago_por, null)
   assert.equal(comandoCapturado.rateio_linhas[1].valor_pago_real_centavos, 0)
 })
