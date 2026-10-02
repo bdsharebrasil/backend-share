@@ -106,11 +106,11 @@ export async function createPaymentRequest(db: D1Database, input: PaymentRequest
   const ehHolding = Boolean(titular?.socio_id)
   const id = crypto.randomUUID()
   const solicitacaoCompraId = input.tipo === 'share' && userId ? crypto.randomUUID() : null
-  // envio_despesas.pago_por guarda o cotista pagador/responsável.
-  const pagador = input.cotista_pagador_id || (input.tipo !== 'share' ? cotistaId : null)
+  // Uma programação de cliente ainda não tem pagador: ele só é definido na baixa.
+  const pagador = input.tipo === 'cliente' ? null : input.cotista_pagador_id || null
   const statements = [
     db.prepare(`INSERT INTO envio_despesas (id, tipo, descricao, valor, valor_total_despesa, data_despesa, vencimento, aeronave_id, observacoes, status, criado_por, grupo_categoria, tipo_caixa, pago_diretamente, pago_por, fornecedor_id, categoria_id, categoria_cliente_id, rateio_linhas_json, anexos_json, periodicidade, tipo_rateio, colaborador_id, abastecimento_json, solicitacao_compra_id, criado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`)
-      .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.valor_total_despesa_centavos != null ? input.valor_total_despesa_centavos / 100 : null, input.data_despesa, input.data_vencimento, aeronaveId, input.observacoes, userId, ehHolding ? 'CAIXA HOLDING' : input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', ehHolding ? 'HOLDING' : input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', input.tipo === 'cliente' ? 1 : 0, pagador, input.fornecedor_id, input.categoria_id, input.categoria_cliente_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio, input.colaborador_id, input.abastecimento ? JSON.stringify(input.abastecimento) : null, solicitacaoCompraId),
+      .bind(id, input.tipo, input.descricao, input.valor_centavos / 100, input.valor_total_despesa_centavos != null ? input.valor_total_despesa_centavos / 100 : null, input.data_despesa, input.data_vencimento, aeronaveId, input.observacoes, userId, ehHolding ? 'CAIXA HOLDING' : input.tipo === 'cliente' ? 'CAIXA CLIENTE' : input.tipo === 'reembolso' ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA', ehHolding ? 'HOLDING' : input.tipo === 'cliente' ? 'CLIENTE' : 'SHARE', 0, pagador, input.fornecedor_id, input.categoria_id, input.categoria_cliente_id, JSON.stringify(input.rateio_linhas), JSON.stringify(input.anexos), input.periodicidade, input.tipo_rateio, input.colaborador_id, input.abastecimento ? JSON.stringify(input.abastecimento) : null, solicitacaoCompraId),
     db.prepare(`INSERT INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'IDEMPOTENCY_KEY', ?, 'ENVIO_DESPESA', ?, 'SOLICITACAO')`).bind(crypto.randomUUID(), input.idempotency_key, id),
   ]
   if (solicitacaoCompraId) {
@@ -148,6 +148,9 @@ export async function convertPaymentRequest(
     throw new Error('solicitacao_em_processamento')
   }
   const linhas = JSON.parse(String(request.rateio_linhas_json || '[]')) as Row[]
+  const linhasParaConversao = request.tipo === 'cliente'
+    ? linhas.map((linha) => ({ ...linha, pago_por: null, pago_diretamente: false, valor_pago_real_centavos: 0 }))
+    : linhas
   const anexos = JSON.parse(String(request.anexos_json || '[]'))
   const cotistaAeronaveId = String(linhas[0]?.cotista_id || request.cotista_id || '').trim() || null
   const titular = cotistaAeronaveId
@@ -171,7 +174,9 @@ export async function convertPaymentRequest(
   const valorCentavos = Math.round(Number(request.valor || 0) * 100)
   const totalDespesa = Number(request.valor_total_despesa || 0)
   const totalDespesaCentavos = totalDespesa > 0 ? Math.round(totalDespesa * 100) : null
-  const pagador = String(request.pago_por || linhas[0]?.cotista_id || cotistaAeronaveId || '').trim() || null
+  const pagador = request.tipo === 'cliente'
+    ? null
+    : String(request.pago_por || linhas[0]?.cotista_id || cotistaAeronaveId || '').trim() || null
   const semRateio = request.tipo === 'share' || (request.tipo === 'reembolso' && !ehHolding)
 
   const comando: Row = {
@@ -185,6 +190,7 @@ export async function convertPaymentRequest(
     aeronave_id: request.aeronave_id || titular?.aeronave_id,
     cotista_aeronave_id: cotistaAeronaveId,
     cotista_pagador_id: pagador,
+    pago_por: pagador,
     socio_id: titular?.socio_id || null,
     holding_id: titular?.holding_id || null,
     categoria_id: request.categoria_id,
@@ -193,12 +199,12 @@ export async function convertPaymentRequest(
     fornecedor_id: request.fornecedor_id,
     observacoes: request.observacoes,
     abastecimentos_id: abastecimentoId,
-    rateio_linhas: linhas,
+    rateio_linhas: linhasParaConversao,
     sem_rateio: semRateio,
     anexos_json: anexos,
     periodicidade: request.periodicidade,
     tipo_rateio: request.tipo_rateio,
-    pago_diretamente: request.tipo === 'cliente',
+    pago_diretamente: false,
     tipo_caixa: ehHolding ? 'HOLDING' : request.tipo === 'cliente' ? 'CLIENTE' : 'SHARE',
     reembolsavel: request.tipo === 'reembolso',
     // Marca a conta a pagar gerada: não aparece em "Contas a pagar" da empresa.

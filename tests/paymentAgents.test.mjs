@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { validatePaymentRequest, createPaymentRequest } from '../src/financeiro/paymentAgents.ts'
+import { validatePaymentRequest, createPaymentRequest, convertPaymentRequest } from '../src/financeiro/paymentAgents.ts'
 
 const migrationPath = new URL('../migrations/20261002_envios_despesas_total_despesa.sql', import.meta.url)
 const schemaPath = new URL('../schema.sql', import.meta.url)
@@ -96,6 +96,8 @@ test('persiste o valor integral, vencimento, rateio e anexo atribuído ao cotist
   assert.match(insert.sql, /valor_total_despesa/)
   assert.equal(db.insertValues[4], 123.45)
   assert.equal(result.valor_total_despesa, 123.45)
+  assert.equal(db.insertValues[12], 0)
+  assert.equal(db.insertValues[13], null)
   assert.equal(db.insertValues[6], '2026-10-15')
   assert.deepEqual(JSON.parse(String(db.insertValues[17])), input.rateio_linhas)
   assert.deepEqual(JSON.parse(String(db.insertValues[18])), input.anexos)
@@ -108,4 +110,44 @@ test('rejeita despesas de cliente cujo rateio não fecha o valor informado', () 
     })),
     /rateio_linhas inválido/,
   )
+})
+
+test('converte despesas de cliente mantendo todos os cotistas em aberto e sem pagador', async () => {
+  const db = fakeDb()
+  let comandoCapturado
+  const request = {
+    id: 'envio-cliente-1',
+    status: 'PENDENTE',
+    tipo: 'cliente',
+    descricao: 'Manutenção da aeronave',
+    valor: 123.45,
+    valor_total_despesa: 123.45,
+    data_despesa: '2026-10-02',
+    vencimento: '2026-10-15',
+    aeronave_id: 'aeronave-1',
+    categoria_id: 'categoria-cliente-1',
+    categoria_cliente_id: 'categoria-cliente-1',
+    pago_por: 'cotista-1',
+    rateio_linhas_json: JSON.stringify([
+      { cotista_id: 'cotista-1', percentual: 50, valor_centavos: 6173, pago_por: 'cotista-1', pago_diretamente: true, valor_pago_real_centavos: 6173 },
+      { cotista_id: 'cotista-2', percentual: 50, valor_centavos: 6172, pago_por: 'cotista-1', pago_diretamente: false, valor_pago_real_centavos: 0 },
+    ]),
+    anexos_json: '[]',
+  }
+
+  await convertPaymentRequest(db, request, {
+    createExpense: async () => ({ id: 'lancamento-1' }),
+    createDirectExternalExpense: async (_db, command) => {
+      comandoCapturado = command
+      return { id: 'lancamento-1' }
+    },
+  }, 'usuario-1')
+
+  assert.equal(comandoCapturado.tipo_caixa, 'CLIENTE')
+  assert.equal(comandoCapturado.pago_diretamente, false)
+  assert.equal(comandoCapturado.cotista_pagador_id, null)
+  assert.equal(comandoCapturado.pago_por, null)
+  assert.ok(comandoCapturado.rateio_linhas.every((linha) => linha.pago_diretamente === false))
+  assert.ok(comandoCapturado.rateio_linhas.every((linha) => linha.pago_por === null))
+  assert.ok(comandoCapturado.rateio_linhas.every((linha) => linha.valor_pago_real_centavos === 0))
 })

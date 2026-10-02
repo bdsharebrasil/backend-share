@@ -1099,7 +1099,8 @@ export async function createExpense(
   }
 
   const lancamentoId = text(command.id) || id()
-  const contaPagarId = id()
+  const ehDespesaCliente = String(command.tipo_caixa || '').toUpperCase() === 'CLIENTE'
+  const contaPagarId = ehDespesaCliente ? null : id()
   const status = 'EM_ABERTO'
   const statements = [
     insertStatement(
@@ -1113,7 +1114,8 @@ export async function createExpense(
         descricao: command.descricao,
         fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-        categoria_id: nullableText(command.categoria_id),
+        categoria_id: ehDespesaCliente ? null : nullableText(command.categoria_id),
+        categoria_cliente_id: ehDespesaCliente ? nullableText(command.categoria_cliente_id ?? command.categoria_id) : null,
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA',
         ),
@@ -1123,7 +1125,7 @@ export async function createExpense(
         ),
         fluxo: 'SAIDA',
         natureza: 'DESPESA',
-        tipo_caixa: 'SHARE',
+        tipo_caixa: ehDespesaCliente ? 'CLIENTE' : 'SHARE',
         valor_centavos: amount,
         valor_total: amount / 100,
         valor: amount / 100,
@@ -1143,7 +1145,7 @@ export async function createExpense(
       },
       ['id', 'descricao', 'fluxo', 'valor_centavos'],
     ),
-    insertStatement(
+    ...(contaPagarId ? [insertStatement(
       db,
       schema,
       'contas_apagar',
@@ -1169,7 +1171,7 @@ export async function createExpense(
         status,
       },
       ['id', 'data_vencimento', 'valor_centavos', 'lancamentos_id'],
-    ),
+    )] : []),
     ...clientAllocationStatements(
       db,
       schema,
@@ -1218,6 +1220,29 @@ export async function createDirectExternalExpense(
   const lines = allocationLines(normalizeCommand(body, userId, options))
   if (!lines.length) {
     throw new FinanceError('Despesa direta precisa de rateio', 'rateio_obrigatorio')
+  }
+
+  if (body.pago_diretamente !== undefined && !asFlag(body.pago_diretamente)) {
+    const rateioPendente = lines.map((line) => ({
+      cotista_id: line.cotistaId,
+      socio_id: line.socioId,
+      holding_id: line.holdingId,
+      percentual: line.percentual,
+      percentual_sociedade: line.percentualSociedade,
+      valor_centavos: line.valorCentavos,
+      pago_por: null,
+      pago_diretamente: false,
+      valor_pago_real_centavos: 0,
+    }))
+    return createExpense(db, {
+      ...body,
+      rateio_linhas: rateioPendente,
+      cotista_pagador_id: null,
+      pago_por: null,
+      pago_diretamente: false,
+      tipo_caixa: body.tipo_caixa || 'CLIENTE',
+      reembolsavel: false,
+    }, userId, options)
   }
 
   const total = asPositiveCents(body.valor_centavos ?? body.valorCentavos)
