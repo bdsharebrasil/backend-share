@@ -102,6 +102,18 @@ const id = (): string => crypto.randomUUID()
 
 const upper = (value: unknown): string => text(value).toUpperCase()
 
+export type EscopoFinanceiro = 'FINANCEIRO' | 'CAIXA_SHARE'
+
+// O escopo é uma decisão do servidor: o formulário nunca controla a fronteira.
+function escopoFinanceiro(command: Row): EscopoFinanceiro {
+  const tipo = upper(command.tipo)
+  const caixa = upper(command.tipo_caixa)
+  const origem = upper(command.origem_tipo)
+  if (caixa === 'CLIENTE' || caixa === 'HOLDING' || tipo === 'CLIENTE' || tipo === 'REEMBOLSO') return 'FINANCEIRO'
+  if (['NF_SAIDA', 'RECIBO_SAIDA', 'RECIBO_COLABORADOR', 'PAGAMENTO_FOLHA', 'DESPESA_EMPRESA', 'SOLICITACAO_COMPRA'].includes(origem)) return 'CAIXA_SHARE'
+  return caixa === 'SHARE' ? 'CAIXA_SHARE' : 'FINANCEIRO'
+}
+
 // Valores aceitos pelo CHECK de tipo_rateio em rateio_despesas e rateio_hold.
 const RATEIO_TYPES: readonly string[] = ['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA']
 // Nomes usados pelo frontend para "dividir igualmente"; no banco viram FIXO.
@@ -947,6 +959,7 @@ export async function createExpense(
 ): Promise<Row> {
   const schema = await loadSchema(db)
   const command = await resolveLancamentoMetadata(db, normalizeCommand(body, userId, options))
+  const escopo = escopoFinanceiro(command)
   const existing = await findExistingByIdempotency(
     db,
     schema,
@@ -996,6 +1009,7 @@ export async function createExpense(
         'movimentos_holding',
         {
           id: movimentoId,
+          escopo_financeiro: escopo,
           holding_id: context.holdingId,
           socio_id: context.socioId,
           aeronave_id: context.aeronaveId || command.aeronave_id,
@@ -1086,6 +1100,7 @@ export async function createExpense(
         'lancamentos',
         {
           id: lancamentoId,
+          escopo_financeiro: escopo,
           aeronave_id: command.aeronave_id,
           cotista_aeronave_id: command.cotista_aeronave_id,
           abastecimentos_id: nullableText(command.abastecimentos_id),
@@ -1164,6 +1179,7 @@ export async function createExpense(
       'lancamentos',
       {
         id: lancamentoId,
+        escopo_financeiro: escopo,
         aeronave_id: command.aeronave_id,
         cotista_aeronave_id: command.cotista_aeronave_id,
         descricao: command.descricao,
@@ -1212,6 +1228,7 @@ export async function createExpense(
       'contas_apagar',
       {
         id: contaPagarId,
+        escopo_financeiro: escopo,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
         categoria_id: nullableText(command.categoria_id),
@@ -1357,6 +1374,7 @@ export async function issueRevenue(
 ): Promise<Row> {
   const schema = await loadSchema(db)
   const command = normalizeCommand({ ...body, fluxo: 'ENTRADA' }, userId, options)
+  const escopo = escopoFinanceiro(command)
   const existing = await findExistingByIdempotency(
     db,
     schema,
@@ -1382,6 +1400,7 @@ export async function issueRevenue(
       'lancamentos',
       {
         id: lancamentoId,
+        escopo_financeiro: escopo,
         aeronave_id: context?.aeronaveId || command.aeronave_id,
         cotista_aeronave_id:
           context?.cotistaAeronaveId || command.cotista_aeronave_id,
@@ -1416,6 +1435,7 @@ export async function issueRevenue(
       'contas_areceber',
       {
         id: contaReceberId,
+        escopo_financeiro: escopo,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
         categoria_id: nullableText(command.categoria_id),
@@ -1445,6 +1465,7 @@ export async function issueRevenue(
         'lancamentos',
         {
           id: clientLancamentoId,
+          escopo_financeiro: escopo,
           aeronave_id: context?.aeronaveId || command.aeronave_id,
           cotista_aeronave_id: context?.cotistaAeronaveId,
           cliente_id: context?.clienteId,
@@ -1596,6 +1617,8 @@ export async function createReimbursement(
 ): Promise<Row> {
   const schema = await loadSchema(db)
   const command = await resolveLancamentoMetadata(db, normalizeCommand(body, userId, options))
+  const origemEscopo = await db.prepare('SELECT escopo_financeiro FROM lancamentos WHERE id = ?').bind(String(command.lancamento_origem_id ?? command.lancamento_id ?? '')).first<{ escopo_financeiro: EscopoFinanceiro }>()
+  const escopo = origemEscopo?.escopo_financeiro || 'FINANCEIRO'
   const originalId = text(
     command.lancamento_origem_id ?? command.lancamento_id,
   )
@@ -1687,6 +1710,7 @@ export async function createReimbursement(
       'reembolsos',
       {
         id: reimbursementId,
+        escopo_financeiro: escopo,
         lancamento_origem_id: originalId,
         conta_receber_id: contaReceberId,
         lancamento_cliente_id: clientLancamentoId,
@@ -1705,6 +1729,7 @@ export async function createReimbursement(
       'lancamentos',
       {
         id: shareLancamentoId,
+        escopo_financeiro: escopo,
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
@@ -1742,6 +1767,7 @@ export async function createReimbursement(
       'lancamentos',
       {
         id: clientLancamentoId,
+        escopo_financeiro: escopo,
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
@@ -1782,6 +1808,7 @@ export async function createReimbursement(
       'contas_areceber',
       {
         id: contaReceberId,
+        escopo_financeiro: escopo,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
         descricao: command.descricao || 'Reembolso de despesa',

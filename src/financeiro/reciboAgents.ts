@@ -98,7 +98,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
       pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
       valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
-      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por, categoria_nome, numero_voo
+      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por, categoria_nome, numero_voo, escopo_financeiro
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
@@ -108,7 +108,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
-    input.observacoes, userId, input.categoria_nome, input.numero_voo,
+    input.observacoes, userId, input.categoria_nome, input.numero_voo, input.tipo_recibo === 'recibo_colaborador' ? 'CAIXA_SHARE' : 'FINANCEIRO',
   ).run()
 }
 

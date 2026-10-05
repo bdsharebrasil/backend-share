@@ -91,6 +91,20 @@ const CONFIG_TABLES = {
   categorias_cliente: 'categoria_movimentacao_cliente',
 } as const
 const configId = () => crypto.randomUUID()
+
+async function requireCaixaShareAccess(c: any): Promise<Response | null> {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await c.env.SHARE_DB.prepare(`
+    SELECT 1 FROM user_profiles p
+     WHERE p.id = ? AND lower(replace(replace(trim(COALESCE(p.tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster')
+    UNION ALL
+    SELECT 1 FROM usuarios_funcoes f
+     WHERE f.user_id = ? AND lower(replace(replace(trim(COALESCE(f.funcao, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster')
+    LIMIT 1`).bind(userId, userId).first()
+  return row ? null : c.json({ error: 'caixa_share_nao_autorizado' }, 403)
+}
+
 const configText = (value: unknown, fallback = '') => String(value ?? fallback).trim()
 
 financeiroRoutes.get('/configuracoes', async (c) => {
@@ -517,6 +531,7 @@ financeiroRoutes.post('/movimentos-holding/:id/baixa', async (c) => {
 
 financeiroRoutes.get('/recibos-saida', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const rows = await listar(c.env.SHARE_DB, 'SELECT * FROM recibos_saida ORDER BY date(data_emissao) DESC, criado_em DESC LIMIT 500')
     return c.json({ recibos: rows })
   } catch (error) { return errorResponse(c, error) }
@@ -524,6 +539,7 @@ financeiroRoutes.get('/recibos-saida', async (c) => {
 
 financeiroRoutes.post('/recibos-saida', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const body = await c.req.json<Record<string, unknown>>()
     const cotistaId = String(body.cotista_aeronave_id ?? body.cotista_id ?? '').trim()
     const aeronaveId = String(body.aeronave_id ?? '').trim()
@@ -585,6 +601,7 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
 
 financeiroRoutes.patch('/recibos-saida/:id', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const body = await c.req.json<Record<string, unknown>>()
     const pdfUrl = String(body.pdf_url ?? '').trim()
     if (!pdfUrl) return c.json({ error: 'pdf_url_obrigatorio' }, 400)
@@ -606,6 +623,7 @@ financeiroRoutes.patch('/recibos-saida/:id', async (c) => {
 
 financeiroRoutes.delete('/recibos-saida/:id', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
     const reciboId = c.req.param('id')
     const recibo = await db.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(reciboId).first<Record<string, unknown>>()
@@ -662,6 +680,7 @@ financeiroRoutes.delete('/recibos-saida/:id', async (c) => {
 
 financeiroRoutes.post('/recibos-saida/:id/dar-baixa', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const reciboId = c.req.param('id')
     const recibo = await c.env.SHARE_DB.prepare('SELECT contas_areceber_id FROM recibos_saida WHERE id = ?').bind(reciboId).first<{ contas_areceber_id: string | null }>()
     if (!recibo) return c.json({ error: 'recibo_saida_nao_encontrado' }, 404)
@@ -756,6 +775,7 @@ financeiroRoutes.get('/notas-saida/opcoes', async (c) => {
 
 financeiroRoutes.get('/notas-saida', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
     const notas = await listar(db, `SELECT n.id, 'nf_saida' AS origem, n.numero, n.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, cl.email_principal AS cliente_email, n.aeronave_id, a.matricula_registro AS aeronave_matricula, n.data_emissao AS data_criacao, n.data_vencimento, n.valor_total, n.nome_categoria AS categoria, n.descricao_servico AS descricao, n.status, n.arquivo_pdf_url, n.criado_em, n.atualizado_em, cr.id AS contas_areceber_id FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id = n.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = n.aeronave_id LEFT JOIN contas_areceber cr ON cr.nf_saida_id = n.id ORDER BY date(n.data_emissao) DESC, n.criado_em DESC`)
     const recibos = await listar(db, `SELECT r.id, 'recibo_saida' AS origem, r.numero_recibo, r.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, cl.email_principal AS cliente_email, r.aeronave_id, a.matricula_registro AS aeronave_matricula, r.data_emissao, r.data_vencimento, r.valor_total, r.nome_categoria, r.descricao_servico, r.status, r.pdf_url, r.contas_areceber_id, r.criado_em, r.atualizado_em FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = r.aeronave_id ORDER BY date(r.data_emissao) DESC, r.criado_em DESC`)
@@ -812,6 +832,7 @@ function notaSaidaStatements(db: D1Database, nota: {
 
 financeiroRoutes.post('/notas-saida', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const numero = String(body.numero ?? '').trim()
@@ -900,6 +921,7 @@ financeiroRoutes.post('/notas-saida', async (c) => {
 
 financeiroRoutes.patch('/notas-saida/:id', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
     const id = c.req.param('id')
     if (!(await documentoSaidaRow(db, id))) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
@@ -919,6 +941,7 @@ financeiroRoutes.patch('/notas-saida/:id', async (c) => {
 
 financeiroRoutes.delete('/notas-saida/:id', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
     const id = c.req.param('id')
     const nota = await documentoSaidaRow(db, id)
@@ -951,6 +974,7 @@ financeiroRoutes.delete('/notas-saida/:id', async (c) => {
 
 financeiroRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const nota = await documentoSaidaRow(c.env.SHARE_DB, c.req.param('id'))
     if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
     const contaId = String(nota.contas_areceber_id ?? '').trim()
@@ -982,6 +1006,7 @@ financeiroRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
 
 financeiroRoutes.post('/notas-saida/anexos', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const bucket = storage(c)
     if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
     const form = await c.req.parseBody()
@@ -1002,6 +1027,7 @@ financeiroRoutes.post('/notas-saida/anexos', async (c) => {
 })
 
 financeiroRoutes.get('/notas-saida/anexos/:id/arquivo', async (c) => {
+  const denied = await requireCaixaShareAccess(c); if (denied) return denied
   const bucket = storage(c)
   if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
   const key = c.req.query('key')
@@ -1035,11 +1061,11 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
   try {
     const db = c.env.SHARE_DB
     const [receber, pagar, movimentacoes, movimentosHolding, emailsEnviados] = await Promise.all([
-      listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE status <> 'CANCELADO'"),
-      listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE status <> 'CANCELADO'"),
-      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(NULLIF(cl.codigo_cliente, ''), NULLIF(ca.codigo_cliente, ''), (SELECT NULLIF(ca_cliente.codigo_cliente, '') FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id ORDER BY l.criado_em DESC LIMIT 100`),
-      listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome, (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.aeronave_id = mh.aeronave_id AND ca.socio_id = mh.socio_id LIMIT 1) AS codigo_cliente FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id ORDER BY mh.criado_em DESC LIMIT 100`),
-      listar(db, 'SELECT id, destinatarios, assunto, status, anexos, erro_mensagem AS erro, criado_em, email_enviado_em FROM emails_enviados ORDER BY criado_em DESC LIMIT 200'),
+      listar(db, "SELECT valor_centavos, status FROM contas_areceber WHERE escopo_financeiro = 'FINANCEIRO' AND status <> 'CANCELADO'"),
+      listar(db, "SELECT id, lancamentos_id, valor_centavos, status, data_vencimento FROM contas_apagar WHERE escopo_financeiro = 'FINANCEIRO' AND status <> 'CANCELADO'"),
+      listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(NULLIF(cl.codigo_cliente, ''), NULLIF(ca.codigo_cliente, ''), (SELECT NULLIF(ca_cliente.codigo_cliente, '') FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id WHERE l.escopo_financeiro = 'FINANCEIRO' ORDER BY l.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome, (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.aeronave_id = mh.aeronave_id AND ca.socio_id = mh.socio_id LIMIT 1) AS codigo_cliente FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' ORDER BY mh.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT e.id, e.destinatarios, e.assunto, e.status, e.anexos, e.erro_mensagem AS erro, e.criado_em, e.email_enviado_em FROM emails_enviados e WHERE e.escopo_financeiro = 'FINANCEIRO' ORDER BY e.criado_em DESC LIMIT 200`),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
     const contaPendente = (row: Record<string, unknown>) => {
@@ -1159,9 +1185,9 @@ financeiroRoutes.get('/dashboard/financeiro/movimentacoes', async (c) => {
     const db = c.env.SHARE_DB
     const [abastecimentos, recibos, reembolsos, relatorios] = await Promise.all([
       listar(db, `SELECT a.id, a.numero_voo, a.data, a.numero_nf, a.numero_comanda, a.valor_total, a.status, a.observacao AS descricao, 'abastecimento' AS origem, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, a.cliente_id, a.socio_id, 'Cotista não informado') AS cotista_nome, 'CLIENTE' AS tipo_caixa FROM abastecimentos a LEFT JOIN cliente cl ON cl.id = a.cliente_id LEFT JOIN hold_socios hs ON hs.id = a.socio_id LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = a.aeronave_id AND (ca.cliente_id = a.cliente_id OR ca.socio_id = a.socio_id) ORDER BY date(a.data) DESC, a.id DESC LIMIT 1000`),
-      listar(db, `SELECT r.id, NULL AS numero_voo, r.data_emissao AS data, COALESCE(r.numero_documento_anexo, r.numero_recibo) AS numero_doc, r.descricao, r.valor, r.status, r.tipo_caixa, 'recibo' AS origem, COALESCE(cl.razao_social, hs.nome, r.nome_pagador, 'Cotista não informado') AS cotista_nome FROM recibos r LEFT JOIN cliente cl ON cl.id = r.pagador_id AND r.pagador_tipo = 'cotista_aeronave' LEFT JOIN hold_socios hs ON hs.id = r.pagador_id AND r.pagador_tipo = 'cotista_aeronave' ORDER BY date(r.data_emissao) DESC, r.id DESC LIMIT 1000`),
-      listar(db, `SELECT r.id, NULL AS numero_voo, r.criado_em AS data, NULL AS numero_doc, 'Reembolso' AS descricao, r.valor_centavos, r.status, 'CLIENTE' AS tipo_caixa, 'reembolso' AS origem, COALESCE(cl.razao_social, hs.nome, r.cotista_id, 'Cotista não informado') AS cotista_nome FROM reembolsos r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY date(r.criado_em) DESC, r.id DESC LIMIT 1000`),
-      listar(db, `SELECT r.id, r.numero_voo, r.data_inicio AS data, r.numero_relatorio AS numero_doc, 'Relatório de despesa de viagem' AS descricao, r.total_valor AS valor, r.status, 'CLIENTE' AS tipo_caixa, 'relatorio_despesa_viagem' AS origem, CASE WHEN r.socio_id IS NOT NULL THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente) ELSE COALESCE(NULLIF(cl.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), ca.codigo_cliente) END AS cotista_nome FROM relatorio_despesa_viagem r LEFT JOIN cliente cl ON cl.id = r.cliente_id LEFT JOIN holdings h ON h.id = r.cliente_id LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id) OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id))) LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id) LEFT JOIN holdings hs_holding ON hs_holding.id = hs.holding_id ORDER BY date(r.data_inicio) DESC, r.id DESC LIMIT 1000`),
+      listar(db, `SELECT r.id, NULL AS numero_voo, r.data_emissao AS data, COALESCE(r.numero_documento_anexo, r.numero_recibo) AS numero_doc, r.descricao, r.valor, r.status, r.tipo_caixa, 'recibo' AS origem, COALESCE(cl.razao_social, hs.nome, r.nome_pagador, 'Cotista não informado') AS cotista_nome FROM recibos r LEFT JOIN cliente cl ON cl.id = r.pagador_id AND r.pagador_tipo = 'cotista_aeronave' LEFT JOIN hold_socios hs ON hs.id = r.pagador_id AND r.pagador_tipo = 'cotista_aeronave' WHERE r.escopo_financeiro = 'FINANCEIRO' ORDER BY date(r.data_emissao) DESC, r.id DESC LIMIT 1000`),
+      listar(db, `SELECT r.id, NULL AS numero_voo, r.criado_em AS data, NULL AS numero_doc, 'Reembolso' AS descricao, r.valor_centavos, r.status, 'CLIENTE' AS tipo_caixa, 'reembolso' AS origem, COALESCE(cl.razao_social, hs.nome, r.cotista_id, 'Cotista não informado') AS cotista_nome FROM reembolsos r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE r.escopo_financeiro = 'FINANCEIRO' ORDER BY date(r.criado_em) DESC, r.id DESC LIMIT 1000`),
+      listar(db, `SELECT r.id, r.numero_voo, r.data_inicio AS data, r.numero_relatorio AS numero_doc, 'Relatório de despesa de viagem' AS descricao, r.total_valor AS valor, r.status, 'CLIENTE' AS tipo_caixa, 'relatorio_despesa_viagem' AS origem, CASE WHEN r.socio_id IS NOT NULL THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente) ELSE COALESCE(NULLIF(cl.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), ca.codigo_cliente) END AS cotista_nome FROM relatorio_despesa_viagem r LEFT JOIN cliente cl ON cl.id = r.cliente_id LEFT JOIN holdings h ON h.id = r.cliente_id LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = r.aeronave_id AND ((r.socio_id IS NOT NULL AND ca.socio_id = r.socio_id) OR (r.cliente_id IS NOT NULL AND (ca.cliente_id = r.cliente_id OR ca.id = r.cliente_id))) LEFT JOIN hold_socios hs ON hs.id = COALESCE(r.socio_id, ca.socio_id) LEFT JOIN holdings hs_holding ON hs_holding.id = hs.holding_id WHERE EXISTS (SELECT 1 FROM lancamentos l WHERE l.origem_id = r.id AND l.escopo_financeiro = 'FINANCEIRO') ORDER BY date(r.data_inicio) DESC, r.id DESC LIMIT 1000`),
     ])
     const rows: Record<string, unknown>[] = [
       ...abastecimentos.map((row): Record<string, unknown> => ({ ...row, valor: Number(row.valor_total || 0), numero_doc: row.numero_nf || row.numero_comanda || null })),

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { issueRevenue } from '../src/financeiro/FinanceiroKernel.ts'
 
 const schemaColumns = [
-  'id', 'descricao', 'fluxo', 'valor_centavos', 'valor_total', 'valor', 'status',
+  'id', 'escopo_financeiro', 'descricao', 'fluxo', 'valor_centavos', 'valor_total', 'valor', 'status',
   'tipo_caixa', 'natureza', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id',
   'cliente_id', 'socio_id', 'holding_id', 'categoria_id', 'categoria_cliente_id',
   'categoria_nome', 'grupo_categoria', 'data_emissao', 'data_vencimento',

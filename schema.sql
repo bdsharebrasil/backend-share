@@ -357,6 +357,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   origem_tipo TEXT,
+  escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
   idempotency_key TEXT
 , tripulante_id TEXT)'), ('CREATE TABLE "contas_areceber" (
   id TEXT PRIMARY KEY NOT NULL,
@@ -380,6 +381,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   origem_tipo TEXT,
+  escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
   idempotency_key TEXT
 )'), ('CREATE TABLE contas_bancarias (
   id TEXT PRIMARY KEY NOT NULL,
@@ -1168,7 +1170,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_internos (
   enviado_por TEXT,
   criado_em TEXT,
   cotista_id TEXT
-, email_enviado_em TEXT, anexos_detalhes TEXT)'), ('CREATE TABLE emails_modelos (
+, email_enviado_em TEXT, anexos_detalhes TEXT, escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))'), ('CREATE TABLE emails_modelos (
   id TEXT PRIMARY KEY NOT NULL,
   nome TEXT NOT NULL,
   assunto TEXT NOT NULL,
@@ -1239,7 +1241,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_internos (
   movimentacao_id TEXT,
   rateio_id TEXT,
   cotista_id TEXT
-, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT ''[]'', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT ''[]'', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT ''[]'', valor_total_despesa REAL)'), ('CREATE TABLE escala_tripulacao (
+, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT ''[]'', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT ''[]'', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT ''[]'', valor_total_despesa REAL, escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))'), ('CREATE TABLE escala_tripulacao (
     id TEXT PRIMARY KEY NOT NULL,
 
     tripulacao_id TEXT NOT NULL,
@@ -1940,7 +1942,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE manual_tutoriais (
     CHECK (periodicidade IN (
       ''ÚNICO'', ''EVENTUAL'', ''MENSAL'', ''BIMESTRAL'', ''TRIMESTRAL'', ''SEMESTRAL'', ''ANUAL''
     )),
-  tipo_caixa TEXT NOT NULL
+  tipo_caixa TEXT NOT NULL,
+  escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
     CHECK (tipo_caixa IN (''SHARE'', ''HOLD'')),
   colaborador_id TEXT 
     REFERENCES user_profiles(id),
@@ -2002,7 +2005,8 @@ numero_demonstrativo TEXT,
     arquivo_pdf_url TEXT NULL,
 
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT,
+  atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, escopo_financeiro TEXT NOT NULL DEFAULT ''CAIXA_SHARE'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
    FOREIGN KEY (cotista_id)
         REFERENCES cotista_aeronave(id)
         ON DELETE SET NULL
@@ -2354,7 +2358,8 @@ status TEXT
   recebedor_cidade TEXT,
   recebedor_uf TEXT,
   numero_documento_anexo TEXT,
-  observacoes TEXT
+  observacoes TEXT,
+  escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
 , categoria_nome TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE recibo_reativacoes (
   id TEXT PRIMARY KEY NOT NULL,
   recibo_id TEXT NOT NULL REFERENCES recibos(id),
@@ -2382,7 +2387,8 @@ status TEXT
     status TEXT NULL DEFAULT ''EM_ABERTO'',
     pdf_url TEXT NULL,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT,
+  atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, escopo_financeiro TEXT NOT NULL DEFAULT ''CAIXA_SHARE'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
     contas_areceber_id TEXT NULL,
     lancamentos_id TEXT NULL,
     criado_por TEXT NULL,
@@ -2412,7 +2418,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reembolsos (
   criado_por TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-, lancamento_cliente_id TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE relatorio_despesa_viagem (
+, lancamento_cliente_id TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id), escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))'), ('CREATE TABLE relatorio_despesa_viagem (
     id                              TEXT PRIMARY KEY NOT NULL,
     numero_relatorio                TEXT NOT NULL,
     numero_voo                      TEXT NULL,
