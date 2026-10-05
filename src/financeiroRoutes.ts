@@ -23,6 +23,7 @@ import {
 import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } from './financeiro/paymentAgents'
 import { mensagemFinanceiraStatements } from './financeiro/financeiroNotifications'
 import { resumirHoldings } from './financeiro/cotistaDashboard'
+import { pagamentosFolhaRoutes } from './financeiro/pagamentosFolhaRoutes'
 
 type Bindings = {
   SHARE_DB: D1Database
@@ -42,6 +43,8 @@ export const financeiroRoutes = new Hono<{
   Bindings: Bindings
   Variables: Variables
 }>()
+
+financeiroRoutes.route('/', pagamentosFolhaRoutes)
 
 function errorResponse(c: any, error: unknown) {
   if (error instanceof FinanceError) {

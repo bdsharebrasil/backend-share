@@ -1843,6 +1843,7 @@ numero_demonstrativo TEXT,
     aprovado_em TEXT,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    idempotency_key TEXT,
 
     FOREIGN KEY (empresa_id)
         REFERENCES empresa(id)
@@ -2039,6 +2040,11 @@ numero_demonstrativo TEXT,
     aprovado_em TEXT,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    rotulo TEXT CHECK (rotulo IS NULL OR rotulo IN (''SALARIO'', ''FERIAS'', ''13_P1'', ''13_P2'', ''BENEFICIO'', ''HORAS_VOO'', ''EXTRA'')),
+    holerite_url TEXT,
+    conta_pagamento_id TEXT,
+    observacoes TEXT,
+    idempotency_key TEXT,
 
     FOREIGN KEY (empresa_id)
         REFERENCES empresa(id)
@@ -3028,3 +3034,5 @@ SELECT
     p.comprovante_url
 FROM pagamentos_folha p
 JOIN user_profiles u ON u.id = p.user_id');
+
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX uq_pagamentos_folha_competencia_rotulo ON pagamentos_folha (empresa_id, user_id, competencia_ano, competencia_mes, rotulo)'), ('CREATE UNIQUE INDEX uq_pagamentos_folha_idempotency ON pagamentos_folha (idempotency_key) WHERE idempotency_key IS NOT NULL'), ('CREATE UNIQUE INDEX uq_lancamentos_financeiros_rh_idempotency ON lancamentos_financeiros_rh (idempotency_key) WHERE idempotency_key IS NOT NULL');
