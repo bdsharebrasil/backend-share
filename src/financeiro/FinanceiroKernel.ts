@@ -130,6 +130,54 @@ function parseAnexos(value: unknown): Row[] {
   }
 }
 
+export function buildDocumentFields(value: unknown, cotistaId?: string | null): Row {
+  const anexos = parseAnexos(value).filter((anexo) => {
+    const anexoCotista = nullableText(anexo.cotista_id)
+    return !cotistaId || !anexoCotista || anexoCotista === cotistaId
+  })
+  const find = (...tipos: string[]) => anexos.find((anexo) => tipos.includes(text(anexo.tipo).toLowerCase()))
+  const nf = find('nf', 'nota', 'nota_fiscal')
+  const recibo = find('recibo')
+  const boleto = find('boleto')
+  const documento = find('comanda', 'doc', 'documento', 'comprovante', 'outro')
+  const demonstrativo = find('demonstrativo')
+  return {
+    numero_nf: nullableText(nf?.numero),
+    numero_recibo: nullableText(recibo?.numero),
+    numero_boleto: nullableText(boleto?.numero),
+    numero_doc: nullableText(documento?.numero),
+    numero_demonstrativo: nullableText(demonstrativo?.numero),
+    url_nf: nullableText(nf?.url),
+    url_recibo: nullableText(recibo?.url),
+    url_boleto: nullableText(boleto?.url),
+    url_doc: nullableText(documento?.url ?? demonstrativo?.url),
+    url_demonstrativo: nullableText(demonstrativo?.url),
+    anexos_json: JSON.stringify(anexos),
+  }
+}
+
+async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Row> {
+  const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
+  const fornecedor = fornecedorId
+    ? await db.prepare('SELECT nome_completo FROM fornecedores_favoritos WHERE id = ? LIMIT 1').bind(fornecedorId).first<{ nome_completo: string | null }>()
+    : null
+  const tipoCaixa = upper(command.tipo_caixa)
+  const categoriaId = nullableText(command.categoria_cliente_id ?? command.categoria_id)
+  const categoriaTabela = tipoCaixa === 'CLIENTE' || tipoCaixa === 'HOLDING'
+    ? 'categoria_movimentacao_cliente'
+    : 'categoria_movimentacao_share'
+  const categoria = categoriaId
+    ? await db.prepare(`SELECT nome FROM ${categoriaTabela} WHERE id = ? LIMIT 1`).bind(categoriaId).first<{ nome: string | null }>()
+    : null
+  return {
+    ...command,
+    fornecedor_nome: fornecedor?.nome_completo
+      ? nullableText(fornecedor.nome_completo)
+      : (fornecedorId ? null : nullableText(command.fornecedor_nome ?? command.fornecedor)),
+    categoria_nome: nullableText(categoria?.nome ?? command.categoria_nome ?? command.categoria),
+  }
+}
+
 /**
  * Decide o modo do reembolso a partir do valor do recibo, do total da despesa
  * e da quantidade de linhas de rateio informadas.
@@ -788,7 +836,6 @@ function clientAllocationStatements(
   const anexos = parseAnexos(command.anexos_json)
   return lines.map((line, index) => {
     const rateioId = rateioIds?.[index] ?? id()
-    const nf = anexos.find((anexo) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'nf')
     const anexosDaLinha = anexos.filter((anexo) => !anexo.cotista_id || anexo.cotista_id === line.cotistaId)
     return insertStatement(
       db,
@@ -806,6 +853,10 @@ function clientAllocationStatements(
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria,
         ),
+        subcategoria_1: nullableText(command.subcategoria_1),
+        subcategoria_2: nullableText(command.subcategoria_2),
+        subcategoria_3: nullableText(command.subcategoria_3),
+        subcategoria_4: nullableText(command.subcategoria_4),
         tipo_rateio: normalizeRateioType(command.tipo_rateio),
         percentual_sociedade: line.percentualSociedade,
         percentual_uso: line.percentual,
@@ -821,12 +872,7 @@ function clientAllocationStatements(
         observacoes: nullableText(command.observacoes),
         origem_id: nullableText(command.recibo_id),
         origem_tipo: nullableText(command.recibo_id) ? 'RECIBO' : null,
-        numero_recibo: nullableText(command.numero_recibo),
-        url_recibo: nullableText(command.url_recibo),
-        anexos_json: JSON.stringify(anexosDaLinha),
-        numero_nf: nf ? nullableText(nf.numero) : null,
-        url_nf: nf ? nullableText(nf.url) : null,
-        url_boleto: (() => { const boleto = anexos.find((anexo) => anexo.cotista_id === line.cotistaId && anexo.tipo === 'boleto'); return boleto ? nullableText(boleto.url) : null })(),
+        ...buildDocumentFields(anexosDaLinha, line.cotistaId),
         criado_por: userId,
       },
       ['id', 'cotista_id', 'aeronave_id'],
@@ -900,7 +946,7 @@ export async function createExpense(
   options: NormalizeOptions = {},
 ): Promise<Row> {
   const schema = await loadSchema(db)
-  const command = normalizeCommand(body, userId, options)
+  const command = await resolveLancamentoMetadata(db, normalizeCommand(body, userId, options))
   const existing = await findExistingByIdempotency(
     db,
     schema,
@@ -959,7 +1005,7 @@ export async function createExpense(
           data_pagamento: direct ? dateValue(command.data_pagamento ?? command.data) : null,
           descricao: command.descricao,
           abastecimentos_id: nullableText(command.abastecimentos_id),
-          fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+          fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
           fornecedor_id: nullableText(command.fornecedor_id),
           // movimentos_holding.categoria_id referencia categoria_movimentacao_cliente.
           categoria_id: nullableText(command.categoria_cliente_id),
@@ -1053,10 +1099,7 @@ export async function createExpense(
           periodicidade: nullableText(command.periodicidade),
           fornecedores_favoritos_id: nullableText(command.fornecedor_id),
           fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
-          numero_nf: (() => { const nf = parseAnexos(command.anexos_json).find((anexo) => anexo.tipo === 'nf'); return nf ? nullableText(nf.numero) : null })(),
-          url_nf: (() => { const nf = parseAnexos(command.anexos_json).find((anexo) => anexo.tipo === 'nf'); return nf ? nullableText(nf.url) : null })(),
-          url_boleto: (() => { const boleto = parseAnexos(command.anexos_json).find((anexo) => anexo.tipo === 'boleto'); return boleto ? nullableText(boleto.url) : null })(),
-          anexos_json: JSON.stringify(parseAnexos(command.anexos_json)),
+          ...buildDocumentFields(command.anexos_json),
           subcategoria_1: nullableText(command.subcategoria_1),
           subcategoria_2: nullableText(command.subcategoria_2),
           subcategoria_3: nullableText(command.subcategoria_3),
@@ -1124,7 +1167,7 @@ export async function createExpense(
         aeronave_id: command.aeronave_id,
         cotista_aeronave_id: command.cotista_aeronave_id,
         descricao: command.descricao,
-        fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+        fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
         categoria_id: ehDespesaCliente ? null : nullableText(command.categoria_id),
         categoria_cliente_id: ehDespesaCliente ? nullableText(command.categoria_cliente_id ?? command.categoria_id) : null,
@@ -1135,6 +1178,12 @@ export async function createExpense(
           command.grupo_categoria ||
           (reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'),
         ),
+        periodicidade: nullableText(command.periodicidade),
+        ...buildDocumentFields(command.anexos_json),
+        subcategoria_1: nullableText(command.subcategoria_1),
+        subcategoria_2: nullableText(command.subcategoria_2),
+        subcategoria_3: nullableText(command.subcategoria_3),
+        subcategoria_4: nullableText(command.subcategoria_4),
         fluxo: 'SAIDA',
         natureza: 'DESPESA',
         tipo_caixa: ehDespesaCliente ? 'CLIENTE' : 'SHARE',
@@ -1546,7 +1595,7 @@ export async function createReimbursement(
   options: NormalizeOptions = {},
 ): Promise<Row> {
   const schema = await loadSchema(db)
-  const command = normalizeCommand(body, userId, options)
+  const command = await resolveLancamentoMetadata(db, normalizeCommand(body, userId, options))
   const originalId = text(
     command.lancamento_origem_id ?? command.lancamento_id,
   )
@@ -1659,9 +1708,18 @@ export async function createReimbursement(
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
-        categoria_id: nullableText(command.categoria_id),
-        categoria_nome: 'REEMBOLSOS ENTRADAS',
-        grupo_categoria: 'REEMBOLSOS ENTRADAS',
+        categoria_id: null,
+        categoria_cliente_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
+        categoria_nome: nullableText(command.categoria_nome ?? 'REEMBOLSOS ENTRADAS'),
+        grupo_categoria: nullableText(command.grupo_categoria ?? 'REEMBOLSOS ENTRADAS'),
+        periodicidade: nullableText(command.periodicidade),
+        fornecedores_favoritos_id: nullableText(command.fornecedor_id),
+        fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
+        ...buildDocumentFields(command.anexos_json),
+        subcategoria_1: nullableText(command.subcategoria_1),
+        subcategoria_2: nullableText(command.subcategoria_2),
+        subcategoria_3: nullableText(command.subcategoria_3),
+        subcategoria_4: nullableText(command.subcategoria_4),
         fluxo: 'ENTRADA',
         natureza: 'REEMBOLSO',
         tipo_caixa: 'SHARE',
@@ -1692,9 +1750,17 @@ export async function createReimbursement(
         categoria_id: null,
         categoria_cliente_id: nullableText(command.categoria_cliente_id),
         categoria_nome: nullableText(
-          command.categoria_cliente_nome ?? 'REEMBOLSO',
+          command.categoria_cliente_nome ?? command.categoria_nome ?? 'REEMBOLSO',
         ),
         grupo_categoria: 'REEMBOLSO',
+        periodicidade: nullableText(command.periodicidade),
+        fornecedores_favoritos_id: nullableText(command.fornecedor_id),
+        fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
+        ...buildDocumentFields(command.anexos_json),
+        subcategoria_1: nullableText(command.subcategoria_1),
+        subcategoria_2: nullableText(command.subcategoria_2),
+        subcategoria_3: nullableText(command.subcategoria_3),
+        subcategoria_4: nullableText(command.subcategoria_4),
         fluxo: 'SAIDA',
         natureza: 'DESPESA',
         tipo_caixa: 'CLIENTE',
@@ -1744,6 +1810,11 @@ export async function createReimbursement(
         periodicidade: nullableText(command.periodicidade),
         categoria_id: nullableText(command.categoria_cliente_id),
         categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+        subcategoria_1: nullableText(command.subcategoria_1),
+        subcategoria_2: nullableText(command.subcategoria_2),
+        subcategoria_3: nullableText(command.subcategoria_3),
+        subcategoria_4: nullableText(command.subcategoria_4),
+        ...buildDocumentFields(command.anexos_json, line.cotistaId),
         tipo_rateio: normalizeRateioType(command.tipo_rateio),
         percentual_sociedade: line.percentualSociedade,
         percentual_uso: line.percentual,

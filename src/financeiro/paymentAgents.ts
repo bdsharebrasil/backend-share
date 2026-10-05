@@ -250,10 +250,18 @@ export async function convertPaymentRequest(
       cotista_aeronave_id: cotistaAeronaveId,
       categoria_id: request.categoria_id,
       categoria_cliente_id: request.categoria_cliente_id,
+      categoria_nome: request.categoria_nome,
+      fornecedor_id: request.fornecedor_id,
+      fornecedor: request.fornecedor,
       colaborador_id: request.colaborador_id,
       rateio_linhas: linhas,
+      anexos_json: anexos,
       tipo_rateio: request.tipo_rateio,
       periodicidade: request.periodicidade,
+      subcategoria_1: request.subcategoria_1,
+      subcategoria_2: request.subcategoria_2,
+      subcategoria_3: request.subcategoria_3,
+      subcategoria_4: request.subcategoria_4,
       }, userId, { internal: true })
     }
     const destinoTipo = ehHolding ? 'MOVIMENTO_HOLDING' : 'LANCAMENTO'
