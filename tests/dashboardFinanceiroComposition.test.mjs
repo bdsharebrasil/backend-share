@@ -14,16 +14,23 @@ test('dashboard usa o valor já rateado sem recalcular a parcela', () => {
 })
 
 test('rateio de despesas identifica o cliente na própria parcela', () => {
-  assert.match(dashboard, /FROM rateio_despesas r[\s\S]*JOIN|LEFT JOIN lancamentos l ON l\.id = r\.lancamento_id/)
+  assert.match(dashboard, /FROM rateio_despesas r/)
+  assert.doesNotMatch(dashboard, /JOIN lancamentos l ON l\.id = r\.lancamento_id/)
   assert.match(dashboard, /LEFT JOIN cotista_aeronave ca ON ca\.id = r\.cotista_id/)
   assert.match(dashboard, /LEFT JOIN cliente cl ON cl\.id = ca\.cliente_id/)
   assert.match(dashboard, /COALESCE\(cl\.razao_social, ca\.codigo_cliente, r\.cotista_id\)/)
 })
 
-test('rateio_hold tem precedência sobre o movimento holding original', () => {
+test('rateio_hold compõe o balanço sem eliminar movimentos do extrato bancário', () => {
   assert.match(dashboard, /FROM rateio_hold r[\s\S]*WHERE \$\{\[\.\.\.filtrosHolding/)
   assert.match(dashboard, /FROM movimentos_holding mh[\s\S]*movimentoHoldingSemRateio/)
   assert.match(dashboard, /rh\.\$\{holdingColumn\} = mh\.id/)
+  assert.match(dashboard, /WHERE \$\{filtrosMovimento\.join\(' AND '\)\}[\s\S]*ORDER BY date\(mh\.data_emissao\)/)
+  assert.match(dashboard, /'APORTE'[\s\S]*escopo_financeiro/)
+  assert.match(dashboard, /paramsMovimento\.push\(cotistaSocioId\)/)
+  assert.doesNotMatch(dashboard, /paramsMovimento\.push\(cotistaId\)/)
+  assert.match(dashboard, /movimentos_holding: extratoHolding/)
+  assert.match(dashboard, /const holdings = resumirHoldings\(/)
 })
 
 test('lançamento sem rateio é fallback e não duplica parcela rateada', () => {

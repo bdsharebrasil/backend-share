@@ -21,6 +21,7 @@ import {
 } from './financeiro/FinanceiroKernel'
 import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } from './financeiro/paymentAgents'
 import { mensagemFinanceiraStatements } from './financeiro/financeiroNotifications'
+import { resumirHoldings } from './financeiro/cotistaDashboard'
 
 type Bindings = {
   SHARE_DB: D1Database
@@ -82,6 +83,16 @@ async function listar(db: D1Database, sql: string, ...params: unknown[]): Promis
     ? await statement.bind(...params).all<Record<string, unknown>>()
     : await statement.all<Record<string, unknown>>()
   return result.results ?? []
+}
+
+async function listarTodos(db: D1Database, sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
+  const pageSize = 500
+  const rows: Record<string, unknown>[] = []
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await listar(db, `${sql} LIMIT ? OFFSET ?`, ...params, pageSize, offset)
+    rows.push(...page)
+    if (page.length < pageSize) return rows
+  }
 }
 
 const CONFIG_TABLES = {
@@ -1268,22 +1279,42 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
     const fim = c.req.query('fim')
     const aeronaveId = c.req.query('aeronave_id')
     const cotistaId = c.req.query('cotista_id')
+    const cotistaAeronaveId = cotistaId
+    let cotistaClienteId = cotistaId
+    let cotistaSocioId: string | undefined
+    if (cotistaId) {
+      const cotista = await db.prepare('SELECT socio_id FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<{ socio_id: string | null }>()
+      if (cotista?.socio_id) {
+        cotistaSocioId = cotista.socio_id
+        cotistaClienteId = undefined
+      } else if (!cotista) {
+        const socio = await db.prepare('SELECT id FROM hold_socios WHERE id = ?').bind(cotistaId).first<{ id: string }>()
+        if (socio) {
+          cotistaSocioId = socio.id
+          cotistaClienteId = undefined
+        }
+      }
+    }
     const filtrosCliente: string[] = []
     const filtrosHolding: string[] = []
     const filtrosLancamentos: string[] = ["UPPER(COALESCE(l.status, '')) <> 'CANCELADO'"]
     const paramsCliente: unknown[] = []
     const paramsHolding: unknown[] = []
     const paramsLancamentos: unknown[] = []
-    const filtrosMovimento: string[] = ["mh.tipo_caixa = 'HOLD'", "UPPER(COALESCE(mh.fluxo, '')) IN ('SAIDA', 'ENTRADA')", "UPPER(COALESCE(mh.status, '')) <> 'CANCELADO'"]
+    const filtrosMovimento: string[] = ["mh.tipo_caixa = 'HOLD'", "UPPER(COALESCE(mh.fluxo, '')) IN ('SAIDA', 'ENTRADA', 'APORTE', 'REEMBOLSO', 'ESTORNO')", "UPPER(COALESCE(mh.status, '')) <> 'CANCELADO'"]
     const paramsMovimento: unknown[] = []
+    if (schema.get('movimentos_holding')?.has('escopo_financeiro')) filtrosMovimento.push("COALESCE(mh.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO'")
     if (inicio) { filtrosCliente.push('date(r.data_emissao) >= date(?)'); paramsCliente.push(inicio); filtrosHolding.push('date(r.data_emissao) >= date(?)'); paramsHolding.push(inicio); filtrosLancamentos.push('date(l.data_emissao) >= date(?)'); paramsLancamentos.push(inicio) }
     if (fim) { filtrosCliente.push('date(r.data_emissao) <= date(?)'); paramsCliente.push(fim); filtrosHolding.push('date(r.data_emissao) <= date(?)'); paramsHolding.push(fim); filtrosLancamentos.push('date(l.data_emissao) <= date(?)'); paramsLancamentos.push(fim) }
     if (aeronaveId) { filtrosCliente.push('r.aeronave_id = ?'); paramsCliente.push(aeronaveId); filtrosHolding.push('r.aeronave_id = ?'); paramsHolding.push(aeronaveId); filtrosLancamentos.push('l.aeronave_id = ?'); paramsLancamentos.push(aeronaveId) }
-    if (cotistaId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaId); filtrosHolding.push('r.socio_id = ?'); paramsHolding.push(cotistaId); filtrosLancamentos.push('l.cotista_aeronave_id = ?'); paramsLancamentos.push(cotistaId) }
+    if (cotistaClienteId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaClienteId) }
+    if (cotistaAeronaveId) { filtrosLancamentos.push('l.cotista_aeronave_id = ?'); paramsLancamentos.push(cotistaAeronaveId) }
+    if (cotistaId && cotistaSocioId) filtrosCliente.push('1 = 0')
+    if (cotistaId && !cotistaSocioId) { filtrosHolding.push('1 = 0'); filtrosMovimento.push('1 = 0') }
+    if (cotistaSocioId) { filtrosHolding.push('r.socio_id = ?'); paramsHolding.push(cotistaSocioId); filtrosMovimento.push('mh.socio_id = ?'); paramsMovimento.push(cotistaSocioId) }
     if (inicio) { filtrosMovimento.push('date(mh.data_emissao) >= date(?)'); paramsMovimento.push(inicio) }
     if (fim) { filtrosMovimento.push('date(mh.data_emissao) <= date(?)'); paramsMovimento.push(fim) }
     if (aeronaveId) { filtrosMovimento.push('mh.aeronave_id = ?'); paramsMovimento.push(aeronaveId) }
-    if (cotistaId) { filtrosMovimento.push('mh.socio_id = ?'); paramsMovimento.push(cotistaId) }
     const lancamentoSemRateio = "NOT EXISTS (SELECT 1 FROM rateio_despesas rd WHERE rd.lancamento_id = l.id AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO')"
     const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(c.env.SHARE_DB, `
@@ -1296,7 +1327,6 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              'rateio_despesas' AS origem_rateio, NULL AS local,
              COALESCE(cl.razao_social, ca.codigo_cliente, r.cotista_id) AS participante_nome
         FROM rateio_despesas r
-        JOIN lancamentos l ON l.id = r.lancamento_id
         LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id
         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
         WHERE ${[...filtrosCliente, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
@@ -1328,7 +1358,8 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       UNION ALL
       SELECT mh.id, mh.aeronave_id, mh.socio_id AS participante_id, mh.data_emissao AS data,
              mh.descricao, COALESCE(mh.numero_doc, mh.numero_nf) AS numero_doc, mh.fornecedor_id,
-             mh.categoria_nome, mh.grupo_categoria, mh.data_vencimento, mh.fluxo,
+             mh.categoria_nome, mh.grupo_categoria, mh.data_vencimento,
+             CASE WHEN UPPER(mh.fluxo) IN ('ENTRADA', 'APORTE', 'ESTORNO') THEN 'ENTRADA' ELSE 'SAIDA' END AS fluxo,
              mh.valor_centavos, mh.valor_centavos AS valor_rateado_centavos, 0 AS valor_pago_centavos,
              NULL AS pago_por, mh.tipo_caixa, mh.pago_diretamente, 0 AS reembolsavel,
              0 AS reembolso_quitado, mh.status, mh.observacoes, 'movimentos_holding' AS origem_rateio,
@@ -1338,7 +1369,41 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
        WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
       ORDER BY data DESC, id DESC LIMIT 1000
     `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
+    const [movimentosHolding, sociosHolding, rateiosHolding] = aeronaveId
+      ? await Promise.all([
+        listarTodos(db, `SELECT mh.id, mh.holding_id, mh.socio_id, mh.aeronave_id, mh.data_emissao AS data,
+            mh.data_pagamento, mh.descricao, mh.categoria_nome, mh.grupo_categoria, mh.fluxo,
+            mh.valor_centavos, mh.status, mh.pago_diretamente, mh.conta_bancaria_id,
+            COALESCE(NULLIF(cb.nome, ''), NULLIF(cb.banco, ''), mh.conta_bancaria_id) AS conta_bancaria,
+            h.nome AS holding_nome, hs.nome AS socio_nome
+          FROM movimentos_holding mh
+          LEFT JOIN holdings h ON h.id = mh.holding_id
+          LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
+          LEFT JOIN contas_bancarias cb ON cb.id = mh.conta_bancaria_id
+          WHERE ${filtrosMovimento.join(' AND ')}
+          ORDER BY date(mh.data_emissao) DESC, mh.criado_em DESC, mh.id DESC`, ...paramsMovimento),
+        cotistaId && !cotistaSocioId ? Promise.resolve([]) : listar(db, `SELECT DISTINCT h.id AS holding_id, h.nome AS holding_nome,
+            COALESCE(NULLIF(h.conta_bancaria, ''), (SELECT COALESCE(NULLIF(cb.nome, ''), cb.banco)
+              FROM contas_bancarias cb WHERE cb.holding_id = h.id AND cb.ativo = 1 ORDER BY cb.id LIMIT 1)) AS conta_bancaria,
+            hs.id AS socio_id, hs.nome AS socio_nome, COALESCE(ca.percentual_sociedade, 0) AS percentual
+          FROM cotista_aeronave ca
+          INNER JOIN hold_socios hs ON hs.id = ca.socio_id
+          INNER JOIN holdings h ON h.id = hs.holding_id
+          WHERE ca.aeronave_id = ? ${cotistaSocioId ? 'AND ca.socio_id = ?' : ''}
+          ORDER BY h.nome, hs.nome`, ...(cotistaSocioId ? [aeronaveId, cotistaSocioId] : [aeronaveId])),
+        listarTodos(db, `SELECT r.${holdingColumn} AS movimento_id, r.socio_id, r.status, r.pago_diretamente,
+            r.valor_rateado_centavos, r.valor_pago_real_centavos
+          FROM rateio_hold r WHERE ${[...filtrosHolding, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
+          ORDER BY date(r.data_emissao) DESC, r.id DESC`, ...paramsHolding),
+      ])
+      : [[], [], []]
+    const holdings = resumirHoldings(
+      sociosHolding.map((row) => ({ holdingId: String(row.holding_id), holdingName: String(row.holding_nome), bankAccount: row.conta_bancaria ? String(row.conta_bancaria) : null, socioId: String(row.socio_id), socioName: String(row.socio_nome), percentage: Number(row.percentual || 0) })),
+      movimentosHolding.map((row) => ({ id: String(row.id), holding_id: row.holding_id ? String(row.holding_id) : null, socio_id: row.socio_id ? String(row.socio_id) : null, fluxo: row.fluxo ? String(row.fluxo) : null, status: row.status ? String(row.status) : null, valor_centavos: row.valor_centavos as number | string | null, pago_diretamente: row.pago_diretamente as number | boolean | null })),
+      rateiosHolding.map((row) => ({ movimento_id: row.movimento_id ? String(row.movimento_id) : null, socio_id: String(row.socio_id), status: row.status ? String(row.status) : null, pago_diretamente: row.pago_diretamente as number | boolean | null, valor_rateado_centavos: row.valor_rateado_centavos as number | string | null, valor_pago_real_centavos: row.valor_pago_real_centavos as number | string | null })),
+    )
     const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, participanteNome: row.participante_nome ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: String(row.fluxo ?? 'SAIDA').toUpperCase(), valorCentavos: Number(row.valor_centavos || row.valor_rateado_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, local: row.local ?? null, rateios: [] }))
+    const extratoHolding = movimentosHolding.slice(0, 1000).map((row) => ({ id: String(row.id), holdingId: row.holding_id ? String(row.holding_id) : null, holdingNome: row.holding_nome ? String(row.holding_nome) : null, socioId: row.socio_id ? String(row.socio_id) : null, socioNome: row.socio_nome ? String(row.socio_nome) : null, aeronaveId: row.aeronave_id ? String(row.aeronave_id) : null, data: row.data ? String(row.data) : '', dataPagamento: row.data_pagamento ? String(row.data_pagamento) : null, descricao: String(row.descricao ?? ''), categoria: row.categoria_nome ? String(row.categoria_nome) : null, fluxo: String(row.fluxo ?? '').toUpperCase(), valorCentavos: Number(row.valor_centavos || 0), status: String(row.status ?? 'EM_ABERTO').toUpperCase(), contaBancaria: row.conta_bancaria ? String(row.conta_bancaria) : null, diretamentePago: Boolean(row.pago_diretamente) }))
     const entradas = lancamentos.filter((row) => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const saidas = lancamentos.filter((row) => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()
@@ -1349,7 +1414,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       if (String(row.fluxo).toUpperCase() !== 'SAIDA') return; const categoria = String(row.categoria_nome ?? 'SEM CATEGORIA'); const atual = porCategoria.get(categoria) ?? { valor: 0, quantidade: 0, grupo: String(row.grupo_categoria ?? '') }; atual.valor += Number(row.valor_centavos || 0) / 100; atual.quantidade += 1; porCategoria.set(categoria, atual)
     })
     const compensacao = calcularCompensacaoBalanco(rows)
-    return c.json({ lancamentos, ...compensacao, holdings: [], resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO', 'PENDENTE', 'APROVADO', 'EMAIL_ENVIADO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO', 'PENDENTE', 'APROVADO', 'EMAIL_ENVIADO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 

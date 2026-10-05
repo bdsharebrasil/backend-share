@@ -66,6 +66,7 @@ export type SaldoCotista = {
 
 export type HoldingSocioResumo = {
   cotistaId: string
+  nome: string
   percentual: number
   totalDepositadoCentavos: number
   totalConsumidoCentavos: number
@@ -77,11 +78,31 @@ export type HoldingResumo = {
   id: string
   nome: string
   contaBancaria: string | null
+  saldoContaCentavos: number
   socios: HoldingSocioResumo[]
+}
+
+export type MovimentoHoldingExtrato = {
+  id: string
+  holdingId: string | null
+  holdingNome: string | null
+  socioId: string | null
+  socioNome: string | null
+  aeronaveId: string | null
+  data: string
+  dataPagamento: string | null
+  descricao: string
+  categoria: string | null
+  fluxo: string
+  valorCentavos: number
+  status: string
+  contaBancaria: string | null
+  diretamentePago: boolean
 }
 
 export type ConsolidadoBalanco = {
   lancamentos: LancamentoConsolidado[]
+  movimentos_holding: MovimentoHoldingExtrato[]
   saldos: SaldoCotista[]
   matrizCompensacao: Record<string, Record<string, number>>
   holdings: HoldingResumo[]
