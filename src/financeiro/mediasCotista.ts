@@ -14,6 +14,8 @@ export type MediasCotista = {
   custo_medio_por_voo_centavos: number
 }
 
+export type MediasCotistaMensais = MediasCotista & { mes: string }
+
 const DIAS_SEMANA = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado']
 
 function numero(valor: number | string | null | undefined): number {
@@ -49,4 +51,25 @@ export function calcularMediasCotista(voos: VooMediasCotista[], custoCentavos: n
     media_mensal_horas: meses.size ? Number((horasVoadas / meses.size).toFixed(2)) : 0,
     custo_medio_por_voo_centavos: voos.length ? Math.round(custo / voos.length) : 0,
   }
+}
+
+export function calcularMediasCotistaPorMes(
+  voos: VooMediasCotista[],
+  custosPorMes: ReadonlyMap<string, number>,
+): MediasCotistaMensais[] {
+  const voosPorMes = new Map<string, VooMediasCotista[]>()
+  for (const voo of voos) {
+    const data = String(voo.data_registro ?? '').slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) continue
+    const mes = data.slice(0, 7)
+    const itens = voosPorMes.get(mes) ?? []
+    itens.push(voo)
+    voosPorMes.set(mes, itens)
+  }
+
+  const meses = new Set([...voosPorMes.keys(), ...custosPorMes.keys()])
+  return [...meses].sort().map((mes) => ({
+    mes,
+    ...calcularMediasCotista(voosPorMes.get(mes) ?? [], custosPorMes.get(mes) ?? 0),
+  }))
 }

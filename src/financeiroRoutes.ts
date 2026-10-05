@@ -23,7 +23,8 @@ import {
 import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } from './financeiro/paymentAgents'
 import { mensagemFinanceiraStatements } from './financeiro/financeiroNotifications'
 import { resumirHoldings } from './financeiro/cotistaDashboard'
-import { calcularMediasCotista, type VooMediasCotista } from './financeiro/mediasCotista'
+import { calcularMediasCotista, calcularMediasCotistaPorMes, type VooMediasCotista } from './financeiro/mediasCotista'
+import { selecionarColunaOpcional } from './financeiro/schemaSql'
 import { pagamentosFolhaRoutes } from './financeiro/pagamentosFolhaRoutes'
 
 type Bindings = {
@@ -70,6 +71,28 @@ function errorResponse(c: any, error: unknown) {
     },
     500,
   )
+}
+
+function camposDocumentaisRateioHolding(schema: Map<string, Set<string>>, aliasTabela: string, prefixo = '', incluirNumeroDoc = true): string {
+  const campos: Array<[string, string[]]> = [
+    ['numero_nf', ['numero_nf']],
+    ['numero_recibo', ['numero_recibo']],
+    ['numero_boleto', ['numero_boleto']],
+    ['numero_demonstrativo', ['numero_demonstrativo']],
+    ['url_nf', ['url_nf']],
+    ['url_recibo', ['url_recibo']],
+    ['url_boleto', ['url_boleto']],
+    ['url_demonstrativo', ['url_demonstrativo']],
+    ['url_doc', ['url_doc', 'documento_url']],
+  ]
+  if (incluirNumeroDoc) campos.push(['numero_doc', ['numero_doc', 'documento_numero']])
+  return campos.map(([campo, alternativas]) => selecionarColunaOpcional(
+    schema,
+    'rateio_hold',
+    aliasTabela,
+    alternativas,
+    `${prefixo}${campo}`,
+  )).join(', ')
 }
 
 function storage(c: any): R2Bucket | undefined {
@@ -1078,13 +1101,14 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const db = c.env.SHARE_DB
     const schema = await loadSchema(db)
     const holdingColumn = holdingMovementColumn(schema)
+    const camposRateioHolding = camposDocumentaisRateioHolding(schema, 'rh', 'rateio_')
     const [receber, pagar, movimentacoes, movimentosHolding, rateiosDespesas, rateiosHold, emailsEnviados] = await Promise.all([
       listar(db, "SELECT ar.valor_centavos, ar.status FROM contas_areceber ar LEFT JOIN lancamentos l ON l.id = ar.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND ar.status <> 'CANCELADO'"),
       listar(db, "SELECT cp.id, cp.lancamentos_id, cp.valor_centavos, cp.status, cp.data_vencimento FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND cp.status <> 'CANCELADO'"),
       listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(NULLIF(cl.codigo_cliente, ''), NULLIF(ca.codigo_cliente, ''), (SELECT NULLIF(ca_cliente.codigo_cliente, '') FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id WHERE l.escopo_financeiro = 'FINANCEIRO' ORDER BY l.criado_em DESC LIMIT 100`),
       listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome, (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.aeronave_id = mh.aeronave_id AND ca.socio_id = mh.socio_id LIMIT 1) AS codigo_cliente FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' ORDER BY mh.criado_em DESC LIMIT 100`),
       listar(db, `SELECT l.*, e.id AS envio_id, e.tipo_caixa AS envio_tipo_caixa, COALESCE(l.id, e.id) AS origem_id, rd.id AS rateio_id, rd.cotista_id AS rateio_cotista_id, rd.data_emissao AS rateio_data_emissao, rd.data_vencimento AS rateio_data_vencimento, rd.categoria_nome AS rateio_categoria_nome, rd.tipo_rateio AS rateio_tipo_rateio, rd.percentual_sociedade AS rateio_percentual, rd.valor_rateado_centavos AS rateio_valor_centavos, rd.valor_pago_real_centavos AS rateio_valor_pago_centavos, rd.email_enviado_em AS rateio_email_enviado_em, rd.status AS rateio_status, rd.descricao_despesa AS rateio_descricao, rd.documento_numero AS rateio_documento, rd.numero_nf AS rateio_numero_nf, rd.numero_recibo AS rateio_numero_recibo, rd.numero_boleto AS rateio_numero_boleto, rd.numero_demonstrativo AS rateio_numero_demonstrativo, rd.numero_doc AS rateio_numero_doc, rd.url_nf AS rateio_url_nf, rd.url_recibo AS rateio_url_recibo, rd.url_boleto AS rateio_url_boleto, rd.url_demonstrativo AS rateio_url_demonstrativo, rd.url_doc AS rateio_url_doc, ca.codigo_cliente AS rateio_codigo_cliente, cl.razao_social AS rateio_participante_nome FROM rateio_despesas rd LEFT JOIN lancamentos l ON l.id = rd.lancamento_id LEFT JOIN envio_despesas e ON e.id = rd.lancamento_id LEFT JOIN cotista_aeronave ca ON ca.id = rd.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO' ORDER BY rd.criado_em DESC LIMIT 300`),
-      listar(db, `SELECT mh.*, e.tipo_caixa AS envio_tipo_caixa, rh.id AS rateio_id, rh.socio_id AS rateio_socio_id, rh.data_emissao AS rateio_data_emissao, rh.data_vencimento AS rateio_data_vencimento, rh.categoria_nome AS rateio_categoria_nome, rh.tipo_rateio AS rateio_tipo_rateio, rh.percentual_uso AS rateio_percentual, rh.valor_rateado_centavos AS rateio_valor_centavos, rh.valor_pago_real_centavos AS rateio_valor_pago_centavos, rh.email_enviado_em AS rateio_email_enviado_em, rh.status AS rateio_status, rh.descricao_despesa AS rateio_descricao, rh.documento_numero AS rateio_documento, rh.numero_nf AS rateio_numero_nf, rh.numero_recibo AS rateio_numero_recibo, rh.numero_boleto AS rateio_numero_boleto, rh.numero_demonstrativo AS rateio_numero_demonstrativo, rh.numero_doc AS rateio_numero_doc, rh.url_nf AS rateio_url_nf, rh.url_recibo AS rateio_url_recibo, rh.url_boleto AS rateio_url_boleto, rh.url_demonstrativo AS rateio_url_demonstrativo, rh.url_doc AS rateio_url_doc, hs.nome AS rateio_participante_nome FROM rateio_hold rh JOIN movimentos_holding mh ON mh.id = rh.${holdingColumn} LEFT JOIN envio_despesas e ON e.movimentos_holding_id = mh.id LEFT JOIN hold_socios hs ON hs.id = rh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO' ORDER BY rh.criado_em DESC LIMIT 300`),
+      listar(db, `SELECT mh.*, e.tipo_caixa AS envio_tipo_caixa, rh.id AS rateio_id, rh.socio_id AS rateio_socio_id, rh.data_emissao AS rateio_data_emissao, rh.data_vencimento AS rateio_data_vencimento, rh.categoria_nome AS rateio_categoria_nome, rh.tipo_rateio AS rateio_tipo_rateio, rh.percentual_uso AS rateio_percentual, rh.valor_rateado_centavos AS rateio_valor_centavos, rh.valor_pago_real_centavos AS rateio_valor_pago_centavos, rh.email_enviado_em AS rateio_email_enviado_em, rh.status AS rateio_status, rh.descricao_despesa AS rateio_descricao, rh.documento_numero AS rateio_documento, ${camposRateioHolding}, hs.nome AS rateio_participante_nome FROM rateio_hold rh JOIN movimentos_holding mh ON mh.id = rh.${holdingColumn} LEFT JOIN envio_despesas e ON e.movimentos_holding_id = mh.id LEFT JOIN hold_socios hs ON hs.id = rh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO' ORDER BY rh.criado_em DESC LIMIT 300`),
       listar(db, `SELECT e.id, e.destinatarios, e.assunto, e.status, e.anexos, e.erro_mensagem AS erro, e.criado_em, e.email_enviado_em FROM emails_enviados e WHERE (lower(COALESCE(e.referencia_tipo, '')) NOT IN ('nf_saida', 'recibo_saida', 'recibo_colaborador', 'despesa_empresa', 'solicitacao_compra') OR EXISTS (SELECT 1 FROM lancamentos l WHERE l.email_enviado_id = e.id AND l.escopo_financeiro = 'FINANCEIRO')) ORDER BY e.criado_em DESC LIMIT 200`),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
@@ -1401,7 +1425,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
     const rows = await listar(c.env.SHARE_DB, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              COALESCE(r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.numero_doc, r.documento_numero) AS numero_doc,
-             r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.numero_doc, r.url_doc, r.url_demonstrativo, r.url_nf, r.url_recibo, r.url_boleto,
+             r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.url_doc, r.url_demonstrativo, r.url_nf, r.url_recibo, r.url_boleto,
              r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
@@ -1415,8 +1439,15 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
         WHERE ${[...filtrosCliente, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
       UNION ALL
       SELECT r.id, r.aeronave_id, r.socio_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
-             COALESCE(r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.numero_doc, r.documento_numero) AS numero_doc,
-             r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.numero_doc, r.url_doc, r.url_demonstrativo, r.url_nf, r.url_recibo, r.url_boleto,
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['numero_nf', 'numero_recibo', 'numero_demonstrativo', 'numero_doc', 'documento_numero'], 'numero_doc')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['numero_nf'], 'numero_nf')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['numero_recibo'], 'numero_recibo')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['numero_demonstrativo'], 'numero_demonstrativo')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_doc', 'documento_url'], 'url_doc')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_demonstrativo'], 'url_demonstrativo')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_nf'], 'url_nf')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_recibo'], 'url_recibo')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_boleto'], 'url_boleto')},
              NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
@@ -1424,13 +1455,13 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              mh.email_enviado_em, 'rateio_hold' AS origem_rateio, NULL AS local,
              COALESCE(hs.nome, r.socio_id) AS participante_nome
         FROM rateio_hold r
-        LEFT JOIN movimentos_holding mh ON mh.id = r.movimento_id
+        LEFT JOIN movimentos_holding mh ON mh.id = r.${holdingColumn}
         LEFT JOIN hold_socios hs ON hs.id = r.socio_id
         WHERE ${[...filtrosHolding, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
       UNION ALL
       SELECT l.id, l.aeronave_id, l.cotista_aeronave_id AS participante_id, l.data_emissao AS data,
              COALESCE(l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.numero_doc) AS numero_doc,
-             l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.numero_doc, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
+             l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
              l.fornecedores_favoritos_id AS fornecedor_id, l.categoria_nome, l.grupo_categoria, l.periodicidade,
              l.data_vencimento, l.data_pagamento, l.fluxo, l.valor_centavos, l.valor_centavos AS valor_rateado_centavos,
              0 AS valor_pago_real_centavos, NULL AS percentual_sociedade, NULL AS percentual_uso, l.pago_por,
@@ -1516,7 +1547,15 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       ? await listar(db, `SELECT l.data_registro, l.tempo_total, l.pousos_total FROM lancamentos_diario_bordo l WHERE ${filtrosVoos.join(' AND ')}`, ...paramsVoos)
       : []
     const medias = calcularMediasCotista(voosMedias as VooMediasCotista[], Math.round(saidas * 100))
-    return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO', 'PENDENTE', 'APROVADO', 'EMAIL_ENVIADO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    const custosPorMes = new Map<string, number>()
+    for (const row of rows) {
+      if (String(row.fluxo ?? 'SAIDA').toUpperCase() !== 'SAIDA') continue
+      const mes = String(row.data ?? '').slice(0, 7)
+      if (!/^\d{4}-\d{2}$/.test(mes)) continue
+      custosPorMes.set(mes, (custosPorMes.get(mes) ?? 0) + Number(row.valor_centavos || row.valor_rateado_centavos || 0))
+    }
+    const mediasMensais = calcularMediasCotistaPorMes(voosMedias as VooMediasCotista[], custosPorMes)
+    return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO', 'PENDENTE', 'APROVADO', 'EMAIL_ENVIADO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -1525,10 +1564,14 @@ financeiroRoutes.get('/cotista/voos-emprestimos', async (c) => {
     const cotistaId = String(c.req.query('cotista_id') || '').trim()
     const tipo = String(c.req.query('tipo') || 'cliente').trim().toLowerCase()
     const aeronaveExcluida = String(c.req.query('excluir_aeronave_id') || '').trim()
+    const inicio = String(c.req.query('inicio') || '').trim()
+    const fim = String(c.req.query('fim') || '').trim()
     if (!cotistaId || !['cliente', 'socio'].includes(tipo)) return c.json({ voos_emprestimos: [] })
     const filtros = [`a.voo_emprestado = 1`, `a.${tipo === 'socio' ? 'socio_id' : 'cliente_id'} = ?`]
     const params: unknown[] = [cotistaId]
     if (aeronaveExcluida) { filtros.push('a.aeronave_id <> ?'); params.push(aeronaveExcluida) }
+    if (inicio) { filtros.push('date(a.data) >= date(?)'); params.push(inicio) }
+    if (fim) { filtros.push('date(a.data) <= date(?)'); params.push(fim) }
     const rows = await listar(c.env.SHARE_DB, `SELECT a.id, a.numero_voo, a.data, a.trecho, a.local, a.litros, a.valor_total, a.status, a.numero_comanda, a.numero_nf, a.aeronave_id, ar.matricula_registro, ar.fabricante, ar.modelo, COALESCE(ad.designativo_icao, a.local) AS local_icao FROM abastecimentos a LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local)) WHERE ${filtros.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`, ...params)
     return c.json({ voos_emprestimos: rows })
   } catch (error) { return errorResponse(c, error) }

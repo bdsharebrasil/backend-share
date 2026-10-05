@@ -48,6 +48,28 @@ test('rateio_hold compõe o balanço sem eliminar movimentos do extrato bancári
   assert.match(dashboard, /const holdings = resumirHoldings\(/)
 })
 
+test('dashboard cotista só projeta documentos de rateio_hold que existem no schema', () => {
+  const inicio = dashboard.indexOf('UNION ALL\n      SELECT r.id, r.aeronave_id, r.socio_id')
+  const fim = dashboard.indexOf('UNION ALL\n      SELECT l.id', inicio)
+  const rateioHolding = dashboard.slice(inicio, fim)
+  assert.notEqual(inicio, -1)
+  assert.notEqual(fim, -1)
+  assert.match(rateioHolding, /selecionarColunaOpcional\(schema, 'rateio_hold', 'r', \['numero_nf'/)
+  assert.match(rateioHolding, /\['url_doc', 'documento_url'\], 'url_doc'/)
+  assert.match(rateioHolding, /r\.\$\{holdingColumn\}/)
+  assert.doesNotMatch(rateioHolding, /r\.(numero_nf|numero_recibo|numero_boleto|numero_demonstrativo|url_nf|url_recibo|url_boleto|url_demonstrativo|url_doc)\b/)
+})
+
+test('dashboard cotista inclui médias por mês e voos empréstimos respeitam o intervalo', () => {
+  assert.match(dashboard, /calcularMediasCotistaPorMes\(voosMedias as VooMediasCotista\[\], custosPorMes\)/)
+  assert.match(dashboard, /medias_mensais: mediasMensais/)
+  const inicioVoos = source.indexOf("financeiroRoutes.get('/cotista/voos-emprestimos'")
+  const fimVoos = source.indexOf("financeiroRoutes.get('/balanco'", inicioVoos)
+  const rotaVoos = source.slice(inicioVoos, fimVoos)
+  assert.match(rotaVoos, /date\(a\.data\) >= date\(\?\)/)
+  assert.match(rotaVoos, /date\(a\.data\) <= date\(\?\)/)
+})
+
 test('saldos por cotista usam somente participantes vinculados à aeronave selecionada', () => {
   assert.match(dashboard, /participantesPermitidos/)
   assert.match(dashboard, /SELECT id, socio_id FROM cotista_aeronave WHERE aeronave_id = \?/)
@@ -98,7 +120,8 @@ test('parcelas de rateio preservam todos os números documentais e o caixa do fl
   assert.match(painelFinanceiro, /rd\.numero_boleto AS rateio_numero_boleto/)
   assert.match(painelFinanceiro, /rd\.numero_demonstrativo AS rateio_numero_demonstrativo/)
   assert.match(painelFinanceiro, /rd\.numero_doc AS rateio_numero_doc/)
-  assert.match(painelFinanceiro, /rh\.numero_nf AS rateio_numero_nf/)
+  assert.match(painelFinanceiro, /camposDocumentaisRateioHolding\(schema, 'rh', 'rateio_'\)/)
+  assert.doesNotMatch(painelFinanceiro, /rh\.(numero_nf|numero_recibo|numero_boleto|numero_demonstrativo|url_nf|url_recibo|url_boleto|url_demonstrativo|url_doc)\s+AS/)
   assert.match(painelFinanceiro, /e\.tipo_caixa AS envio_tipo_caixa[\s\S]*LEFT JOIN envio_despesas e ON e\.movimentos_holding_id = mh\.id/)
   assert.match(painelFinanceiro, /row\.rateio_numero_nf \?\? row\.numero_nf/)
   assert.match(painelFinanceiro, /row\.rateio_numero_recibo \?\? row\.numero_recibo/)
