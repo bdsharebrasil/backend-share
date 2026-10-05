@@ -3,6 +3,11 @@ export type TitularAbastecimento = {
   socio_id: string | null
 }
 
+export const METADADOS_CATEGORIA_ABASTECIMENTO = {
+  lancamentos: { categoriaNome: 'COMBUSTÍVEIS', grupoCategoria: 'CAIXA CLIENTE' },
+  holding: { categoriaNome: 'COMBUSTÍVEIS', grupoCategoria: 'COMBUSTÍVEIS' },
+} as const
+
 type DiarioTitularAbastecimento = {
   cliente_id?: string | null
   socio_id?: string | null

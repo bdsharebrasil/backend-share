@@ -1,6 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizarVooEmprestado, resolverTitularAbastecimento } from '../src/abastecimentoUtils.ts'
+import { METADADOS_CATEGORIA_ABASTECIMENTO, normalizarVooEmprestado, resolverTitularAbastecimento } from '../src/abastecimentoUtils.ts'
+
+test('usa categoria COMBUSTÍVEIS e grupo CAIXA CLIENTE nos lançamentos de abastecimento', () => {
+  assert.deepEqual(METADADOS_CATEGORIA_ABASTECIMENTO.lancamentos, {
+    categoriaNome: 'COMBUSTÍVEIS',
+    grupoCategoria: 'CAIXA CLIENTE',
+  })
+  assert.deepEqual(METADADOS_CATEGORIA_ABASTECIMENTO.holding, {
+    categoriaNome: 'COMBUSTÍVEIS',
+    grupoCategoria: 'COMBUSTÍVEIS',
+  })
+})
 
 test('normaliza representações booleanas sem tratar a string "false" como empréstimo', () => {
   for (const valor of [true, 1, '1', 'true', 'sim', 'yes']) {
