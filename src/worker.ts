@@ -22,6 +22,7 @@ type Bindings = {
   AISWEB_API_KEY: string
   AISWEB_API_PASS: string
   CACHE_KV: KVNamespace
+  RATE_LIMITER: DurableObjectNamespace
   FILES: R2Bucket
   SHARE_FILES?: R2Bucket
   SHARE_DB: D1Database
@@ -271,12 +272,15 @@ async function checkRateLimit(
   perMinute: number
 ): Promise<boolean> {
   const minuteWindow = Math.floor(Date.now() / 60_000)
-  const key = `rl:${bucket}:${minuteWindow}`
-  const kv = c.env.CACHE_KV
-  const current = parseInt((await kv.get(key)) ?? '0', 10)
-  if (current >= perMinute) return false
-  await kv.put(key, String(current + 1), { expirationTtl: 70 })
-  return true
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bucket))
+  const id = c.env.RATE_LIMITER.idFromName(Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''))
+  const response = await c.env.RATE_LIMITER.get(id).fetch('https://rate-limiter/increment', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minuteWindow, perMinute }),
+  })
+  if (!response.ok) throw new Error(`rate_limit_unavailable:${response.status}`)
+  return (await response.json<{ allowed: boolean }>()).allowed
 }
 
 /** Identifica o cliente para limitar por IP as rotas públicas (sem auth) que fazem proxy da AISWEB. */
@@ -1092,6 +1096,41 @@ async function authenticatedColaboradorToken(c: Context<{ Bindings: Bindings }>,
   return c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1 OR lower(email) = ?2 LIMIT 1').bind(claims.id, claims.email).first<Colaborador>()
 }
 
+const MAX_COLABORADOR_UPLOAD_BYTES = 10 * 1024 * 1024
+
+async function parseColaboradorUploadForm(c: Context<{ Bindings: Bindings }>): Promise<FormData | null> {
+  const contentLength = Number(c.req.header('content-length'))
+  if (Number.isFinite(contentLength) && contentLength > MAX_COLABORADOR_UPLOAD_BYTES) return null
+  const body = c.req.raw.body
+  if (!body) throw new Error('multipart_body_missing')
+
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > MAX_COLABORADOR_UPLOAD_BYTES) {
+        await reader.cancel()
+        return null
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk)
+      controller.close()
+    },
+  })
+  return new Response(stream, { headers: { 'Content-Type': c.req.header('content-type') || '' } }).formData()
+}
+
 function colaboradorExtensao(file: File): string {
   return file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin'
 }
@@ -1106,7 +1145,7 @@ function bucketParaChaveColaborador(c: Context<{ Bindings: Bindings }>, key: str
 
 async function salvarArquivoColaborador(c: Context<{ Bindings: Bindings }>, userId: string, file: File, pasta: 'avatar_profiles' | 'documentos_colaboradores'): Promise<string> {
   if (!file.size) throw new Error('arquivo_vazio')
-  if (file.size > 10 * 1024 * 1024) throw new Error('arquivo_excede_10mb')
+  if (file.size > MAX_COLABORADOR_UPLOAD_BYTES) throw new Error('arquivo_excede_10mb')
   const key = `${pasta}/${userId}/${Date.now()}-${uuid().slice(0, 8)}.${colaboradorExtensao(file)}`
   await bucketColaborador(c).put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
   return key
@@ -2936,7 +2975,8 @@ app.get('/api/colaborador/foto', async c => {
 app.post('/api/colaborador/foto', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const formData = await c.req.formData()
+  const formData = await parseColaboradorUploadForm(c)
+  if (!formData) return c.json({ error: 'arquivo_excede_10mb' }, 413)
   const fileValue = formData.get('foto') as unknown
   if (!fileValue || typeof fileValue !== 'object' || !('type' in fileValue) || typeof fileValue.type !== 'string' || !fileValue.type.startsWith('image/')) return c.json({ error: 'foto_invalida' }, 400)
   const file = fileValue as File
@@ -2960,7 +3000,8 @@ app.get('/api/colaborador/documentos', async c => {
 app.post('/api/colaborador/documentos', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
-  const formData = await c.req.formData()
+  const formData = await parseColaboradorUploadForm(c)
+  if (!formData) return c.json({ error: 'arquivo_excede_10mb' }, 413)
   const fileValue = formData.get('arquivo') as unknown
   const categoria = String(formData.get('tipo_documento') || '').trim()
   if (!fileValue || typeof fileValue !== 'object' || !('type' in fileValue) || !categoria) return c.json({ error: 'tipo_e_arquivo_obrigatorios' }, 400)
@@ -7556,6 +7597,26 @@ app.patch('/api/colaborador/recados/:id/lido', async c => {
   await c.env.SHARE_DB.prepare('UPDATE recados SET lido_por = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(lidoPor), row.id).run()
   return c.json({ success: true, lido: true })
 })
+
+export class RateLimitCounter {
+  constructor(private readonly state: DurableObjectState) {}
+
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 })
+    const body = await request.json<{ minuteWindow: number; perMinute: number }>()
+    if (!Number.isInteger(body.minuteWindow) || !Number.isInteger(body.perMinute) || body.perMinute < 1) {
+      return Response.json({ error: 'invalid_rate_limit' }, { status: 400 })
+    }
+    const allowed = await this.state.storage.transaction(async transaction => {
+      const stored = await transaction.get<{ minuteWindow: number; count: number }>('counter')
+      const count = stored?.minuteWindow === body.minuteWindow ? stored.count : 0
+      if (count >= body.perMinute) return false
+      await transaction.put('counter', { minuteWindow: body.minuteWindow, count: count + 1 })
+      return true
+    })
+    return Response.json({ allowed })
+  }
+}
 
 export class MeetingRoom {
   constructor(private readonly state: DurableObjectState) {}

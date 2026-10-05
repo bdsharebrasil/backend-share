@@ -40,9 +40,17 @@ database_id = "4267a49f-e38f-442f-8b6f-47fe02dea308"
 name = "MEETING_ROOMS"
 class_name = "MeetingRoom"
 
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimitCounter"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MeetingRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitCounter"]
 
 # ── Secrets (NÃO colocar valores aqui — usar `wrangler secret put <NOME>`) ──
 # AISWEB_API_KEY

@@ -400,13 +400,26 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const rowsComFornecedor = await enriquecerFornecedores(c.env.SHARE_DB, rows)
   const mapped = rowsComFornecedor.map(mapConta)
   if (table !== 'contas_areceber') return mapped
-  return Promise.all(mapped.map(async (conta) => ({
+  const lancamentoIds = [...new Set(mapped
+    .map(conta => conta.lancamentoId)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0))]
+  const rateios = lancamentoIds.length
+    ? await listar(c.env.SHARE_DB,
+      `SELECT id, lancamento_id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id IN (${lancamentoIds.map(() => '?').join(', ')}) ORDER BY rowid`,
+      ...lancamentoIds,
+    )
+    : []
+  const rateiosPorLancamento = new Map<string, typeof rateios>()
+  for (const rateio of rateios) {
+    const lancamentoId = String(rateio.lancamento_id)
+    const agrupados = rateiosPorLancamento.get(lancamentoId) ?? []
+    agrupados.push(rateio)
+    rateiosPorLancamento.set(lancamentoId, agrupados)
+  }
+  return mapped.map(conta => ({
     ...conta,
-    rateios: await listar(c.env.SHARE_DB,
-      'SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid',
-      conta.lancamentoId,
-    ),
-  })))
+    rateios: rateiosPorLancamento.get(String(conta.lancamentoId)) ?? [],
+  }))
 }
 
 /*
