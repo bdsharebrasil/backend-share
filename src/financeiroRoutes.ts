@@ -23,6 +23,7 @@ import {
 import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } from './financeiro/paymentAgents'
 import { mensagemFinanceiraStatements } from './financeiro/financeiroNotifications'
 import { resumirHoldings } from './financeiro/cotistaDashboard'
+import { calcularMediasCotista, type VooMediasCotista } from './financeiro/mediasCotista'
 import { pagamentosFolhaRoutes } from './financeiro/pagamentosFolhaRoutes'
 
 type Bindings = {
@@ -1358,10 +1359,12 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
     let cotistaClienteId = cotistaId
     let cotistaSocioId: string | undefined
     if (cotistaId) {
-      const cotista = await db.prepare('SELECT socio_id FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<{ socio_id: string | null }>()
+      const cotista = await db.prepare('SELECT cliente_id, socio_id FROM cotista_aeronave WHERE id = ?').bind(cotistaId).first<{ cliente_id: string | null; socio_id: string | null }>()
       if (cotista?.socio_id) {
         cotistaSocioId = cotista.socio_id
         cotistaClienteId = undefined
+      } else if (cotista?.cliente_id) {
+        cotistaClienteId = cotista.cliente_id
       } else if (!cotista) {
         const socio = await db.prepare('SELECT id FROM hold_socios WHERE id = ?').bind(cotistaId).first<{ id: string }>()
         if (socio) {
@@ -1489,7 +1492,17 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       if (String(row.fluxo).toUpperCase() !== 'SAIDA') return; const categoria = String(row.categoria_nome ?? 'SEM CATEGORIA'); const atual = porCategoria.get(categoria) ?? { valor: 0, quantidade: 0, grupo: String(row.grupo_categoria ?? '') }; atual.valor += Number(row.valor_centavos || 0) / 100; atual.quantidade += 1; porCategoria.set(categoria, atual)
     })
     const compensacao = calcularCompensacaoBalanco(rows)
-    return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO', 'PENDENTE', 'APROVADO', 'EMAIL_ENVIADO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    const filtrosVoos: string[] = ['l.aeronave_id = ?']
+    const paramsVoos: unknown[] = [aeronaveId]
+    if (inicio) { filtrosVoos.push('date(l.data_registro) >= date(?)'); paramsVoos.push(inicio) }
+    if (fim) { filtrosVoos.push('date(l.data_registro) <= date(?)'); paramsVoos.push(fim) }
+    if (cotistaClienteId) { filtrosVoos.push('l.cliente_id = ?'); paramsVoos.push(cotistaClienteId) }
+    if (cotistaSocioId) { filtrosVoos.push('l.socio_id = ?'); paramsVoos.push(cotistaSocioId) }
+    const voosMedias = aeronaveId
+      ? await listar(db, `SELECT l.data_registro, l.tempo_total, l.pousos_total FROM lancamentos_diario_bordo l WHERE ${filtrosVoos.join(' AND ')}`, ...paramsVoos)
+      : []
+    const medias = calcularMediasCotista(voosMedias as VooMediasCotista[], Math.round(saidas * 100))
+    return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter((row) => ['EM_ABERTO', 'EM_ATRASO', 'PENDENTE', 'APROVADO', 'EMAIL_ENVIADO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 
