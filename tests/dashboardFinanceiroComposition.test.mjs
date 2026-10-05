@@ -15,6 +15,9 @@ test('rotas financeiras de cotista validam sessão Supabase antes de retornar da
   assert.notEqual(guardStart, -1)
   assert.match(guard, /requireAuthenticatedUser\(c\)/)
   assert.match(guard, /c\.json\(\{ error: 'nao_autorizado' \}, 401\)/)
+  assert.match(guard, /usuarios_funcoes/)
+  assert.match(guard, /financeiro_master/)
+  assert.match(guard, /c\.json\(\{ error: 'financeiro_cotista_nao_autorizado' \}, 403\)/)
 })
 
 test('dashboard usa o valor já rateado sem recalcular a parcela', () => {

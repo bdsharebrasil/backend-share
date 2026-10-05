@@ -104,6 +104,16 @@ app.use('/api/financeiro/*', async (c, next) => {
 })
 app.use('/api/financeiro/cotista/*', async (c, next) => {
   if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'nao_autorizado' }, 401)
+  const userId = extractSupabaseUserId(c)
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const permitido = await c.env.SHARE_DB.prepare(`
+    SELECT 1 FROM user_profiles
+     WHERE id = ? AND lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster')
+    UNION ALL
+    SELECT 1 FROM usuarios_funcoes
+     WHERE user_id = ? AND lower(replace(replace(trim(COALESCE(funcao, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster')
+    LIMIT 1`).bind(userId, userId).first()
+  if (!permitido) return c.json({ error: 'financeiro_cotista_nao_autorizado' }, 403)
   return next()
 })
 app.route('/api/financeiro', financeiroRoutes)
