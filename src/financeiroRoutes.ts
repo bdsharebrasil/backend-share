@@ -1136,7 +1136,14 @@ financeiroRoutes.get('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId/
     const rows = origem.kind === 'cliente'
       ? await listar(db, `SELECT ca.id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, ca.id) AS nome, COALESCE(ca.percentual_sociedade, 0) AS percentual_sugerido FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.aeronave_id = ? ORDER BY nome`, aeronaveId)
       : await listar(db, `SELECT DISTINCT hs.id, COALESCE(hs.nome, hs.id) AS nome, COALESCE(ca.percentual_sociedade, 0) AS percentual_sugerido FROM hold_socios hs LEFT JOIN cotista_aeronave ca ON ca.socio_id = hs.id AND ca.aeronave_id = ? WHERE hs.id IN (SELECT socio_id FROM cotista_aeronave WHERE aeronave_id = ? AND socio_id IS NOT NULL) ORDER BY nome`, aeronaveId, aeronaveId)
-    return c.json({ origem_tipo: c.req.param('origemTipo'), origem_id: c.req.param('origemId'), valor_centavos: Number(origem.source.valor_centavos ?? origem.source.valor_rateado_centavos ?? 0), cotistas: rows })
+    return c.json({
+      origem_tipo: c.req.param('origemTipo'),
+      origem_id: c.req.param('origemId'),
+      valor_centavos: Number(origem.source.valor_centavos ?? origem.source.valor_rateado_centavos ?? 0),
+      data_vencimento: origem.source.data_vencimento ? String(origem.source.data_vencimento).slice(0, 10) : null,
+      periodicidade: origem.source.periodicidade ? String(origem.source.periodicidade).toUpperCase() : null,
+      cotistas: rows,
+    })
   } catch (error) { return errorResponse(c, error) }
 })
 

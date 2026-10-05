@@ -31,3 +31,12 @@ test('lançamento sem rateio é fallback e não duplica parcela rateada', () => 
   assert.match(dashboard, /rd\.lancamento_id = l\.id/)
   assert.match(dashboard, /'lancamentos' AS origem_rateio/)
 })
+
+const rateioOpcoes = source.slice(source.indexOf("financeiroRoutes.get('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId/rateio-opcoes'"))
+
+test('opções de rateio retornam vencimento e periodicidade gravados na origem', () => {
+  assert.match(rateioOpcoes, /origem\.source\.data_vencimento/)
+  assert.match(rateioOpcoes, /origem\.source\.periodicidade/)
+  assert.match(rateioOpcoes, /data_vencimento:/)
+  assert.match(rateioOpcoes, /periodicidade:/)
+})
