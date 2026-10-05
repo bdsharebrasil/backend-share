@@ -7922,8 +7922,7 @@ app.post('/api/interno/emails', async c => {
   }
   const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
   const emailEnviadoEm = status === 'enviado' ? new Date().toISOString() : null
-  const escopoEmail = ['nf_saida', 'recibo_saida', 'recibo_colaborador', 'despesa_empresa', 'solicitacao_compra'].includes(String(primeiroPrefix || '').toLowerCase()) ? 'CAIXA_SHARE' : 'FINANCEIRO'
-  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, anexos_detalhes, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id, email_enviado_em, escopo_financeiro) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), JSON.stringify(anexosDetalhes), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId, emailEnviadoEm, escopoEmail).run()
+  await db.prepare('INSERT INTO emails_enviados (id, destinatarios, assunto, mensagem, anexos, anexos_detalhes, quantidade_anexos, status, erro_mensagem, enviado_por, referencia_tipo, referencia_id, email_enviado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, JSON.stringify(destinatarios), assunto, mensagem, JSON.stringify(ids), JSON.stringify(anexosDetalhes), anexos.length, status, erro, user.id, primeiroPrefix, primeiroRawId, emailEnviadoEm).run()
   if (status === 'enviado') {
     // A FK de lancamentos.email_enviado_id exige que o registro pai exista
     // antes da atualização do lançamento.

@@ -1228,7 +1228,6 @@ export async function createExpense(
       'contas_apagar',
       {
         id: contaPagarId,
-        escopo_financeiro: escopo,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
         categoria_id: nullableText(command.categoria_id),
@@ -1435,7 +1434,6 @@ export async function issueRevenue(
       'contas_areceber',
       {
         id: contaReceberId,
-        escopo_financeiro: escopo,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
         categoria_id: nullableText(command.categoria_id),
@@ -1710,7 +1708,6 @@ export async function createReimbursement(
       'reembolsos',
       {
         id: reimbursementId,
-        escopo_financeiro: escopo,
         lancamento_origem_id: originalId,
         conta_receber_id: contaReceberId,
         lancamento_cliente_id: clientLancamentoId,
@@ -1767,7 +1764,6 @@ export async function createReimbursement(
       'lancamentos',
       {
         id: clientLancamentoId,
-        escopo_financeiro: escopo,
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
@@ -1808,7 +1804,6 @@ export async function createReimbursement(
       'contas_areceber',
       {
         id: contaReceberId,
-        escopo_financeiro: escopo,
         data_vencimento: command.data_vencimento || command.data,
         valor_centavos: amount,
         descricao: command.descricao || 'Reembolso de despesa',
