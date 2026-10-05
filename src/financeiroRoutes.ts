@@ -607,9 +607,9 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
       numero_recibo: numero,
       origem_tipo: 'RECIBO_SAIDA', origem_id: id,
       periodicidade: 'MENSAL',
-    }, c.get('userId') || null)
-    if (financeiro.lancamentoClienteId) {
-      await c.env.SHARE_DB.prepare(`
+    }, c.get('userId') || null, {}, ({ lancamentoId, contaReceberId, lancamentoClienteId }) => {
+      const statements: D1PreparedStatement[] = []
+      if (lancamentoClienteId) statements.push(c.env.SHARE_DB.prepare(`
         UPDATE rateio_despesas
         SET percentual_sociedade = COALESCE((SELECT percentual_sociedade FROM cotista_aeronave WHERE id = ?), 100),
             percentual_uso = 100,
@@ -618,9 +618,8 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
             status = 'AGUARDANDO_REEMBOLSO',
             atualizado_em = CURRENT_TIMESTAMP
         WHERE lancamento_id = ?
-      `).bind(cotistaId, financeiro.lancamentoClienteId).run()
-    }
-    await c.env.SHARE_DB.prepare(`INSERT INTO recibos_saida
+      `).bind(cotistaId, lancamentoClienteId))
+      statements.push(c.env.SHARE_DB.prepare(`INSERT INTO recibos_saida
       (id, numero_recibo, cotista_id, aeronave_id, valor_total, percentual, descricao_servico,
        nome_categoria, categoria_id, subcategoria_1, data_emissao, data_vencimento,
        status, contas_areceber_id, lancamentos_id, criado_por)
@@ -629,10 +628,10 @@ financeiroRoutes.post('/recibos-saida', async (c) => {
         body.categoria_receita_nome ?? body.nome_categoria ?? null,
         categoriaExiste ? categoriaInformada : null,
         body.categoria_despesa_subcategoria ?? null, dataEmissao, dataVencimento,
-        financeiro.contaReceberId ?? null, financeiro.id ?? financeiro.lancamento_id ?? null, c.get('userId') || null).run()
-    if (financeiro.contaReceberId) {
-      await c.env.SHARE_DB.prepare('UPDATE contas_areceber SET recibos_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id, financeiro.contaReceberId).run()
-    }
+        contaReceberId, lancamentoId, c.get('userId') || null))
+      statements.push(c.env.SHARE_DB.prepare('UPDATE contas_areceber SET recibos_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id, contaReceberId))
+      return statements
+    })
     const recibo = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(id).first()
     return c.json({ recibo }, 201)
   } catch (error) { return errorResponse(c, error) }
@@ -1476,7 +1475,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
       UNION ALL
       SELECT mh.id, mh.aeronave_id, mh.socio_id AS participante_id, mh.data_emissao AS data,
              COALESCE(mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.numero_doc) AS numero_doc,
-             mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.numero_doc, mh.url_doc, mh.url_demonstrativo, mh.url_nf, mh.url_recibo, mh.url_boleto,
+             mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.url_doc, mh.url_demonstrativo, mh.url_nf, mh.url_recibo, mh.url_boleto,
              mh.fornecedor_id, mh.categoria_nome, mh.grupo_categoria, mh.periodicidade, mh.data_vencimento, mh.data_pagamento,
              CASE WHEN UPPER(mh.fluxo) IN ('ENTRADA', 'APORTE', 'ESTORNO') THEN 'ENTRADA' ELSE 'SAIDA' END AS fluxo,
              mh.valor_centavos, mh.valor_centavos AS valor_rateado_centavos, 0 AS valor_pago_real_centavos,

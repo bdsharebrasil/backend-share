@@ -9,14 +9,16 @@ const end = source.indexOf("financeiroRoutes.get('/cotista/voos-emprestimos'", s
 const dashboard = source.slice(start, end)
 
 test('rotas financeiras de cotista validam sessão Supabase antes de retornar dados', () => {
+  const authStart = worker.indexOf("app.use('/api/financeiro/*'")
   const guardStart = worker.indexOf("app.use('/api/financeiro/cotista/*'")
   const guardEnd = worker.indexOf("app.route('/api/financeiro'", guardStart)
+  const auth = worker.slice(authStart, guardStart)
   const guard = worker.slice(guardStart, guardEnd)
+  assert.notEqual(authStart, -1)
   assert.notEqual(guardStart, -1)
-  assert.match(guard, /requireAuthenticatedUser\(c\)/)
-  assert.match(guard, /c\.json\(\{ error: 'nao_autorizado' \}, 401\)/)
-  assert.match(guard, /usuarios_funcoes/)
-  assert.match(guard, /financeiro_master/)
+  assert.match(auth, /autorizarRequisicaoFinanceira\(c,/)
+  assert.match(auth, /set\('userId', acesso\.userId\)/)
+  assert.match(guard, /usuarioTemPapel\(c\.env\.SHARE_DB, userId/)
   assert.match(guard, /c\.json\(\{ error: 'financeiro_cotista_nao_autorizado' \}, 403\)/)
 })
 
@@ -29,6 +31,17 @@ test('dashboard usa o valor já rateado sem recalcular a parcela', () => {
 test('UNION do dashboard usa ordenação por posições compatível com SQLite/D1', () => {
   assert.match(dashboard, /ORDER BY 4 DESC, 1 DESC LIMIT 1000/)
   assert.doesNotMatch(dashboard, /ORDER BY data DESC, id DESC LIMIT 1000/)
+})
+
+test('UNION do balanço mantém a projeção documental de movimentos_holding alinhada', () => {
+  const inicio = dashboard.indexOf('UNION ALL\n      SELECT mh.id, mh.aeronave_id')
+  const fim = dashboard.indexOf('\n      ORDER BY 4 DESC', inicio)
+  const movimentosHolding = dashboard.slice(inicio, fim)
+  assert.notEqual(inicio, -1)
+  assert.notEqual(fim, -1)
+  assert.match(movimentosHolding, /COALESCE\(mh\.numero_nf, mh\.numero_recibo, mh\.numero_demonstrativo, mh\.numero_doc\) AS numero_doc/)
+  assert.match(movimentosHolding, /mh\.numero_nf, mh\.numero_recibo, mh\.numero_demonstrativo, mh\.url_doc, mh\.url_demonstrativo, mh\.url_nf, mh\.url_recibo, mh\.url_boleto/)
+  assert.doesNotMatch(movimentosHolding, /mh\.numero_demonstrativo, mh\.numero_doc, mh\.url_doc/)
 })
 
 test('rateio de despesas identifica o cliente na própria parcela', () => {
@@ -88,6 +101,19 @@ test('lançamento sem rateio é fallback e não duplica parcela rateada', () => 
   assert.match(dashboard, /FROM lancamentos l[\s\S]*lancamentoSemRateio/)
   assert.match(dashboard, /rd\.lancamento_id = l\.id/)
   assert.match(dashboard, /'lancamentos' AS origem_rateio/)
+})
+
+test('recibo de saída inclui rateio, recibo e vínculo no batch da receita', () => {
+  const inicio = source.indexOf("financeiroRoutes.post('/recibos-saida'")
+  const fim = source.indexOf("financeiroRoutes.patch('/recibos-saida/:id'", inicio)
+  const rota = source.slice(inicio, fim)
+  assert.notEqual(inicio, -1)
+  assert.notEqual(fim, -1)
+  assert.match(rota, /\}, c\.get\('userId'\) \|\| null, \{\}, \(\{ lancamentoId, contaReceberId, lancamentoClienteId \}\)/)
+  assert.match(rota, /UPDATE rateio_despesas/)
+  assert.match(rota, /INSERT INTO recibos_saida/)
+  assert.match(rota, /UPDATE contas_areceber SET recibos_saida_id/)
+  assert.doesNotMatch(rota, /\)\.run\(\)/)
 })
 
 const rateioOpcoes = source.slice(source.indexOf("financeiroRoutes.get('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId/rateio-opcoes'"))

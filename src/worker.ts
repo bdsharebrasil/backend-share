@@ -7,6 +7,7 @@ import { z } from 'zod'
 import logoShareBytes from './assets/share-signature-logo.png'
 import signatureBytes from './assets/assinatura-para-recibo.png'
 import { financeiroRoutes } from './financeiroRoutes'
+import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
 import { METADADOS_CATEGORIA_ABASTECIMENTO, normalizarVooEmprestado, resolverTitularAbastecimento } from './abastecimentoUtils'
@@ -99,20 +100,15 @@ app.use('*', async (c, next) => {
 // As rotas legadas de escrita foram removidas abaixo para evitar dois fluxos
 // gravando diretamente no mesmo D1. O kernel é o único dono dessas operações.
 app.use('/api/financeiro/*', async (c, next) => {
-  ;(c as any).set('userId', extractSupabaseUserId(c))
+  const acesso = await autorizarRequisicaoFinanceira(c, new URL(c.req.url).pathname, c.req.method)
+  if (!acesso.autorizado) return c.json({ error: acesso.status === 401 ? 'nao_autorizado' : 'financeiro_nao_autorizado' }, acesso.status)
+  ;(c as any).set('userId', acesso.userId)
   return next()
 })
 app.use('/api/financeiro/cotista/*', async (c, next) => {
-  if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'nao_autorizado' }, 401)
-  const userId = extractSupabaseUserId(c)
+  const userId = (c as any).get('userId') as string | null
   if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
-  const permitido = await c.env.SHARE_DB.prepare(`
-    SELECT 1 FROM user_profiles
-     WHERE id = ? AND lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster')
-    UNION ALL
-    SELECT 1 FROM usuarios_funcoes
-     WHERE user_id = ? AND lower(replace(replace(trim(COALESCE(funcao, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster')
-    LIMIT 1`).bind(userId, userId).first()
+  const permitido = await usuarioTemPapel(c.env.SHARE_DB, userId, ['admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster'])
   if (!permitido) return c.json({ error: 'financeiro_cotista_nao_autorizado' }, 403)
   return next()
 })
@@ -120,6 +116,9 @@ app.route('/api/financeiro', financeiroRoutes)
 
 // Compatibilidade para clientes antigos; o endpoint canônico é financeiro/dashboard/financeiro.
 app.get('/api/interno/dashboard/financeiro', async (c) => {
+  const acesso = await autorizarRequisicaoFinanceira(c, new URL(c.req.url).pathname, c.req.method)
+  if (!acesso.autorizado) return c.json({ error: acesso.status === 401 ? 'nao_autorizado' : 'financeiro_nao_autorizado' }, acesso.status)
+  ;(c as any).set('userId', acesso.userId)
   const url = new URL(c.req.url)
   url.pathname = '/dashboard/financeiro'
   return financeiroRoutes.fetch(new Request(url, c.req.raw), c.env, c.executionCtx)

@@ -33,18 +33,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE _cf_KV (
     prazo_envio_cliente TEXT,
 
     FOREIGN KEY (socio_id) REFERENCES hold_socios(id)
-)'), ('CREATE TABLE fornecedores_combustivel (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
-  nome_cidade TEXT NOT NULL,
-  codigo_icao TEXT,
-  nome_fornecedor TEXT NOT NULL,
-  pessoa_contato TEXT,
-  telefone TEXT,
-  preco_avgas REAL,
-  preco_jet REAL,
-  criado_em TEXT DEFAULT (datetime('now')),
-  atualizado_em TEXT DEFAULT (datetime('now'))
-)'), ('CREATE TABLE aerodromo (
+  )'), ('CREATE TABLE aerodromo (
     id TEXT PRIMARY KEY NOT NULL,
     nome TEXT NOT NULL,
     designativo_icao TEXT NOT NULL,
@@ -282,7 +271,18 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE auditoria_financeira (
     FOREIGN KEY (usuario_id)
         REFERENCES user_profiles(id)
         ON DELETE CASCADE
-)'), ('CREATE TABLE centro_reunioes (id TEXT PRIMARY KEY NOT NULL, titulo TEXT NOT NULL, descricao TEXT, status TEXT NOT NULL DEFAULT ''ATIVA'', criado_por TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, encerrado_em TEXT NULL)'), ('CREATE TABLE "checklists_pre_voo"(
+)'), ('CREATE TABLE centro_reunioes (id TEXT PRIMARY KEY NOT NULL, titulo TEXT NOT NULL, descricao TEXT, status TEXT NOT NULL DEFAULT ''ATIVA'', criado_por TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, encerrado_em TEXT NULL)'), ('CREATE TABLE checklists_planos_voo (
+    id TEXT PRIMARY KEY NOT NULL,
+    plano_voo_id TEXT NOT NULL UNIQUE,
+    itens_json TEXT NOT NULL DEFAULT ''{}'',
+    observacoes TEXT NULL,
+    status TEXT NOT NULL DEFAULT ''rascunho'',
+    executado_por TEXT NULL,
+    executado_por_nome TEXT NULL,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    concluido_em TEXT NULL
+  )'), ('CREATE TABLE "checklists_pre_voo"(
   id TEXT,
   solicitacao_id TEXT,
   aeronave_id TEXT,
@@ -323,17 +323,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE auditoria_financeira (
     observacoes TEXT NULL,
     criado_em TEXT NULL DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TEXT NULL DEFAULT CURRENT_TIMESTAMP
-)'), ('CREATE TABLE colaboradores (
-  id TEXT PRIMARY KEY NOT NULL,
-  user_profile_id TEXT UNIQUE,
-  nome TEXT NOT NULL,
-  cpf TEXT,
-  pix TEXT,
-  ativo INTEGER NOT NULL DEFAULT 1,
-  criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE clientes (id TEXT PRIMARY KEY)'), ('CREATE TABLE "contas_apagar" (
   id TEXT PRIMARY KEY NOT NULL,
   data_vencimento TEXT NOT NULL,
   data_pagamento TEXT,
@@ -347,7 +338,6 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   boleto_url TEXT,
   nf_url TEXT,
   lancamentos_id TEXT REFERENCES lancamentos(id),
-  movimentos_id TEXT REFERENCES movimentos_holding(id),
   banco_recebimento  TEXT REFERENCES contas_bancarias(id),
   colaborador_id TEXT REFERENCES user_profiles(id),
   status TEXT NOT NULL DEFAULT ''EM_ABERTO'' CHECK (status IN (''EM_ABERTO'',''EM_ATRASO'',''PAGO'',''CANCELADO'')),
@@ -358,7 +348,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   origem_tipo TEXT,
   idempotency_key TEXT
-, tripulante_id TEXT)'), ('CREATE TABLE "contas_areceber" (
+, tripulante_id TEXT, movimentos_id TEXT REFERENCES movimentos_holding(id), escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))'), ('CREATE TABLE "contas_areceber" (
   id TEXT PRIMARY KEY NOT NULL,
   data_vencimento TEXT,
   data_recebimento TEXT,
@@ -381,7 +371,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   origem_tipo TEXT,
   idempotency_key TEXT
-)'), ('CREATE TABLE contas_bancarias (
+, escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))'), ('CREATE TABLE contas_bancarias (
   id TEXT PRIMARY KEY NOT NULL,
   razao_social TEXT NOT NULL,
   cnpj TEXT NOT NULL,
@@ -491,7 +481,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   icone TEXT,
   ativo INTEGER NOT NULL DEFAULT 1 CHECK (ativo IN (0,1)),
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)'), ('CREATE TABLE ctm_componente_eventos (
+)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_componente_eventos (
   id TEXT PRIMARY KEY,
   componente_id TEXT NOT NULL REFERENCES ctm_mapa_componente(id) ON DELETE CASCADE,
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id) ON DELETE CASCADE,
@@ -515,8 +506,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE "contas_apagar" (
   criado_por TEXT REFERENCES user_profiles(id),
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_despesas_motor (
+)'), ('CREATE TABLE ctm_despesas_motor (
   id TEXT PRIMARY KEY,
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id) ON DELETE CASCADE,
   data TEXT NOT NULL,
@@ -706,7 +696,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_despesas_motor (
   observacoes TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)'), ('CREATE TABLE ctm_itens_orcamento (
+)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_itens_orcamento (
   id TEXT PRIMARY KEY,
   servico_id TEXT NOT NULL REFERENCES ctm_orcamentos(id) ON DELETE CASCADE,
   ordenacao INTEGER NOT NULL DEFAULT 1,
@@ -716,8 +707,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_despesas_motor (
   subtotal REAL NOT NULL DEFAULT 0,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_mapa_componente (
+)'), ('CREATE TABLE ctm_mapa_componente (
   id TEXT PRIMARY KEY,
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id) ON DELETE CASCADE,
   nome TEXT NOT NULL,
@@ -929,7 +919,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_mapa_componente (
   criado_por TEXT REFERENCES user_profiles(id),
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)'), ('CREATE TABLE ctm_ras (
+)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_ras (
   id TEXT PRIMARY KEY,
   numero TEXT NOT NULL UNIQUE,
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id) ON DELETE CASCADE,
@@ -950,8 +941,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_mapa_componente (
   status TEXT CHECK (status IN (''in_progress'',''completed'',''cancelled'')),
   criado_por TEXT REFERENCES user_profiles(id),
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_ras_fotos (
+)'), ('CREATE TABLE ctm_ras_fotos (
   id TEXT PRIMARY KEY,
   ras_id TEXT NOT NULL REFERENCES ctm_ras(id) ON DELETE CASCADE,
   url_foto TEXT NOT NULL,
@@ -1100,6 +1090,21 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_ras_fotos (
   celula_anterior_tvoo REAL,
   celula_prox_revisao_tvoo REAL, modo_celula TEXT,
   FOREIGN KEY (aeronave_id) REFERENCES aeronave(id)
+)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_aeronave (
+  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+  nome TEXT NOT NULL,
+  descricao TEXT,
+  caminho_arquivo TEXT NOT NULL,
+  tipo_arquivo TEXT,
+  tamanho_arquivo INTEGER,
+  enviado_por TEXT,
+  criado_em TEXT DEFAULT (datetime(''now'')),
+  aeronave_id TEXT,
+  tipo_documento TEXT,
+  data_validade TEXT,
+  atualizado_em TEXT DEFAULT (datetime(''now'')),
+  dias_alerta INTEGER DEFAULT 30
 )'), ('CREATE TABLE "documentos_cotista"(
   id TEXT,
   nome_arquivo TEXT,
@@ -1111,8 +1116,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ctm_ras_fotos (
   criado_em TEXT,
   atualizado_em TEXT,
   cotista_id TEXT
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_internos (
+)'), ('CREATE TABLE documentos_internos (
     id TEXT PRIMARY KEY NOT NULL,
 
     pasta_id TEXT,
@@ -1239,7 +1243,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_internos (
   movimentacao_id TEXT,
   rateio_id TEXT,
   cotista_id TEXT
-, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT ''[]'', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT ''[]'', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT ''[]'', valor_total_despesa REAL)'), ('CREATE TABLE escala_tripulacao (
+, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT ''[]'', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT ''[]'', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT ''[]'', categoria_cliente_id TEXT, colaborador_id TEXT, abastecimento_json TEXT, solicitacao_compra_id TEXT, valor_total_despesa REAL, escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE escala_tripulacao (
     id TEXT PRIMARY KEY NOT NULL,
 
     tripulacao_id TEXT NOT NULL,
@@ -1296,8 +1301,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE documentos_internos (
     FOREIGN KEY (item_folha_id)
         REFERENCES itens_folha(id)
         ON DELETE CASCADE
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ferias (
+)'), ('CREATE TABLE ferias (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     empresa_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -1353,9 +1357,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ferias (
   tentativas INTEGER NOT NULL DEFAULT 0,
   erro TEXT,
   processado_em TEXT,
-  processando_em TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)'), ('CREATE TABLE financeiro_vinculos (
+, processando_em TEXT)'), ('CREATE TABLE financeiro_vinculos (
   id TEXT PRIMARY KEY NOT NULL,
   origem_tipo TEXT NOT NULL,
   origem_id TEXT NOT NULL,
@@ -1417,6 +1420,20 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ferias (
         ON DELETE SET NULL,
 
     UNIQUE (empresa_id, competencia_ano, competencia_mes, tipo_folha)
+)'), ('CREATE TABLE fornecedores_combustivel (
+  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+
+  nome_cidade TEXT NOT NULL,
+  codigo_icao TEXT,
+  nome_fornecedor TEXT NOT NULL,
+  pessoa_contato TEXT,
+  telefone TEXT,
+
+  preco_avgas REAL,
+  preco_jet REAL,
+
+  criado_em TEXT DEFAULT (datetime(''now'')),
+  atualizado_em TEXT DEFAULT (datetime(''now''))
 )'), ('CREATE TABLE fornecedores_favoritos (
     id TEXT PRIMARY KEY NOT NULL,
 
@@ -1461,7 +1478,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ferias (
     FOREIGN KEY (tripulacao_id)
         REFERENCES tripulacao(id)
         ON DELETE CASCADE
-)'), ('CREATE TABLE hold_socios (id TEXT PRIMARY KEY NOT NULL, cotista_id TEXT NOT NULL, nome TEXT NOT NULL, cpf TEXT NOT NULL, email_principal TEXT, emails TEXT NOT NULL DEFAULT ''[]'', endereco TEXT, cidade TEXT, uf TEXT, contato_financeiro TEXT, telefone_financeiro TEXT, telefone TEXT, observacoes TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, holding_id TEXT NOT NULL, numero_nf TEXT, numero_recibo TEXT, numero_boleto TEXT, numero_demonstrativo TEXT, url_demonstrativo TEXT, url_nf TEXT, url_recibo TEXT, url_boleto TEXT, url_doc TEXT, FOREIGN KEY (cotista_id) REFERENCES cotista_aeronave(id), FOREIGN KEY (holding_id) REFERENCES holdings(id))'), ('CREATE TABLE holdings (
+)'), ('CREATE TABLE hold_socios (id TEXT PRIMARY KEY NOT NULL, cotista_id TEXT NOT NULL, nome TEXT NOT NULL, cpf TEXT NOT NULL, email_principal TEXT, emails TEXT NOT NULL DEFAULT ''[]'', endereco TEXT, cidade TEXT, uf TEXT, contato_financeiro TEXT, telefone_financeiro TEXT, telefone TEXT, observacoes TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP, holding_id TEXT NOT NULL, numero_nf TEXT, numero_recibo TEXT, numero_boleto TEXT, numero_demonstrativo TEXT, url_demonstrativo TEXT, url_nf TEXT, url_recibo TEXT, url_boleto TEXT, url_doc TEXT, FOREIGN KEY (cotista_id) REFERENCES cotista_aeronave(id), FOREIGN KEY (holding_id) REFERENCES holdings(id))');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE holdings (
     id TEXT PRIMARY KEY NOT NULL,
     nome TEXT NOT NULL,
     conta_bancaria TEXT,
@@ -1531,8 +1549,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE ferias (
         ON DELETE SET NULL,
 
     UNIQUE (folha_id, user_id)
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE itens_solicitacao_compra (
+)'), ('CREATE TABLE itens_solicitacao_compra (
     id TEXT PRIMARY KEY NOT NULL,
 
     solicitacao_compra_id TEXT NOT NULL,
@@ -1557,7 +1574,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE itens_solicitacao_compra
 
     UNIQUE (solicitacao_compra_id, numero_item)
 )'), ('CREATE TABLE jornadas_voo(
-id                       TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+  id                       TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
 
   solicitacao_id           TEXT NOT NULL REFERENCES solicitacoes_reserva_voo(id),
   aeronave_id              TEXT NOT NULL REFERENCES aeronave(id),
@@ -1568,13 +1585,13 @@ id                       TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob
 
   horario_apresentacao     TEXT NOT NULL,
   horario_acionamento      TEXT,
-  horario_pouso     TEXT,
-  horario_corte      TEXT,
+  horario_pouso            TEXT,
+  horario_corte            TEXT,
 
-  minutos_pos_corte        INTEGER NOT NULL DEFAULT 45,
+  minutos_pos_corte        INTEGER NOT NULL DEFAULT 30,
 
   status                   TEXT NOT NULL DEFAULT ''em_solo''
-                            CHECK (status IN (''em_solo'', ''em_rota'', ''encerrada'')),
+                           CHECK (status IN (''em_solo'', ''em_rota'', ''pousado'', ''encerrada'')),
 
   minutos_jornada          INTEGER,
   limite_jornada_minutos   INTEGER NOT NULL DEFAULT 540,
@@ -1582,7 +1599,7 @@ id                       TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob
   limite_mensal_minutos    INTEGER NOT NULL DEFAULT 10560,
 
   nivel_alerta             TEXT NOT NULL DEFAULT ''normal''
-                            CHECK (nivel_alerta IN (''normal'', ''atencao'', ''critico'', ''excedido'')),
+                           CHECK (nivel_alerta IN (''normal'', ''atencao'', ''critico'', ''excedido'')),
 
   observacoes              TEXT,
   criado_por               TEXT,
@@ -1592,7 +1609,7 @@ id                       TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob
 
   funcao_tripulante        TEXT NOT NULL DEFAULT ''PIC'',
   jornada_principal_id     TEXT REFERENCES jornadas_voo(id)
-)'), ('CREATE TABLE justificativa_ausencia (
+, horario_decolagem INTEGER)'), ('CREATE TABLE justificativa_ausencia (
     id TEXT PRIMARY KEY NOT NULL,
 
     id_usuario TEXT NOT NULL,
@@ -1714,7 +1731,6 @@ status TEXT
 
 tipo_caixa TEXT NOT NULL
     CHECK (tipo_caixa IN (''SHARE'', ''CLIENTE'' , ''HOLDING'')),
-  escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
   valor_centavos INTEGER NOT NULL
     CHECK (valor_centavos > 0),
 
@@ -1765,7 +1781,11 @@ numero_demonstrativo TEXT,
 
 
   idempotency_key TEXT
-, origem_id TEXT, email_enviado_em TEXT, email_enviado_id TEXT REFERENCES emails_enviados(id), numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE lancamentos_diario_bordo (
+, origem_id TEXT, email_enviado_em TEXT, email_enviado_id TEXT REFERENCES emails_enviados(id), numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id), cliente_id TEXT REFERENCES clientes(id), subcategoria_1  text, subcategoria_2  text, subcategoria_3  text, subcategoria_4  text, escopo_financeiro TEXT
+CHECK (
+  escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')
+))');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE lancamentos_diario_bordo (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   numero_sequencial INTEGER,
   diario_mes_id TEXT NOT NULL,
@@ -1806,8 +1826,7 @@ numero_demonstrativo TEXT,
   local_combustivel TEXT,
   abastecido INTEGER DEFAULT 0,
   celula REAL DEFAULT 0,
-   celula_tvoo TEXT,
-  confirmado INTEGER DEFAULT 0,
+   confirmado INTEGER DEFAULT 0,
   confirmado_em TEXT,
   assinado_pic TEXT,
   data_assinatura TEXT,
@@ -1821,7 +1840,7 @@ numero_demonstrativo TEXT,
   tipo_manutencao_proxima TEXT,
   responsavel_aprovacao_manutencao TEXT,
   detectado_por TEXT,
-  criado_por TEXT, 
+  criado_por TEXT, celula_tvoo REAL DEFAULT 0,
   FOREIGN KEY (diario_mes_id) REFERENCES diario_mes(id),
   FOREIGN KEY (aeronave_id) REFERENCES aeronave(id)
 )'), ('CREATE TABLE lancamentos_financeiros_rh (
@@ -1842,8 +1861,7 @@ numero_demonstrativo TEXT,
     aprovado_por TEXT,
     aprovado_em TEXT,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    idempotency_key TEXT,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, idempotency_key TEXT,
 
     FOREIGN KEY (empresa_id)
         REFERENCES empresa(id)
@@ -1888,8 +1906,7 @@ numero_demonstrativo TEXT,
     CHECK (
         visibilidade IN (''PRIVADO'', ''TODOS'')
     )
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE manual_tutoriais (
+)'), ('CREATE TABLE manual_tutoriais (
     id TEXT PRIMARY KEY NOT NULL,
 
     titulo TEXT NOT NULL,
@@ -1944,7 +1961,6 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE manual_tutoriais (
     )),
   tipo_caixa TEXT NOT NULL
     CHECK (tipo_caixa IN (''SHARE'', ''HOLD'')),
-  escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
   colaborador_id TEXT 
     REFERENCES user_profiles(id),
   data_emissao TEXT,
@@ -1984,7 +2000,10 @@ numero_demonstrativo TEXT,
   criado_por TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-, email_enviado_em TEXT, email_enviado_id TEXT REFERENCES emails_enviados(id))'), ('CREATE TABLE notas_fiscais_saida (
+, email_enviado_em TEXT, email_enviado_id TEXT REFERENCES emails_enviados(id), idempotency_key TEXT, escopo_financeiro TEXT
+CHECK (
+  escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')
+))'), ('CREATE TABLE notas_fiscais_saida (
     id TEXT PRIMARY KEY NOT NULL,
     numero TEXT NOT NULL,
         lancamentos_id TEXT NULL,
@@ -2005,14 +2024,15 @@ numero_demonstrativo TEXT,
     arquivo_pdf_url TEXT NULL,
 
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, processando_em TEXT, escopo_financeiro TEXT NOT NULL DEFAULT ''CAIXA_SHARE'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
    FOREIGN KEY (cotista_id)
         REFERENCES cotista_aeronave(id)
         ON DELETE SET NULL
     FOREIGN KEY (aeronave_id)
         REFERENCES aeronave(id)
         ON DELETE SET NULL
-)'), ('CREATE TABLE pagamentos_folha (
+)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pagamentos_folha (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     empresa_id TEXT NOT NULL,
     folha_id TEXT,
@@ -2041,10 +2061,7 @@ numero_demonstrativo TEXT,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     rotulo TEXT CHECK (rotulo IS NULL OR rotulo IN (''SALARIO'', ''FERIAS'', ''13_P1'', ''13_P2'', ''BENEFICIO'', ''HORAS_VOO'', ''EXTRA'')),
-    holerite_url TEXT,
-    conta_pagamento_id TEXT,
-    observacoes TEXT,
-    idempotency_key TEXT,
+    holerite_url TEXT, conta_pagamento_id TEXT REFERENCES contas_bancarias(id), observacoes TEXT, lancamento_rh_id TEXT, idempotency_key TEXT,
 
     FOREIGN KEY (empresa_id)
         REFERENCES empresa(id)
@@ -2111,8 +2128,7 @@ numero_demonstrativo TEXT,
 
     CHECK (date(data_fim) >= date(data_inicio)),
     CHECK (dias_gozados + dias_abono <= dias_direito)
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
+)'), ('CREATE TABLE pernas_jornada_voo (
   id                    TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
 
   jornada_id            TEXT NOT NULL REFERENCES jornadas_voo(id) ON DELETE CASCADE,
@@ -2136,7 +2152,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
   lancamento_diario_id  TEXT REFERENCES lancamentos_diario_bordo(id),
 
   criado_em             TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  atualizado_em         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, passageiros INTEGER NOT NULL DEFAULT 0,
 
   UNIQUE (jornada_id, numero)
 )'), ('CREATE TABLE planos_voo (
@@ -2150,9 +2166,9 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )'), ('CREATE TABLE rateio_despesas (
   id TEXT PRIMARY KEY NOT NULL,
-  lancamento_id TEXT REFERENCES lancamentos(id),
+  lancamento_id TEXT ,
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id),
-  cotista_id TEXT REFERENCES cotista_aeronave(id),
+  cotista_id TEXT,
    data_emissao TEXT,
   data_vencimento TEXT,
   data_pagamento TEXT,
@@ -2164,7 +2180,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
     subcategoria_2 TEXT NULL,
     subcategoria_3 TEXT NULL,
     subcategoria_4 TEXT NULL,
-  fornecedor_id TEXT REFERENCES fornecedores_favoritos(id),
+  fornecedor_id TEXT ,
   tipo_rateio TEXT NOT NULL CHECK (tipo_rateio IN (''FIXO'', ''VARIAVEL_POR_VOO'', ''VARIAVEL_POR_HORA'', ''EXTRA'')),
  periodicidade TEXT
     CHECK (periodicidade IN (
@@ -2175,7 +2191,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE pernas_jornada_voo (
   valor_total_centavos INTEGER NOT NULL CHECK (valor_total_centavos > 0),
   valor_rateado_centavos INTEGER NOT NULL CHECK (valor_rateado_centavos > 0),
   valor_pago_real_centavos INTEGER NOT NULL DEFAULT 0 CHECK (valor_pago_real_centavos >= 0),
-  pago_por TEXT,
+  pago_por TEXT ,
   pago_diretamente INTEGER NOT NULL DEFAULT 0 CHECK (pago_diretamente IN (0, 1)),
 status TEXT
 
@@ -2192,9 +2208,9 @@ status TEXT
   observacoes TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-, documento_url TEXT, documento_numero TEXT, origem_id TEXT, origem_tipo TEXT, numero_nf TEXT, numero_recibo TEXT, numero_boleto TEXT, numero_demonstrativo TEXT, url_demonstrativo TEXT, url_nf TEXT, url_recibo TEXT, url_boleto  TEXT, url_doc TEXT)'), ('CREATE TABLE rateio_hold (
+, documento_url TEXT, documento_numero TEXT, origem_tipo TEXT, numero_nf TEXT, numero_recibo TEXT, numero_boleto TEXT, numero_demonstrativo TEXT, url_demonstrativo TEXT, url_nf TEXT, url_recibo TEXT, url_boleto  TEXT, url_doc TEXT, numero_voo TEXT, numero_doc TEXT, email_enviado_em TEXT)'), ('CREATE TABLE rateio_hold (
   id TEXT PRIMARY KEY NOT NULL,
-  movimento_id TEXT REFERENCES movimentos_holding(id),
+  movimento_id Text,
   aeronave_id TEXT NOT NULL REFERENCES aeronave(id),
   socio_id TEXT NOT NULL REFERENCES hold_socios(id),
    data_emissao TEXT,
@@ -2217,14 +2233,15 @@ status TEXT
   valor_total_centavos INTEGER NOT NULL CHECK (valor_total_centavos > 0),
   valor_rateado_centavos INTEGER NOT NULL CHECK (valor_rateado_centavos > 0),
   valor_pago_real_centavos INTEGER NOT NULL DEFAULT 0 CHECK (valor_pago_real_centavos >= 0),
-  pago_por TEXT REFERENCES hold_socios(id),
+  pago_por TEXT ,
   pago_diretamente INTEGER NULL DEFAULT 0 CHECK (pago_diretamente IN (0, 1)),
   status TEXT NOT NULL CHECK (status IN (''EM_ABERTO'', ''PAGO'',''PAGO_DIRETAMENTE'', ''RECEBIDO'',''SAIDA'',''ESTORNO'', ''EM_ATRASO'',  ''ENTRADA'', ''AGUARDANDO_REEMBOLSO'', ''REEMBOLSADO'', ''CANCELADO'')),
   descricao_despesa TEXT,
   observacoes TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-, origem_tipo TEXT, origem_id TEXT, documento_numero TEXT, documento_url TEXT)'), ('CREATE TABLE rateio_pagamentos (
+, origem_tipo TEXT, origem_id TEXT, documento_numero TEXT, documento_url TEXT, numero_voo TEXT, numero_doc TEXT, email_enviado_em TEXT, numero_nf TEXT, numero_recibo TEXT, numero_boleto TEXT, numero_demonstrativo TEXT, url_nf TEXT, url_recibo TEXT, url_boleto TEXT, url_demonstrativo TEXT, url_doc TEXT)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE rateio_pagamentos (
   id TEXT PRIMARY KEY NOT NULL,
 
   rateio_id TEXT NOT NULL
@@ -2308,6 +2325,14 @@ status TEXT
   percentual REAL, -- percentual (ex: 33.33), não é valor monetário
   valor INTEGER NOT NULL DEFAULT 0, -- valor rateado em centavos
   cotista_id TEXT REFERENCES cotista_aeronave(id)
+)'), ('CREATE TABLE recibo_reativacoes (
+  id TEXT PRIMARY KEY NOT NULL,
+  recibo_id TEXT NOT NULL,
+  justificativa TEXT NOT NULL,
+  status_restaurado TEXT NOT NULL,
+  reativado_por TEXT NULL,
+  reativado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (recibo_id) REFERENCES recibos(id)
 )'), ('CREATE TABLE recibos (
   id TEXT PRIMARY KEY NOT NULL,
   numero_recibo TEXT UNIQUE,
@@ -2323,10 +2348,14 @@ status TEXT
   colaborador_id TEXT REFERENCES user_profiles(id),
   aeronave_id TEXT REFERENCES aeronave(id),
 
-  rateado INTEGER NOT NULL DEFAULT 0 CHECK (rateado IN (0,1)),
+  rateado INTEGER NOT NULL DEFAULT 0 CHECK (rateado IN (0, 1)),
 
   pagador_tipo TEXT NOT NULL CHECK (
-    pagador_tipo IN (''empresa'',''cotista_aeronave'')
+    pagador_tipo IN (
+      ''empresa'',
+      ''cotista_aeronave'',
+      ''cliente''
+    )
   ),
 
   pagador_id TEXT NOT NULL,
@@ -2343,34 +2372,24 @@ status TEXT
   forma_pagamento TEXT,
 
   tipo_caixa TEXT NOT NULL CHECK (
-    tipo_caixa IN (''share'',''cliente'',''holding'')
+    tipo_caixa IN (''share'', ''cliente'', ''holding'')
   ),
 
   categoria_movimentacao_id TEXT NOT NULL,
   grupo_categoria TEXT,
 
   status TEXT,
-  status_anterior TEXT,
 
   lancamento_id TEXT,
   criado_por TEXT,
   criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
   url_recibo TEXT,
   recebedor_nome TEXT,
-  recebedor_cpf TEXT,
-  recebedor_endereco TEXT,
-  recebedor_cidade TEXT,
-  recebedor_uf TEXT,
   numero_documento_anexo TEXT,
   observacoes TEXT,
-, categoria_nome TEXT, numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id))'), ('CREATE TABLE recibo_reativacoes (
-  id TEXT PRIMARY KEY NOT NULL,
-  recibo_id TEXT NOT NULL REFERENCES recibos(id),
-  justificativa TEXT NOT NULL,
-  status_restaurado TEXT NOT NULL,
-  reativado_por TEXT,
-  reativado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)'), ('CREATE INDEX idx_recibo_reativacoes_recibo ON recibo_reativacoes (recibo_id, reativado_em DESC)'), ('CREATE TABLE recibos_saida (
+  categoria_nome TEXT,
+  numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id)
+, status_anterior TEXT, escopo_financeiro TEXT NOT NULL DEFAULT ''FINANCEIRO'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')))'), ('CREATE TABLE recibos_saida (
     id TEXT PRIMARY KEY NOT NULL,
     numero_recibo TEXT NOT NULL,
     sequencia_numeros_recibo_saida_id TEXT,
@@ -2390,10 +2409,10 @@ status TEXT
     status TEXT NULL DEFAULT ''EM_ABERTO'',
     pdf_url TEXT NULL,
     criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     contas_areceber_id TEXT NULL,
     lancamentos_id TEXT NULL,
-    criado_por TEXT NULL,
+    criado_por TEXT NULL, escopo_financeiro TEXT NOT NULL DEFAULT ''CAIXA_SHARE'' CHECK (escopo_financeiro IN (''FINANCEIRO'', ''CAIXA_SHARE'')),
     FOREIGN KEY (aeronave_id)
         REFERENCES aeronave(id)
         ON DELETE SET NULL,
@@ -2406,8 +2425,7 @@ status TEXT
     FOREIGN KEY (sequencia_numeros_recibo_saida_id)
         REFERENCES sequencia_numeros_recibo_saida(id)
         ON DELETE SET NULL
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reembolsos (
+)'), ('CREATE TABLE reembolsos (
   id TEXT PRIMARY KEY NOT NULL,
   lancamento_origem_id TEXT NOT NULL,
   conta_receber_id TEXT,
@@ -2482,7 +2500,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reembolsos (
     FOREIGN KEY (relatorio_despesa_viagem_id)
         REFERENCES relatorio_despesa_viagem(id)
         ON DELETE CASCADE
-)'), ('CREATE TABLE reservas_hoteis (id TEXT PRIMARY KEY NOT NULL, hotel_id TEXT NOT NULL, criado_por TEXT, data_checkin TEXT NOT NULL, data_checkout TEXT NOT NULL, tipo_quarto TEXT, quantidade_hospedes INTEGER NOT NULL, hospede_nome TEXT NOT NULL, hospede_telefone TEXT NOT NULL, hospede_email TEXT, observacoes TEXT, destinatario_email TEXT NOT NULL, status TEXT NOT NULL DEFAULT ''SOLICITADA'', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)'), ('CREATE TABLE senhas (
+)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reservas_hoteis (id TEXT PRIMARY KEY NOT NULL, hotel_id TEXT NOT NULL, criado_por TEXT, data_checkin TEXT NOT NULL, data_checkout TEXT NOT NULL, tipo_quarto TEXT, quantidade_hospedes INTEGER NOT NULL, hospede_nome TEXT NOT NULL, hospede_telefone TEXT NOT NULL, hospede_email TEXT, observacoes TEXT, destinatario_email TEXT NOT NULL, status TEXT NOT NULL DEFAULT ''SOLICITADA'', criado_em TEXT DEFAULT CURRENT_TIMESTAMP)'), ('CREATE TABLE senhas (
     id TEXT PRIMARY KEY NOT NULL,
     titulo TEXT NOT NULL,
 
@@ -2514,7 +2533,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reembolsos (
     ON DELETE CASCADE
 )'), ('CREATE TABLE sequencia_numeros_recibos (
   id TEXT PRIMARY KEY NOT NULL,
-  cotista_aeronave_id TEXT,
+  cotista_aeronave_id TEXT NOT NULL,
   codigo_cliente TEXT NOT NULL,
   ano TEXT NOT NULL,
   proximo_numero INTEGER NOT NULL DEFAULT 1,
@@ -2564,8 +2583,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE reembolsos (
     FOREIGN KEY (user_id) REFERENCES user_profiles(id) ON DELETE CASCADE,
     FOREIGN KEY (aprovador_1_id) REFERENCES user_profiles(id) ON DELETE SET NULL,
     FOREIGN KEY (aprovador_2_id) REFERENCES user_profiles(id) ON DELETE SET NULL
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE solicitacoes_correcao_ponto (
+)'), ('CREATE TABLE solicitacoes_correcao_ponto (
     id TEXT PRIMARY KEY NOT NULL,
 
     user_id TEXT NOT NULL,
@@ -2619,7 +2637,8 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE solicitacoes_correcao_po
     piloto_id TEXT NULL,
     copiloto_id TEXT NULL,
     numero_voo TEXT NULL
-, socio_id TEXT NULL, cliente_emprestimo_id TEXT NULL, socio_emprestimo_id TEXT NULL)'), ('CREATE TABLE sqlite_sequence(name,seq)'), ('CREATE TABLE tarefas (
+, socio_id TEXT NULL, cliente_emprestimo_id TEXT NULL, socio_emprestimo_id TEXT NULL)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE sqlite_sequence(name,seq)'), ('CREATE TABLE tarefas (
     id TEXT PRIMARY KEY NOT NULL,
 
     titulo TEXT NOT NULL,
@@ -2741,8 +2760,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE solicitacoes_correcao_po
         REFERENCES user_profiles(id)
         ON DELETE CASCADE
 
-)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE tripulacao_freelancer 
+)'), ('CREATE TABLE tripulacao_freelancer
   (
 id TEXT PRIMARY KEY NOT NULL,  
   canac text not null,
@@ -2806,7 +2824,8 @@ status TEXT DEFAULT ''ativo'',
     departamento TEXT,
 
     cliente_id TEXT
-, "departamentos_email" TEXT, email_envio TEXT, exame_admissional_realizado INTEGER NOT NULL DEFAULT 0, exame_admissional_data TEXT, exame_admissional_local TEXT, exame_admissional_empresa TEXT, exame_admissional_prazo TEXT, exame_admissional_documento_id TEXT)'), ('CREATE TABLE usuarios_empresas (
+, "departamentos_email" TEXT, email_envio TEXT, exame_admissional_realizado INTEGER NOT NULL DEFAULT 0, exame_admissional_data TEXT, exame_admissional_local TEXT, exame_admissional_empresa TEXT, exame_admissional_prazo TEXT, exame_admissional_documento_id TEXT)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE usuarios_empresas (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     usuario_id TEXT NOT NULL,
     empresa_id TEXT NOT NULL,
@@ -2851,65 +2870,65 @@ status TEXT DEFAULT ''ativo'',
   id INTEGER PRIMARY KEY CHECK (id = 1),
   ultimo_numero INTEGER NOT NULL DEFAULT 0
 )'), ('CREATE TABLE voo_sequencia_cotista (cotista_key TEXT PRIMARY KEY NOT NULL, ultimo_numero INTEGER NOT NULL DEFAULT 0)'), ('CREATE INDEX hold_socios_cotista_idx ON hold_socios(cotista_id)'), ('CREATE INDEX hold_socios_holding_idx ON hold_socios(holding_id)'), ('CREATE UNIQUE INDEX idx_aerodromo_designativo_icao
-ON aerodromo(designativo_icao)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_aerodromo_nome
+ON aerodromo(designativo_icao)'), ('CREATE INDEX idx_aerodromo_nome
   ON aerodromo(nome COLLATE NOCASE)'), ('CREATE INDEX idx_aeronave_id
 ON tripulacao_freelancer (aeronave_id)'), ('CREATE INDEX idx_aeronave_proprietario
-ON aeronave(nome_proprietario)'), ('CREATE INDEX idx_agenda_contatos_cidade
+ON aeronave(nome_proprietario)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_agenda_contatos_cidade
 ON agenda_contatos (cidade)'), ('CREATE INDEX idx_alteracoes_contratuais_contrato
     ON alteracoes_contratuais (contrato_id, data_efetiva DESC)'), ('CREATE INDEX idx_anexos_mensagens_mensagem
 ON anexos_mensagens (mensagem_id)'), ('CREATE INDEX idx_auditoria_financeira_entidade ON auditoria_financeira(entidade, entidade_id, criado_em)'), ('CREATE INDEX idx_auditoria_rh_empresa_data
     ON auditoria_rh (empresa_id, criado_em DESC)'), ('CREATE INDEX idx_auditoria_rh_entidade
     ON auditoria_rh (entidade, entidade_id, criado_em DESC)'), ('CREATE INDEX idx_cartoes_beneficios_periodo
-ON cartoes_beneficios (ano, mes)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX idx_cliente_codigo
+ON cartoes_beneficios (ano, mes)'), ('CREATE UNIQUE INDEX idx_cliente_codigo
 ON cliente(codigo_cliente)'), ('CREATE INDEX idx_contratos_trabalho_empresa
     ON contratos_trabalho (empresa_id, status)'), ('CREATE INDEX idx_contratos_trabalho_usuario
-    ON contratos_trabalho (user_id, data_inicio DESC)'), ('CREATE INDEX idx_ctm_analise_oleo_os ON ctm_analise_oleo(ordem_servico_id)'), ('CREATE INDEX idx_ctm_despesas_motor_tipo ON ctm_despesas_motor(tipo)'), ('CREATE INDEX idx_ctm_diretrizes_status ON ctm_diretrizes(status)'), ('CREATE INDEX idx_ctm_estacoes_pb ON ctm_estacoes(peso_balanceamento_id)'), ('CREATE INDEX idx_ctm_execucoes_os ON ctm_execucoes(ordem_servico)'), ('CREATE INDEX idx_ctm_horas_voadas_socio ON ctm_horas_voadas_rateio(socio_id)'), ('CREATE INDEX idx_ctm_itens_aeronave_aeronave ON ctm_itens_aeronave(aeronave_id)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_ctm_itens_nc_aeronave ON ctm_itens_nao_controlados(aeronave_id)'), ('CREATE INDEX idx_ctm_modelos_item_categoria ON ctm_modelos_item(categoria_id)'), ('CREATE INDEX idx_ctm_oas_item_rateios_socio ON ctm_oas_item_rateios(socio_id)'), ('CREATE INDEX idx_ctm_oas_servicos_oas ON ctm_oas_servicos(ordem_servico_id)'), ('CREATE INDEX idx_ctm_pecas_componente ON ctm_pecas_trocadas(componente_id)'), ('CREATE INDEX idx_ctm_ras_fotos_ras ON ctm_ras_fotos(ras_id)'), ('CREATE INDEX idx_ctm_ras_itens_ras ON ctm_ras_itens(ras_id)'), ('CREATE INDEX idx_ctm_ras_status ON ctm_ras(status)'), ('CREATE INDEX idx_ctm_rastreamento_socio ON ctm_rastreamento(nome_socio)'), ('CREATE INDEX idx_ctm_rateio_custos_cliente ON ctm_rateio_custos(cliente_id)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_decimo_terceiro_empresa_ano
+    ON contratos_trabalho (user_id, data_inicio DESC)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_ctm_analise_oleo_os ON ctm_analise_oleo(ordem_servico_id)'), ('CREATE INDEX idx_ctm_despesas_motor_tipo ON ctm_despesas_motor(tipo)'), ('CREATE INDEX idx_ctm_diretrizes_status ON ctm_diretrizes(status)'), ('CREATE INDEX idx_ctm_estacoes_pb ON ctm_estacoes(peso_balanceamento_id)'), ('CREATE INDEX idx_ctm_execucoes_os ON ctm_execucoes(ordem_servico)'), ('CREATE INDEX idx_ctm_horas_voadas_socio ON ctm_horas_voadas_rateio(socio_id)'), ('CREATE INDEX idx_ctm_itens_aeronave_aeronave ON ctm_itens_aeronave(aeronave_id)'), ('CREATE INDEX idx_ctm_itens_nc_aeronave ON ctm_itens_nao_controlados(aeronave_id)'), ('CREATE INDEX idx_ctm_modelos_item_categoria ON ctm_modelos_item(categoria_id)'), ('CREATE INDEX idx_ctm_oas_item_rateios_socio ON ctm_oas_item_rateios(socio_id)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_ctm_oas_servicos_oas ON ctm_oas_servicos(ordem_servico_id)'), ('CREATE INDEX idx_ctm_pecas_componente ON ctm_pecas_trocadas(componente_id)'), ('CREATE INDEX idx_ctm_ras_fotos_ras ON ctm_ras_fotos(ras_id)'), ('CREATE INDEX idx_ctm_ras_itens_ras ON ctm_ras_itens(ras_id)'), ('CREATE INDEX idx_ctm_ras_status ON ctm_ras(status)'), ('CREATE INDEX idx_ctm_rastreamento_socio ON ctm_rastreamento(nome_socio)'), ('CREATE INDEX idx_ctm_rateio_custos_cliente ON ctm_rateio_custos(cliente_id)'), ('CREATE INDEX idx_decimo_terceiro_empresa_ano
     ON decimo_terceiro (empresa_id, ano, status)'), ('CREATE INDEX idx_destinatarios_mensagens_destinatario
 ON destinatarios_mensagens (
     destinatario_id,
     excluida,
     arquivada
 )'), ('CREATE INDEX idx_documentos_internos_enviado_por
-ON documentos_internos (enviado_por)'), ('CREATE UNIQUE INDEX idx_emails_enviados_id_unique ON emails_enviados(id)'), ('CREATE INDEX idx_eventos_folha_item
+ON documentos_internos (enviado_por)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX idx_emails_enviados_id_unique ON emails_enviados(id)'), ('CREATE INDEX idx_eventos_folha_item
     ON eventos_folha (item_folha_id, natureza)'), ('CREATE INDEX idx_ferias_status
     ON ferias (empresa_id, status)'), ('CREATE INDEX idx_ferias_usuario_data
     ON ferias (user_id, data_inicio DESC)'), ('CREATE INDEX idx_ficha_peso_balanceamento
 ON ctm_ficha_peso_balanceamento (peso_balanceamento_id)'), ('CREATE INDEX idx_financeiro_fila_status ON financeiro_fila(status, criado_em)'), ('CREATE INDEX idx_financeiro_vinculos_origem
-  ON financeiro_vinculos (origem_tipo, origem_id)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX idx_financeiro_vinculos_unico
+  ON financeiro_vinculos (origem_tipo, origem_id)'), ('CREATE UNIQUE INDEX idx_financeiro_vinculos_unico
   ON financeiro_vinculos (origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)'), ('CREATE INDEX idx_folhas_pagamento_empresa_competencia
     ON folhas_pagamento (empresa_id, competencia_ano DESC, competencia_mes DESC)'), ('CREATE INDEX idx_folhas_pagamento_status
-    ON folhas_pagamento (status)'), ('CREATE INDEX idx_hold_socios_holding ON hold_socios(holding_id)'), ('CREATE INDEX idx_hoteis_nome
+    ON folhas_pagamento (status)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_hold_socios_holding ON hold_socios(holding_id)'), ('CREATE INDEX idx_hoteis_nome
 ON hoteis (nome)'), ('CREATE INDEX idx_itens_folha_usuario
-    ON itens_folha (user_id, folha_id)'), ('CREATE UNIQUE INDEX idx_jornadas_voo_solic_tripulante
-  ON jornadas_voo (solicitacao_id, tripulante_id, numero_jornada)'), ('CREATE INDEX idx_lancamentos_email_enviado
-  ON lancamentos (email_enviado_em)'), ('CREATE INDEX idx_lancamentos_rh_empresa_status
+    ON itens_folha (user_id, folha_id)'), ('CREATE INDEX idx_lancamentos_cliente_id
+  ON lancamentos(cliente_id)'), ('CREATE INDEX idx_lancamentos_email_enviado
+  ON lancamentos (email_enviado_em)'), ('CREATE INDEX idx_lancamentos_escopo_criado ON lancamentos (escopo_financeiro, criado_em DESC)'), ('CREATE INDEX idx_lancamentos_rh_empresa_status
     ON lancamentos_financeiros_rh (empresa_id, status, data_vencimento)'), ('CREATE INDEX idx_lembretes_calendario_categoria
-ON lembretes_calendario (cor_categoria_id)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_manual_tutoriais_ordem
-ON manual_tutoriais (ordem)'), ('CREATE INDEX idx_mensagens_usuario_pasta ON mensagens_usuario (usuario_id, papel, excluida, arquivada, favorita, lida)'), ('CREATE INDEX idx_movimentos_holding_email_enviado
-  ON movimentos_holding (email_enviado_em)'), ('CREATE INDEX idx_pagamentos_folha_empresa_status
+ON lembretes_calendario (cor_categoria_id)'), ('CREATE INDEX idx_manual_tutoriais_ordem
+ON manual_tutoriais (ordem)'), ('CREATE INDEX idx_mensagens_usuario_pasta ON mensagens_usuario (usuario_id, papel, excluida, arquivada, favorita, lida)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_movimentos_holding_email_enviado
+  ON movimentos_holding (email_enviado_em)'), ('CREATE INDEX idx_movimentos_holding_escopo_criado ON movimentos_holding (escopo_financeiro, criado_em DESC)'), ('CREATE INDEX idx_pagamentos_folha_empresa_status
     ON pagamentos_folha (empresa_id, status, data_prevista)'), ('CREATE INDEX idx_pagamentos_folha_usuario
     ON pagamentos_folha (user_id, data_prevista DESC)'), ('CREATE INDEX idx_pastas_documentos_criado_por
 ON pastas_documentos(criado_por)'), ('CREATE INDEX idx_periodos_ferias_usuario
-    ON periodos_aquisitivos_ferias (user_id, status, data_fim)'), ('CREATE INDEX idx_pernas_jornada_voo_lancamento  ON pernas_jornada_voo (lancamento_diario_id)'), ('CREATE INDEX idx_rateio_despesas_lancamento_status
-ON rateio_despesas(lancamento_id, status)'), ('CREATE INDEX idx_rateio_pagamentos_conta_receber_status
-ON rateio_pagamentos(conta_receber_id, status)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_rateio_pagamentos_pagador
+    ON periodos_aquisitivos_ferias (user_id, status, data_fim)'), ('CREATE INDEX idx_pernas_jornada_voo_lancamento  ON pernas_jornada_voo (lancamento_diario_id)'), ('CREATE INDEX idx_rateio_pagamentos_conta_receber_status
+ON rateio_pagamentos(conta_receber_id, status)'), ('CREATE INDEX idx_rateio_pagamentos_pagador
 ON rateio_pagamentos(tipo_pagador, pagador_cotista_id, pagador_holding_id)'), ('CREATE INDEX idx_rateio_pagamentos_pagador_cotista
-ON rateio_pagamentos(pagador_cotista_id, status)'), ('CREATE INDEX idx_rateio_pagamentos_pagador_holding
+ON rateio_pagamentos(pagador_cotista_id, status)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_rateio_pagamentos_pagador_holding
 ON rateio_pagamentos(pagador_holding_id, status)'), ('CREATE INDEX idx_rateio_pagamentos_rateio_confirmado ON rateio_pagamentos(rateio_id, status)'), ('CREATE INDEX idx_rateio_pagamentos_rateio_status
 ON rateio_pagamentos(rateio_id, status)'), ('CREATE INDEX idx_rateio_pagamentos_recebimento
 ON rateio_pagamentos(conta_receber_id)'), ('CREATE INDEX idx_rateio_pagamentos_recibo
 ON rateio_pagamentos(recibo_id)'), ('CREATE INDEX idx_recados_criado_em
-ON recados(criado_em)'), ('CREATE INDEX idx_reembolsos_lancamento_cliente
+ON recados(criado_em)'), ('CREATE INDEX idx_recibo_reativacoes_recibo
+  ON recibo_reativacoes (recibo_id, reativado_em DESC)'), ('CREATE INDEX idx_reembolsos_lancamento_cliente
   ON reembolsos(lancamento_cliente_id)'), ('CREATE INDEX idx_relatorio_despesa_viagem_anexos_relatorio
-  ON relatorio_despesa_viagem_anexos (relatorio_despesa_viagem_id)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX idx_relatorio_token_tripulante_1 ON relatorio_despesa_viagem(token_aprovacao_tripulante_1)'), ('CREATE UNIQUE INDEX idx_relatorio_token_tripulante_2 ON relatorio_despesa_viagem(token_aprovacao_tripulante_2)'), ('CREATE INDEX idx_solicitacoes_ferias_colaborador
+  ON relatorio_despesa_viagem_anexos (relatorio_despesa_viagem_id)'), ('CREATE UNIQUE INDEX idx_relatorio_token_tripulante_1 ON relatorio_despesa_viagem(token_aprovacao_tripulante_1)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX idx_relatorio_token_tripulante_2 ON relatorio_despesa_viagem(token_aprovacao_tripulante_2)'), ('CREATE INDEX idx_solicitacoes_ferias_colaborador
     ON solicitacoes_ferias (colaborador_id, status, data_inicio)'), ('CREATE INDEX idx_tarefas_comentarios_usuario
 ON tarefas_comentarios (usuario_id)'), ('CREATE INDEX idx_tarefas_criado_por
 ON tarefas (criado_por)'), ('CREATE INDEX idx_tarefas_notificacoes_tarefa
@@ -2917,12 +2936,16 @@ ON tarefas_notificacoes (id_da_tarefa)'), ('CREATE INDEX idx_transacoes_benefici
 ON transacoes_beneficios (data_transacao)'), ('CREATE INDEX idx_user_profiles_departamentos_email
 ON user_profiles(departamentos_email)'), ('CREATE INDEX idx_usuarios_empresas_empresa
     ON usuarios_empresas (empresa_id, perfil, status)'), ('CREATE INDEX idx_usuarios_empresas_usuario
-    ON usuarios_empresas (usuario_id, status)');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_usuarios_funcoes_funcao
-ON usuarios_funcoes(funcao)'), ('CREATE INDEX idx_weight_balance_aircraft_id
+    ON usuarios_empresas (usuario_id, status)'), ('CREATE INDEX idx_usuarios_funcoes_funcao
+ON usuarios_funcoes(funcao)');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE INDEX idx_weight_balance_aircraft_id
 ON ctm_peso_balanceamento (aeronave_id)'), ('CREATE INDEX solicitacoes_ferias_status_idx ON solicitacoes_ferias(status, data_inicio)'), ('CREATE INDEX solicitacoes_reserva_voo_cliente_idx
   ON solicitacoes_reserva_voo(cliente_id, criado_em DESC)'), ('CREATE INDEX solicitacoes_reserva_voo_status_data_idx
-  ON solicitacoes_reserva_voo(status, data_agendada)'), ('CREATE UNIQUE INDEX uq_rateio_pagamentos_idempotency ON rateio_pagamentos(idempotency_key) WHERE idempotency_key IS NOT NULL'), ('CREATE TRIGGER trg_ctm_aprov_os_upd
+  ON solicitacoes_reserva_voo(status, data_agendada)'), ('CREATE UNIQUE INDEX uq_pagamentos_folha_competencia_rotulo
+  ON pagamentos_folha (empresa_id, user_id, competencia_ano, competencia_mes, rotulo)'), ('CREATE UNIQUE INDEX uq_pagamentos_folha_idempotency
+  ON pagamentos_folha (idempotency_key)
+  WHERE idempotency_key IS NOT NULL'), ('CREATE UNIQUE INDEX uq_rateio_pagamentos_idempotency ON rateio_pagamentos(idempotency_key) WHERE idempotency_key IS NOT NULL'), ('CREATE UNIQUE INDEX ux_pag_folha_user_comp_rotulo
+  ON pagamentos_folha(user_id, competencia_ano, competencia_mes, rotulo)'), ('CREATE TRIGGER trg_ctm_aprov_os_upd
 AFTER UPDATE ON ctm_aprovacoes_ordem_servico FOR EACH ROW
 BEGIN
   UPDATE ctm_aprovacoes_ordem_servico SET atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.id;
@@ -2930,7 +2953,8 @@ END'), ('CREATE TRIGGER trg_ctm_comp_evento_upd
 AFTER UPDATE ON ctm_componente_eventos FOR EACH ROW
 BEGIN
   UPDATE ctm_componente_eventos SET atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.id;
-END'), ('CREATE TRIGGER trg_ctm_componente_upd
+END');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TRIGGER trg_ctm_componente_upd
 AFTER UPDATE ON ctm_mapa_componente FOR EACH ROW
 BEGIN
   UPDATE ctm_mapa_componente SET atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.id;
@@ -2938,8 +2962,7 @@ END'), ('CREATE TRIGGER trg_ctm_documentos_oas_upd
 AFTER UPDATE ON ctm_documentos_oas FOR EACH ROW
 BEGIN
   UPDATE ctm_documentos_oas SET atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.id;
-END');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TRIGGER trg_ctm_execucao_atualiza_programa
+END'), ('CREATE TRIGGER trg_ctm_execucao_atualiza_programa
 AFTER INSERT ON ctm_execucoes FOR EACH ROW
 BEGIN
   UPDATE ctm_programa_manutencao SET
@@ -2985,7 +3008,8 @@ BEGIN
     total_geral = (SELECT COALESCE(SUM(valor),0) FROM ctm_oas_servicos WHERE ordem_servico_id = OLD.ordem_servico_id)
                 + (SELECT COALESCE(SUM(valor_total),0) FROM ctm_pecas_trocadas WHERE ordem_servico_id = OLD.ordem_servico_id)
   WHERE id = OLD.ordem_servico_id;
-END'), ('CREATE TRIGGER trg_pernas_jornada_voo_atualizado_em
+END');
+INSERT INTO "sqlite_master"("sql") VALUES('CREATE TRIGGER trg_pernas_jornada_voo_atualizado_em
 AFTER UPDATE ON pernas_jornada_voo
 FOR EACH ROW
 BEGIN
@@ -3003,8 +3027,7 @@ BEGIN
     ELSE ''programada''
   END
   WHERE id = NEW.id;
-END');
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE TRIGGER trg_rateio_pagamentos_ad_recalcula AFTER DELETE ON rateio_pagamentos BEGIN UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = OLD.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = OLD.rateio_id; END'), ('CREATE TRIGGER trg_rateio_pagamentos_ai_recalcula AFTER INSERT ON rateio_pagamentos BEGIN UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = NEW.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.rateio_id; END'), ('CREATE TRIGGER trg_rateio_pagamentos_au_recalcula AFTER UPDATE OF valor_centavos, status, rateio_id ON rateio_pagamentos BEGIN UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = NEW.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.rateio_id; UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = OLD.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = OLD.rateio_id AND OLD.rateio_id <> NEW.rateio_id; END'), ('CREATE VIEW vw_colaboradores_rh AS
+END'), ('CREATE TRIGGER trg_rateio_pagamentos_ad_recalcula AFTER DELETE ON rateio_pagamentos BEGIN UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = OLD.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = OLD.rateio_id; END'), ('CREATE TRIGGER trg_rateio_pagamentos_ai_recalcula AFTER INSERT ON rateio_pagamentos BEGIN UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = NEW.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.rateio_id; END'), ('CREATE TRIGGER trg_rateio_pagamentos_au_recalcula AFTER UPDATE OF valor_centavos, status, rateio_id ON rateio_pagamentos BEGIN UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = NEW.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = NEW.rateio_id; UPDATE rateio_despesas SET valor_pago_real_centavos = (SELECT COALESCE(SUM(valor_centavos), 0) FROM rateio_pagamentos WHERE rateio_id = OLD.rateio_id AND status = ''CONFIRMADO''), atualizado_em = CURRENT_TIMESTAMP WHERE id = OLD.rateio_id AND OLD.rateio_id <> NEW.rateio_id; END'), ('CREATE VIEW vw_colaboradores_rh AS
 SELECT
     u.id AS user_id,
     u.nome_completo,
@@ -3034,5 +3057,3 @@ SELECT
     p.comprovante_url
 FROM pagamentos_folha p
 JOIN user_profiles u ON u.id = p.user_id');
-
-INSERT INTO "sqlite_master"("sql") VALUES('CREATE UNIQUE INDEX uq_pagamentos_folha_competencia_rotulo ON pagamentos_folha (empresa_id, user_id, competencia_ano, competencia_mes, rotulo)'), ('CREATE UNIQUE INDEX uq_pagamentos_folha_idempotency ON pagamentos_folha (idempotency_key) WHERE idempotency_key IS NOT NULL'), ('CREATE UNIQUE INDEX uq_lancamentos_financeiros_rh_idempotency ON lancamentos_financeiros_rh (idempotency_key) WHERE idempotency_key IS NOT NULL');
