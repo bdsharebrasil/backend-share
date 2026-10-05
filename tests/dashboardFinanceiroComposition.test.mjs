@@ -88,6 +88,7 @@ test('parcelas de rateio preservam todos os números documentais e o caixa do fl
   assert.match(painelFinanceiro, /rd\.numero_demonstrativo AS rateio_numero_demonstrativo/)
   assert.match(painelFinanceiro, /rd\.numero_doc AS rateio_numero_doc/)
   assert.match(painelFinanceiro, /rh\.numero_nf AS rateio_numero_nf/)
+  assert.match(painelFinanceiro, /e\.tipo_caixa AS envio_tipo_caixa[\s\S]*LEFT JOIN envio_despesas e ON e\.movimentos_holding_id = mh\.id/)
   assert.match(painelFinanceiro, /row\.rateio_numero_nf \?\? row\.numero_nf/)
   assert.match(painelFinanceiro, /row\.rateio_numero_recibo \?\? row\.numero_recibo/)
   assert.match(painelFinanceiro, /row\.rateio_numero_boleto \?\? row\.numero_boleto/)
