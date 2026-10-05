@@ -173,3 +173,42 @@ export function resumirHoldings(
     }))
     .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'))
 }
+
+export function calcularCompensacaoBalanco(rows: Record<string, unknown>[], participantesPermitidos?: Set<string>) {
+  const devido = new Map<string, number>()
+  const pago = new Map<string, number>()
+  const nomes = new Map<string, string>()
+  for (const row of rows) {
+    if (String(row.fluxo ?? 'SAIDA').toUpperCase() === 'ENTRADA') continue
+    const participante = String(row.participante_id ?? '').trim()
+    if (participantesPermitidos && (!participante || !participantesPermitidos.has(participante))) continue
+    const nome = String(row.participante_nome ?? '').trim()
+    if (participante && nome) nomes.set(participante, nome)
+    const valorDevido = Math.max(0, Number(row.valor_rateado_centavos ?? row.valor_centavos ?? 0))
+    if (participante) devido.set(participante, (devido.get(participante) || 0) + valorDevido)
+    const pagador = String(row.pago_por ?? '').trim() || (Number(row.pago_diretamente || 0) ? participante : '')
+    const valorPago = Math.max(0, Number(row.valor_pago_centavos ?? 0))
+    if (pagador && valorPago) pago.set(pagador, (pago.get(pagador) || 0) + valorPago)
+  }
+  const ids = [...new Set([...devido.keys(), ...pago.keys()])]
+  const saldos = ids.map((cotista) => {
+    const totalPagoCentavos = pago.get(cotista) || 0
+    const totalDevidoCentavos = devido.get(cotista) || 0
+    return { cotista: nomes.get(cotista) || cotista, cotistaId: cotista, totalPagoCentavos, totalDevidoCentavos, saldoCentavos: totalPagoCentavos - totalDevidoCentavos }
+  }).sort((a, b) => Math.abs(b.saldoCentavos) - Math.abs(a.saldoCentavos))
+  const matriz: Record<string, Record<string, number>> = {}
+  for (const credor of ids) matriz[credor] = Object.fromEntries(ids.map((devedor) => [devedor, 0]))
+  const credores = saldos.filter((item) => item.saldoCentavos > 0).map((item) => ({ id: item.cotista, valor: item.saldoCentavos }))
+  const devedores = saldos.filter((item) => item.saldoCentavos < 0).map((item) => ({ id: item.cotista, valor: -item.saldoCentavos }))
+  let credorIndex = 0
+  let devedorIndex = 0
+  while (credorIndex < credores.length && devedorIndex < devedores.length) {
+    const valor = Math.min(credores[credorIndex].valor, devedores[devedorIndex].valor)
+    matriz[credores[credorIndex].id][devedores[devedorIndex].id] = valor
+    credores[credorIndex].valor -= valor
+    devedores[devedorIndex].valor -= valor
+    if (credores[credorIndex].valor === 0) credorIndex += 1
+    if (devedores[devedorIndex].valor === 0) devedorIndex += 1
+  }
+  return { saldos, matrizCompensacao: matriz }
+}

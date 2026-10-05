@@ -1,0 +1,287 @@
+import { Hono } from "hono"
+import { issueRevenue, settleReceivable } from "./FinanceiroKernel"
+import { errorResponse } from "./errorResponse"
+import { requireCaixaShareAccess } from "./access"
+import { listar } from "./repositories/d1"
+
+type Bindings = { SHARE_DB: D1Database; SHARE_FILES?: R2Bucket; FILES?: R2Bucket; R2_PUBLIC_URL?: string }
+type Variables = { userId: string | null }
+
+export const notasSaidaRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
+notasSaidaRoutes.get('/notas-saida/opcoes', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const [cotistas, aeronaves, categoriasReceita, categoriasDespesa, contasBancarias] = await Promise.all([
+      listar(db, "SELECT ca.id AS cotista_aeronave_id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.codigo_cliente, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, COALESCE(cl.cnpj, hs.cpf) AS documento, COALESCE(cl.endereco, hs.endereco) AS endereco, COALESCE(cl.cidade, hs.cidade) AS cidade, COALESCE(cl.uf, hs.uf) AS uf, CASE WHEN ca.socio_id IS NULL THEN 'cliente' ELSE 'socio_hold' END AS tipo_cotista, ca.percentual_sociedade FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id ORDER BY nome"),
+      listar(db, 'SELECT id, matricula_registro FROM aeronave ORDER BY matricula_registro'),
+      listar(db, "SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share WHERE upper(COALESCE(grupo_categoria, '')) LIKE '%RECEIT%' OR upper(COALESCE(nome, '')) LIKE '%N.F%' OR upper(COALESCE(nome, '')) LIKE '%RECIBO%' ORDER BY nome"),
+      listar(db, 'SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
+      listar(db, 'SELECT id, banco, numero_conta FROM contas_bancarias ORDER BY banco'),
+    ])
+    return c.json({ cotistas, aeronaves, categoriasReceita, categoriasDespesa, contasBancarias })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+notasSaidaRoutes.get('/notas-saida', async (c) => {
+  try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
+    const db = c.env.SHARE_DB
+    const notas = await listar(db, `SELECT n.id, 'nf_saida' AS origem, n.numero, n.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, cl.email_principal AS cliente_email, n.aeronave_id, a.matricula_registro AS aeronave_matricula, n.data_emissao AS data_criacao, n.data_vencimento, n.valor_total, n.nome_categoria AS categoria, n.descricao_servico AS descricao, n.status, n.arquivo_pdf_url, n.criado_em, n.atualizado_em, cr.id AS contas_areceber_id FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id = n.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = n.aeronave_id LEFT JOIN contas_areceber cr ON cr.nf_saida_id = n.id ORDER BY date(n.data_emissao) DESC, n.criado_em DESC`)
+    const recibos = await listar(db, `SELECT r.id, 'recibo_saida' AS origem, r.numero_recibo, r.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, cl.email_principal AS cliente_email, r.aeronave_id, a.matricula_registro AS aeronave_matricula, r.data_emissao, r.data_vencimento, r.valor_total, r.nome_categoria, r.descricao_servico, r.status, r.pdf_url, r.contas_areceber_id, r.criado_em, r.atualizado_em FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = r.aeronave_id ORDER BY date(r.data_emissao) DESC, r.criado_em DESC`)
+    return c.json({ notas, recibos })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+async function categoriaClienteNota(db: D1Database, id: string, subcategoria: string | null) {
+  if (!id) return { id: null, nome: null, subcategoria }
+  const row = await db.prepare('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente WHERE id = ?').bind(id).first<Record<string, unknown>>()
+  if (!row) return { id: null, nome: null, subcategoria }
+  const subcategorias = [row.subcategoria_1, row.subcategoria_2, row.subcategoria_3, row.subcategoria_4].map((value) => String(value ?? '').trim()).filter(Boolean)
+  return { id: String(row.id), nome: String(row.nome ?? '').trim() || null, subcategoria: subcategoria || subcategorias[0] || null }
+}
+
+function documentoSaidaRow(db: D1Database, id: string) {
+  return db.prepare(`SELECT n.*, cr.id AS contas_areceber_id
+    FROM notas_fiscais_saida n
+    LEFT JOIN contas_areceber cr ON cr.nf_saida_id = n.id
+    WHERE n.id = ?`).bind(id).first<Record<string, unknown>>()
+}
+
+function notaSaidaStatements(db: D1Database, nota: {
+  id: string
+  numero: string
+  cotistaId: string
+  aeronaveId: string
+  valor: number
+  descricao: string
+  categoriaNome: string
+  categoriaId: string
+  subcategoria: string | null
+  dataEmissao: string
+  dataVencimento: string
+  status: string
+  arquivoPdfUrl: string | null
+  lancamentoId: string
+  contaReceberId: string
+}): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = []
+  statements.push(db.prepare(`INSERT INTO notas_fiscais_saida
+    (id, numero, cotista_id, aeronave_id, valor_total, percentual, descricao_servico, nome_categoria,
+     categoria_id, subcategoria_1, data_emissao, data_vencimento, status, arquivo_pdf_url, lancamentos_id)
+    VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(nota.id, nota.numero, nota.cotistaId, nota.aeronaveId, nota.valor, nota.descricao,
+      nota.categoriaNome, nota.categoriaId, nota.subcategoria, nota.dataEmissao, nota.dataVencimento,
+      nota.status, nota.arquivoPdfUrl, nota.lancamentoId))
+  statements.push(db.prepare(`UPDATE contas_areceber
+    SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ? AND (nf_saida_id IS NULL OR nf_saida_id = ?)`)
+    .bind(nota.id, nota.contaReceberId, nota.id))
+  return statements
+}
+
+notasSaidaRoutes.post('/notas-saida', async (c) => {
+  try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
+    const db = c.env.SHARE_DB
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const numero = String(body.numero ?? '').trim()
+    const cotistaId = String(body.cotista_id ?? body.cotista_aeronave_id ?? '').trim()
+    const aeronaveId = String(body.aeronave_id ?? '').trim()
+    const dataEmissao = String(body.data_emissao ?? '').trim()
+    const dataVencimento = String(body.data_vencimento ?? dataEmissao).trim()
+    const descricao = String(body.descricao_servico ?? body.descricao ?? '').trim()
+    const valor = Number(body.valor_total ?? body.valor ?? 0)
+    const categoriaReceitaId = String(body.categoria_receita_id ?? '').trim()
+    const categoriaClienteId = String(body.categoria_id ?? '').trim()
+    if (!numero || !cotistaId || !aeronaveId || !categoriaReceitaId || !(valor > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao) || !descricao) {
+      return c.json({ error: 'numero, cotista_id, aeronave_id, categoria_receita_id, valor_total, data_emissao e descricao_servico são obrigatórios' }, 400)
+    }
+    const cotista = await db.prepare('SELECT id FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(cotistaId, aeronaveId).first()
+    if (!cotista) return c.json({ error: 'cotista_aeronave_invalido' }, 400)
+    const categoriaReceita = await db.prepare('SELECT id, nome FROM categoria_movimentacao_share WHERE id = ?').bind(categoriaReceitaId).first<{ id: string; nome: string }>()
+    if (!categoriaReceita) return c.json({ error: 'categoria_receita_invalida' }, 400)
+    const categoriaCliente = await categoriaClienteNota(db, categoriaClienteId, String(body.subcategoria_1 ?? '').trim() || null)
+    if (categoriaClienteId && !categoriaCliente.id) return c.json({ error: 'categoria_despesa_invalida' }, 400)
+    const id = crypto.randomUUID()
+    const requestKey = String(body.idempotency_key ?? '').trim() || id
+    const idempotencyKey = `nf_saida:${requestKey}`
+    const dadosNota = {
+      numero,
+      cotistaId,
+      aeronaveId,
+      valor,
+      descricao,
+      categoriaNome: String(body.categoria_receita_nome ?? categoriaReceita.nome),
+      categoriaId: categoriaReceitaId,
+      subcategoria: categoriaCliente.subcategoria,
+      dataEmissao,
+      dataVencimento,
+      status: ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO',
+      arquivoPdfUrl: body.arquivo_pdf_url ? String(body.arquivo_pdf_url) : null,
+    }
+    const financeiro = await issueRevenue(db, {
+      idempotency_key: idempotencyKey,
+      valor_centavos: Math.round(valor * 100),
+      descricao,
+      data: dataEmissao,
+      data_emissao: dataEmissao,
+      data_vencimento: dataVencimento,
+      aeronave_id: aeronaveId,
+      cotista_aeronave_id: cotistaId,
+      categoria_id: categoriaReceitaId,
+      categoria_nome: body.categoria_receita_nome ?? categoriaReceita.nome,
+      categoria_cliente_id: categoriaCliente.id,
+      categoria_cliente_nome: categoriaCliente.nome,
+      categoria_despesa_subcategoria: categoriaCliente.subcategoria,
+      origem_tipo: 'NF_SAIDA',
+      origem_id: id,
+      periodicidade: 'MENSAL',
+    }, c.get('userId') || null, {}, ({ lancamentoId, contaReceberId }) =>
+      notaSaidaStatements(db, { ...dadosNota, id, lancamentoId, contaReceberId }))
+
+    if (financeiro.idempotent) {
+      const conta = await db.prepare(`SELECT id, nf_saida_id, lancamentos_id
+        FROM contas_areceber WHERE idempotency_key = ? LIMIT 1`).bind(idempotencyKey)
+        .first<{ id: string; nf_saida_id: string | null; lancamentos_id: string | null }>()
+      if (!conta?.id || !conta.lancamentos_id) return c.json({ error: 'operacao_financeira_incompleta' }, 409)
+      const notaExistente = conta.nf_saida_id
+        ? await documentoSaidaRow(db, conta.nf_saida_id)
+        : await db.prepare('SELECT id FROM notas_fiscais_saida WHERE lancamentos_id = ? LIMIT 1')
+          .bind(conta.lancamentos_id).first<{ id: string }>()
+      if (notaExistente) {
+        if (!conta.nf_saida_id) {
+          await db.prepare(`UPDATE contas_areceber SET nf_saida_id = ?, atualizado_em = CURRENT_TIMESTAMP
+            WHERE id = ? AND nf_saida_id IS NULL`).bind(notaExistente.id, conta.id).run()
+        }
+        return c.json({ nota: await documentoSaidaRow(db, String(notaExistente.id)) }, 200)
+      }
+      const notaId = conta.nf_saida_id || id
+      await db.batch(notaSaidaStatements(db, {
+        ...dadosNota, id: notaId, lancamentoId: conta.lancamentos_id, contaReceberId: conta.id,
+      }))
+      return c.json({ nota: await documentoSaidaRow(db, notaId) }, 200)
+    }
+
+    const nota = await documentoSaidaRow(db, id)
+    if (!nota) return c.json({ error: 'nota_saida_nao_persistida' }, 500)
+    return c.json({ nota }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+notasSaidaRoutes.patch('/notas-saida/:id', async (c) => {
+  try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    if (!(await documentoSaidaRow(db, id))) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const fields: Array<[string, unknown]> = []
+    const add = (column: string, value: unknown) => { if (value !== undefined) fields.push([column, value === '' ? null : value]) }
+    add('numero', body.numero); add('cotista_id', body.cotista_id ?? body.cotista_aeronave_id); add('aeronave_id', body.aeronave_id)
+    add('data_emissao', body.data_emissao); add('data_vencimento', body.data_vencimento); add('valor_total', body.valor_total ?? body.valor)
+    add('nome_categoria', body.nome_categoria); add('descricao_servico', body.descricao_servico ?? body.descricao); add('status', body.status)
+    add('arquivo_pdf_url', body.arquivo_pdf_url)
+    if (!fields.length) return c.json({ error: 'nenhum_campo_atualizavel' }, 400)
+    const assignments = fields.map(([column]) => `${column} = ?`).join(', ')
+    await db.prepare(`UPDATE notas_fiscais_saida SET ${assignments}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...fields.map(([, value]) => value), id).run()
+    return c.json({ nota: await documentoSaidaRow(db, id) })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+notasSaidaRoutes.delete('/notas-saida/:id', async (c) => {
+  try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
+    const db = c.env.SHARE_DB
+    const id = c.req.param('id')
+    const nota = await documentoSaidaRow(db, id)
+    if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const contaId = String(nota.contas_areceber_id ?? '').trim()
+    const lancamentoId = String(nota.lancamentos_id ?? '').trim()
+    const conta = contaId ? await db.prepare('SELECT lancamentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null }>() : null
+    const lancamentos = [...new Set([lancamentoId, conta?.lancamentos_id ?? ''].filter(Boolean))]
+    const espelhos = lancamentos.length ? await listar(db, `SELECT id FROM lancamentos WHERE origem_id IN (${lancamentos.map(() => '?').join(', ')})`, ...lancamentos) : []
+    lancamentos.push(...espelhos.map((row) => String(row.id)).filter(Boolean))
+    const ids = [...new Set(lancamentos)]
+    const statements: D1PreparedStatement[] = []
+    if (ids.length) {
+      const placeholders = ids.map(() => '?').join(', ')
+      const rateios = await listar(db, `SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`, ...ids)
+      const rateioIds = rateios.map((row) => String(row.id)).filter(Boolean)
+      if (rateioIds.length) statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioIds.map(() => '?').join(', ')})`).bind(...rateioIds))
+      statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
+      statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE origem_id IN (${placeholders}) OR destino_id IN (${placeholders}) OR origem_id = ? OR destino_id = ?`).bind(...ids, ...ids, id, id))
+      statements.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
+    } else {
+      statements.push(db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ? OR destino_id = ?').bind(id, id))
+    }
+    if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
+    statements.push(db.prepare('DELETE FROM notas_fiscais_saida WHERE id = ?').bind(id))
+    await db.batch(statements)
+    return c.json({ ok: true, id })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+notasSaidaRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
+  try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
+    const nota = await documentoSaidaRow(c.env.SHARE_DB, c.req.param('id'))
+    if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const contaId = String(nota.contas_areceber_id ?? '').trim()
+    if (!contaId) return c.json({ error: 'conta_a_receber_nao_vinculada' }, 409)
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
+    const dataPagamento = body.data_pagamento ?? body.data_recebimento
+    const contaBancaria = body.conta_bancaria_id ?? body.conta_bancaria ?? body.banco_recebimento
+    const pagamentos = Array.isArray(body.pagamentos) && body.pagamentos.length
+      ? body.pagamentos
+      : [{
+          tipo_pagador: 'COTISTA',
+          pagador_cotista_id: nota.cotista_id,
+          valor_centavos: Math.round(Number(nota.valor_total ?? 0) * 100),
+          data_pagamento: dataPagamento,
+          conta_bancaria_id: contaBancaria,
+          forma_pagamento: body.forma_pagamento,
+          comprovante_url: body.comprovante_url,
+        }]
+    const conta = await settleReceivable(c.env.SHARE_DB, contaId, {
+      data_recebimento: dataPagamento,
+      conta_bancaria_id: contaBancaria,
+      forma_pagamento: body.forma_pagamento,
+      comprovante_url: body.comprovante_url,
+      pagamentos,
+    }, c.get('userId') || null)
+    return c.json({ ok: true, conta })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+notasSaidaRoutes.post('/notas-saida/anexos', async (c) => {
+  try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
+    const bucket = c.env.SHARE_FILES || c.env.FILES
+    if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+    const form = await c.req.parseBody()
+    const arquivo = form.arquivo
+    if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
+    const origem = String(form.origem ?? 'nota_fiscal_saida')
+    const documentoId = String(form.documento_id ?? '').trim() || crypto.randomUUID()
+    const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : 'nota_fiscal_saida'
+    const id = crypto.randomUUID()
+    const key = `share/${prefixo}/${documentoId}/${id}-${arquivo.name}`
+    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
+    const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
+    const url = publicBase
+      ? `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
+      : `/api/financeiro/notas-saida/anexos/${id}/arquivo?key=${encodeURIComponent(key)}`
+    return c.json({ id, url }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
+notasSaidaRoutes.get('/notas-saida/anexos/:id/arquivo', async (c) => {
+  const denied = await requireCaixaShareAccess(c); if (denied) return denied
+  const bucket = c.env.SHARE_FILES || c.env.FILES
+  if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
+  const key = c.req.query('key')
+  if (!key) return c.notFound()
+  const object = await bucket.get(key)
+  if (!object) return c.notFound()
+  return c.body(await object.arrayBuffer(), 200, { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' })
+})

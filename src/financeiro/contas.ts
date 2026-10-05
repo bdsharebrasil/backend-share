@@ -1,0 +1,34 @@
+export function mapConta(row: Record<string, unknown>): Record<string, unknown> {
+  const documento = row.numero_nf ?? row.numero_recibo ?? row.numero_doc ?? row.numero_demonstrativo ?? null
+  const documentoUrl = row.url_demonstrativo ?? row.url_nf ?? row.url_recibo ?? row.url_boleto ?? row.url_doc ?? row.lancamento_boleto_url ?? row.lancamento_nf_url ?? row.boleto_url ?? row.nf_url ?? null
+  return {
+    id: row.id,
+    dataEmissao: row.lancamento_data_emissao ?? row.data_emissao ?? row.data ?? null,
+    dataVencimento: row.data_vencimento,
+    valor: Number(row.valor ?? Number(row.valor_centavos ?? 0) / 100),
+    categoriaId: row.categoria_id ?? null,
+    categoriaNome: row.categoria_nome ?? null,
+    descricao: row.descricao ?? null,
+    criadoPor: row.criado_por ?? null,
+    aeronaveId: row.aeronave_id ?? null,
+    fornecedorId: row.fornecedor_id ?? row.fornecedores_favoritos_id ?? null,
+    fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
+    cotistaId: row.cotista_id ?? null,
+    tipoCaixa: row.tipo_caixa ?? (row.movimentos_id ? 'HOLDING' : 'SHARE'),
+    holdingId: row.holding_id ?? null,
+    movimentoHoldingId: row.movimentos_id ?? null,
+    boletoUrl: row.boleto_url ?? null,
+    nfUrl: row.nf_url ?? null,
+    nfSaidaId: row.nf_saida_id ?? null,
+    dataPagamento: row.data_pagamento ?? row.data_recebimento ?? null,
+    bancoPagamento: row.banco_pagamento ?? row.banco_recebimento ?? null,
+    comprovantePagamentoUrl: row.comprovante_pagamento_url ?? row.comprovante_recebimento_url ?? null,
+    documento,
+    documentoUrl,
+    lancamentoId: row.lancamento_id ?? row.lancamentos_id ?? row.lancamento_receita_id ?? null,
+    status: row.status,
+    solicitanteNome: row.solicitante_nome ?? null,
+    criadoEm: row.criado_em,
+    atualizadoEm: row.atualizado_em,
+  }
+}

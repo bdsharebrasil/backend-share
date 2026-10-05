@@ -2,12 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-const worker = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8')
-const routes = await readFile(new URL('../src/financeiroRoutes.ts', import.meta.url), 'utf8')
+const emailRoutes = await readFile(new URL('../src/routes/emailsRoutes.ts', import.meta.url), 'utf8')
+const routes = await readFile(new URL('../src/financeiro/dashboardShareRoutes.ts', import.meta.url), 'utf8')
 const migration = await readFile(new URL('../migrations/20261005_rateios_email_enviado.sql', import.meta.url), 'utf8')
 
-const marcador = worker.slice(worker.indexOf('async function marcarEmailEnviadoParaOrigens'), worker.indexOf('const DOCUMENTOS_CLIENTE_CATEGORIAS'))
-const painel = routes.slice(routes.indexOf("financeiroRoutes.get('/dashboard/financeiro',"), routes.indexOf('async function origemRateio'))
+const marcador = emailRoutes.slice(emailRoutes.indexOf('async function marcarEmailEnviadoParaOrigens'), emailRoutes.indexOf('async function garantirTabelaEmails'))
+const painel = routes.slice(routes.indexOf("dashboardShareRoutes.get('/dashboard/financeiro'"), routes.indexOf("dashboardShareRoutes.get('/share'"))
 
 test('migrationa o timestamp de envio nas duas tabelas de rateio', () => {
   assert.match(migration, /ALTER TABLE rateio_despesas ADD COLUMN email_enviado_em TEXT;/i)

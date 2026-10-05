@@ -3,10 +3,13 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const source = await readFile(new URL('../src/financeiroRoutes.ts', import.meta.url), 'utf8')
+const dashboardRoutes = await readFile(new URL('../src/financeiro/dashboardCotistaRoutes.ts', import.meta.url), 'utf8')
+const dashboardShareRoutes = await readFile(new URL('../src/financeiro/dashboardShareRoutes.ts', import.meta.url), 'utf8')
+const recibosSaidaRoutes = await readFile(new URL('../src/financeiro/recibosSaidaRoutes.ts', import.meta.url), 'utf8')
 const worker = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8')
-const start = source.indexOf("financeiroRoutes.get('/cotista/dashboard'")
-const end = source.indexOf("financeiroRoutes.get('/cotista/voos-emprestimos'", start)
-const dashboard = source.slice(start, end)
+const start = dashboardRoutes.indexOf("dashboardCotistaRoutes.get('/cotista/dashboard'")
+const end = dashboardRoutes.indexOf("dashboardCotistaRoutes.get('/cotista/voos-emprestimos'", start)
+const dashboard = dashboardRoutes.slice(start, end)
 
 test('rotas financeiras de cotista validam sessão Supabase antes de retornar dados', () => {
   const authStart = worker.indexOf("app.use('/api/financeiro/*'")
@@ -79,9 +82,9 @@ test('dashboard cotista só projeta documentos de rateio_hold que existem no sch
 test('dashboard cotista inclui médias por mês e voos empréstimos respeitam o intervalo', () => {
   assert.match(dashboard, /calcularMediasCotistaPorMes\(voosMedias as VooMediasCotista\[\], custosPorMes\)/)
   assert.match(dashboard, /medias_mensais: mediasMensais/)
-  const inicioVoos = source.indexOf("financeiroRoutes.get('/cotista/voos-emprestimos'")
-  const fimVoos = source.indexOf("financeiroRoutes.get('/balanco'", inicioVoos)
-  const rotaVoos = source.slice(inicioVoos, fimVoos)
+  const inicioVoos = dashboardRoutes.indexOf("dashboardCotistaRoutes.get('/cotista/voos-emprestimos'")
+  const fimVoos = dashboardRoutes.indexOf("dashboardCotistaRoutes.get('/balanco'", inicioVoos)
+  const rotaVoos = dashboardRoutes.slice(inicioVoos, fimVoos)
   assert.match(rotaVoos, /date\(a\.data\) >= date\(\?\)/)
   assert.match(rotaVoos, /date\(a\.data\) <= date\(\?\)/)
 })
@@ -104,9 +107,9 @@ test('lançamento sem rateio é fallback e não duplica parcela rateada', () => 
 })
 
 test('recibo de saída inclui rateio, recibo e vínculo no batch da receita', () => {
-  const inicio = source.indexOf("financeiroRoutes.post('/recibos-saida'")
-  const fim = source.indexOf("financeiroRoutes.patch('/recibos-saida/:id'", inicio)
-  const rota = source.slice(inicio, fim)
+  const inicio = recibosSaidaRoutes.indexOf("recibosSaidaRoutes.post('/recibos-saida'")
+  const fim = recibosSaidaRoutes.indexOf("recibosSaidaRoutes.patch('/recibos-saida/:id'", inicio)
+  const rota = recibosSaidaRoutes.slice(inicio, fim)
   assert.notEqual(inicio, -1)
   assert.notEqual(fim, -1)
   assert.match(rota, /\}, c\.get\('userId'\) \|\| null, \{\}, \(\{ lancamentoId, contaReceberId, lancamentoClienteId \}\)/)
@@ -125,7 +128,7 @@ test('opções de rateio retornam vencimento e periodicidade gravados na origem'
   assert.match(rateioOpcoes, /periodicidade:/)
 })
 
-const painelFinanceiro = source.slice(source.indexOf("financeiroRoutes.get('/dashboard/financeiro',"), source.indexOf("async function origemRateio"))
+const painelFinanceiro = dashboardShareRoutes.slice(dashboardShareRoutes.indexOf("dashboardShareRoutes.get('/dashboard/financeiro'"), dashboardShareRoutes.indexOf("dashboardShareRoutes.get('/share'"))
 
 test('painel financeiro exibe parcelas de rateio_despesas e exclui o lançamento original', () => {
   assert.match(painelFinanceiro, /FROM rateio_despesas rd/)
