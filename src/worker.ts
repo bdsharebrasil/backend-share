@@ -9,6 +9,7 @@ import signatureBytes from './assets/assinatura-para-recibo.png'
 import { financeiroRoutes } from './financeiroRoutes'
 import { processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
+import { normalizarVooEmprestado, resolverTitularAbastecimento } from './abastecimentoUtils'
 
 const SIGNATURE_LOGO_CID = 'share-brasil-signature-logo'
 const SIGNATURE_LOGO_BASE64 = arrayBufferBase64(logoShareBytes)
@@ -5889,7 +5890,7 @@ async function statementFinanceiroAbastecimento(c: Context<{ Bindings: Bindings 
   const fornecedor = body.fornecedor_id
     ? await db.prepare('SELECT nome_fornecedor AS nome FROM fornecedores_combustivel WHERE id = ?1').bind(body.fornecedor_id).first<{ nome: string | null }>()
     : null
-  const vooEmprestado = ['1', 'true', 'sim', 'yes'].includes(String(body.voo_emprestado).toLowerCase())
+  const vooEmprestado = normalizarVooEmprestado(body.voo_emprestado)
 
   if (body.socio_id) {
     const socio = await db.prepare('SELECT id, holding_id FROM hold_socios WHERE id = ?1').bind(body.socio_id).first<{ id: string; holding_id: string | null }>()
@@ -5950,22 +5951,19 @@ app.post('/api/interno/abastecimentos', async c => {
     diarioId = diario?.id || null
   }
   if (diarioId && (!diario || diario.aeronave_id !== aeronaveId)) return c.json({ error: 'lancamento_diario_invalido_para_aeronave' }, 409)
-  const vooEmprestado = body?.voo_emprestado == null
-    ? Boolean(diario?.voo_emprestado)
-    : ['1', 'true', 'sim', 'yes'].includes(String(body.voo_emprestado).toLowerCase())
+  const vooEmprestado = normalizarVooEmprestado(body?.voo_emprestado, diario?.voo_emprestado)
   if (diario) {
     if (vooEmprestado) {
       // Em voo de empréstimo, o pagador é o tomador (a pasta em que a
       // operação foi registrada), não o cotista proprietário da aeronave.
       const tomadorClienteId = diario.cliente_tomador_emprestimo_id || null
       const tomadorSocioId = diario.socio_tomador_emprestimo_id || null
-      if (tomadorClienteId && clienteId && tomadorClienteId !== clienteId) return c.json({ error: 'titular_nao_corresponde_ao_tomador_do_emprestimo' }, 409)
-      if (tomadorSocioId && socioId && tomadorSocioId !== socioId) return c.json({ error: 'titular_nao_corresponde_ao_tomador_do_emprestimo' }, 409)
-      if (!clienteId && !socioId) { clienteId = tomadorClienteId; socioId = tomadorSocioId }
-    } else {
-      if (diario.cliente_id) clienteId = diario.cliente_id
-      if (diario.socio_id) socioId = diario.socio_id
+      const titularDoDiario = resolverTitularAbastecimento(true, diario, { cliente_id: clienteId, socio_id: socioId })
+      if ((tomadorClienteId || tomadorSocioId) && (clienteId || socioId) && (clienteId !== titularDoDiario.cliente_id || socioId !== titularDoDiario.socio_id)) return c.json({ error: 'titular_nao_corresponde_ao_tomador_do_emprestimo' }, 409)
     }
+    const titularFinal = resolverTitularAbastecimento(vooEmprestado, diario, { cliente_id: clienteId, socio_id: socioId })
+    clienteId = titularFinal.cliente_id
+    socioId = titularFinal.socio_id
   }
   if (!vooEmprestado && ((diario?.cliente_id && body?.cliente_id && diario.cliente_id !== body.cliente_id) || (diario?.socio_id && body?.socio_id && diario.socio_id !== body.socio_id))) return c.json({ error: 'titular_nao_corresponde_ao_lancamento_diario' }, 409)
   const numeroVooGravado = diario ? (String(diario.numero_voo || '').trim() || null) : numeroVooSolicitado
@@ -6015,7 +6013,7 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
   const valorTotal = Number(body.valor_total ?? litros * valorUnitario)
   const statusPago = String(body.status || '').toLowerCase() === 'pago'
   const local = await normalizarLocalAbastecimento(db, localInformado)
-  if (!dataAbastecimentoValida(data) || !local || !aeronaveId || Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
+  if (!dataAbastecimentoValida(data) || !local || !aeronaveId) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
   if (!Number.isFinite(litros) || litros <= 0 || !Number.isFinite(valorTotal) || valorTotal <= 0 || Math.round(valorTotal * 100) <= 0) return c.json({ error: 'litros_e_valor_total_invalidos' }, 400)
   if (statusPago && !dataAbastecimentoValida(body.data_pagamento)) return c.json({ error: 'data_pagamento_obrigatoria' }, 400)
 
@@ -6026,16 +6024,17 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
     ? await db.prepare('SELECT id, aeronave_id, cliente_id, socio_id, cliente_tomador_emprestimo_id, socio_tomador_emprestimo_id, voo_emprestado FROM lancamentos_diario_bordo WHERE id = ?1').bind(diarioId).first<any>()
     : null
   if (diarioId && (!diario || diario.aeronave_id !== aeronaveId)) return c.json({ error: 'lancamento_diario_invalido_para_aeronave' }, 409)
-  const vooEmprestado = body.voo_emprestado == null ? Boolean(diario?.voo_emprestado) : diarioBoolean(body.voo_emprestado)
+  const vooEmprestado = normalizarVooEmprestado(body.voo_emprestado, diario?.voo_emprestado)
   if (diario && vooEmprestado) {
     const tomadorClienteId = diario.cliente_tomador_emprestimo_id || null
     const tomadorSocioId = diario.socio_tomador_emprestimo_id || null
-    if (tomadorClienteId && clienteId && tomadorClienteId !== clienteId || tomadorSocioId && socioId && tomadorSocioId !== socioId) return c.json({ error: 'titular_nao_corresponde_ao_tomador_do_emprestimo' }, 409)
-    if (!clienteId && !socioId) { clienteId = tomadorClienteId; socioId = tomadorSocioId }
-  } else if (diario) {
-    if (diario.cliente_id) clienteId = diario.cliente_id
-    if (diario.socio_id) socioId = diario.socio_id
+    const titularDoDiario = resolverTitularAbastecimento(true, diario, { cliente_id: clienteId, socio_id: socioId })
+    if ((tomadorClienteId || tomadorSocioId) && (clienteId || socioId) && (clienteId !== titularDoDiario.cliente_id || socioId !== titularDoDiario.socio_id)) return c.json({ error: 'titular_nao_corresponde_ao_tomador_do_emprestimo' }, 409)
   }
+  const titularFinal = resolverTitularAbastecimento(vooEmprestado, diario, { cliente_id: clienteId, socio_id: socioId })
+  clienteId = titularFinal.cliente_id
+  socioId = titularFinal.socio_id
+  if (Boolean(clienteId) === Boolean(socioId)) return c.json({ error: 'data_local_aeronave_e_titular_obrigatorios' }, 400)
   const atualLancamento = await db.prepare('SELECT id, comprovante_url, aeronave_id, cotista_aeronave_id, cliente_id FROM lancamentos WHERE abastecimentos_id = ?1 LIMIT 1').bind(id).first<{ id: string; comprovante_url: string | null; aeronave_id: string | null; cotista_aeronave_id: string | null; cliente_id: string | null }>()
   const atualMovimento = await db.prepare('SELECT id, comprovante_url, aeronave_id, socio_id, holding_id FROM movimentos_holding WHERE abastecimentos_id = ?1 LIMIT 1').bind(id).first<{ id: string; comprovante_url: string | null; aeronave_id: string | null; socio_id: string | null; holding_id: string | null }>()
   const titularSocio = socioId
@@ -6064,7 +6063,7 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
   }
 
   const userId = extractSupabaseUserId(c) || null
-  const bodyFinanceiro = { ...body, cliente_id: clienteId, socio_id: socioId, aeronave_id: aeronaveId, data, valor_total: valorTotal }
+  const bodyFinanceiro = { ...body, cliente_id: clienteId, socio_id: socioId, aeronave_id: aeronaveId, data, valor_total: valorTotal, voo_emprestado: vooEmprestado }
   const aeronaveFinanceira = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
   const trechoFinanceiro = String(body.trecho || '').trim().toUpperCase()
   const dataFinanceira = /^\d{4}-\d{2}-\d{2}$/.test(data) ? `${data.slice(8, 10)}/${data.slice(5, 7)}` : data
@@ -6082,7 +6081,7 @@ app.patch('/api/interno/abastecimentos/:id', async c => {
     })()
     : await statementFinanceiroAbastecimento(c, id, bodyFinanceiro, userId, comprovanteAtual)
 
-  const abastecimentoStatement = db.prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, voo_emprestado = ?, numero_voo = ?, prazo_envio_cliente = ? WHERE id = ?`).bind(clienteId, socioId, aeronaveId, data, body.tipo_combustivel || null, body.trecho || null, local, body.numero_comanda || null, body.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, diarioId, body.voo_emprestado ? 1 : 0, body.numero_voo || null, body.prazo_envio_cliente || null, id)
+  const abastecimentoStatement = db.prepare(`UPDATE abastecimentos SET cliente_id = ?, socio_id = ?, aeronave_id = ?, data = ?, tipo_combustivel = ?, trecho = ?, local = ?, numero_comanda = ?, numero_nf = ?, litros = ?, valor_unitario = ?, valor_total = ?, desconto = ?, fornecedor_id = ?, status = ?, observacao = ?, forma_pagamento = ?, data_vencimento_boleto = ?, lancamento_diario_id = ?, voo_emprestado = ?, numero_voo = ?, prazo_envio_cliente = ? WHERE id = ?`).bind(clienteId, socioId, aeronaveId, data, body.tipo_combustivel || null, body.trecho || null, local, body.numero_comanda || null, body.numero_nf || null, litros, Number.isFinite(valorUnitario) ? valorUnitario : 0, valorTotal, body.desconto == null ? null : Number(body.desconto), body.fornecedor_id || null, body.status || null, body.observacao || null, body.forma_pagamento || null, body.data_vencimento_boleto || null, diarioId, vooEmprestado ? 1 : 0, body.numero_voo || null, body.prazo_envio_cliente || null, id)
   const statements = [abastecimentoStatement, financeiroStatement]
   if (mudandoTabela && tabelaAtual === 'lancamentos') statements.push(db.prepare('DELETE FROM lancamentos WHERE id = ?1').bind(atualLancamento!.id))
   if (mudandoTabela && tabelaAtual === 'movimentos_holding') statements.push(db.prepare('DELETE FROM movimentos_holding WHERE id = ?1').bind(atualMovimento!.id))
