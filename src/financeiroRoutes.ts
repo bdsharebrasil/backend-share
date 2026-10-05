@@ -1237,20 +1237,22 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
     const cotistaId = c.req.query('cotista_id')
     const filtrosCliente: string[] = []
     const filtrosHolding: string[] = []
+    const filtrosLancamentos: string[] = ["UPPER(COALESCE(l.status, '')) <> 'CANCELADO'"]
     const paramsCliente: unknown[] = []
     const paramsHolding: unknown[] = []
-    const filtrosEnvio: string[] = ["e.tipo IN ('cliente', 'reembolso')", "e.tipo_caixa = 'CLIENTE'", "e.status <> 'CANCELADO'", 'e.lancamento_id IS NULL', 'e.movimentacao_id IS NULL', 'e.movimentos_holding_id IS NULL']
-    const paramsEnvio: unknown[] = []
+    const paramsLancamentos: unknown[] = []
     const filtrosMovimento: string[] = ["mh.tipo_caixa = 'HOLD'", "UPPER(COALESCE(mh.fluxo, '')) IN ('SAIDA', 'ENTRADA')", "UPPER(COALESCE(mh.status, '')) <> 'CANCELADO'"]
     const paramsMovimento: unknown[] = []
-    if (inicio) { filtrosCliente.push('date(r.data_emissao) >= date(?)'); paramsCliente.push(inicio); filtrosHolding.push('date(r.data_emissao) >= date(?)'); paramsHolding.push(inicio) }
-    if (fim) { filtrosCliente.push('date(r.data_emissao) <= date(?)'); paramsCliente.push(fim); filtrosHolding.push('date(r.data_emissao) <= date(?)'); paramsHolding.push(fim) }
-    if (aeronaveId) { filtrosCliente.push('r.aeronave_id = ?'); paramsCliente.push(aeronaveId); filtrosHolding.push('r.aeronave_id = ?'); paramsHolding.push(aeronaveId) }
-    if (cotistaId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaId); filtrosHolding.push('r.socio_id = ?'); paramsHolding.push(cotistaId) }
-    if (inicio) { filtrosEnvio.push('date(e.data_despesa) >= date(?)'); paramsEnvio.push(inicio); filtrosMovimento.push('date(mh.data_emissao) >= date(?)'); paramsMovimento.push(inicio) }
-    if (fim) { filtrosEnvio.push('date(e.data_despesa) <= date(?)'); paramsEnvio.push(fim); filtrosMovimento.push('date(mh.data_emissao) <= date(?)'); paramsMovimento.push(fim) }
-    if (aeronaveId) { filtrosEnvio.push('e.aeronave_id = ?'); paramsEnvio.push(aeronaveId); filtrosMovimento.push('mh.aeronave_id = ?'); paramsMovimento.push(aeronaveId) }
-    if (cotistaId) { filtrosEnvio.push("json_extract(e.rateio_linhas_json, '$[0].cotista_id') = ?"); paramsEnvio.push(cotistaId); filtrosMovimento.push('mh.socio_id = ?'); paramsMovimento.push(cotistaId) }
+    if (inicio) { filtrosCliente.push('date(r.data_emissao) >= date(?)'); paramsCliente.push(inicio); filtrosHolding.push('date(r.data_emissao) >= date(?)'); paramsHolding.push(inicio); filtrosLancamentos.push('date(l.data_emissao) >= date(?)'); paramsLancamentos.push(inicio) }
+    if (fim) { filtrosCliente.push('date(r.data_emissao) <= date(?)'); paramsCliente.push(fim); filtrosHolding.push('date(r.data_emissao) <= date(?)'); paramsHolding.push(fim); filtrosLancamentos.push('date(l.data_emissao) <= date(?)'); paramsLancamentos.push(fim) }
+    if (aeronaveId) { filtrosCliente.push('r.aeronave_id = ?'); paramsCliente.push(aeronaveId); filtrosHolding.push('r.aeronave_id = ?'); paramsHolding.push(aeronaveId); filtrosLancamentos.push('l.aeronave_id = ?'); paramsLancamentos.push(aeronaveId) }
+    if (cotistaId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaId); filtrosHolding.push('r.socio_id = ?'); paramsHolding.push(cotistaId); filtrosLancamentos.push('l.cotista_aeronave_id = ?'); paramsLancamentos.push(cotistaId) }
+    if (inicio) { filtrosMovimento.push('date(mh.data_emissao) >= date(?)'); paramsMovimento.push(inicio) }
+    if (fim) { filtrosMovimento.push('date(mh.data_emissao) <= date(?)'); paramsMovimento.push(fim) }
+    if (aeronaveId) { filtrosMovimento.push('mh.aeronave_id = ?'); paramsMovimento.push(aeronaveId) }
+    if (cotistaId) { filtrosMovimento.push('mh.socio_id = ?'); paramsMovimento.push(cotistaId) }
+    const lancamentoSemRateio = "NOT EXISTS (SELECT 1 FROM rateio_despesas rd WHERE rd.lancamento_id = l.id AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO')"
+    const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(c.env.SHARE_DB, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
@@ -1261,10 +1263,10 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              'rateio_despesas' AS origem_rateio, NULL AS local,
              COALESCE(cl.razao_social, ca.codigo_cliente, r.cotista_id) AS participante_nome
         FROM rateio_despesas r
-        LEFT JOIN lancamentos l ON l.id = r.lancamento_id
+        JOIN lancamentos l ON l.id = r.lancamento_id
         LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id
         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
-        ${filtrosCliente.length ? `WHERE ${filtrosCliente.join(' AND ')}` : ''}
+        WHERE ${[...filtrosCliente, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
       UNION ALL
       SELECT r.id, r.aeronave_id, r.socio_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              r.documento_numero AS numero_doc, NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria,
@@ -1276,48 +1278,20 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              COALESCE(hs.nome, r.socio_id) AS participante_nome
         FROM rateio_hold r
         LEFT JOIN hold_socios hs ON hs.id = r.socio_id
-        ${`WHERE ${[...filtrosHolding, `(r.${holdingColumn} IS NULL OR NOT EXISTS (SELECT 1 FROM movimentos_holding mh_link WHERE mh_link.id = r.${holdingColumn}))`].join(' AND ')}`}
+        WHERE ${[...filtrosHolding, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
       UNION ALL
-      SELECT a.id, a.aeronave_id, ca.id AS participante_id, a.data,
-             COALESCE(l.descricao, 'Abastecimento ' || COALESCE(a.trecho, '')) AS descricao,
-             COALESCE(a.numero_nf, a.numero_comanda) AS numero_doc,
-             l.fornecedores_favoritos_id AS fornecedor_id, 'Combustível' AS categoria_nome, 'OPERACIONAL' AS grupo_categoria,
-             COALESCE(l.data_vencimento, a.data) AS data_vencimento, 'SAIDA' AS fluxo,
-             COALESCE(l.valor_centavos, CAST(ROUND(COALESCE(a.valor_total, 0) * 100) AS INTEGER)) AS valor_centavos,
-             COALESCE(l.valor_centavos, CAST(ROUND(COALESCE(a.valor_total, 0) * 100) AS INTEGER)) AS valor_rateado_centavos,
-             0 AS valor_pago_centavos, NULL AS pago_por, 'CLIENTE' AS tipo_caixa,
-             0 AS pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado,
-             COALESCE(l.status, a.status, 'PENDENTE') AS status, a.observacao AS observacoes,
-             'abastecimento' AS origem_rateio, COALESCE(ad.designativo_icao, a.local) AS local,
-             COALESCE(cl.razao_social, ca.codigo_cliente, a.cliente_id) AS participante_nome
-        FROM abastecimentos a
-        LEFT JOIN lancamentos l ON l.abastecimentos_id = a.id AND l.tipo_caixa = 'CLIENTE'
-        LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = a.aeronave_id AND ca.cliente_id = a.cliente_id
-        LEFT JOIN cliente cl ON cl.id = a.cliente_id
-        LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local))
-        WHERE NOT EXISTS (
-          SELECT 1 FROM rateio_despesas rd
-          JOIN lancamentos lr ON lr.id = rd.lancamento_id
-          WHERE lr.abastecimentos_id = a.id
-        )
-        ${aeronaveId ? 'AND a.aeronave_id = ?' : ''}
-        ${cotistaId ? 'AND ca.id = ?' : ''}
-        ${inicio ? 'AND date(a.data) >= date(?)' : ''}
-        ${fim ? 'AND date(a.data) <= date(?)' : ''}
-      UNION ALL
-      SELECT e.id, e.aeronave_id, json_extract(e.rateio_linhas_json, '$[0].cotista_id') AS participante_id,
-             e.data_despesa AS data, e.descricao, NULL AS numero_doc, e.fornecedor_id,
-             e.grupo_categoria AS categoria_nome, '' AS grupo_categoria, e.vencimento AS data_vencimento,
-             'SAIDA' AS fluxo, CAST(ROUND(COALESCE(e.valor, 0) * 100) AS INTEGER) AS valor_centavos,
-             CAST(ROUND(COALESCE(e.valor, 0) * 100) AS INTEGER) AS valor_rateado_centavos,
-             0 AS valor_pago_centavos, e.pago_por, e.tipo_caixa, e.pago_diretamente,
-             0 AS reembolsavel, 0 AS reembolso_quitado, e.status, e.observacoes,
-             'envio_despesas' AS origem_rateio, NULL AS local,
-             COALESCE(cl.razao_social, ca.codigo_cliente, json_extract(e.rateio_linhas_json, '$[0].cotista_id')) AS participante_nome
-        FROM envio_despesas e
-        LEFT JOIN cotista_aeronave ca ON ca.id = json_extract(e.rateio_linhas_json, '$[0].cotista_id')
+      SELECT l.id, l.aeronave_id, l.cotista_aeronave_id AS participante_id, l.data_emissao AS data,
+             l.descricao, COALESCE(l.numero_doc, l.numero_nf, l.numero_recibo) AS numero_doc,
+             l.fornecedores_favoritos_id AS fornecedor_id, l.categoria_nome, l.grupo_categoria,
+             l.data_vencimento, l.fluxo, l.valor_centavos, l.valor_centavos AS valor_rateado_centavos,
+             0 AS valor_pago_centavos, l.pago_por, l.tipo_caixa, l.pago_diretamente,
+             l.reembolsavel, l.reembolso_quitado, l.status, l.observacoes,
+             'lancamentos' AS origem_rateio, NULL AS local,
+             COALESCE(cl.razao_social, ca.codigo_cliente, l.cotista_aeronave_id) AS participante_nome
+        FROM lancamentos l
+        LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id
         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
-       WHERE ${filtrosEnvio.join(' AND ')}
+       WHERE ${[...filtrosLancamentos, lancamentoSemRateio].join(' AND ')}
       UNION ALL
       SELECT mh.id, mh.aeronave_id, mh.socio_id AS participante_id, mh.data_emissao AS data,
              mh.descricao, COALESCE(mh.numero_doc, mh.numero_nf) AS numero_doc, mh.fornecedor_id,
@@ -1328,10 +1302,10 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
              NULL AS local, COALESCE(hs.nome, mh.socio_id) AS participante_nome
         FROM movimentos_holding mh
         LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
-       WHERE ${filtrosMovimento.join(' AND ')}
+       WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
       ORDER BY data DESC, id DESC LIMIT 1000
-    `, ...paramsCliente, ...paramsHolding, ...[aeronaveId, cotistaId, inicio, fim].filter((value) => value), ...paramsEnvio, ...paramsMovimento)
-    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: String(row.fluxo ?? 'SAIDA').toUpperCase(), valorCentavos: Number(row.valor_centavos || row.valor_rateado_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, local: row.local ?? null, rateios: [] }))
+    `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
+    const lancamentos = rows.map((row) => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, participanteId: row.participante_id ?? null, participanteNome: row.participante_nome ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, fornecedor: row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, prazo: row.data_vencimento ?? null, fluxo: String(row.fluxo ?? 'SAIDA').toUpperCase(), valorCentavos: Number(row.valor_centavos || row.valor_rateado_centavos || 0), valorPagoCentavos: Number(row.valor_pago_centavos || 0), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, local: row.local ?? null, rateios: [] }))
     const entradas = lancamentos.filter((row) => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const saidas = lancamentos.filter((row) => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()
