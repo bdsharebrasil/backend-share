@@ -30,7 +30,7 @@ test('UNION do dashboard usa ordenação por posições compatível com SQLite/D
 
 test('rateio de despesas identifica o cliente na própria parcela', () => {
   assert.match(dashboard, /FROM rateio_despesas r/)
-  assert.doesNotMatch(dashboard, /JOIN lancamentos l ON l\.id = r\.lancamento_id/)
+  assert.match(dashboard, /LEFT JOIN lancamentos l ON l\.id = r\.lancamento_id/)
   assert.match(dashboard, /LEFT JOIN cotista_aeronave ca ON ca\.id = r\.cotista_id/)
   assert.match(dashboard, /LEFT JOIN cliente cl ON cl\.id = ca\.cliente_id/)
   assert.match(dashboard, /COALESCE\(cl\.razao_social, ca\.codigo_cliente, r\.cotista_id\)/)
@@ -48,6 +48,17 @@ test('rateio_hold compõe o balanço sem eliminar movimentos do extrato bancári
   assert.match(dashboard, /const holdings = resumirHoldings\(/)
 })
 
+test('saldos por cotista usam somente participantes vinculados à aeronave selecionada', () => {
+  assert.match(dashboard, /participantesPermitidos/)
+  assert.match(dashboard, /SELECT id, socio_id FROM cotista_aeronave WHERE aeronave_id = \?/)
+  assert.match(dashboard, /calcularCompensacaoBalanco\(rows, participantesPermitidos\)/)
+})
+test('lançamentos econômicos expõem ações de edição, cancelamento e baixa', () => {
+  assert.match(source, /financeiroRoutes\.patch\('\/lancamentos\/:id'/)
+  assert.match(source, /financeiroRoutes\.delete\('\/lancamentos\/:id'/)
+  assert.match(source, /financeiroRoutes\.post\('\/lancamentos\/:id\/baixa'/)
+  assert.match(source, /entidadeLancamentoFinanceiro/)
+})
 test('lançamento sem rateio é fallback e não duplica parcela rateada', () => {
   assert.match(dashboard, /FROM lancamentos l[\s\S]*lancamentoSemRateio/)
   assert.match(dashboard, /rd\.lancamento_id = l\.id/)
