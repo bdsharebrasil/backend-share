@@ -1071,11 +1071,15 @@ function anexosDashboardFinanceiro(row: Record<string, unknown>, prefix: 'lancam
 financeiroRoutes.get('/dashboard/financeiro', async (c) => {
   try {
     const db = c.env.SHARE_DB
-    const [receber, pagar, movimentacoes, movimentosHolding, emailsEnviados] = await Promise.all([
+    const schema = await loadSchema(db)
+    const holdingColumn = holdingMovementColumn(schema)
+    const [receber, pagar, movimentacoes, movimentosHolding, rateiosDespesas, rateiosHold, emailsEnviados] = await Promise.all([
       listar(db, "SELECT ar.valor_centavos, ar.status FROM contas_areceber ar LEFT JOIN lancamentos l ON l.id = ar.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND ar.status <> 'CANCELADO'"),
       listar(db, "SELECT cp.id, cp.lancamentos_id, cp.valor_centavos, cp.status, cp.data_vencimento FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND cp.status <> 'CANCELADO'"),
       listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(NULLIF(cl.codigo_cliente, ''), NULLIF(ca.codigo_cliente, ''), (SELECT NULLIF(ca_cliente.codigo_cliente, '') FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id WHERE l.escopo_financeiro = 'FINANCEIRO' ORDER BY l.criado_em DESC LIMIT 100`),
       listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome, (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.aeronave_id = mh.aeronave_id AND ca.socio_id = mh.socio_id LIMIT 1) AS codigo_cliente FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' ORDER BY mh.criado_em DESC LIMIT 100`),
+      listar(db, `SELECT l.*, rd.id AS rateio_id, rd.cotista_id AS rateio_cotista_id, rd.data_emissao AS rateio_data_emissao, rd.data_vencimento AS rateio_data_vencimento, rd.categoria_nome AS rateio_categoria_nome, rd.tipo_rateio AS rateio_tipo_rateio, rd.percentual_sociedade AS rateio_percentual, rd.valor_rateado_centavos AS rateio_valor_centavos, rd.valor_pago_real_centavos AS rateio_valor_pago_centavos, rd.status AS rateio_status, rd.descricao_despesa AS rateio_descricao, rd.documento_numero AS rateio_documento, ca.codigo_cliente AS rateio_codigo_cliente, cl.razao_social AS rateio_participante_nome FROM rateio_despesas rd JOIN lancamentos l ON l.id = rd.lancamento_id LEFT JOIN cotista_aeronave ca ON ca.id = rd.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id WHERE l.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO' ORDER BY rd.criado_em DESC LIMIT 300`),
+      listar(db, `SELECT mh.*, rh.id AS rateio_id, rh.socio_id AS rateio_socio_id, rh.data_emissao AS rateio_data_emissao, rh.data_vencimento AS rateio_data_vencimento, rh.categoria_nome AS rateio_categoria_nome, rh.tipo_rateio AS rateio_tipo_rateio, rh.percentual_uso AS rateio_percentual, rh.valor_rateado_centavos AS rateio_valor_centavos, rh.valor_pago_real_centavos AS rateio_valor_pago_centavos, rh.status AS rateio_status, rh.descricao_despesa AS rateio_descricao, rh.documento_numero AS rateio_documento, hs.nome AS rateio_participante_nome FROM rateio_hold rh JOIN movimentos_holding mh ON mh.id = rh.${holdingColumn} LEFT JOIN hold_socios hs ON hs.id = rh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO' ORDER BY rh.criado_em DESC LIMIT 300`),
       listar(db, `SELECT e.id, e.destinatarios, e.assunto, e.status, e.anexos, e.erro_mensagem AS erro, e.criado_em, e.email_enviado_em FROM emails_enviados e WHERE (lower(COALESCE(e.referencia_tipo, '')) NOT IN ('nf_saida', 'recibo_saida', 'recibo_colaborador', 'despesa_empresa', 'solicitacao_compra') OR EXISTS (SELECT 1 FROM lancamentos l WHERE l.email_enviado_id = e.id AND l.escopo_financeiro = 'FINANCEIRO')) ORDER BY e.criado_em DESC LIMIT 200`),
     ])
     const hoje = new Date().toISOString().slice(0, 10)
@@ -1088,7 +1092,54 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const totalPago = pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const lancamentosComFornecedor = await enriquecerFornecedores(db, movimentacoes)
     const movimentosHoldingComFornecedor = await enriquecerFornecedores(db, movimentosHolding)
-    const movimentacoesComFornecedor = [...lancamentosComFornecedor, ...movimentosHoldingComFornecedor]
+    const rateiosDespesasComFornecedor = await enriquecerFornecedores(db, rateiosDespesas.map((row) => ({
+      ...row,
+      id: row.rateio_id,
+      origem_id: row.id,
+      descricao: row.rateio_descricao ?? row.descricao,
+      numero_doc: row.rateio_documento ?? row.numero_doc,
+      data_emissao: row.rateio_data_emissao ?? row.data_emissao,
+      data_vencimento: row.rateio_data_vencimento ?? row.data_vencimento,
+      categoria_nome: row.rateio_categoria_nome ?? row.categoria_nome,
+      grupo_categoria: row.rateio_tipo_rateio ?? row.grupo_categoria,
+      cotista_aeronave_id: row.rateio_cotista_id,
+      codigo_cliente: row.rateio_codigo_cliente,
+      participante_nome: row.rateio_participante_nome,
+      status: row.rateio_status,
+      valor_centavos: row.rateio_valor_centavos,
+      valor: Number(row.rateio_valor_centavos || 0) / 100,
+      valor_pago_real_centavos: row.rateio_valor_pago_centavos,
+      origem_tipo: 'rateio_despesas',
+    })))
+    const rateiosHoldComFornecedor = await enriquecerFornecedores(db, rateiosHold.map((row) => ({
+      ...row,
+      id: row.rateio_id,
+      origem_id: row.id,
+      descricao: row.rateio_descricao ?? row.descricao,
+      numero_doc: row.rateio_documento ?? row.numero_doc,
+      data_emissao: row.rateio_data_emissao ?? row.data_emissao,
+      data_vencimento: row.rateio_data_vencimento ?? row.data_vencimento,
+      categoria_nome: row.rateio_categoria_nome ?? row.categoria_nome,
+      grupo_categoria: row.rateio_tipo_rateio ?? row.grupo_categoria,
+      socio_id: row.rateio_socio_id,
+      socio_nome: row.rateio_participante_nome,
+      status: row.rateio_status,
+      valor_centavos: row.rateio_valor_centavos,
+      valor: Number(row.rateio_valor_centavos || 0) / 100,
+      valor_pago_real_centavos: row.rateio_valor_pago_centavos,
+      origem_tipo: 'rateio_hold',
+    })))
+    const lancamentosComRateio = new Set(rateiosDespesasComFornecedor.map((row) => String(row.origem_id ?? '')).filter(Boolean))
+    const movimentosHoldingComRateio = new Set(rateiosHoldComFornecedor.map((row) => String(row.origem_id ?? '')).filter(Boolean))
+    const lancamentosExibidos = [
+      ...rateiosDespesasComFornecedor,
+      ...lancamentosComFornecedor.filter((row) => !lancamentosComRateio.has(String(row.id ?? ''))),
+    ]
+    const movimentosHoldingExibidos = [
+      ...rateiosHoldComFornecedor,
+      ...movimentosHoldingComFornecedor.filter((row) => !movimentosHoldingComRateio.has(String(row.id ?? ''))),
+    ]
+    const movimentacoesComFornecedor = [...lancamentosExibidos, ...movimentosHoldingExibidos]
     const lancIds = lancamentosComFornecedor.map((row) => String(row.id ?? '')).filter(Boolean)
     const reativacoes = lancIds.length
       ? await listar(db, `SELECT r.lancamento_id, rr.justificativa, rr.reativado_em
@@ -1107,8 +1158,8 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const contasEmAberto = new Set(contasPendentes.flatMap((row) => [row.id, row.lancamentos_id].filter(Boolean).map(String)))
     return c.json({
       resumo: { total_a_receber: totalAReceber, total_pago: totalPago, pendencias: contasPendentes.length, pagamentos_confirmados: pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').length },
-      lancamentos: lancamentosComFornecedor.map((row) => ({ ...row, destinatario_email: row.destinatario_email ?? null, anexos: anexosDashboardFinanceiro(row, 'lancamento'), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))), justificativa_reativacao: reativacaoPorLancamento.get(String(row.id))?.justificativa ?? null, reativado_em: reativacaoPorLancamento.get(String(row.id))?.reativado_em ?? null })),
-      movimentos_holding: movimentosHoldingComFornecedor.map((row) => ({ ...row, tipo_caixa: 'HOLDING', anexos: anexosDashboardFinanceiro(row, 'movimento_holding'), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100, pendencia: [row.id].some((id) => contasEmAberto.has(String(id))) })),
+      lancamentos: lancamentosExibidos.map((row) => ({ ...row, destinatario_email: row.destinatario_email ?? null, anexos: anexosDashboardFinanceiro(row, 'lancamento'), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: row.valor ?? Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))), justificativa_reativacao: reativacaoPorLancamento.get(String(row.origem_id ?? row.id))?.justificativa ?? null, reativado_em: reativacaoPorLancamento.get(String(row.origem_id ?? row.id))?.reativado_em ?? null })),
+      movimentos_holding: movimentosHoldingExibidos.map((row) => ({ ...row, tipo_caixa: 'HOLDING', anexos: anexosDashboardFinanceiro(row, 'movimento_holding'), fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: row.valor ?? Number(row.valor_centavos || 0) / 100, pendencia: [row.id, row.origem_id].filter(Boolean).some((id) => contasEmAberto.has(String(id))) })),
       movimentacoes: movimentacoesComFornecedor.map((row) => ({ ...row, fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null, valor: Number(row.valor_centavos || 0) / 100 })),
       emails_enviados: emailsEnviados
     })

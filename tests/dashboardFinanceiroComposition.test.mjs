@@ -47,3 +47,20 @@ test('opções de rateio retornam vencimento e periodicidade gravados na origem'
   assert.match(rateioOpcoes, /data_vencimento:/)
   assert.match(rateioOpcoes, /periodicidade:/)
 })
+
+const painelFinanceiro = source.slice(source.indexOf("financeiroRoutes.get('/dashboard/financeiro',"), source.indexOf("async function origemRateio"))
+
+test('painel financeiro exibe parcelas de rateio_despesas e exclui o lançamento original', () => {
+  assert.match(painelFinanceiro, /FROM rateio_despesas rd/)
+  assert.match(painelFinanceiro, /rd\.valor_rateado_centavos AS rateio_valor_centavos/)
+  assert.match(painelFinanceiro, /rateio_cotista_id/)
+  assert.match(painelFinanceiro, /lancamentosComRateio/)
+  assert.match(painelFinanceiro, /lancamentosComFornecedor\.filter\(\(row\) => !lancamentosComRateio\.has/)
+})
+
+test('painel financeiro exibe parcelas de rateio_hold e exclui o movimento original', () => {
+  assert.match(painelFinanceiro, /FROM rateio_hold rh/)
+  assert.match(painelFinanceiro, /rh\.valor_rateado_centavos AS rateio_valor_centavos/)
+  assert.match(painelFinanceiro, /movimentosHoldingComRateio/)
+  assert.match(painelFinanceiro, /movimentosHoldingComFornecedor\.filter\(\(row\) => !movimentosHoldingComRateio\.has/)
+})
