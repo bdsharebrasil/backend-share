@@ -3,9 +3,19 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const source = await readFile(new URL('../src/financeiroRoutes.ts', import.meta.url), 'utf8')
+const worker = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8')
 const start = source.indexOf("financeiroRoutes.get('/cotista/dashboard'")
 const end = source.indexOf("financeiroRoutes.get('/cotista/voos-emprestimos'", start)
 const dashboard = source.slice(start, end)
+
+test('rotas financeiras de cotista validam sessão Supabase antes de retornar dados', () => {
+  const guardStart = worker.indexOf("app.use('/api/financeiro/cotista/*'")
+  const guardEnd = worker.indexOf("app.route('/api/financeiro'", guardStart)
+  const guard = worker.slice(guardStart, guardEnd)
+  assert.notEqual(guardStart, -1)
+  assert.match(guard, /requireAuthenticatedUser\(c\)/)
+  assert.match(guard, /c\.json\(\{ error: 'nao_autorizado' \}, 401\)/)
+})
 
 test('dashboard usa o valor já rateado sem recalcular a parcela', () => {
   assert.match(dashboard, /r\.valor_rateado_centavos AS valor_centavos/)

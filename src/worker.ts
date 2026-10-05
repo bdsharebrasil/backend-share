@@ -102,6 +102,10 @@ app.use('/api/financeiro/*', async (c, next) => {
   ;(c as any).set('userId', extractSupabaseUserId(c))
   return next()
 })
+app.use('/api/financeiro/cotista/*', async (c, next) => {
+  if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'nao_autorizado' }, 401)
+  return next()
+})
 app.route('/api/financeiro', financeiroRoutes)
 
 // Compatibilidade para clientes antigos; o endpoint canônico é financeiro/dashboard/financeiro.
