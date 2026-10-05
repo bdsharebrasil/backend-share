@@ -13,6 +13,11 @@ test('dashboard usa o valor já rateado sem recalcular a parcela', () => {
   assert.doesNotMatch(dashboard, /r\.valor_total_centavos\s*\/|valor_total_centavos.*percentual/)
 })
 
+test('UNION do dashboard usa ordenação por posições compatível com SQLite/D1', () => {
+  assert.match(dashboard, /ORDER BY 4 DESC, 1 DESC LIMIT 1000/)
+  assert.doesNotMatch(dashboard, /ORDER BY data DESC, id DESC LIMIT 1000/)
+})
+
 test('rateio de despesas identifica o cliente na própria parcela', () => {
   assert.match(dashboard, /FROM rateio_despesas r/)
   assert.doesNotMatch(dashboard, /JOIN lancamentos l ON l\.id = r\.lancamento_id/)

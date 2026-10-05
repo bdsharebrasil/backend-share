@@ -1418,7 +1418,7 @@ financeiroRoutes.get('/cotista/dashboard', async (c) => {
         FROM movimentos_holding mh
         LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
        WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
-      ORDER BY data DESC, id DESC LIMIT 1000
+      ORDER BY 4 DESC, 1 DESC LIMIT 1000
     `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
     const [movimentosHolding, sociosHolding, rateiosHolding] = aeronaveId
       ? await Promise.all([
