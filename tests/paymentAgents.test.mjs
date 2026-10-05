@@ -147,6 +147,7 @@ test('rejeita rateio direto com cotista de outra aeronave', async () => {
 test('converte envio direto com rateio em aberto até a baixa do pagamento', async () => {
   const db = fakeDb()
   let comandoCapturado
+  let criouLancamento = false
   const request = {
     id: 'envio-cliente-1',
     status: 'PENDENTE',
@@ -167,14 +168,24 @@ test('converte envio direto com rateio em aberto até a baixa do pagamento', asy
     anexos_json: '[]',
   }
 
-  await convertPaymentRequest(db, request, {
+  const result = await convertPaymentRequest(db, request, {
     createExpense: async () => ({ id: 'lancamento-1' }),
     createDirectExternalExpense: async (_db, command) => {
+      criouLancamento = true
       comandoCapturado = command
       return { id: 'lancamento-1' }
     },
+    createClientExpenseRateios: async (_db, command) => {
+      comandoCapturado = command
+      return { lancamento_id: request.id, rateio_ids: ['rateio-1', 'rateio-2'] }
+    },
   }, 'usuario-1')
 
+  assert.equal(criouLancamento, false)
+  assert.equal(result.lancamento_id, request.id)
+  assert.equal(result.movimentacao_id, null)
+  assert.equal(db.batches.some((statement) => statement.sql.includes('INSERT INTO lancamentos')), false)
+  assert.equal(comandoCapturado.lancamento_id, request.id)
   assert.equal(comandoCapturado.tipo_caixa, 'CLIENTE')
   assert.equal(comandoCapturado.pago_diretamente, false)
   assert.equal(comandoCapturado.cotista_pagador_id, null)

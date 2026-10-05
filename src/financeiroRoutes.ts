@@ -3,6 +3,7 @@ import {
   createExpense,
   createReimbursement,
   createDirectExternalExpense,
+  createClientExpenseRateios,
   enqueueFinance,
   FinanceError,
   issueRevenue,
@@ -1078,7 +1079,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
       listar(db, "SELECT cp.id, cp.lancamentos_id, cp.valor_centavos, cp.status, cp.data_vencimento FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND cp.status <> 'CANCELADO'"),
       listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(NULLIF(cl.codigo_cliente, ''), NULLIF(ca.codigo_cliente, ''), (SELECT NULLIF(ca_cliente.codigo_cliente, '') FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id WHERE l.escopo_financeiro = 'FINANCEIRO' ORDER BY l.criado_em DESC LIMIT 100`),
       listar(db, `SELECT mh.*, h.nome AS holding_nome, hs.nome AS socio_nome, (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.aeronave_id = mh.aeronave_id AND ca.socio_id = mh.socio_id LIMIT 1) AS codigo_cliente FROM movimentos_holding mh LEFT JOIN holdings h ON h.id = mh.holding_id LEFT JOIN hold_socios hs ON hs.id = mh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' ORDER BY mh.criado_em DESC LIMIT 100`),
-      listar(db, `SELECT l.*, rd.id AS rateio_id, rd.cotista_id AS rateio_cotista_id, rd.data_emissao AS rateio_data_emissao, rd.data_vencimento AS rateio_data_vencimento, rd.categoria_nome AS rateio_categoria_nome, rd.tipo_rateio AS rateio_tipo_rateio, rd.percentual_sociedade AS rateio_percentual, rd.valor_rateado_centavos AS rateio_valor_centavos, rd.valor_pago_real_centavos AS rateio_valor_pago_centavos, rd.status AS rateio_status, rd.descricao_despesa AS rateio_descricao, rd.documento_numero AS rateio_documento, ca.codigo_cliente AS rateio_codigo_cliente, cl.razao_social AS rateio_participante_nome FROM rateio_despesas rd JOIN lancamentos l ON l.id = rd.lancamento_id LEFT JOIN cotista_aeronave ca ON ca.id = rd.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id WHERE l.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO' ORDER BY rd.criado_em DESC LIMIT 300`),
+      listar(db, `SELECT l.*, e.id AS envio_id, COALESCE(l.id, e.id) AS origem_id, rd.id AS rateio_id, rd.cotista_id AS rateio_cotista_id, rd.data_emissao AS rateio_data_emissao, rd.data_vencimento AS rateio_data_vencimento, rd.categoria_nome AS rateio_categoria_nome, rd.tipo_rateio AS rateio_tipo_rateio, rd.percentual_sociedade AS rateio_percentual, rd.valor_rateado_centavos AS rateio_valor_centavos, rd.valor_pago_real_centavos AS rateio_valor_pago_centavos, rd.status AS rateio_status, rd.descricao_despesa AS rateio_descricao, rd.documento_numero AS rateio_documento, ca.codigo_cliente AS rateio_codigo_cliente, cl.razao_social AS rateio_participante_nome FROM rateio_despesas rd LEFT JOIN lancamentos l ON l.id = rd.lancamento_id LEFT JOIN envio_despesas e ON e.id = rd.lancamento_id LEFT JOIN cotista_aeronave ca ON ca.id = rd.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO' ORDER BY rd.criado_em DESC LIMIT 300`),
       listar(db, `SELECT mh.*, rh.id AS rateio_id, rh.socio_id AS rateio_socio_id, rh.data_emissao AS rateio_data_emissao, rh.data_vencimento AS rateio_data_vencimento, rh.categoria_nome AS rateio_categoria_nome, rh.tipo_rateio AS rateio_tipo_rateio, rh.percentual_uso AS rateio_percentual, rh.valor_rateado_centavos AS rateio_valor_centavos, rh.valor_pago_real_centavos AS rateio_valor_pago_centavos, rh.status AS rateio_status, rh.descricao_despesa AS rateio_descricao, rh.documento_numero AS rateio_documento, hs.nome AS rateio_participante_nome FROM rateio_hold rh JOIN movimentos_holding mh ON mh.id = rh.${holdingColumn} LEFT JOIN hold_socios hs ON hs.id = rh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO' ORDER BY rh.criado_em DESC LIMIT 300`),
       listar(db, `SELECT e.id, e.destinatarios, e.assunto, e.status, e.anexos, e.erro_mensagem AS erro, e.criado_em, e.email_enviado_em FROM emails_enviados e WHERE (lower(COALESCE(e.referencia_tipo, '')) NOT IN ('nf_saida', 'recibo_saida', 'recibo_colaborador', 'despesa_empresa', 'solicitacao_compra') OR EXISTS (SELECT 1 FROM lancamentos l WHERE l.email_enviado_id = e.id AND l.escopo_financeiro = 'FINANCEIRO')) ORDER BY e.criado_em DESC LIMIT 200`),
     ])
@@ -1095,7 +1096,7 @@ financeiroRoutes.get('/dashboard/financeiro', async (c) => {
     const rateiosDespesasComFornecedor = await enriquecerFornecedores(db, rateiosDespesas.map((row) => ({
       ...row,
       id: row.rateio_id,
-      origem_id: row.id,
+      origem_id: row.origem_id ?? row.id,
       descricao: row.rateio_descricao ?? row.descricao,
       numero_doc: row.rateio_documento ?? row.numero_doc,
       data_emissao: row.rateio_data_emissao ?? row.data_emissao,
@@ -2277,7 +2278,7 @@ financeiroRoutes.post('/envios-pagamento/:id/aprovar', async (c) => {
   const statements = mensagemFinanceiraStatements(db, String(request.criado_por ?? '') || null, userId, 'Solicitação de compra aprovada', `Sua solicitação “${String(request.descricao ?? '')}” foi aprovada e está sendo preparada para pagamento.`)
   if (statements.length) await db.batch(statements)
   try {
-    const conversion = await convertPaymentRequest(db, { ...request, status: 'APROVADO' }, { createExpense, createReimbursement, createDirectExternalExpense }, userId)
+    const conversion = await convertPaymentRequest(db, { ...request, status: 'APROVADO' }, { createExpense, createReimbursement, createDirectExternalExpense, createClientExpenseRateios }, userId)
     if (request.solicitacao_compra_id) {
       await db.prepare("UPDATE solicitacoes_compra SET status = 'APROVADA', data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?").bind(request.solicitacao_compra_id).run()
     }
@@ -2296,7 +2297,7 @@ financeiroRoutes.post('/envios-pagamento/:id/converter', async (c) => {
     return c.json(await convertPaymentRequest(
       c.env.SHARE_DB,
       request,
-      { createExpense, createReimbursement, createDirectExternalExpense },
+      { createExpense, createReimbursement, createDirectExternalExpense, createClientExpenseRateios },
       c.get('userId') || null,
     ))
   } catch (error) { return errorResponse(c, error) }

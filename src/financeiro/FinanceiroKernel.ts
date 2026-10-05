@@ -892,6 +892,24 @@ function clientAllocationStatements(
   })
 }
 
+/** Persiste apenas parcelas de cliente; o id do envio é a referência do rateio. */
+export async function createClientExpenseRateios(
+  db: Database,
+  body: Row,
+  userId: string | null,
+  options: NormalizeOptions = {},
+): Promise<Row> {
+  const sourceId = nullableText(body.lancamento_id)
+  if (!sourceId) throw new FinanceError('Envio de despesa obrigatório para o rateio', 'envio_despesa_obrigatorio')
+  const schema = await loadSchema(db)
+  const command = normalizeCommand({ ...body, tipo_caixa: 'CLIENTE', sem_rateio: false }, userId, options)
+  const lines = allocationLines(command)
+  if (!lines.length) throw new FinanceError('Despesa de cliente precisa de rateio', 'rateio_obrigatorio')
+  const rateioIds = lines.map(() => id())
+  await db.batch(clientAllocationStatements(db, schema, command, sourceId, lines, userId, rateioIds))
+  return { id: sourceId, lancamento_id: sourceId, rateio_ids: rateioIds, movimentacao_id: null, status: 'EM_ABERTO', idempotent: false }
+}
+
 function holdingAllocationStatements(
   db: Database,
   schema: SchemaCache,
