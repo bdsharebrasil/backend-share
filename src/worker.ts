@@ -6252,6 +6252,7 @@ async function marcarEmailEnviadoParaOrigens(
 
     for (const lid of lancamentoIds) {
       await db.prepare(`UPDATE lancamentos SET email_enviado_em = COALESCE(email_enviado_em, ?), email_enviado_id = COALESCE(email_enviado_id, ?) WHERE id = ?`).bind(agora, emailId, lid).run()
+      await db.prepare('UPDATE rateio_despesas SET email_enviado_em = COALESCE(email_enviado_em, ?) WHERE lancamento_id = ?').bind(agora, lid).run()
       await db.prepare(
         `INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
          VALUES (?, 'EMAIL', ?, 'LANCAMENTO', ?, 'EMAIL_ENVIADO')`
@@ -6259,6 +6260,7 @@ async function marcarEmailEnviadoParaOrigens(
     }
     for (const mid of movimentoIds) {
       await db.prepare(`UPDATE movimentos_holding SET email_enviado_em = COALESCE(email_enviado_em, ?), email_enviado_id = COALESCE(email_enviado_id, ?) WHERE id = ?`).bind(agora, emailId, mid).run()
+      await db.prepare('UPDATE rateio_hold SET email_enviado_em = COALESCE(email_enviado_em, ?) WHERE movimento_id = ?').bind(agora, mid).run()
       await db.prepare(
         `INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
          VALUES (?, 'EMAIL', ?, 'MOVIMENTO_HOLDING', ?, 'EMAIL_ENVIADO')`

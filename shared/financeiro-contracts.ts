@@ -42,6 +42,7 @@ export type RateioDespesaContract = {
   status: typeof STATUS_RATEIO_DESPESAS[number] | null;
   descricao_despesa: string | null;
   observacoes: string | null;
+  email_enviado_em: string | null;
   criado_em: string;
   atualizado_em: string;
 };
