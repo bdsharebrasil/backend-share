@@ -23,11 +23,6 @@ const PAPEIS_FINANCEIROS = [
   'financeiro', 'administrativo',
 ]
 
-const PAPEIS_FINANCEIROS_GESTAO = [
-  'admin', 'administrador', 'gestor_master', 'gestormaster',
-  'financeiro_master', 'financeiromaster', 'financeiro_admin',
-]
-
 const normalizarPapelSql = (coluna: string) =>
   `lower(replace(replace(trim(COALESCE(${coluna}, '')), ' ', '_'), '-', '_'))`
 

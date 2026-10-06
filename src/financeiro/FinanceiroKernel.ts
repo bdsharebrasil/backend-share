@@ -1,6 +1,7 @@
 type Row = Record<string, unknown>
 type Database = D1Database
 
+import { dateValue, nullableText, text, uuid } from '../lib/strings'
 import { mensagemFinanceiraStatements } from './financeiroNotifications'
 import {
   allocateReceiptNumber,
@@ -44,14 +45,6 @@ export class FinanceError extends Error {
   }
 }
 
-const text = (value: unknown): string =>
-  value == null ? '' : String(value).trim()
-
-const nullableText = (value: unknown): string | null => {
-  const valueText = text(value)
-  return valueText || null
-}
-
 const asFlag = (value: unknown): boolean =>
   value === true ||
   value === 1 ||
@@ -79,14 +72,6 @@ const asNonNegativeCents = (value: unknown): number => {
 const optionalCents = (value: unknown): number | null =>
   value == null || value === '' ? null : asPositiveCents(value)
 
-const dateValue = (value: unknown): string => {
-  const date = text(value) || new Date().toISOString().slice(0, 10)
-  if (!/^\d{4}-\d{2}-\d{2}/.test(date)) {
-    throw new FinanceError('Data inválida', 'data_invalida')
-  }
-  return date
-}
-
 async function resolveContaBancariaId(db: Database, value: unknown): Promise<string | null> {
   const informada = nullableText(value)
   if (!informada) return null
@@ -98,7 +83,7 @@ async function resolveContaBancariaId(db: Database, value: unknown): Promise<str
   return row?.id ?? null
 }
 
-const id = (): string => crypto.randomUUID()
+const id = (): string => uuid()
 
 const upper = (value: unknown): string => text(value).toUpperCase()
 

@@ -1,9 +1,7 @@
 import { Hono } from "hono"
-import { emitirReciboColaborador, emitirReciboPagamento, emitirReciboReembolso, emitirReciboSaida, enviarReciboPagamentoParaRateio, programarReciboReembolso, settleReceivable, validateFinanceSchema } from "./FinanceiroKernel"
+import { emitirReciboColaborador, emitirReciboPagamento, emitirReciboReembolso, emitirReciboSaida, enviarReciboPagamentoParaRateio, programarReciboReembolso, validateFinanceSchema } from "./FinanceiroKernel"
 import { errorResponse } from "./errorResponse"
-import { listar, listarTodos } from "./repositories/d1"
-import { mapConta } from "./contas"
-import { enriquecerFornecedores } from "./repositories/contas"
+import { listar } from "./repositories/d1"
 
 type Bindings = { SHARE_DB: D1Database; FILES?: R2Bucket; SHARE_FILES?: R2Bucket; R2_PUBLIC_URL?: string }
 type Variables = { userId: string | null }
@@ -11,7 +9,7 @@ type Variables = { userId: string | null }
 export const recibosRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 function storage(c: any): R2Bucket | undefined { return c.env.SHARE_FILES || c.env.FILES }
-function publicStorageUrl(c: any, key: string): string { const publicBase = String(c.env.R2_PUBLIC_URL ?? "").trim().replace(/\/+$/, ""); if (!publicBase) throw new Error("R2_PUBLIC_URL_nao_configurada"); return `${publicBase}/${key.split("/").map((segment: string) => encodeURIComponent(segment)).join("/")}` }
+function publicStorageUrl(c: any, key: string): string { const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, ''); if (!publicBase) throw new Error('R2_PUBLIC_URL_nao_configurada'); return `${publicBase}/${key.split('/').map((segment: string) => encodeURIComponent(segment)).join('/')}` }
 
 recibosRoutes.post('/recibos', async (c) => {
   try {

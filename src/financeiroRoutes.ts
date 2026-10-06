@@ -2,33 +2,22 @@ import { Hono } from 'hono'
 import {
   createExpense,
   createReimbursement,
-  createDirectExternalExpense,
-  createClientExpenseRateios,
   enqueueFinance,
   issueRevenue,
-  emitirReciboReembolso,
-  emitirReciboColaborador,
-  emitirReciboPagamento,
-  emitirReciboSaida,
-  enviarReciboPagamentoParaRateio,
-  programarReciboReembolso,
   processFinanceQueue,
   settlePayable,
   settleReceivable,
   validateFinanceSchema,
 } from './financeiro/FinanceiroKernel'
-import { createPaymentRequest, convertPaymentRequest, validatePaymentRequest } from './financeiro/paymentAgents'
-import { mensagemFinanceiraStatements } from './financeiro/financeiroNotifications'
 import { pagamentosFolhaRoutes } from './financeiro/pagamentosFolhaRoutes'
 import { configuracoesRoutes } from './financeiro/configuracoesRoutes'
 import { errorResponse } from './financeiro/errorResponse'
-import { listar, listarTodos } from './financeiro/repositories/d1'
+import { listar } from './financeiro/repositories/d1'
 import { contasRoutes } from './financeiro/contasRoutes'
 import { mapConta } from './financeiro/contas'
 import { enriquecerFornecedores } from './financeiro/repositories/contas'
 import { dashboardCotistaRoutes } from './financeiro/dashboardCotistaRoutes'
 import { dashboardShareRoutes } from './financeiro/dashboardShareRoutes'
-import { requireCaixaShareAccess } from './financeiro/access'
 import { notasSaidaRoutes } from './financeiro/notasSaidaRoutes'
 import { recibosSaidaRoutes } from './financeiro/recibosSaidaRoutes'
 import { movimentosHoldingRoutes } from './financeiro/movimentosHoldingRoutes'
@@ -66,18 +55,6 @@ financeiroRoutes.route('/', movimentosHoldingRoutes)
 financeiroRoutes.route('/', demonstrativoIARoutes)
 financeiroRoutes.route('/', recibosRoutes)
 financeiroRoutes.route('/', enviosPagamentoRoutes)
-
-
-function storage(c: any): R2Bucket | undefined {
-  return c.env.SHARE_FILES || c.env.FILES
-}
-
-function publicStorageUrl(c: any, key: string): string {
-  const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
-  if (!publicBase) throw new Error('R2_PUBLIC_URL_nao_configurada')
-  return `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
-}
-
 
 /*
  * Esta rota somente valida o schema. Ela não cria, altera ou exclui tabelas.

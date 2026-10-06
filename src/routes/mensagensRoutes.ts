@@ -2,6 +2,7 @@ import { Hono, Context } from 'hono'
 import { authenticatedColaborador } from '../lib/auth'
 import { garantirTabelasAuxiliares } from '../lib/schema'
 import { shareBrasilBucket, shareBrasilFileName, salvarArquivoShareBrasil } from '../lib/storage'
+import { uuid } from '../lib/strings'
 import { assinaturaOperacional } from './emailsRoutes'
 
 type Bindings = { SHARE_DB: D1Database; FILES: R2Bucket; SHARE_FILES?: R2Bucket; SUPABASE_URL?: string; SUPABASE_ANON_KEY?: string; SUPABASE_SERVICE_ROLE_KEY?: string; VITE_SUPABASE_PUBLISHABLE_KEY?: string }
@@ -10,7 +11,6 @@ type Variables = Record<string, never>
 export const mensagensRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
-const uuid = () => crypto.randomUUID()
 // ─── Routes: Mensageria Interna (Inbox / D1) ──────────────────────────────────
 
 // 📩 1. Enviar nova mensagem

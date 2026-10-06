@@ -1,3 +1,5 @@
+import { dateValue, nullableText, text, uuid } from './lib/strings'
+
 type ReportRow = Record<string, any>
 
 type Payer = 'tripulante_1' | 'tripulante_2' | 'cliente' | 'sharebrasil'
@@ -16,22 +18,7 @@ type Allocation = CotistaRow & {
   valor_rateado_centavos: number
 }
 
-const uuid = () => crypto.randomUUID()
 const FORNECEDOR_RELATORIO_VIAGEM = 'SHARE BRASIL'
-
-function text(value: unknown): string {
-  return value == null ? '' : String(value).trim()
-}
-
-function nullableText(value: unknown): string | null {
-  const valueText = text(value)
-  return valueText || null
-}
-
-function dateValue(value: unknown, fallback: string): string {
-  const candidate = text(value) || fallback
-  return /^\d{4}-\d{2}-\d{2}/.test(candidate) ? candidate.slice(0, 10) : fallback
-}
 
 function addCalendarDays(value: unknown, days: number): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(text(value))
@@ -88,11 +75,6 @@ function payerDescription(report: ReportRow, payer: Payer): string {
       ? text(report.nome_tripulante)
       : ''
   return ['Relatório Despesa de Viagem', matricula, nomeTripulante].filter(Boolean).join(' - ')
-}
-
-function categoryDescription(expenses: Array<Record<string, any>>): string | null {
-  const categories = [...new Set(expenses.map((expense) => text(expense.categoria ?? expense.category)).filter(Boolean))]
-  return categories.length ? categories.join(' / ').slice(0, 180) : null
 }
 
 async function prepareInsert(db: D1Database, table: string, row: Record<string, unknown>): Promise<D1PreparedStatement> {
@@ -245,7 +227,6 @@ async function addRateiosCliente(
   description: string,
   userId: string | null,
 ) {
-  const direct = false
   const status = 'EM_ABERTO'
   for (const allocation of allocations) {
     const rateioId = uuid()

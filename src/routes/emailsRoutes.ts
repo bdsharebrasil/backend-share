@@ -1,6 +1,7 @@
 import { Hono, Context } from 'hono'
-import { arrayBufferBase64, SIGNATURE_LOGO_BASE64, SIGNATURE_LOGO_CID, SIGNATURE_BASE64 } from '../lib/emailAssets'
+import { arrayBufferBase64, SIGNATURE_LOGO_BASE64, SIGNATURE_LOGO_CID } from '../lib/emailAssets'
 import { escapeHtml } from '../lib/format'
+import { MAX_ATTACHMENT_TOTAL_SIZE, arrayBufferToBase64, uuid } from '../lib/strings'
 import { garantirTabelasAuxiliares, validateWorkerSchema } from '../lib/schema'
 import { authenticatedColaborador, checkInternalAuth, extractSupabaseUserId, requireAuthenticatedUser, shareBrasilUser } from '../lib/auth'
 import { chaveStorageDeUrl, shareBrasilBucket, shareBrasilFileName } from '../lib/storage'
@@ -11,10 +12,7 @@ type Variables = Record<string, never>
 export const emailRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
-const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024
-const uuid = () => crypto.randomUUID()
 type SignatureContext = { env: { SHARE_DB: D1Database } }
-function arrayBufferToBase64(buffer: ArrayBuffer): string { const bytes = new Uint8Array(buffer); let binary = ""; for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, Math.min(index + 0x8000, bytes.length))); return btoa(binary) }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))
   const logoUrl = String(assinatura.logo_url || '').trim()
@@ -279,28 +277,6 @@ function base64ArrayBuffer(value: string): ArrayBuffer {
   const binary = atob(value); const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
   return bytes.buffer
-}
-
-function carimboAssinaturaHtml(dataEmissaoISO: string): string {
-  const dataExtenso = new Date(`${dataEmissaoISO}T00:00:00`).toLocaleDateString('pt-BR', {
-    day: '2-digit',
-    month: 'long',
-    year: 'numeric',
-  })
-
-  return `
-    <div style="text-align:center; font-family:Arial,sans-serif; width:280px; margin:50px auto 0;">
-      <div style="font-size:13px; margin-bottom:8px; color:#222;">
-        Várzea Grande-MT, ${dataExtenso}
-      </div>
-      <img src="data:image/png;base64,${SIGNATURE_BASE64}" alt="Assinatura" style="width:170px; height:auto; display:block; margin:0 auto;">
-      <div style="border-top:1px solid #333; width:220px; margin:2px auto 8px;"></div>
-      <div style="font-size:13px; font-weight:bold; color:#111;">Rolffe de Lima Erbe</div>
-      <div style="font-size:12px; color:#555; margin-bottom:16px;">Gestor Responsável</div>
-      <img src="data:image/png;base64,${SIGNATURE_LOGO_BASE64}" alt="Share Brasil" style="width:110px; height:auto; display:block; margin:0 auto 6px;">
-      <div style="font-size:11px; color:#444;">Financeiro - SHARE BRASIL SERVICOS AEROPORTUARIOS</div>
-    </div>
-  `
 }
 
 emailRoutes.get('/api/interno/emails', async c => {

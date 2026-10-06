@@ -1,7 +1,6 @@
 import { Hono, Context } from "hono"
 import { cachedFetch, checkRateLimit } from "../lib/cache"
 import { checkInternalAuth, requireAuthenticatedUser } from "../lib/auth"
-import { escapeHtml } from "../lib/format"
 
 type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; SUPABASE_URL?: string; SUPABASE_ANON_KEY?: string; SUPABASE_SERVICE_ROLE_KEY?: string; VITE_SUPABASE_PUBLISHABLE_KEY?: string; WINSOCK_VALUATION_URL?: string; WINSOCK_API_KEY?: string; WINSOCK_AUTH_HEADER?: string; WINSOCK_AUTH_PREFIX?: string }
 type Variables = Record<string, never>

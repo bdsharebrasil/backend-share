@@ -12,6 +12,7 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    "noUnusedLocals": true,
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true
   },

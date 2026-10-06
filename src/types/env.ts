@@ -1,0 +1,30 @@
+export type Env = {
+  AISWEB_API_KEY: string
+  AISWEB_API_PASS: string
+  CACHE_KV: KVNamespace
+  RATE_LIMITER: DurableObjectNamespace
+  FILES: R2Bucket
+  SHARE_FILES?: R2Bucket
+  SHARE_DB: D1Database
+  RESEND_API_KEY: string
+  INTERNAL_TOKEN: string
+  EMAIL_FROM: string
+  SUPABASE_URL: string
+  SUPABASE_ANON_KEY: string
+  SUPABASE_SERVICE_ROLE_KEY: string
+  VITE_SUPABASE_PUBLISHABLE_KEY?: string
+  WINSOCK_VALUATION_URL: string
+  WINSOCK_API_KEY: string
+  WINSOCK_AUTH_HEADER?: string
+  WINSOCK_AUTH_PREFIX?: string
+  ANTHROPIC_API_KEY: string
+  GEMINI_API_KEY?: string
+  ALLOWED_ORIGINS?: string
+  TELEGRAM_BOT_TOKEN?: string
+  CLIENT_SESSION_SECRET?: string
+  CLIENT_SESSION_TTL_SECONDS?: string
+  CLOUDFLARE_TURN_KEY_ID?: string
+  CLOUDFLARE_TURN_API_TOKEN?: string
+  MEETING_ROOMS: DurableObjectNamespace
+  R2_PUBLIC_URL?: string
+}

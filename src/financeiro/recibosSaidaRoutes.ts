@@ -67,7 +67,7 @@ recibosSaidaRoutes.post('/recibos-saida', async (c) => {
     const categoriaExiste = categoriaInformada
       ? Boolean(await c.env.SHARE_DB.prepare('SELECT id FROM categoria_movimentacao_share WHERE id = ?').bind(categoriaInformada).first())
       : false
-    const financeiro = await issueRevenue(c.env.SHARE_DB, {
+    await issueRevenue(c.env.SHARE_DB, {
       idempotency_key: `recibo_saida:${id}`,
       valor_centavos: Math.round(valor * 100), descricao,
       data_emissao: dataEmissao, data_vencimento: dataVencimento,

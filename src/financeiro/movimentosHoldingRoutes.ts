@@ -1,7 +1,6 @@
 import { Hono } from "hono"
 import { mensagemFinanceiraStatements } from "./financeiroNotifications"
 import { errorResponse } from "./errorResponse"
-import { requireCaixaShareAccess } from "./access"
 import { listar } from "./repositories/d1"
 
 type Bindings = { SHARE_DB: D1Database }
