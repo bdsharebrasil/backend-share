@@ -28,6 +28,15 @@ test("repetir a ação completa vínculos faltantes sem duplicar linhas já vinc
   assert.match(kernel, /createClientExpenseRateios\(db, rateioCommand, userId, \{ internal: true \}\)/);
 });
 
+test("recibo pago por cliente persiste envio como origem do rateio", () => {
+  assert.match(kernel, /receipt\.pagador_tipo === 'cliente'/);
+  assert.match(kernel, /INSERT INTO envio_despesas/);
+  assert.match(kernel, /'RECIBO', \?\, 'ENVIO_DESPESA'/);
+  assert.match(kernel, /lancamento_id: envioId/);
+  assert.match(kernel, /UPDATE recibos SET lancamento_id = \? WHERE id = \? AND lancamento_id IS NULL/);
+  assert.match(kernel, /'ENVIO_DESPESA', \?\, 'RATEIO_DESPESAS'/);
+});
+
 test("histórico reconhece rateio de recibo sem depender de um lançamento espelho", () => {
   assert.match(routes, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id IN/);
   assert.match(routes, /FROM recibo_rateio/);

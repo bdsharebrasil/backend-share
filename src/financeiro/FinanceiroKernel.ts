@@ -2527,7 +2527,64 @@ export async function enviarReciboPagamentoParaRateio(
     `SELECT id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const rateioExistente = Boolean(existingClient?.id || existingDirectClient?.id || existingHolding?.id)
+  const envioVinculado = await db.prepare(
+    `SELECT destino_id AS id FROM financeiro_vinculos WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 AND destino_tipo = 'ENVIO_DESPESA' LIMIT 1`,
+  ).bind(receiptId).first<{ id: string }>().catch(() => null)
   let result: Row | null = null
+
+  // Recibo pago por cliente representa uma despesa do caixa cliente. O envio
+  // é a origem operacional desse fluxo; suas parcelas devem usar o próprio ID
+  // do envio como lancamento_id, sem criar um lançamento espelho.
+  if (!rateioExistente && receipt.pagador_tipo === 'cliente') {
+    const rateioLinhas = Array.isArray(body.rateio_linhas) ? body.rateio_linhas as Row[] : []
+    const aeronaveId = text(body.aeronave_id) || text(receipt.aeronave_id)
+    const dataVencimento = text(body.data_vencimento) || text(receipt.data_vencimento) || text(receipt.data_emissao)
+    const envioId = text(envioVinculado?.id) || id()
+    const comando: Row = {
+      ...receipt,
+      ...body,
+      lancamento_id: envioId,
+      recibo_id: receiptId,
+      tipo: 'cliente',
+      tipo_caixa: 'CLIENTE',
+      descricao: receipt.descricao,
+      valor_centavos: receipt.valor,
+      valor_total_despesa_centavos: receipt.valor,
+      data: receipt.data_emissao,
+      data_despesa: receipt.data_emissao,
+      data_vencimento: dataVencimento,
+      vencimento: dataVencimento,
+      aeronave_id: aeronaveId,
+      categoria_id: receipt.categoria_movimentacao_id,
+      categoria_cliente_id: receipt.categoria_movimentacao_id,
+      categoria_nome: receipt.categoria_nome,
+      rateio_linhas: rateioLinhas,
+      anexos_json: [],
+      idempotency_key: `recibo-pagamento-envio:${receiptId}`,
+    }
+    const command = normalizeCommand(comando, userId, { internal: true })
+    const linhas = allocationLines(command)
+    if (!linhas.length) throw new FinanceError('Despesa precisa de rateio', 'rateio_obrigatorio')
+    await validateAllocationLines(db, command, linhas, asPositiveCents(receipt.valor))
+    const envioExistente = envioVinculado?.id
+      ? await db.prepare('SELECT id FROM envio_despesas WHERE id = ?').bind(envioId).first<{ id: string }>()
+      : null
+    if (!envioExistente) {
+      await db.batch([
+        db.prepare(`INSERT INTO envio_despesas (id, tipo, descricao, valor, valor_total_despesa, data_despesa, vencimento, aeronave_id, observacoes, status, criado_por, grupo_categoria, tipo_caixa, pago_diretamente, pago_por, categoria_id, categoria_cliente_id, rateio_linhas_json, anexos_json, periodicidade, tipo_rateio, lancamento_id, criado_em, categoria_nome) VALUES (?, 'cliente', ?, ?, ?, ?, ?, ?, ?, 'CONVERTIDO', ?, 'CAIXA CLIENTE', 'CLIENTE', 0, NULL, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`)
+          .bind(envioId, receipt.descricao, asPositiveCents(receipt.valor) / 100, asPositiveCents(receipt.valor) / 100, receipt.data_emissao, dataVencimento, aeronaveId, body.observacoes ?? receipt.observacoes ?? null, userId, receipt.categoria_movimentacao_id, receipt.categoria_movimentacao_id, JSON.stringify(rateioLinhas), '[]', body.periodicidade ?? 'ÚNICO', body.tipo_rateio ?? 'FIXO', envioId, receipt.categoria_nome ?? null),
+        db.prepare(`INSERT INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'RECIBO', ?, 'ENVIO_DESPESA', ?, 'CONVERSAO')`).bind(id(), receiptId, envioId),
+      ])
+    }
+    const rateiosDoEnvio = await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id = ?').bind(envioId).all<{ id: string }>()
+    result = rateiosDoEnvio.results?.length
+      ? { id: envioId, lancamento_id: envioId, rateio_ids: rateiosDoEnvio.results.map((row) => row.id), idempotent: true }
+      : await createClientExpenseRateios(db, comando, userId, { internal: true })
+    await db.batch([
+      db.prepare('UPDATE recibos SET lancamento_id = ? WHERE id = ? AND lancamento_id IS NULL').bind(envioId, receiptId),
+      ...((result.rateio_ids ?? []) as string[]).map((rateioId) => db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo) VALUES (?, 'ENVIO_DESPESA', ?, 'RATEIO_DESPESAS', ?, 'CONVERSAO')`).bind(id(), envioId, rateioId)),
+    ])
+  }
 
   // Recupera recibos da empresa que já tenham lançamento, mas cuja primeira
   // tentativa de rateio tenha falhado antes de gravar as linhas.
