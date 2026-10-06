@@ -33,6 +33,7 @@ export const STATUS_CONTA_RECEBER = ['EM_ABERTO', 'EM_ATRASO', 'RECEBIDO', 'PAGO
 export const STATUS_RATEIO = ['EM_ABERTO', 'PAGO', 'CANCELADO'] as const
 export const STATUS_REEMBOLSO = ['PENDENTE', 'AGUARDANDO_REEMBOLSO', 'RECEBIDO', 'REEMBOLSADO', 'CANCELADO'] as const
 export const STATUS_FILA = ['PENDENTE', 'PROCESSANDO', 'PROCESSADO', 'ERRO'] as const
+const FILA_BACKOFF_MINUTOS = [1, 5, 15, 60]
 
 export class FinanceError extends Error {
   constructor(
@@ -116,6 +117,39 @@ const normalizeRateioType = (value: unknown): string => {
 }
 
 const round3 = (value: number): number => Math.round(value * 1000) / 1000
+const PERCENTUAL_TOTAL_BASIS_POINTS = 10_000
+
+function percentualBasisPoints(percentuais: number[]): number[] {
+  const brutos = percentuais.map((percentual) => percentual * 100)
+  const bases = brutos.map((bruto) => Math.floor(bruto))
+  let restante = PERCENTUAL_TOTAL_BASIS_POINTS - bases.reduce((total, base) => total + base, 0)
+  const ordemDosRestos = brutos.map((bruto, index) => ({ index, resto: bruto - bases[index] }))
+    .sort((a, b) => b.resto - a.resto || a.index - b.index)
+  for (let index = 0; index < ordemDosRestos.length && restante > 0; index += 1) {
+    bases[ordemDosRestos[index].index] += 1
+    restante -= 1
+  }
+  if (restante !== 0) throw new FinanceError('A soma dos percentuais do rateio deve ser 100%', 'rateio_percentual_invalido')
+  return bases
+}
+
+/** Distribui centavos pelo maior resto, preservando exatamente o total. */
+export function allocateCentsByPercentages(amount: number, percentuais: number[]): number[] {
+  if (!Number.isInteger(amount) || amount <= 0 || !percentuais.length || percentuais.some((percentual) => !Number.isFinite(percentual) || percentual < 0)) {
+    throw new FinanceError('Percentuais do rateio inválidos', 'rateio_percentual_invalido')
+  }
+  const basisPoints = percentualBasisPoints(percentuais)
+  const exatos = basisPoints.map((basisPoint) => amount * basisPoint / PERCENTUAL_TOTAL_BASIS_POINTS)
+  const valores = exatos.map(Math.floor)
+  let restante = amount - valores.reduce((total, valor) => total + valor, 0)
+  const ordemDosRestos = exatos.map((exato, index) => ({ index, resto: exato - valores[index] }))
+    .sort((a, b) => b.resto - a.resto || a.index - b.index)
+  for (let index = 0; index < ordemDosRestos.length && restante > 0; index += 1) {
+    valores[ordemDosRestos[index].index] += 1
+    restante -= 1
+  }
+  return valores
+}
 
 function parseAnexos(value: unknown): Row[] {
   if (Array.isArray(value)) return value as Row[]
@@ -673,10 +707,7 @@ function allocationLines(body: Row): AllocationLine[] {
     holdingId: nullableText(line.holding_id),
     percentual: Number(line.percentual ?? line.percentual_sociedade ?? 0),
     percentualSociedade: Number(line.percentual_sociedade ?? line.percentual ?? 0),
-    valorCentavos:
-      line.valor_centavos != null
-        ? asPositiveCents(line.valor_centavos)
-        : Math.round(amount * Number(line.percentual ?? 0) / 100),
+    valorCentavos: line.valor_centavos != null ? asPositiveCents(line.valor_centavos) : 0,
     pagoPor: nullableText(line.pago_por ?? line.pagoPor),
     pagoDiretamente: asFlag(
       line.pago_diretamente ?? line.pagoDiretamente ?? body.pago_diretamente ?? body.pagoDiretamente,
@@ -692,6 +723,12 @@ function allocationLines(body: Row): AllocationLine[] {
     )
   }
 
+  const percentualTotal = lines.reduce((sum, line) => sum + line.percentual, 0)
+  if (Math.abs(percentualTotal - 100) > 0.01) {
+    throw new FinanceError('A soma dos percentuais do rateio deve ser 100%', 'rateio_percentual_invalido')
+  }
+  const valoresCalculados = allocateCentsByPercentages(amount, lines.map((line) => line.percentual))
+  lines.forEach((line, index) => { line.valorCentavos = valoresCalculados[index] })
   const total = lines.reduce((sum, line) => sum + line.valorCentavos, 0)
   if (total !== amount) {
     throw new FinanceError(
@@ -722,8 +759,8 @@ async function receiptAllocationLines(
     throw new FinanceError('Aeronave obrigatória para rateio', 'rateio_aeronave_obrigatoria')
   }
   const cotistas = await db.prepare(
-    'SELECT id FROM cotista_aeronave WHERE aeronave_id = ? ORDER BY id',
-  ).bind(aeronaveId).all<{ id: string }>()
+    'SELECT id, percentual_sociedade FROM cotista_aeronave WHERE aeronave_id = ? ORDER BY id',
+  ).bind(aeronaveId).all<{ id: string; percentual_sociedade: number | null }>()
   const ids = cotistas.results ?? []
   if (!ids.length) {
     throw new FinanceError('Nenhum cotista encontrado para a aeronave', 'rateio_cotistas_invalidos')
@@ -731,12 +768,12 @@ async function receiptAllocationLines(
 
   const amount = asPositiveCents(input.valor_centavos)
   const percentual = 100 / ids.length
-  const valorBase = Math.floor(amount / ids.length)
-  let restante = amount - valorBase * ids.length
-  return ids.map(({ id: cotistaId }) => ({
+  const valores = allocateCentsByPercentages(amount, ids.map(() => percentual))
+  return ids.map(({ id: cotistaId, percentual_sociedade }, index) => ({
     cotista_id: cotistaId,
     percentual: round3(percentual),
-    valor_centavos: valorBase + (restante-- > 0 ? 1 : 0),
+    percentual_sociedade: percentual_sociedade == null ? null : Number(percentual_sociedade),
+    valor_centavos: valores[index],
   }))
 }
 
@@ -2073,6 +2110,7 @@ export async function enqueueFinance(
     'tentativas',
     'erro',
     'processado_em',
+    'proxima_tentativa_em',
   ])
   if (!['DESPESA', 'RECEITA', 'REEMBOLSO'].includes(operation)) {
     throw new FinanceError('Operação de fila inválida', 'operacao_fila_invalida')
@@ -2110,16 +2148,20 @@ export async function processFinanceQueue(
     'tentativas',
     'erro',
     'processado_em',
+    'proxima_tentativa_em',
   ])
   await db.prepare(`UPDATE financeiro_fila
       SET status = CASE WHEN tentativas >= 5 THEN 'ERRO' ELSE 'PENDENTE' END,
-          erro = CASE WHEN tentativas >= 5 THEN 'limite_de_tentativas_excedido' ELSE 'claim_expirado' END
+          erro = CASE WHEN tentativas >= 5 THEN 'limite_de_tentativas_excedido' ELSE 'claim_expirado' END,
+          processando_em = NULL,
+          proxima_tentativa_em = CASE WHEN tentativas >= 5 THEN NULL ELSE datetime('now', '+1 minute') END
     WHERE status = 'PROCESSANDO'
       AND datetime(COALESCE(processando_em, criado_em)) < datetime('now', '-15 minutes')`).run()
   const rows = await db
     .prepare(
       `SELECT * FROM financeiro_fila
         WHERE status = 'PENDENTE' AND tentativas < 5
+          AND (proxima_tentativa_em IS NULL OR datetime(proxima_tentativa_em) <= datetime('now'))
         ORDER BY criado_em
         LIMIT ?`,
     )
@@ -2168,7 +2210,8 @@ export async function processFinanceQueue(
               SET status = 'PROCESSADO',
                   processado_em = CURRENT_TIMESTAMP,
                   processando_em = NULL,
-                  erro = NULL
+                  erro = NULL,
+                  proxima_tentativa_em = NULL
             WHERE id = ?
               AND status = 'PROCESSANDO'`,
         )
@@ -2177,22 +2220,27 @@ export async function processFinanceQueue(
 
       result.push({ id: row.id, status: 'PROCESSADO' })
     } catch (error) {
+      const permanent = error instanceof FinanceError
+      const mensagem = error instanceof Error ? error.message : String(error)
+      const backoff = FILA_BACKOFF_MINUTOS[Math.min(Number(row.tentativas ?? 0), FILA_BACKOFF_MINUTOS.length - 1)]
       await db
         .prepare(
           `UPDATE financeiro_fila
-              SET status = 'ERRO',
+              SET status = CASE WHEN ? = 1 OR tentativas >= 5 THEN 'ERRO' ELSE 'PENDENTE' END,
                   processando_em = NULL,
-                  erro = ?
+                  erro = ?,
+                  proxima_tentativa_em = CASE WHEN ? = 1 OR tentativas >= 5 THEN NULL ELSE datetime('now', '+' || ? || ' minutes') END
             WHERE id = ?
               AND status = 'PROCESSANDO'`,
         )
-        .bind(error instanceof Error ? error.message : String(error), row.id)
+        .bind(permanent ? 1 : 0, mensagem, permanent ? 1 : 0, backoff, row.id)
         .run()
 
       result.push({
         id: row.id,
-        status: 'ERRO',
-        erro: error instanceof Error ? error.message : String(error),
+        status: permanent || Number(row.tentativas ?? 0) >= 5 ? 'ERRO' : 'PENDENTE',
+        erro: mensagem,
+        ...(permanent || Number(row.tentativas ?? 0) >= 5 ? {} : { proxima_tentativa_em: `+${backoff}m` }),
       })
     }
   }

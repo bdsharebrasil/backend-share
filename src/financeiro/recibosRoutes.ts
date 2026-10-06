@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { emitirReciboColaborador, emitirReciboPagamento, emitirReciboReembolso, emitirReciboSaida, enviarReciboPagamentoParaRateio, programarReciboReembolso, validateFinanceSchema } from "./FinanceiroKernel"
+import { allocateCentsByPercentages, emitirReciboColaborador, emitirReciboPagamento, emitirReciboReembolso, emitirReciboSaida, enviarReciboPagamentoParaRateio, programarReciboReembolso, validateFinanceSchema } from "./FinanceiroKernel"
 import { errorResponse } from "./errorResponse"
 import { listar } from "./repositories/d1"
 
@@ -265,10 +265,11 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
       const cotistaHolding = cotistas.find((cotista) => String(cotista.holding_id) === holdingIds[0])
       statements.push(c.env.SHARE_DB.prepare(`INSERT INTO movimentos_holding (id, holding_id, socio_id, aeronave_id, periodicidade, tipo_caixa, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome, fluxo, valor_centavos, status, pago_diretamente, numero_recibo, url_recibo, observacoes, criado_por) VALUES (?, ?, ?, ?, ?, 'HOLD', ?, ?, ?, ?, ?, 'SAIDA', ?, 'EM_ABERTO', 0, ?, ?, ?, ?)`).bind(movimentoHoldingId, holdingIds[0], cotistaHolding?.socio_id ?? null, aeronaveId, periodicidade, dataEmissao, dataVencimento, descricao, categoriaIdRateio, categoriaNomeRateio, valorCentavos, receipt.numero_recibo ?? null, documentoUrl, body.observacoes ?? null, c.get('userId') || null))
     }
+    const valoresRateados = allocateCentsByPercentages(valorCentavos, linhasNormalizadas.map((linha) => linha.percentual_uso))
     linhasNormalizadas.forEach((linha, index) => {
       const cotista = cotistas.find((item) => String(item.id) === String(linha.cotista_id))!
       const percentual = linha.percentual_uso
-      const rateado = Math.round(valorCentavos * percentual / 100)
+      const rateado = valoresRateados[index]
       const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, documento_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?)`
       const parametros = String(cotista.socio_id ?? '').trim()
         ? [rateioIds[index], movimentoHoldingId, aeronaveId, cotista.socio_id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, body.subcategoria_1 ?? null, body.subcategoria_2 ?? null, body.subcategoria_3 ?? null, body.subcategoria_4 ?? null, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl]

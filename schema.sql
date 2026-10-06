@@ -1359,7 +1359,7 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE escala_tripulacao (
   erro TEXT,
   processado_em TEXT,
   criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-, processando_em TEXT)'), ('CREATE TABLE financeiro_vinculos (
+, processando_em TEXT, proxima_tentativa_em TEXT)'), ('CREATE TABLE financeiro_vinculos (
   id TEXT PRIMARY KEY NOT NULL,
   origem_tipo TEXT NOT NULL,
   origem_id TEXT NOT NULL,

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import {
   createExpense,
   createReimbursement,
+  allocateCentsByPercentages,
   enqueueFinance,
   issueRevenue,
   processFinanceQueue,
@@ -234,9 +235,10 @@ financeiroRoutes.post('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId
     const categoriaNome = origem.source.categoria_nome ?? null
     const rateioIds: string[] = []
     const statements: D1PreparedStatement[] = []
-    for (const linha of linhas) {
+    const valoresRateados = allocateCentsByPercentages(valorTotal, linhas.map((linha) => Number(linha.percentual)))
+    for (const [index, linha] of linhas.entries()) {
       const id = crypto.randomUUID(); rateioIds.push(id)
-      const percentual = Number(linha.percentual); const rateado = Math.round(valorTotal * percentual / 100)
+      const percentual = Number(linha.percentual); const rateado = valoresRateados[index]
       if (origem.kind === 'cliente') {
         const cotista = await db.prepare('SELECT id, percentual_sociedade FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(String(linha.cotista_id ?? ''), aeronaveId).first<{ id: string; percentual_sociedade: number | null }>()
         if (!cotista) return c.json({ error: 'cotista_cliente_invalido' }, 400)
