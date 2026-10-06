@@ -9,7 +9,7 @@ type Variables = Record<string, never>
 
 export const mensagensRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
-const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
+const log = { debug: (...args: unknown[]) => console.debug(...args), warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
 // ─── Routes: Mensageria Interna (Inbox / D1) ──────────────────────────────────
 
 type PastaMensagem = 'inbox' | 'nao-lidas' | 'favoritas' | 'enviadas' | 'arquivo'

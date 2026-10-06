@@ -13,9 +13,16 @@ export function nullableText(value: unknown): string | null {
   return valueText || null
 }
 
+export function isIsoDate(value: unknown): boolean {
+  const candidate = text(value).slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return false
+  const parsed = new Date(`${candidate}T00:00:00.000Z`)
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === candidate
+}
+
 export function dateValue(value: unknown, fallback = new Date().toISOString().slice(0, 10)): string {
   const candidate = text(value) || fallback
-  return /^\d{4}-\d{2}-\d{2}/.test(candidate) ? candidate.slice(0, 10) : fallback
+  return isIsoDate(candidate) ? candidate.slice(0, 10) : fallback
 }
 
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {

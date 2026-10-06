@@ -7,7 +7,7 @@ type Variables = Record<string, never>
 
 export const valuationRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
-const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
+const log = { debug: (...args: unknown[]) => console.debug(...args), warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
 const WINSOCK_VALUATION_CACHE_TTL = 86_400
 const WINSOCK_N_NUMBER = /^N[0-9A-Z]{1,5}$/i
 

@@ -11,7 +11,7 @@ type Variables = Record<string, never>
 
 export const emailRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
-const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
+const log = { debug: (...args: unknown[]) => console.debug(...args), warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
 type SignatureContext = { env: { SHARE_DB: D1Database } }
 function assinaturaHtml(assinatura: any): string {
   const esc = (valor: unknown) => escapeHtml(String(valor || ''))

@@ -9,7 +9,7 @@ interface Airport { icao: string; name: string; lat: number; lon: number; distKm
 
 export const aiswebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
-const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
+const log = { debug: (...args: unknown[]) => console.debug(...args), warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
 /** Converte envelopes AISWEB (`item`, `notam`, `data`) em uma lista plana. */
 function collectionItems(value: any): any[] {
   if (value == null) return []

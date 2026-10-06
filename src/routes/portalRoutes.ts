@@ -7,7 +7,7 @@ type Variables = Record<string, never>
 
 export const portalRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
-const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
+const log = { debug: (...args: unknown[]) => console.debug(...args), warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
 type PortalUser = {
   id: string
   login: string

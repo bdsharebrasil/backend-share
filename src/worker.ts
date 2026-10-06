@@ -22,6 +22,7 @@ import { checkRateLimit, clientIp } from './lib/cache'
 import { normalizarPastaUpload, salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
 import { getPontoServerTimestamp } from './lib/ponto'
 import { uuid } from './lib/strings'
+import { createLogger } from './lib/logger'
 import type { Env } from './types/env'
 import {
   authenticatedColaborador,
@@ -82,7 +83,7 @@ app.onError((error, c) => {
     return c.json({ error: error.message, code: error.code }, error.status as any)
   }
 
-  console.error('[http] erro interno', error)
+  createLogger((c as any).get?.('requestId') || null).error('http.internal_error', error)
   return c.json({ error: 'erro_interno', code: 'erro_interno' }, 500)
 })
 
@@ -90,10 +91,17 @@ app.onError((error, c) => {
 app.use('*', async (c, next) => {
   const corsMiddleware = cors({
     origin: origin => originFor(c.env, origin),
-    allowHeaders: ['Content-Type', 'Authorization', 'apikey', 'X-Requested-With'],
+    allowHeaders: ['Content-Type', 'Authorization', 'apikey', 'X-Requested-With', 'X-Request-Id'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
   })
   return corsMiddleware(c, next)
+})
+app.use('*', async (c, next) => {
+  const recebido = c.req.header('X-Request-Id')?.trim() || ''
+  const requestId = /^[A-Za-z0-9._:-]{1,128}$/.test(recebido) ? recebido : crypto.randomUUID()
+  ;(c as any).set('requestId', requestId)
+  c.header('X-Request-Id', requestId)
+  await next()
 })
 app.route('/', abastecimentosRoutes)
 app.route('/', diarioBordoRoutes)
@@ -166,7 +174,7 @@ function createMcpServer(db: D1Database): McpServer {
 app.use('/mcp', async (c, next) => {
   const corsMiddleware = cors({
     origin: origin => originFor(c.env, origin),
-    allowHeaders: ['Content-Type', 'Authorization', 'mcp-session-id', 'Last-Event-ID', 'mcp-protocol-version'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'mcp-session-id', 'Last-Event-ID', 'mcp-protocol-version'],
     exposeHeaders: ['mcp-session-id', 'mcp-protocol-version'],
     allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   })
@@ -182,19 +190,14 @@ app.all('/mcp', async c => {
     await server.connect(transport)
     return transport.handleRequest(c.req.raw)
   } catch (error) {
-    console.error('[mcp] erro ao iniciar sessão', error)
+    createLogger((c as any).get?.('requestId') || null).error('mcp.session_start_error', error)
     return c.json({ error: 'erro_interno', code: 'erro_interno' }, 500)
   }
 })
 
 // ─── Outras Configurações & Helpers Originais ──────────────────────────────────
 
-const isDev = false
-const log = {
-  debug: (...a: any[]) => isDev && console.log('[DEBUG]', ...a),
-  warn: (...a: any[]) => console.warn('[WARN]', ...a),
-  error: (...a: any[]) => console.error('[ERROR]', ...a),
-}
+const log = createLogger()
 
 // ─── Helpers: arquivos, short links e auth ────────────────────────────────────
 

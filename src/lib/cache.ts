@@ -12,7 +12,7 @@ type CacheContext = {
 }
 
 const log = {
-  debug: (..._args: unknown[]) => undefined,
+  debug: (...args: unknown[]) => console.debug(...args),
   error: (...args: unknown[]) => console.error(...args),
 }
 
