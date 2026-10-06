@@ -6,73 +6,107 @@ export type Colaborador = {
   tipo_conta: string | null; conta_numero: string | null; agencia_numero: string | null; tipo_chave_pix: string | null
   pix: string | null; tipo_user: string | null; departamento: string | null; departamentos_email?: string | null; cliente_id: string | null
 }
-type AuthContext = { req: { header(name: string): string | undefined }; env: { SUPABASE_URL?: string; INTERNAL_TOKEN?: string; SHARE_DB: D1Database } }
-type JwtClaims = { sub?: unknown; email?: unknown; iss?: unknown; aud?: unknown; exp?: unknown; nbf?: unknown }
-type CachedJwks = { issuer: string; keys: JsonWebKey[]; expiresAt: number }
-const JWKS_TTL_MS = 5 * 60_000
-const TOKEN_TTL_MS = 60_000
-let jwksCache: CachedJwks | null = null
-let jwksRequest: Promise<CachedJwks> | null = null
-const validTokenCache = new Map<string, { userId: string; expiresAt: number }>()
-function base64UrlBytes(value: string): Uint8Array {
-  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
-  const binary = atob(normalized + '='.repeat((4 - normalized.length % 4) % 4))
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
+type AuthContext = {
+  req: { header(name: string): string | undefined }
+  env: {
+    SUPABASE_URL?: string
+    SUPABASE_ANON_KEY?: string
+    SUPABASE_SERVICE_ROLE_KEY?: string
+    VITE_SUPABASE_PUBLISHABLE_KEY?: string
+    INTERNAL_TOKEN?: string
+    SHARE_DB: D1Database
+  }
 }
-function parseJwt(token: string): { header: Record<string, unknown>; claims: JwtClaims; signingInput: string; signature: Uint8Array } | null {
+type JwtClaims = { exp?: unknown }
+type CachedToken = { userId: string; expiresAt: number }
+const VERIFIED_TOKEN_TTL_MS = 30_000
+const verifiedTokenCache = new Map<string, CachedToken>()
+const tokenValidationRequests = new Map<string, Promise<string | null>>()
+
+function tokenExpiration(token: string): number | null {
   const parts = token.split('.')
   if (parts.length !== 3) return null
   try {
-    return { header: JSON.parse(new TextDecoder().decode(base64UrlBytes(parts[0]))), claims: JSON.parse(new TextDecoder().decode(base64UrlBytes(parts[1]))), signingInput: `${parts[0]}.${parts[1]}`, signature: base64UrlBytes(parts[2]) }
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(normalized + '='.repeat((4 - normalized.length % 4) % 4))) as JwtClaims
+    return typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp * 1000 : null
   } catch { return null }
 }
-function audienceMatches(aud: unknown): boolean {
-  return typeof aud === 'string' ? aud === 'authenticated' : Array.isArray(aud) && aud.includes('authenticated')
+
+function supabaseApiKeys(c: AuthContext): string[] {
+  return [...new Set([
+    c.env.SUPABASE_ANON_KEY,
+    c.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+    c.req.header('apikey'),
+    c.env.SUPABASE_SERVICE_ROLE_KEY,
+  ].map((key) => key?.trim()).filter((key): key is string => Boolean(key)))]
 }
-async function loadJwks(supabaseUrl: string): Promise<CachedJwks> {
-  const issuer = `${supabaseUrl}/auth/v1`
-  if (jwksCache?.issuer === issuer && jwksCache.expiresAt > Date.now()) return jwksCache
-  if (!jwksRequest) {
-    jwksRequest = fetch(`${issuer}/.well-known/jwks.json`, { headers: { Accept: 'application/json' } }).then(async (response) => {
-      if (!response.ok) throw new Error(`JWKS status ${response.status}`)
-      const payload = await response.json() as { keys?: JsonWebKey[] }
-      if (!Array.isArray(payload.keys) || !payload.keys.length) throw new Error('JWKS sem chaves')
-      const result = { issuer, keys: payload.keys, expiresAt: Date.now() + JWKS_TTL_MS }
-      jwksCache = result
-      return result
-    }).finally(() => { jwksRequest = null })
+
+async function validateWithSupabase(supabaseUrl: string, token: string, apiKeys: string[]): Promise<string | null> {
+  for (const apiKey of apiKeys) {
+    let response: Response
+    try {
+      response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+        headers: { apikey: apiKey, Authorization: `Bearer ${token}` },
+      })
+    } catch {
+      return null
+    }
+    if (response.ok) {
+      try {
+        const user = await response.json() as { id?: unknown }
+        return typeof user?.id === 'string' && user.id.trim() ? user.id.trim() : null
+      } catch {
+        return null
+      }
+    }
+    // A public API key may have rotated; retry only credential errors with
+    // another configured/public key. Transient upstream failures fail closed.
+    if (response.status !== 401 && response.status !== 403) return null
   }
-  return jwksRequest
+  return null
 }
-async function verifyToken(token: string, supabaseUrl: string): Promise<string | null> {
-  const cached = validTokenCache.get(token)
-  if (cached && cached.expiresAt > Date.now()) return cached.userId
-  const parsed = parseJwt(token)
-  if (!parsed || typeof parsed.header.alg !== 'string' || typeof parsed.header.kid !== 'string') return null
-  const algorithm = parsed.header.alg
-  const cryptoAlgorithm: any = algorithm === 'RS256'
-    ? { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
-    : algorithm === 'ES256' ? { name: 'ECDSA', namedCurve: 'P-256' } : undefined
-  if (!cryptoAlgorithm) return null
-  const jwks = await loadJwks(supabaseUrl)
-  const jwk = jwks.keys.find((key) => (key as JsonWebKey & { kid?: string; alg?: string }).kid === parsed.header.kid && (key as JsonWebKey & { kid?: string; alg?: string }).alg === algorithm)
-  if (!jwk) return null
-  const key = await crypto.subtle.importKey('jwk', jwk, cryptoAlgorithm, false, ['verify'])
-  const verified = await crypto.subtle.verify(algorithm === 'ES256' ? { name: 'ECDSA', hash: 'SHA-256' } : cryptoAlgorithm, key, parsed.signature, new TextEncoder().encode(parsed.signingInput))
-  const now = Math.floor(Date.now() / 1000)
-  if (!verified || parsed.claims.iss !== jwks.issuer || !audienceMatches(parsed.claims.aud) || typeof parsed.claims.exp !== 'number' || parsed.claims.exp <= now || (typeof parsed.claims.nbf === 'number' && parsed.claims.nbf > now + 60)) return null
-  const userId = typeof parsed.claims.sub === 'string' ? parsed.claims.sub.trim() : ''
-  if (!userId) return null
-  if (validTokenCache.size >= 1000) validTokenCache.delete(validTokenCache.keys().next().value as string)
-  validTokenCache.set(token, { userId, expiresAt: Date.now() + TOKEN_TTL_MS })
-  return userId
+
+function cacheVerifiedToken(cacheKey: string, token: string, userId: string): void {
+  const now = Date.now()
+  const expiration = tokenExpiration(token)
+  // The JWT payload is used only to bound the cache; Supabase Auth remains the
+  // authority that verifies the signature, issuer, expiry, and user status.
+  const expiresAt = expiration === null ? now : Math.min(now + VERIFIED_TOKEN_TTL_MS, expiration)
+  if (expiresAt <= now) return
+  if (verifiedTokenCache.size >= 1000) {
+    const oldestKey = verifiedTokenCache.keys().next().value
+    if (oldestKey) verifiedTokenCache.delete(oldestKey)
+  }
+  verifiedTokenCache.set(cacheKey, { userId, expiresAt })
 }
+
 export async function getAuthenticatedUserId(c: AuthContext, tokenOverride?: string): Promise<string | null> {
-  const authorization = tokenOverride ? `Bearer ${tokenOverride}` : c.req.header('authorization')
+  const authorization = tokenOverride ? `Bearer ${tokenOverride.trim()}` : c.req.header('authorization')
+  const match = authorization?.match(/^Bearer\s+([^\s]+)$/i)
+  const token = match?.[1]
   const supabaseUrl = c.env.SUPABASE_URL?.trim().replace(/\/+$/, '')
-  if (!authorization?.startsWith('Bearer ') || !supabaseUrl) return null
-  try { return await verifyToken(authorization.slice(7).trim(), supabaseUrl) } catch { return null }
+  const apiKeys = supabaseApiKeys(c)
+  if (!token || !supabaseUrl || !apiKeys.length) return null
+
+  const cacheKey = `${supabaseUrl}\u0000${token}`
+  const cached = verifiedTokenCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return cached.userId
+  if (cached) verifiedTokenCache.delete(cacheKey)
+  const inFlight = tokenValidationRequests.get(cacheKey)
+  if (inFlight) return inFlight
+
+  const validation = validateWithSupabase(supabaseUrl, token, apiKeys)
+    .then((userId) => {
+      if (userId) cacheVerifiedToken(cacheKey, token, userId)
+      return userId
+    })
+    .catch(() => null)
+    .finally(() => { tokenValidationRequests.delete(cacheKey) })
+  tokenValidationRequests.set(cacheKey, validation)
+  return validation
 }
+
 export async function requireAuthenticatedUser(c: AuthContext): Promise<boolean> { return Boolean(await getAuthenticatedUserId(c)) }
 async function timingSafeTokenMatch(a: string, b: string): Promise<boolean> {
   const encoder = new TextEncoder()
@@ -85,8 +119,12 @@ export async function checkInternalAuth(c: AuthContext): Promise<boolean> {
   return Boolean(expected && token) && timingSafeTokenMatch(token!, expected!)
 }
 export function extractSupabaseUserId(c: Pick<AuthContext, 'req'>): string | null {
-  const authorization = c.req.header('authorization'); const parsed = authorization?.startsWith('Bearer ') ? parseJwt(authorization.slice(7).trim()) : null
-  return typeof parsed?.claims.sub === 'string' ? parsed.claims.sub : null
+  const authorization = c.req.header('authorization')
+  if (!authorization?.startsWith('Bearer ')) return null
+  try {
+    const payload = authorization.slice(7).split('.')[1]
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))?.sub ?? null
+  } catch { return null }
 }
 export async function authenticatedColaborador(c: AuthContext): Promise<Colaborador | null> {
   const userId = await getAuthenticatedUserId(c)
