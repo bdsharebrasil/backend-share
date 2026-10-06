@@ -284,3 +284,38 @@ export function consolidarRateiosLancamentos(rows: Record<string, unknown>[]) {
 
   return resultado
 }
+
+
+/**
+ * Predicado único para impedir que um lançamento-pai e seus rateios sejam
+ * contabilizados juntos. O schema é consultado antes para manter compatibilidade
+ * com instalações antigas que ainda não possuem as colunas de origem/reembolso.
+ */
+export function buildLancamentoSemRateioPredicate(schema: Map<string, Set<string>>) {
+  const lancamentoColumns = schema.get('lancamentos')
+  const rateioColumns = schema.get('rateio_despesas')
+  const reembolsoColumns = schema.get('reembolsos')
+  const relacionamentosRateio = ['rd.lancamento_id = l.id']
+
+  if (reembolsoColumns?.has('lancamento_cliente_id') && reembolsoColumns.has('lancamento_origem_id')) {
+    relacionamentosRateio.push(
+      'rd.lancamento_id IN (SELECT rb.lancamento_origem_id FROM reembolsos rb WHERE rb.lancamento_cliente_id = l.id)',
+      'rd.lancamento_id IN (SELECT rb.lancamento_cliente_id FROM reembolsos rb WHERE rb.lancamento_origem_id = l.id)',
+    )
+  }
+
+  if (lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('origem_id')
+    && rateioColumns?.has('origem_tipo') && rateioColumns.has('origem_id')) {
+    relacionamentosRateio.push('(l.origem_tipo IS NOT NULL AND l.origem_id IS NOT NULL AND rd.origem_tipo = l.origem_tipo AND rd.origem_id = l.origem_id)')
+  }
+
+  const excluirEntradaReembolso = lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('fluxo')
+    ? ` AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'REEMBOLSO' AND UPPER(COALESCE(l.fluxo, '')) = 'ENTRADA')`
+    : ''
+
+  return `NOT EXISTS (
+        SELECT 1 FROM rateio_despesas rd
+         WHERE UPPER(COALESCE(rd.status, '')) <> 'CANCELADO'
+           AND (${relacionamentosRateio.join('\n             OR ')})
+      )${excluirEntradaReembolso}`
+}

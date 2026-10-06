@@ -3,44 +3,19 @@ import {
   holdingMovementColumn,
   loadSchema,
 } from './FinanceiroKernel'
-import { calcularCompensacaoBalanco, consolidarRateiosLancamentos, resumirHoldings } from './cotistaDashboard'
+import { buildLancamentoSemRateioPredicate, calcularCompensacaoBalanco, consolidarRateiosLancamentos, resumirHoldings } from './cotistaDashboard'
 import { calcularMediasCotista, calcularMediasCotistaPorMes, type VooMediasCotista } from './mediasCotista'
+import { montarRelatorioGeral, type CustoBruto, type VooMes } from './relatorioGeralCotista'
 import { errorResponse } from './errorResponse'
 import { listar, listarTodos } from './repositories/d1'
 import { selecionarColunaOpcional } from './schemaSql'
 import { statusLancamentoFinanceiro } from './statuses'
 
+// Compatibilidade para consumidores legados; a implementação vive no módulo compartilhado.
+export { buildLancamentoSemRateioPredicate } from './cotistaDashboard'
+
 type Bindings = { SHARE_DB: D1Database }
 type Variables = { userId: string | null }
-
-export function buildLancamentoSemRateioPredicate(schema: Map<string, Set<string>>) {
-  const lancamentoColumns = schema.get('lancamentos')
-  const rateioColumns = schema.get('rateio_despesas')
-  const reembolsoColumns = schema.get('reembolsos')
-  const relacionamentosRateio = ['rd.lancamento_id = l.id']
-
-  if (reembolsoColumns?.has('lancamento_cliente_id') && reembolsoColumns.has('lancamento_origem_id')) {
-    relacionamentosRateio.push(
-      'rd.lancamento_id IN (SELECT rb.lancamento_origem_id FROM reembolsos rb WHERE rb.lancamento_cliente_id = l.id)',
-      'rd.lancamento_id IN (SELECT rb.lancamento_cliente_id FROM reembolsos rb WHERE rb.lancamento_origem_id = l.id)',
-    )
-  }
-
-  if (lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('origem_id')
-    && rateioColumns?.has('origem_tipo') && rateioColumns.has('origem_id')) {
-    relacionamentosRateio.push('(l.origem_tipo IS NOT NULL AND l.origem_id IS NOT NULL AND rd.origem_tipo = l.origem_tipo AND rd.origem_id = l.origem_id)')
-  }
-
-  const excluirEntradaReembolso = lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('fluxo')
-    ? ` AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'REEMBOLSO' AND UPPER(COALESCE(l.fluxo, '')) = 'ENTRADA')`
-    : ''
-
-  return `NOT EXISTS (
-        SELECT 1 FROM rateio_despesas rd
-         WHERE UPPER(COALESCE(rd.status, '')) <> 'CANCELADO'
-           AND (${relacionamentosRateio.join('\n             OR ')})
-      )${excluirEntradaReembolso}`
-}
 
 export const dashboardCotistaRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
@@ -249,6 +224,59 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     }
     const mediasMensais = calcularMediasCotistaPorMes(voosMedias as VooMediasCotista[], custosPorMes)
     return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+  } catch (error) { return errorResponse(c, error) }
+})
+
+dashboardCotistaRoutes.get('/cotista/relatorio-geral', async (c) => {
+  try {
+    const db = c.env.SHARE_DB
+    const aeronaveId = String(c.req.query('aeronave_id') || '').trim()
+    const ano = Number(c.req.query('ano') || new Date().getFullYear())
+    if (!aeronaveId || !Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'aeronave_id_e_ano_validos_obrigatorios' }, 400)
+
+    const schema = await loadSchema(db)
+    const holdingColumn = holdingMovementColumn(schema)
+    const inicio = `${ano}-01-01`
+    const fim = `${ano}-12-31`
+    const periodo = (col: string) => `date(${col}) >= date(?) AND date(${col}) <= date(?)`
+    const naoCancelado = (col: string) => `UPPER(COALESCE(${col}, '')) <> 'CANCELADO'`
+    const lancamentoSemRateio = buildLancamentoSemRateioPredicate(schema)
+
+    const [rateios, lancamentos, rateiosHolding, movimentosHolding, voos, cotistas] = await Promise.all([
+      listar(db, `SELECT MIN(r.data_emissao) AS data, MIN(r.categoria_nome) AS categoria, MIN(r.tipo_rateio) AS tipo_rateio, MIN(r.periodicidade) AS periodicidade,
+          MIN(r.descricao_despesa) AS descricao, SUM(r.valor_rateado_centavos) AS rateado, MAX(r.valor_total_centavos) AS total
+        FROM rateio_despesas r
+       WHERE r.aeronave_id = ? AND ${naoCancelado('r.status')} AND ${periodo('r.data_emissao')}
+       GROUP BY COALESCE(r.lancamento_id, r.id)`, aeronaveId, inicio, fim),
+      listar(db, `SELECT l.data_emissao AS data, l.categoria_nome AS categoria, l.grupo_categoria AS grupo, l.periodicidade, l.descricao, l.valor_centavos
+        FROM lancamentos l
+       WHERE l.aeronave_id = ? AND UPPER(COALESCE(l.fluxo, '')) = 'SAIDA' AND ${naoCancelado('l.status')} AND ${periodo('l.data_emissao')}
+         AND ${lancamentoSemRateio}`, aeronaveId, inicio, fim),
+      listar(db, `SELECT MIN(r.data_emissao) AS data, MIN(r.categoria_nome) AS categoria, MIN(r.tipo_rateio) AS tipo_rateio, MIN(r.periodicidade) AS periodicidade,
+          MIN(r.descricao_despesa) AS descricao, SUM(r.valor_rateado_centavos) AS rateado
+        FROM rateio_hold r
+       WHERE r.aeronave_id = ? AND ${naoCancelado('r.status')} AND ${periodo('r.data_emissao')}
+       GROUP BY COALESCE(r.${holdingColumn}, r.id)`, aeronaveId, inicio, fim),
+      listar(db, `SELECT mh.data_emissao AS data, mh.categoria_nome AS categoria, mh.grupo_categoria AS grupo, mh.periodicidade, mh.descricao, mh.valor_centavos
+        FROM movimentos_holding mh
+       WHERE mh.aeronave_id = ? AND mh.tipo_caixa = 'HOLD' AND UPPER(COALESCE(mh.fluxo, '')) = 'SAIDA' AND ${naoCancelado('mh.status')} AND ${periodo('mh.data_emissao')}
+         AND NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND ${naoCancelado('rh.status')})`, aeronaveId, inicio, fim),
+      listar(db, `SELECT substr(l.data_registro, 1, 7) AS mes, COALESCE(SUM(l.tempo_voo), 0) AS h_voo, COALESCE(SUM(l.tempo_total), 0) AS h_ttl,
+          COALESCE(SUM(l.pousos_total), 0) AS pousos, COALESCE(SUM(l.distancia_nm), 0) AS distancia_nm,
+          COALESCE(SUM(l.litros_combustivel_abastecido), 0) AS litros, COUNT(DISTINCT date(l.data_registro)) AS dias_voo
+        FROM lancamentos_diario_bordo l
+       WHERE l.aeronave_id = ? AND ${periodo('l.data_registro')}
+       GROUP BY substr(l.data_registro, 1, 7)`, aeronaveId, inicio, fim),
+      db.prepare('SELECT COUNT(*) AS n FROM cotista_aeronave WHERE aeronave_id = ?').bind(aeronaveId).first<{ n: number }>(),
+    ])
+
+    const custos: CustoBruto[] = [
+      ...rateios.map((r) => ({ ...r, valor_centavos: Number(r.total) > 0 ? Number(r.total) : Number(r.rateado) }) as CustoBruto),
+      ...lancamentos as unknown as CustoBruto[],
+      ...rateiosHolding.map((r) => ({ ...r, valor_centavos: Number(r.rateado) }) as CustoBruto),
+      ...movimentosHolding as unknown as CustoBruto[],
+    ]
+    return c.json(montarRelatorioGeral(custos, voos as unknown as VooMes[], ano, Number(cotistas?.n ?? 0)))
   } catch (error) { return errorResponse(c, error) }
 })
 
