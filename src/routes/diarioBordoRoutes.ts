@@ -297,13 +297,17 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
       COALESCE((SELECT SUM(l.tempo_total) FROM lancamentos_diario_bordo l WHERE l.aeronave_id = a.id AND strftime('%Y', l.data_registro) = ?1), 0) AS horas_ano,
       COALESCE(dm.celula_atual_ttotal, 0) AS celula_atual_ttotal,
       COALESCE(dm.celula_prox_revisao_ttotal, 0) AS celula_prox_revisao_ttotal,
+      COALESCE(dm.celula_disponivel_ttotal, 0) AS celula_disponivel_ttotal,
+      COALESCE(dm.celula_atual_tvoo, 0) AS celula_atual_tvoo,
+      COALESCE(dm.celula_prox_revisao_tvoo, 0) AS celula_prox_revisao_tvoo,
+      COALESCE(dm.celula_disponivel_tvoo, 0) AS celula_disponivel_tvoo,
       COALESCE(dm.mes, 0) AS mes_referencia,
       COALESCE(dm.fechado, 0) AS fechado
     FROM aeronave a
     LEFT JOIN diario_mes dm ON dm.id = (SELECT dm2.id FROM diario_mes dm2 WHERE dm2.aeronave_id = a.id AND dm2.ano = ?1 ORDER BY dm2.mes DESC LIMIT 1)
     WHERE lower(COALESCE(a.status, 'ativa')) LIKE 'ativ%'
     ORDER BY a.matricula_registro`).bind(String(ano)).all<any>()
-  return c.json({ ano, aeronaves: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), fechado: Number(row.fechado || 0) })) })
+  return c.json({ ano, aeronaves: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), celula_disponivel_ttotal: Number(row.celula_disponivel_ttotal || 0), celula_atual_tvoo: Number(row.celula_atual_tvoo || 0), celula_prox_revisao_tvoo: Number(row.celula_prox_revisao_tvoo || 0), celula_disponivel_tvoo: Number(row.celula_disponivel_tvoo || 0), fechado: Number(row.fechado || 0) })) })
 })
 
 diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes', async c => {
@@ -317,8 +321,12 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes', async c => {
   await garantirTabelaAbastecimentos(c)
   const aeronave = await db.prepare('SELECT id, matricula_registro, fabricante, modelo, status, consumo_combustivel, base FROM aeronave WHERE id = ?1').bind(aeronaveId).first<any>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
-  const diarioMes = await db.prepare('SELECT * FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
-  const meses = await db.prepare('SELECT id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal FROM diario_mes WHERE aeronave_id = ?1 ORDER BY ano DESC, mes DESC').bind(aeronaveId).all<any>()
+  let diarioMes = await db.prepare('SELECT * FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
+  if (diarioMes) {
+    await recalcularDiarioMes(c, diarioMes.id)
+    diarioMes = await db.prepare('SELECT * FROM diario_mes WHERE id = ?1').bind(diarioMes.id).first<any>()
+  }
+  const meses = await db.prepare('SELECT id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal, celula_disponivel_ttotal, celula_atual_tvoo, celula_prox_revisao_tvoo, celula_disponivel_tvoo, modo_celula FROM diario_mes WHERE aeronave_id = ?1 ORDER BY ano DESC, mes DESC').bind(aeronaveId).all<any>()
   if (!diarioMes) return c.json({ aeronave, diario_mes: null, lancamentos: [], meses_disponiveis: meses.results })
   const lancamentos = await db.prepare(`SELECT l.*, (SELECT matricula_registro FROM aeronave WHERE id = l.aeronave_id) AS matricula_registro, c.razao_social AS cliente_nome, c.codigo_cliente AS cliente_codigo, c.proprietario AS cliente_proprietario, h.nome AS holding_nome, s.nome AS socio_nome,
       ct.razao_social AS cliente_tomador_nome, ct.codigo_cliente AS cliente_tomador_codigo, st.nome AS socio_tomador_nome,
@@ -378,17 +386,18 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/mes', async c => {
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
   const existing = await db.prepare('SELECT id FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<{ id: string }>()
   if (existing) return c.json({ error: 'diario_mes_ja_existe', id: existing.id }, 409)
-  const anterior = await db.prepare('SELECT celula_atual_ttotal, celula_atual_tvoo FROM diario_mes WHERE aeronave_id = ?1 AND (ano < ?2 OR (ano = ?2 AND mes < ?3)) ORDER BY ano DESC, mes DESC LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
+  const anterior = await db.prepare('SELECT celula_atual_ttotal, celula_atual_tvoo, celula_prox_revisao_ttotal, celula_prox_revisao_tvoo, horimetro_final, aerodromo_base, consumo_combustivel, tem_tarifa_diaria, tarifa_diaria FROM diario_mes WHERE aeronave_id = ?1 AND (ano < ?2 OR (ano = ?2 AND mes < ?3)) ORDER BY ano DESC, mes DESC LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
   const anteriorTotal = diarioNumber(body.celula_anterior_ttotal, diarioNumber(anterior?.celula_atual_ttotal))
   const anteriorVoo = diarioNumber(body.celula_anterior_tvoo, diarioNumber(anterior?.celula_atual_tvoo))
   const id = uuid()
   await db.prepare(`INSERT INTO diario_mes (id, aeronave_id, ano, mes, celula_anterior_ttotal, celula_atual_ttotal, celula_prox_revisao_ttotal, celula_disponivel_ttotal, horimetro_inicio, horimetro_final, horimetro_ativo, fechado, aerodromo_base, tarifa_diaria, consumo_combustivel, tem_tarifa_diaria, celula_atual_tvoo, celula_disponivel_tvoo, celula_anterior_tvoo, celula_prox_revisao_tvoo, modo_celula)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-    id, aeronaveId, ano, mes, anteriorTotal, anteriorTotal, diarioNumber(body.celula_prox_revisao_ttotal), 0,
-    diarioNumber(body.horimetro_inicio), diarioNumber(body.horimetro_final), diarioNumber(body.horimetro_ativo), 0,
-    body.aerodromo_base?.trim() || null, diarioNumber(body.tarifa_diaria), body.consumo_combustivel?.trim() || null, diarioBoolean(body.tem_tarifa_diaria ?? true),
-    anteriorVoo, 0, anteriorVoo, diarioNumber(body.celula_prox_revisao_tvoo), modoCelula,
+    id, aeronaveId, ano, mes, anteriorTotal, anteriorTotal, diarioNumber(body.celula_prox_revisao_ttotal, diarioNumber(anterior?.celula_prox_revisao_ttotal)), 0,
+    diarioNumber(body.horimetro_inicio, diarioNumber(anterior?.horimetro_final)), diarioNumber(body.horimetro_final, diarioNumber(anterior?.horimetro_final)), diarioNumber(body.horimetro_ativo), 0,
+    body.aerodromo_base?.trim() || anterior?.aerodromo_base || null, diarioNumber(body.tarifa_diaria, diarioNumber(anterior?.tarifa_diaria)), body.consumo_combustivel?.trim() || anterior?.consumo_combustivel || null, diarioBoolean(body.tem_tarifa_diaria ?? anterior?.tem_tarifa_diaria ?? true),
+    anteriorVoo, 0, anteriorVoo, diarioNumber(body.celula_prox_revisao_tvoo, diarioNumber(anterior?.celula_prox_revisao_tvoo)), modoCelula,
   ).run()
+  await recalcularDiarioMes(c, id)
   return c.json({ id, aeronave_id: aeronaveId, ano, mes, celula_anterior_ttotal: anteriorTotal, celula_anterior_tvoo: anteriorVoo }, 201)
 })
 
