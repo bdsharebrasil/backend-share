@@ -839,6 +839,18 @@ function linkStatement(
   ).bind(id(), origemTipo, origemId, destinoTipo, destinoId, tipoVinculo)
 }
 
+async function linkedAbastecimentoId(db: Database, receiptId: string): Promise<string | null> {
+  const row = await db.prepare(`
+    SELECT destino_id FROM financeiro_vinculos
+     WHERE origem_tipo = 'RECIBO'
+       AND origem_id = ?
+       AND destino_tipo = 'ABASTECIMENTO'
+       AND tipo_vinculo = 'RECIBO_ABASTECIMENTO'
+     LIMIT 1
+  `).bind(receiptId).first<{ destino_id: string }>()
+  return row?.destino_id ?? null
+}
+
 function clientAllocationStatements(
   db: Database,
   schema: SchemaCache,
@@ -2234,6 +2246,7 @@ export async function processFinanceQueue(
 
 async function createReimbursementFinance(db: Database, schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
   const receiptMeta = await db.prepare('SELECT numero_recibo, url_recibo FROM recibos WHERE id = ? LIMIT 1').bind(receiptId).first<{ numero_recibo: string | null; url_recibo: string | null }>()
+  const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
   const categoriaShare = await db.prepare(`
     SELECT id FROM categoria_movimentacao_share
      WHERE id = ? OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%' OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
@@ -2254,6 +2267,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
     insertStatement(db, schema, 'lancamentos', {
       id: shareLancamentoId,
       aeronave_id: input.aeronave_id,
+      abastecimentos_id: abastecimentosId,
       cotista_aeronave_id: cotistaId,
       cliente_id: clienteId,
       descricao: input.descricao,
@@ -2620,6 +2634,23 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   const data = dateValue(body.data ?? receipt.data_emissao)
   const vencimento = nullableText(body.data_vencimento ?? receipt.data_vencimento) || data
   const cotistaId = text(receipt.cotista_aeronave_id)
+  const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
+  if (abastecimentosId) {
+    const lancamentoCotistaExistente = await db.prepare(`
+      SELECT id FROM lancamentos
+       WHERE abastecimentos_id = ?
+         AND tipo_caixa = 'CLIENTE'
+         AND UPPER(COALESCE(status, '')) <> 'CANCELADO'
+       LIMIT 1
+    `).bind(abastecimentosId).first<{ id: string }>()
+    if (lancamentoCotistaExistente) {
+      throw new FinanceError(
+        'Este abastecimento já está associado a um lançamento ativo do caixa cotista',
+        'abastecimento_ja_vinculado_a_lancamento_cotista',
+        409,
+      )
+    }
+  }
   const statements: D1PreparedStatement[] = [
     insertStatement(db, schema, 'reembolsos', {
       id: reimbursementId, lancamento_origem_id: receipt.share_lancamento_id, conta_receber_id: contaReceberId,
@@ -2628,6 +2659,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     }, ['id', 'lancamento_origem_id', 'valor_centavos']),
     insertStatement(db, schema, 'lancamentos', {
       id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_aeronave_id: cotistaId,
+      abastecimentos_id: abastecimentosId,
       descricao: receipt.descricao || 'Reembolso de despesa', grupo_categoria: 'REEMBOLSO',
       fluxo: 'SAIDA', natureza: 'DESPESA', tipo_caixa: 'CLIENTE', valor_centavos: amount, valor_total: amount / 100,
       valor: amount / 100, status: 'EM_ABERTO', data_lancamento: data, data_emissao: data,
@@ -2646,6 +2678,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       status: 'EM_ABERTO', criado_por: userId,
     }, ['id', 'valor_centavos']),
     linkStatement(db, schema, 'RECIBO', receiptId, 'LANCAMENTO', clientLancamentoId, 'RECIBO_LANCAMENTO_CLIENTE', userId),
+    ...(abastecimentosId ? [linkStatement(db, schema, 'LANCAMENTO', clientLancamentoId, 'ABASTECIMENTO', abastecimentosId, 'LANCAMENTO_ABASTECIMENTO', userId)] : []),
     linkStatement(db, schema, 'LANCAMENTO', text(receipt.share_lancamento_id), 'CONTA_A_RECEBER', contaReceberId, 'REEMBOLSO_CONTA_RECEBER', userId),
     db.prepare('UPDATE lancamentos SET periodicidade = ?, numero_recibo = COALESCE(numero_recibo, ?), url_recibo = COALESCE(url_recibo, ?) WHERE id = ?')
       .bind(nullableText(body.periodicidade), nullableText(receipt.numero_recibo), nullableText(receipt.url_recibo), receipt.share_lancamento_id),
@@ -2693,6 +2726,37 @@ async function issueReceiptInternal(
   if (!input.descricao || !/^\d{4}-\d{2}-\d{2}/.test(input.data_emissao)) {
     throw new FinanceError('Descrição e data de emissão são obrigatórias', 'recibo_incompleto')
   }
+  const abastecimentosId = nullableText(body.abastecimentos_id)
+  if (abastecimentosId) {
+    if (input.tipo_recibo !== 'recibo_reembolso') {
+      throw new FinanceError('Abastecimento só pode ser vinculado a recibo de reembolso', 'abastecimento_tipo_recibo_invalido')
+    }
+    const abastecimento = await db.prepare('SELECT id, aeronave_id FROM abastecimentos WHERE id = ? LIMIT 1')
+      .bind(abastecimentosId).first<{ id: string; aeronave_id: string | null }>()
+    if (!abastecimento) throw new FinanceError('Abastecimento não encontrado', 'abastecimento_nao_encontrado', 404)
+    if (input.aeronave_id && input.aeronave_id !== abastecimento.aeronave_id) {
+      throw new FinanceError('O abastecimento selecionado pertence a outra aeronave', 'abastecimento_aeronave_incompativel')
+    }
+    input.aeronave_id = input.aeronave_id || abastecimento.aeronave_id
+    const reciboVinculado = await db.prepare(`
+      SELECT id FROM financeiro_vinculos
+       WHERE origem_tipo = 'RECIBO'
+         AND destino_tipo = 'ABASTECIMENTO'
+         AND tipo_vinculo = 'RECIBO_ABASTECIMENTO'
+         AND destino_id = ?
+       LIMIT 1
+    `).bind(abastecimentosId).first<{ id: string }>()
+    const lancamentoCotista = await db.prepare(`
+      SELECT id FROM lancamentos
+       WHERE abastecimentos_id = ?
+         AND tipo_caixa = 'CLIENTE'
+         AND UPPER(COALESCE(status, '')) <> 'CANCELADO'
+       LIMIT 1
+    `).bind(abastecimentosId).first<{ id: string }>()
+    if (reciboVinculado || lancamentoCotista) {
+      throw new FinanceError('Este abastecimento já está associado a um recibo ou lançamento ativo do caixa cotista', 'abastecimento_ja_vinculado', 409)
+    }
+  }
   const schema = await loadSchema(db)
   requireTable(schema, 'recibos', ['id', 'tipo_recibo', 'pagador_tipo', 'pagador_id', 'valor', 'categoria_movimentacao_id', 'lancamento_id', 'status'])
   requireTable(schema, 'recibo_rateio', ['id', 'recibo_id', 'rateio_id', 'percentual', 'valor', 'cotista_id'])
@@ -2728,6 +2792,11 @@ async function issueReceiptInternal(
   try {
     if (!existingReceiptId) {
       await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
+      if (abastecimentosId) {
+        await db.batch([
+          linkStatement(db, schema, 'RECIBO', reciboId, 'ABASTECIMENTO', abastecimentosId, 'RECIBO_ABASTECIMENTO', userId),
+        ])
+      }
       return {
         recibo: {
           id: reciboId,

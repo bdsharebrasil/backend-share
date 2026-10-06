@@ -157,7 +157,7 @@ recibosRoutes.get('/recibos', async (c) => {
 recibosRoutes.get('/recibos/opcoes', async (c) => {
   const db = c.env.SHARE_DB
   const read = async (sql: string) => (await db.prepare(sql).all().catch((error) => { console.warn('[financeiro/lancamentos] consulta opcional indisponível', error); return { results: [] } })).results ?? []
-  const [clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categoriasCliente] = await Promise.all([
+  const [clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categoriasCliente, abastecimentos] = await Promise.all([
     read('SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status, codigo_cliente FROM cliente ORDER BY razao_social'),
     read("SELECT id, nome_completo, nome_exibicao, cpf, endereco, cidade, uf, email, telefone, canac, nome_banco, tipo_conta, conta_numero, agencia_numero, pix, 'user_profiles' AS origem FROM user_profiles ORDER BY nome_completo"),
     read("SELECT id, nome_completo, cpf, endereco, cidade, uf, telefone, canac, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo"),
@@ -174,12 +174,36 @@ recibosRoutes.get('/recibos/opcoes', async (c) => {
            ORDER BY COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente), ca.codigo_cliente`),
     read('SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share ORDER BY nome'),
     read('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
+    read(`SELECT a.id, a.aeronave_id, a.data, a.tipo_combustivel, a.trecho, a.local,
+                 a.numero_comanda, a.numero_nf, a.litros, a.valor_total,
+                 ar.matricula_registro,
+                 COALESCE(cl.razao_social, hs.nome, 'Cotista não informado') AS cotista_nome
+            FROM abastecimentos a
+            LEFT JOIN aeronave ar ON ar.id = a.aeronave_id
+            LEFT JOIN cliente cl ON cl.id = a.cliente_id
+            LEFT JOIN hold_socios hs ON hs.id = a.socio_id
+           WHERE UPPER(COALESCE(a.status, '')) NOT IN ('CANCELADO', 'CANCELADA')
+             AND NOT EXISTS (
+               SELECT 1 FROM financeiro_vinculos fv
+                WHERE fv.origem_tipo = 'RECIBO'
+                  AND fv.destino_tipo = 'ABASTECIMENTO'
+                  AND fv.tipo_vinculo = 'RECIBO_ABASTECIMENTO'
+                  AND fv.destino_id = a.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM lancamentos l
+                WHERE l.abastecimentos_id = a.id
+                  AND l.tipo_caixa = 'CLIENTE'
+                  AND UPPER(COALESCE(l.status, '')) <> 'CANCELADO'
+             )
+             AND COALESCE(a.valor_total, 0) > 0
+           ORDER BY date(a.data) DESC, a.id DESC LIMIT 300`),
   ])
   const recebedores = [
     ...colaboradores.map((item: any) => ({ ...item, id: `perfil:${item.id}`, nome: item.nome_completo || item.nome_exibicao || item.email || '', tipo_user: item.tipo_user || 'colaborador' })),
     ...freelancers.map((item: any) => ({ ...item, id: `freelancer:${item.id}`, nome: item.nome_completo || '', tipo_user: 'freelancer' })),
   ].sort((a: any, b: any) => String(a.nome_completo || '').localeCompare(String(b.nome_completo || ''), 'pt-BR'))
-  return c.json({ clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categorias_cliente: categoriasCliente, recebedores })
+  return c.json({ clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categorias_cliente: categoriasCliente, abastecimentos, recebedores })
 })
 
 recibosRoutes.patch('/recibos/:id/status', async (c) => {
