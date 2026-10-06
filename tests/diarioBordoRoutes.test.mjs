@@ -81,7 +81,14 @@ class FakeD1 {
     throw new Error(`Consulta first não simulada: ${sql}`)
   }
 
-  async all(sql) {
+  async all(sql, values) {
+    if (sql.includes('SELECT id, tempo_total, tempo_voo FROM lancamentos_diario_bordo')) {
+      const results = [...this.launches.values()]
+        .filter((launch) => launch.diario_mes_id === values[0])
+        .sort((a, b) => String(a.data_registro).localeCompare(String(b.data_registro)) || Number(a.numero_sequencial) - Number(b.numero_sequencial))
+        .map(({ id, tempo_total, tempo_voo }) => ({ id, tempo_total, tempo_voo }))
+      return { results }
+    }
     throw new Error(`Consulta all não simulada: ${sql}`)
   }
 
@@ -126,6 +133,15 @@ class FakeD1 {
   }
 }
 
+const cacheKv = {
+  async get(key, options) {
+    if (options?.type !== 'json' || !key.startsWith('solar-')) return null
+    return { data: [{ date: key.slice(-8), nascer: '2026-10-05T06:00:00Z', poente: '2026-10-05T18:00:00Z' }], fetchedAt: Date.now() }
+  },
+  async put() {},
+  async delete() {},
+}
+
 async function enviarLancamento(db, body) {
   return diarioBordoRoutes.fetch(new Request('https://worker.test/api/interno/diario-bordo/lancamentos', {
     method: 'POST',
@@ -137,6 +153,7 @@ async function enviarLancamento(db, body) {
     body: JSON.stringify(body),
   }), {
     SHARE_DB: db,
+    CACHE_KV: cacheKv,
     SUPABASE_URL: 'https://supabase.test',
     SUPABASE_ANON_KEY: 'sb_publishable_diario-test-key',
   })
@@ -153,6 +170,7 @@ async function alterarLancamento(db, id, body) {
     body: JSON.stringify(body),
   }), {
     SHARE_DB: db,
+    CACHE_KV: cacheKv,
     SUPABASE_URL: 'https://supabase.test',
     SUPABASE_ANON_KEY: 'sb_publishable_diario-test-key',
   })
@@ -219,4 +237,68 @@ test('criação vincula a perna ao lançamento e impede incluí-la novamente', a
   assert.equal(recreated.status, 201)
   assert.equal(db.launches.size, 1)
   assert.equal(db.flightLeg.lancamento_diario_id, (await recreated.json()).id)
+})
+
+test('célula e célula TVOO acumulam os intervalos AC-COR e DEP-POU a partir do lançamento anterior', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-diario-test' })
+
+  const db = new FakeD1()
+  const base = {
+    aeronave_id: 'aircraft-1',
+    diario_mes_id: 'month-1',
+    data_registro: '2026-10-05',
+    natureza_voo: 'PV - Privado',
+    aerodromo_partida: 'SBSP',
+    aerodromo_chegada: 'SBRJ',
+    pic_canac: '123456',
+    celula: 9999,
+    celula_tvoo: 9999,
+  }
+  const primeiro = await enviarLancamento(db, {
+    ...base,
+    tempo_ac: '08:55',
+    tempo_dep: '09:00',
+    tempo_pou: '10:00',
+    tempo_cor: '10:00',
+  })
+  assert.equal(primeiro.status, 201)
+  const primeiroSalvo = await primeiro.json()
+  assert.equal(primeiroSalvo.tempo_total, 1.08)
+  assert.equal(primeiroSalvo.tempo_voo, 1)
+  assert.equal(primeiroSalvo.celula, 101.08)
+  assert.equal(primeiroSalvo.celula_tvoo, 101)
+
+  const segundo = await enviarLancamento(db, {
+    ...base,
+    tempo_ac: '10:15',
+    tempo_dep: '10:20',
+    tempo_pou: '10:50',
+    tempo_cor: '11:00',
+  })
+  assert.equal(segundo.status, 201)
+  const segundoSalvo = await segundo.json()
+  assert.equal(segundoSalvo.tempo_total, 0.75)
+  assert.equal(segundoSalvo.tempo_voo, 0.5)
+  assert.equal(segundoSalvo.celula, 101.83)
+  assert.equal(segundoSalvo.celula_tvoo, 101.5)
+  assert.equal(db.launches.get(primeiroSalvo.id).celula, 101.08)
+  assert.equal(db.launches.get(primeiroSalvo.id).celula_tvoo, 101)
+
+  const atualizado = await alterarLancamento(db, primeiroSalvo.id, {
+    acionamento_utc: '2026-10-05T08:30:00Z',
+    decolagem_utc: '2026-10-05T09:00:00Z',
+    pouso_utc: '2026-10-05T10:00:00Z',
+    corte_utc: '2026-10-05T10:00:00Z',
+  })
+  assert.equal(atualizado.status, 200)
+  assert.equal(db.launches.get(primeiroSalvo.id).celula, 101.5)
+  assert.equal(db.launches.get(segundoSalvo.id).celula, 102.25)
+  assert.equal(db.launches.get(segundoSalvo.id).celula_tvoo, 101.5)
+
+  const excluido = await excluirLancamento(db, primeiroSalvo.id)
+  assert.equal(excluido.status, 200)
+  assert.equal(db.launches.get(segundoSalvo.id).celula, 100.75)
+  assert.equal(db.launches.get(segundoSalvo.id).celula_tvoo, 100.5)
 })

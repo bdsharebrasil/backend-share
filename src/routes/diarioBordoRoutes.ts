@@ -200,6 +200,32 @@ async function recalcularDiarioMes(c: Context<{ Bindings: Bindings; Variables: V
     .bind(celulaAtualTotal, disponivelTotal, celulaAtualVoo, disponivelVoo, diarioMesId).run()
 }
 
+type LeituraCelula = { celula: number; celula_tvoo: number }
+
+async function calcularCelulasLancamentos(c: Context<{ Bindings: Bindings; Variables: Variables }>, diarioMesId: string): Promise<Map<string, LeituraCelula>> {
+  const db = c.env.SHARE_DB
+  const diario = await db.prepare('SELECT id, celula_anterior_ttotal, celula_anterior_tvoo FROM diario_mes WHERE id = ?1').bind(diarioMesId).first<any>()
+  const leituras = new Map<string, LeituraCelula>()
+  if (!diario) return leituras
+  const lancamentos = await db.prepare(`SELECT id, tempo_total, tempo_voo FROM lancamentos_diario_bordo
+    WHERE diario_mes_id = ?1 ORDER BY date(data_registro), numero_sequencial, id`).bind(diarioMesId).all<any>()
+  let celula = diarioNumber(diario.celula_anterior_ttotal)
+  let celulaTvoo = diarioNumber(diario.celula_anterior_tvoo)
+  for (const lancamento of lancamentos.results || []) {
+    celula = Number((celula + diarioNumber(lancamento.tempo_total)).toFixed(2))
+    celulaTvoo = Number((celulaTvoo + diarioNumber(lancamento.tempo_voo)).toFixed(2))
+    leituras.set(String(lancamento.id), { celula, celula_tvoo: celulaTvoo })
+  }
+  return leituras
+}
+
+async function recalcularCelulasLancamentos(c: Context<{ Bindings: Bindings; Variables: Variables }>, diarioMesId: string): Promise<void> {
+  const db = c.env.SHARE_DB
+  const leituras = await calcularCelulasLancamentos(c, diarioMesId)
+  const updates = [...leituras].map(([id, leitura]) => db.prepare('UPDATE lancamentos_diario_bordo SET celula = ?, celula_tvoo = ? WHERE id = ?').bind(leitura.celula, leitura.celula_tvoo, id))
+  if (updates.length) await db.batch(updates)
+}
+
 async function nomeAerodromoDiario(c: Context<{ Bindings: Bindings; Variables: Variables }>, valor: string): Promise<string> {
   const codigo = String(valor || '').trim().toUpperCase()
   if (!codigo) return codigo
@@ -221,7 +247,7 @@ async function trechoAerodromosDiario(c: Context<{ Bindings: Bindings; Variables
   return `${nomePartida} X ${nomeChegada}`
 }
 
-function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, defaults: { diarioMesId?: string; celula?: number; sequencial?: number; criadoPor?: string | null } = {}): Record<string, unknown> {
+function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, defaults: { diarioMesId?: string; celula?: number; celulaTvoo?: number; sequencial?: number; criadoPor?: string | null } = {}): Record<string, unknown> {
   const partida = String(body.aerodromo_partida || '').trim().toUpperCase()
   const chegada = String(body.aerodromo_chegada || '').trim().toUpperCase()
   const data = diarioDate(body.data_registro)
@@ -240,7 +266,7 @@ function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, de
     tempo_ac: body.tempo_ac || null, tempo_dep: body.tempo_dep || null, tempo_pou: body.tempo_pou || null, tempo_cor: body.tempo_cor || null, tempo_ifr: diarioNumber(body.tempo_ifr), tempo_voo: tempoVoo, tempo_total: tempoTotal,
     horas_diurnas: diarioNumber(body.horas_diurnas, tempoVoo), horas_noturnas: diarioNumber(body.horas_noturnas), pousos_total: Math.max(0, Math.trunc(diarioNumber(body.pousos_total))), distancia_nm: diarioNumber(body.distancia_nm), diarias: body.diarias == null || body.diarias === '' ? null : String(body.diarias),
     consumo_combustivel_voo: consumoVoo, consumo_combustivel_total: consumoTotal, litros_combustivel_inicio_voo: diarioNumber(body.litros_combustivel_inicio_voo), litros_combustivel_abastecido: diarioNumber(body.litros_combustivel_abastecido), local_combustivel: body.local_combustivel?.trim() || null, abastecido: diarioBoolean(body.abastecido),
-    celula: diarioNumber(body.celula, defaults.celula || 0), confirmado: diarioBoolean(body.confirmado), confirmado_em: diarioBoolean(body.confirmado) ? (body.confirmado_em || new Date().toISOString()) : null, assinado_pic: body.assinado_pic || null, data_assinatura: body.data_assinatura || null,
+    celula: diarioNumber(defaults.celula), celula_tvoo: diarioNumber(defaults.celulaTvoo), confirmado: diarioBoolean(body.confirmado), confirmado_em: diarioBoolean(body.confirmado) ? (body.confirmado_em || new Date().toISOString()) : null, assinado_pic: body.assinado_pic || null, data_assinatura: body.data_assinatura || null,
     passageiros: Math.max(0, Math.trunc(diarioNumber(body.passageiros))), carga_kg: body.carga_kg == null || body.carga_kg === '' ? null : String(body.carga_kg), natureza_voo: String(body.natureza_voo || '').trim(), ocorrencias: body.ocorrencias?.trim() || null, discrepancias: body.discrepancias?.trim() || null, acoes_corretivas: body.acoes_corretivas?.trim() || null,
     tipo_manutencao_ultima: body.tipo_manutencao_ultima?.trim() || null, tipo_manutencao_proxima: body.tipo_manutencao_proxima?.trim() || null, responsavel_aprovacao_manutencao: body.responsavel_aprovacao_manutencao?.trim() || null, detectado_por: body.detectado_por?.trim() || null,
   }
@@ -317,6 +343,11 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes', async c => {
     LEFT JOIN aerodromo adg ON upper(adg.designativo_icao) = upper(l.aerodromo_chegada)
     WHERE l.diario_mes_id = ?1
     ORDER BY date(l.data_registro), l.numero_sequencial, l.id`).bind(diarioMes.id).all<any>()
+  const leiturasCelula = await calcularCelulasLancamentos(c, diarioMes.id)
+  const lancamentosComCelula = lancamentos.results.map((lancamento: any) => ({
+    ...lancamento,
+    ...(leiturasCelula.get(String(lancamento.id)) || {}),
+  }))
   const horasCotistas = await db.prepare(`SELECT
       CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(l.socio_id, l.cliente_id, l.holding_id) END AS cotista_id,
       CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(s.nome, h.nome, c.razao_social, c.proprietario, 'Cotista não identificado') END AS cotista_nome,
@@ -330,7 +361,7 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes', async c => {
       CASE WHEN l.natureza_voo IN ('TR - Traslado', 'VT - Voo Teste') THEN l.natureza_voo ELSE COALESCE(s.nome, h.nome, c.razao_social, c.proprietario, 'Cotista não identificado') END
     ORDER BY horas_voo DESC`).bind(diarioMes.id).all()
   const horasEmprestadas = await db.prepare(`SELECT COALESCE(SUM(e.horas_emprestadas - COALESCE(e.horas_devolvidas, 0)), 0) AS horas_total, COUNT(*) AS quantidade FROM emprestimos_aeronave e LEFT JOIN lancamentos_diario_bordo l ON l.id = e.lancamento_diario_id WHERE l.diario_mes_id = ?1`).bind(diarioMes.id).first<any>()
-  return c.json({ aeronave, diario_mes: diarioMes, lancamentos: lancamentos.results, meses_disponiveis: meses.results, horas_cotistas: horasCotistas.results, horas_emprestadas: { horas_total: Number(horasEmprestadas?.horas_total || 0), quantidade: Number(horasEmprestadas?.quantidade || 0) } })
+  return c.json({ aeronave, diario_mes: diarioMes, lancamentos: lancamentosComCelula, meses_disponiveis: meses.results, horas_cotistas: horasCotistas.results, horas_emprestadas: { horas_total: Number(horasEmprestadas?.horas_total || 0), quantidade: Number(horasEmprestadas?.quantidade || 0) } })
 })
 
 diarioBordoRoutes.post('/api/interno/diario-bordo/mes', async c => {
@@ -381,7 +412,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/mes/:id', async c => {
 })
 
 const DIARIO_LANCAMENTO_FIELDS = [
-  'numero_voo', 'jornada_id', 'cliente_id', 'holding_id', 'socio_id', 'voo_emprestado', 'socio_tomador_emprestimo_id', 'cliente_tomador_emprestimo_id', 'data_registro', 'aerodromo_partida', 'aerodromo_chegada', 'trecho', 'pic_canac', 'pic_nome', 'sic_canac', 'sic_nome', 'tripulacao_checkin_hora', 'tempo_ac', 'tempo_dep', 'tempo_pou', 'tempo_cor', 'tempo_ifr', 'tempo_voo', 'tempo_total', 'horas_diurnas', 'horas_noturnas', 'pousos_total', 'distancia_nm', 'diarias', 'consumo_combustivel_voo', 'consumo_combustivel_total', 'litros_combustivel_inicio_voo', 'litros_combustivel_abastecido', 'local_combustivel', 'abastecido', 'celula', 'confirmado', 'confirmado_em', 'assinado_pic', 'data_assinatura', 'passageiros', 'carga_kg', 'natureza_voo', 'ocorrencias', 'discrepancias', 'acoes_corretivas', 'tipo_manutencao_ultima', 'tipo_manutencao_proxima', 'responsavel_aprovacao_manutencao', 'detectado_por',
+  'numero_voo', 'jornada_id', 'cliente_id', 'holding_id', 'socio_id', 'voo_emprestado', 'socio_tomador_emprestimo_id', 'cliente_tomador_emprestimo_id', 'data_registro', 'aerodromo_partida', 'aerodromo_chegada', 'trecho', 'pic_canac', 'pic_nome', 'sic_canac', 'sic_nome', 'tripulacao_checkin_hora', 'tempo_ac', 'tempo_dep', 'tempo_pou', 'tempo_cor', 'tempo_ifr', 'tempo_voo', 'tempo_total', 'horas_diurnas', 'horas_noturnas', 'pousos_total', 'distancia_nm', 'diarias', 'consumo_combustivel_voo', 'consumo_combustivel_total', 'litros_combustivel_inicio_voo', 'litros_combustivel_abastecido', 'local_combustivel', 'abastecido', 'confirmado', 'confirmado_em', 'assinado_pic', 'data_assinatura', 'passageiros', 'carga_kg', 'natureza_voo', 'ocorrencias', 'discrepancias', 'acoes_corretivas', 'tipo_manutencao_ultima', 'tipo_manutencao_proxima', 'responsavel_aprovacao_manutencao', 'detectado_por',
 ]
 
 diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
@@ -445,7 +476,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     horas_noturnas: dadosOperacionais.horas_noturnas,
     pousos_total: body.pousos_total ?? (pernaVinculada.horario_pouso ? 1 : 0),
   } : body
-  const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(body.celula, diarioNumber(diario.celula_atual_ttotal) + diarioNumber(dadosOperacionais.tempo_total)), criadoPor: extractSupabaseUserId(c) })
+  const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(diario.celula_atual_ttotal) + dadosOperacionais.tempo_total, celulaTvoo: diarioNumber(diario.celula_atual_tvoo) + dadosOperacionais.tempo_voo, criadoPor: extractSupabaseUserId(c) })
   const columns = ['id', ...Object.keys(row)]
   const statements = [db.prepare(`INSERT INTO lancamentos_diario_bordo (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).bind(id, ...columns.slice(1).map(column => row[column]))]
   if (abastecimentoStmt) statements.push(abastecimentoStmt)
@@ -458,6 +489,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     ])
     return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   }
+  await recalcularCelulasLancamentos(c, diarioMesId)
   await recalcularDiarioMes(c, diarioMesId)
   const inserted = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
   return c.json({ ...inserted, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status }, 201)
@@ -527,6 +559,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
     }
     if (pernaAtualId) await db.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = NULL WHERE id = ?1 AND lancamento_diario_id = ?2').bind(pernaAtualId, id).run()
   }
+  await recalcularCelulasLancamentos(c, current.diario_mes_id)
   await recalcularDiarioMes(c, current.diario_mes_id)
   const updated = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
   return c.json({ ...updated, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status })
@@ -543,6 +576,7 @@ diarioBordoRoutes.delete('/api/interno/diario-bordo/lancamentos/:id', async c =>
     c.env.SHARE_DB.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id),
   ])
   if (!result[1]?.meta.changes) return c.notFound()
+  await recalcularCelulasLancamentos(c, current.diario_mes_id)
   await recalcularDiarioMes(c, current.diario_mes_id)
   return c.json({ success: true })
 })
