@@ -13,6 +13,16 @@ test('short links usam código hexadecimal de 16 bytes e cabeçalhos defensivos'
   assert.match(worker, /\^\[a-f0-9\]\{32\}\$/i)
 })
 
+test('short links forçam download e não renderizam HTML ou SVG no domínio da API', () => {
+  const start = worker.indexOf("app.get('/r/:code'")
+  const end = worker.indexOf('\nfunction normalizarEmailLocal', start)
+  const route = worker.slice(start, end)
+
+  assert.notEqual(start, -1)
+  assert.match(route, /Content-Disposition.*attachment/)
+  assert.doesNotMatch(route, /Content-Disposition.*inline/)
+})
+
 test('upload valida pasta e impede segmentos arbitrários', () => {
   assert.match(storage, /normalizarPastaUpload/)
   assert.match(storage, /segment => !\/\^\[a-zA-Z0-9_-\]\+\$\/.test\(segment\)/)

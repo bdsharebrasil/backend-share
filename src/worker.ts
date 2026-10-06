@@ -772,7 +772,7 @@ app.get('/r/:code', async (c) => {
     const headers = new Headers()
     object.writeHttpMetadata(headers)
     headers.set('etag', object.httpEtag)
-    headers.set('Content-Disposition', `inline; filename="${shareBrasilFileName(row.r2_key.split('/').pop() || 'arquivo')}"`)
+    headers.set('Content-Disposition', `attachment; filename="${shareBrasilFileName(row.r2_key.split('/').pop() || 'arquivo')}"`)
     headers.set('X-Content-Type-Options', 'nosniff')
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
 
