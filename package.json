@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check:migrations": "node scripts/check-d1-migrations.mjs",
     "type-check": "tsc --noEmit --pretty false",
     "test:relatorio-financeiro": "node --experimental-strip-types --test tests/relatorioFinanceiro.test.mjs",
     "test": "tsx --test tests/*.test.mjs"
