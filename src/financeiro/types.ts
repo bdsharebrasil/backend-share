@@ -1,4 +1,5 @@
 export type FluxoLancamento = "ENTRADA" | "SAIDA"
+export type NaturezaLancamento = "RECEITA" | "DESPESA" | "REEMBOLSO"
 
 export type CaixaLancamento = "SHARE" | "HOLDING" | "COTISTA" | string
 
@@ -17,6 +18,7 @@ export type RegistrarLancamentoInput = {
   tipo?: string
   prazo?: string
   fluxo: FluxoLancamento
+  natureza: NaturezaLancamento
   valorCentavos: number
   pagoPor: string
   caixa?: CaixaLancamento
@@ -45,6 +47,7 @@ export type LancamentoConsolidado = {
   tipo: string | null
   prazo: string | null
   fluxo: FluxoLancamento
+  natureza: NaturezaLancamento
   valorCentavos: number
   pagoPor: string
   caixa: CaixaLancamento
@@ -127,6 +130,7 @@ export type LancamentoApiInput = {
   prazo?: unknown
   data_vencimento?: unknown
   fluxo?: unknown
+  natureza?: unknown
   valorCentavos?: unknown
   valor_centavos?: unknown
   valor?: unknown

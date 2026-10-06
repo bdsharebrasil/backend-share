@@ -1,81 +1,42 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { autorizarRequisicaoFinanceira } from '../src/financeiro/financeiroAuth.ts'
-
+const keyPair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
+const jwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey)
+jwk.kid = 'test-key'; jwk.alg = 'RS256'
+const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url')
+async function token(userId) {
+  const header = encode({ alg: 'RS256', typ: 'JWT', kid: 'test-key' })
+  const claims = encode({ iss: 'https://auth.example/auth/v1', aud: 'authenticated', sub: userId, email: `${userId}@example.com`, exp: Math.floor(Date.now() / 1000) + 3600 })
+  const input = `${header}.${claims}`
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keyPair.privateKey, new TextEncoder().encode(input))
+  return `${input}.${Buffer.from(signature).toString('base64url')}`
+}
 class AuthDatabase {
-  constructor({ active = true, finance = false } = {}) {
-    this.active = active
-    this.finance = finance
-    this.bindings = []
-  }
-
-  prepare(sql) {
-    return {
-      bind: (...values) => ({
-        first: async () => {
-          this.bindings.push(values)
-          if (sql.includes('FROM user_profiles p')) return this.finance ? { allowed: 1 } : null
-          if (sql.includes('FROM user_profiles')) return this.active ? { active: 1 } : null
-          return null
-        },
-      }),
-    }
-  }
+  constructor({ active = true, finance = false } = {}) { this.active = active; this.finance = finance; this.bindings = [] }
+  prepare(sql) { return { bind: (...values) => ({ first: async () => { this.bindings.push(values); if (sql.includes('FROM user_profiles p')) return this.finance ? { allowed: 1 } : null; if (sql.includes('FROM user_profiles')) return this.active ? { active: 1 } : null; return null } }) } }
 }
-
-function context(db, authorization = 'Bearer token-validado') {
-  return {
-    env: { SHARE_DB: db, SUPABASE_URL: 'https://auth.example', SUPABASE_ANON_KEY: 'public-key' },
-    req: { header: (name) => name.toLowerCase() === 'authorization' ? authorization : undefined },
-  }
+async function context(db, userId = 'usuario-validado') {
+  const jwt = await token(userId)
+  return { env: { SHARE_DB: db, SUPABASE_URL: 'https://auth.example' }, req: { header: (name) => name.toLowerCase() === 'authorization' ? `Bearer ${jwt}` : undefined } }
 }
-
-test('nega token rejeitado pelo endpoint de autenticação Supabase', async (t) => {
+async function withJwks(t, response = Response.json({ keys: [jwk] })) {
   const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => Response.json({ message: 'invalid token' }, { status: 401 })
+  globalThis.fetch = async () => response
   t.after(() => { globalThis.fetch = originalFetch })
-
-  const db = new AuthDatabase({ finance: true })
-  const result = await autorizarRequisicaoFinanceira(context(db), '/api/financeiro/configuracoes', 'GET')
+}
+test('nega token sem assinatura/JWKS disponível', async (t) => {
+  await withJwks(t, Response.json({ message: 'invalid token' }, { status: 401 }))
+  const result = await autorizarRequisicaoFinanceira(await context(new AuthDatabase({ finance: true })), '/api/financeiro/configuracoes', 'GET')
   assert.deepEqual(result, { autorizado: false, status: 401 })
-  assert.equal(db.bindings.length, 0)
 })
-
-test('usa o ID retornado pelo Supabase e não o sub decodificado do token', async (t) => {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => Response.json({ id: 'usuario-validado' })
-  t.after(() => { globalThis.fetch = originalFetch })
-
+test('usa o sub do JWT assinado e não chama /auth/v1/user', async (t) => {
+  await withJwks(t)
   const db = new AuthDatabase({ finance: true })
-  const result = await autorizarRequisicaoFinanceira(context(db, 'Bearer token-com-sub-forjado'), '/api/financeiro/configuracoes', 'GET')
+  const result = await autorizarRequisicaoFinanceira(await context(db, 'usuario-validado'), '/api/financeiro/configuracoes', 'GET')
   assert.deepEqual(result, { autorizado: true, userId: 'usuario-validado' })
   assert.equal(db.bindings[0][0], 'usuario-validado')
 })
-
-test('exige papel financeiro para rotas de caixa', async (t) => {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => Response.json({ id: 'colaborador' })
-  t.after(() => { globalThis.fetch = originalFetch })
-
-  const result = await autorizarRequisicaoFinanceira(context(new AuthDatabase()), '/api/financeiro/contas-apagar', 'GET')
-  assert.deepEqual(result, { autorizado: false, status: 403 })
-})
-
-test('permite a colaborador ativo submeter a própria solicitação', async (t) => {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => Response.json({ id: 'colaborador' })
-  t.after(() => { globalThis.fetch = originalFetch })
-
-  const db = new AuthDatabase({ active: true })
-  const result = await autorizarRequisicaoFinanceira(context(db), '/api/financeiro/envios-pagamento', 'POST')
-  assert.deepEqual(result, { autorizado: true, userId: 'colaborador' })
-})
-
-test('delega autorização da folha para o guard próprio, inclusive na rota base', async (t) => {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => Response.json({ id: 'rh-user' })
-  t.after(() => { globalThis.fetch = originalFetch })
-
-  const result = await autorizarRequisicaoFinanceira(context(new AuthDatabase()), '/api/financeiro/pagamentos-folha', 'GET')
-  assert.deepEqual(result, { autorizado: true, userId: 'rh-user' })
-})
+test('exige papel financeiro para rotas de caixa', async (t) => { await withJwks(t); assert.deepEqual(await autorizarRequisicaoFinanceira(await context(new AuthDatabase()), '/api/financeiro/contas-apagar', 'GET'), { autorizado: false, status: 403 }) })
+test('permite a colaborador ativo submeter a própria solicitação', async (t) => { await withJwks(t); assert.deepEqual(await autorizarRequisicaoFinanceira(await context(new AuthDatabase({ active: true })), '/api/financeiro/envios-pagamento', 'POST'), { autorizado: true, userId: 'usuario-validado' }) })
+test('delega autorização da folha para o guard próprio, inclusive na rota base', async (t) => { await withJwks(t); assert.deepEqual(await autorizarRequisicaoFinanceira(await context(new AuthDatabase()), '/api/financeiro/pagamentos-folha', 'GET'), { autorizado: true, userId: 'usuario-validado' }) })

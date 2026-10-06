@@ -433,7 +433,7 @@ financeiroRoutes.post('/lancamentos/:id/duplicar', async (c) => {
     if (!source) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const payload = { descricao: body.descricao ?? source.descricao, data: body.data ?? source.data_emissao, data_emissao: body.data_emissao ?? body.data ?? source.data_emissao, data_vencimento: body.data_vencimento ?? source.data_vencimento, valor_centavos: body.valor_centavos ?? source.valor_centavos, categoria_id: source.categoria_id, categoria_nome: source.categoria_nome, grupo_categoria: source.grupo_categoria, fornecedor_nome: source.fornecedor_nome, aeronave_id: source.aeronave_id, cotista_aeronave_id: source.cotista_aeronave_id, tipo_caixa: source.tipo_caixa, reembolsavel: source.reembolsavel, idempotency_key: `duplicado:${source.id}:${crypto.randomUUID()}` }
-    const result = String(source.fluxo).toUpperCase() === 'ENTRADA' || String(source.fluxo).toUpperCase() === 'RECEITA' ? await issueRevenue(db, payload, c.get('userId') || null) : await createExpense(db, payload, c.get('userId') || null)
+    const result = String(source.fluxo).toUpperCase() === 'ENTRADA' ? await issueRevenue(db, payload, c.get('userId') || null) : await createExpense(db, payload, c.get('userId') || null)
     return c.json(result, 201)
   } catch (error) { return errorResponse(c, error) }
 })

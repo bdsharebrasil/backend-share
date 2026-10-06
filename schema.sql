@@ -1715,19 +1715,15 @@ periodicidade TEXT
  categoria_cliente_id TEXT 
     REFERENCES categoria_movimentacao_cliente(id),
 status TEXT
-
     CHECK (status IN (
-
-     ''EM_ABERTO'', ''PAGO'', ''RECEITA'',''EM_ATRASO'',''ESTORNO'', ''RECEBIDO'',''SAIDA'',  ''ENTRADA'',''SAIDA_REEMBOLSO'', ''ENTRADA_REEMBOLSO'',''AGUARDANDO_REEMBOLSO'', ''REEMBOLSADO'', ''CANCELADO'')),
+     ''EM_ABERTO'', ''PAGO'', ''RECEBIDO'', ''CANCELADO'')),
+  natureza TEXT NOT NULL DEFAULT ''DESPESA''
+    CHECK (natureza IN (''RECEITA'', ''DESPESA'', ''REEMBOLSO'')),
   categoria_nome TEXT,
   grupo_categoria TEXT,
 
   fluxo TEXT NOT NULL
     CHECK (fluxo IN (
-      ''RECEITA'',
-  	''ESTORNO'',
-      ''DESPESA'',
-      ''REEMBOLSO'',
       ''ENTRADA'',
       ''SAIDA''
     )),

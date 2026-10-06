@@ -11,10 +11,6 @@ type Bindings = {
   SHARE_DB: D1Database
   SHARE_FILES?: R2Bucket
   FILES?: R2Bucket
-  SUPABASE_URL?: string
-  SUPABASE_ANON_KEY?: string
-  SUPABASE_SERVICE_ROLE_KEY?: string
-  VITE_SUPABASE_PUBLISHABLE_KEY?: string
 }
 type Variables = { userId: string | null }
 type PagamentoAtual = {
@@ -39,18 +35,6 @@ async function autorizar(c: any): Promise<{ userId: string } | { resposta: Respo
   const authorization = c.req.header('authorization')
   if (!userId || !authorization?.startsWith('Bearer ')) return { resposta: erro(c, 'nao_autorizado', 401) }
 
-  const base = String(c.env.SUPABASE_URL ?? '').trim().replace(/\/+$/, '')
-  const apiKey = c.env.SUPABASE_ANON_KEY || c.env.VITE_SUPABASE_PUBLISHABLE_KEY || c.env.SUPABASE_SERVICE_ROLE_KEY || c.req.header('apikey')
-  if (!base || !apiKey) return { resposta: erro(c, 'autenticacao_indisponivel', 503) }
-  let sessao: { id?: string }
-  try {
-    const response = await fetch(`${base}/auth/v1/user`, { headers: { apikey: apiKey, Authorization: authorization } })
-    if (!response.ok) return { resposta: erro(c, 'nao_autorizado', 401) }
-    sessao = await response.json() as { id?: string }
-  } catch {
-    return { resposta: erro(c, 'autenticacao_indisponivel', 503) }
-  }
-  if (sessao.id !== userId) return { resposta: erro(c, 'nao_autorizado', 401) }
 
   const role = await c.env.SHARE_DB.prepare(`
     SELECT 1 FROM user_profiles p

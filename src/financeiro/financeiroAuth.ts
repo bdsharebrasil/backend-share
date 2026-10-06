@@ -6,14 +6,10 @@ type FinanceiroAuthDb = {
   }
 }
 
+import { getAuthenticatedUserId } from '../lib/auth'
+
 type FinanceiroAuthContext = {
-  env: {
-    SHARE_DB: FinanceiroAuthDb
-    SUPABASE_URL?: string
-    SUPABASE_ANON_KEY?: string
-    SUPABASE_SERVICE_ROLE_KEY?: string
-    VITE_SUPABASE_PUBLISHABLE_KEY?: string
-  }
+  env: { SHARE_DB: FinanceiroAuthDb; SUPABASE_URL?: string }
   req: { header(name: string): string | undefined }
 }
 
@@ -61,26 +57,8 @@ async function usuarioAtivo(db: FinanceiroAuthDb, userId: string): Promise<boole
 }
 
 async function validarUsuarioSupabase(c: FinanceiroAuthContext): Promise<string | null> {
-  const authorization = c.req.header('authorization')
-  const supabaseUrl = c.env.SUPABASE_URL?.trim().replace(/\/+$/, '')
-  const apiKey = c.env.SUPABASE_ANON_KEY
-    || c.env.VITE_SUPABASE_PUBLISHABLE_KEY
-    || c.env.SUPABASE_SERVICE_ROLE_KEY
-    || c.req.header('apikey')
-  if (!authorization?.startsWith('Bearer ') || !supabaseUrl || !apiKey) return null
-
-  try {
-    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: { apikey: apiKey, Authorization: authorization },
-    })
-    if (!response.ok) return null
-    const user = await response.json() as { id?: unknown }
-    return typeof user.id === 'string' && user.id.trim() ? user.id : null
-  } catch {
-    return null
-  }
+  return getAuthenticatedUserId(c as Parameters<typeof getAuthenticatedUserId>[0])
 }
-
 function colaboradorPodeSolicitar(path: string, method: string): boolean {
   if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
   if (method !== 'GET') return false
