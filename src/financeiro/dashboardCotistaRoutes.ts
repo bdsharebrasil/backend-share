@@ -324,7 +324,7 @@ dashboardCotistaRoutes.get('/cotista/relatorio-geral', async (c) => {
     ])
 
     const custos: CustoBruto[] = [
-      ...rateios.map((r) => ({ ...r, valor_centavos: Number(r.total) > 0 ? Number(r.total) : Number(r.rateado) }) as CustoBruto),
+      ...rateios.map((r) => ({ ...r, valor_centavos: Number(r.rateado) }) as CustoBruto),
       ...lancamentos as unknown as CustoBruto[],
       ...rateiosHolding.map((r) => ({ ...r, valor_centavos: Number(r.rateado) }) as CustoBruto),
       ...movimentosHolding as unknown as CustoBruto[],

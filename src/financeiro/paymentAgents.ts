@@ -195,6 +195,7 @@ export async function convertPaymentRequest(
 
   const comando: Row = {
     idempotency_key: `envio:${request.id}`,
+    lancamento_id: request.id,
     tipo: request.tipo,
     descricao: request.descricao,
     valor_centavos: valorCentavos,

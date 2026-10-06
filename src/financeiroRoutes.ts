@@ -17,6 +17,7 @@ import { listar } from './financeiro/repositories/d1'
 import { contasRoutes } from './financeiro/contasRoutes'
 import { mapConta } from './financeiro/contas'
 import { enriquecerFornecedores } from './financeiro/repositories/contas'
+import { balancoMensalRoutes } from './financeiro/balancoMensalRoutes'
 import { dashboardCotistaRoutes } from './financeiro/dashboardCotistaRoutes'
 import { dashboardShareRoutes } from './financeiro/dashboardShareRoutes'
 import { notasSaidaRoutes } from './financeiro/notasSaidaRoutes'
@@ -50,6 +51,7 @@ financeiroRoutes.route('/', pagamentosFolhaRoutes)
 financeiroRoutes.route('/', configuracoesRoutes)
 financeiroRoutes.route('/', contasRoutes)
 financeiroRoutes.route('/', dashboardCotistaRoutes)
+financeiroRoutes.route('/', balancoMensalRoutes)
 financeiroRoutes.route('/', dashboardShareRoutes)
 financeiroRoutes.route('/', notasSaidaRoutes)
 financeiroRoutes.route('/', recibosSaidaRoutes)

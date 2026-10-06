@@ -581,6 +581,23 @@ async function findExistingByIdempotency(
     if (movimento) return { ...movimento, movimento_holding_id: movimento.id, idempotent: true }
   }
 
+  const envioLink = await db.prepare(`SELECT destino_id FROM financeiro_vinculos
+    WHERE origem_tipo='IDEMPOTENCY_KEY' AND origem_id=?
+      AND destino_tipo='ENVIO_DESPESA' AND tipo_vinculo='IDEMPOTENCIA' LIMIT 1`)
+    .bind(key).first<{ destino_id: string }>()
+  if (envioLink) {
+    const envio = await db.prepare('SELECT * FROM envio_despesas WHERE id=?')
+      .bind(envioLink.destino_id).first<Row>()
+    if (envio) {
+      const rateios = await db.prepare(`SELECT id FROM rateio_despesas WHERE lancamento_id=?
+        UNION ALL SELECT id FROM rateio_hold WHERE origem_tipo='ENVIO_DESPESA' AND origem_id=?`)
+        .bind(envioLink.destino_id, envioLink.destino_id).all<Row>()
+      return { id: envioLink.destino_id, envio_id: envioLink.destino_id, lancamento_id: null,
+        movimento_holding_id: null, rateio_ids: (rateios.results || []).map(r => r.id),
+        conta_pagar_id: null, status: 'PAGO', idempotent: true }
+    }
+  }
+
   return null
 }
 
@@ -933,7 +950,7 @@ function holdingAllocationStatements(
   db: Database,
   schema: SchemaCache,
   command: Row,
-  movimentoId: string,
+  movimentoId: string | null,
   lines: AllocationLine[],
   userId: string | null,
 ): D1PreparedStatement[] {
@@ -977,8 +994,8 @@ function holdingAllocationStatements(
         data_pagamento: line.pagoDiretamente ? dateValue(command.data_pagamento ?? command.data) : null,
         descricao_despesa: command.descricao,
         observacoes: nullableText(command.observacoes),
-        origem_id: nullableText(command.recibo_id),
-        origem_tipo: nullableText(command.recibo_id) ? 'RECIBO' : null,
+        origem_id: nullableText(command.origem_id ?? command.recibo_id),
+        origem_tipo: nullableText(command.origem_tipo) || (nullableText(command.recibo_id) ? 'RECIBO' : null),
         documento_numero: nullableText(command.numero_recibo),
         documento_url: nullableText(command.url_recibo),
         criado_por: userId,
@@ -1028,6 +1045,53 @@ export async function createExpense(
   // holding, as linhas são validadas por socio_id em holdingAllocationStatements.
   if (context?.kind !== 'HOLDING') {
     await validateAllocationLines(db, command, lines, amount)
+  }
+
+  if (direct) {
+    if (!lines.length) throw new FinanceError('Despesa direta precisa de rateio', 'rateio_obrigatorio')
+    const sourceId = nullableText(body.lancamento_id)
+    const source = sourceId
+      ? await db.prepare('SELECT id, aeronave_id FROM envio_despesas WHERE id=?').bind(sourceId).first<Row>()
+      : null
+    if (sourceId && (!source || source.aeronave_id !== command.aeronave_id)) {
+      throw new FinanceError('Envio de despesa inválido para a aeronave', 'envio_despesa_invalido')
+    }
+    const envioId = sourceId || id()
+    const diretoCommand = { ...command, origem_tipo: 'ENVIO_DESPESA', origem_id: envioId }
+    const rateioIds = lines.map(() => id())
+    const allocationStatements = context?.kind === 'HOLDING'
+      ? holdingAllocationStatements(db, schema, diretoCommand, null, lines, userId)
+      : clientAllocationStatements(db, schema, diretoCommand, envioId, lines, userId, rateioIds)
+    const key = nullableText(command.idempotency_key)
+    const statements: D1PreparedStatement[] = [
+      ...(source ? [] : [insertStatement(db, schema, 'envio_despesas', {
+        id: envioId, tipo: 'cliente', descricao: command.descricao, valor: amount / 100,
+        valor_total_despesa: (optionalCents(command.valor_total_despesa_centavos) ?? amount) / 100,
+        aeronave_id: command.aeronave_id, data_despesa: dateValue(command.data_emissao ?? command.data),
+        vencimento: nullableText(command.data_vencimento ?? command.vencimento),
+        tipo_caixa: context?.kind === 'HOLDING' ? 'HOLDING' : 'CLIENTE',
+        pago_diretamente: 1, pago_por: nullableText(command.pago_por ?? command.cotista_pagador_id),
+        status: 'CONVERTIDO', criado_por: userId, criado_em: new Date().toISOString(),
+        categoria_id: nullableText(command.categoria_id), categoria_nome: nullableText(command.categoria_nome),
+        categoria_cliente_id: nullableText(command.categoria_cliente_id),
+        tipo_rateio: normalizeRateioType(command.tipo_rateio), periodicidade: nullableText(command.periodicidade),
+        escopo_financeiro: escopo,
+      }, ['id', 'aeronave_id', 'descricao', 'valor'])]),
+      ...allocationStatements,
+      ...(key ? [db.prepare(`INSERT INTO financeiro_vinculos
+        (id,origem_tipo,origem_id,destino_tipo,destino_id,tipo_vinculo)
+        VALUES (?,'IDEMPOTENCY_KEY',?,'ENVIO_DESPESA',?,'IDEMPOTENCIA')`).bind(id(),key,envioId)] : []),
+      auditStatement(db,schema,'envio_despesas',envioId,'CRIACAO_DESPESA_DIRETA',userId,
+        null,amount,nullableText(command.motivo),key),
+    ]
+    // O índice de idempotência faz a segunda escrita concorrente abortar o batch inteiro.
+    await db.batch(statements)
+    const result = context?.kind === 'HOLDING'
+      ? await db.prepare("SELECT id FROM rateio_hold WHERE origem_tipo='ENVIO_DESPESA' AND origem_id=?").bind(envioId).all<Row>()
+      : await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id=?').bind(envioId).all<Row>()
+    return { id: envioId, envio_id: envioId, lancamento_id: null, movimento_holding_id: null,
+      rateio_ids: (result.results || []).map(r => r.id), conta_pagar_id: null,
+      valor_centavos: amount, status: 'PAGO', idempotent: false }
   }
 
   if (context?.kind === 'HOLDING') {
@@ -1112,98 +1176,6 @@ export async function createExpense(
     }
   }
 
-  if (direct) {
-    const lancamentoId = text(command.id) || id()
-    const rateioIds = lines.map(() => id())
-    const statements = clientAllocationStatements(
-      db,
-      schema,
-      command,
-      lancamentoId,
-      lines,
-      userId,
-      rateioIds,
-    )
-    if (!statements.length && !text(command.recibo_id)) {
-      throw new FinanceError(
-        'Despesa direta precisa de rateio',
-        'rateio_obrigatorio',
-      )
-    }
-    await db.batch([
-      insertStatement(
-        db,
-        schema,
-        'lancamentos',
-        {
-          id: lancamentoId,
-          escopo_financeiro: escopo,
-          aeronave_id: command.aeronave_id,
-          cotista_aeronave_id: command.cotista_aeronave_id,
-          abastecimentos_id: nullableText(command.abastecimentos_id),
-          descricao: command.descricao,
-          categoria_id: command.tipo_caixa === 'CLIENTE' ? null : nullableText(command.categoria_id),
-          categoria_cliente_id: command.tipo_caixa === 'CLIENTE'
-            ? nullableText(command.categoria_cliente_id ?? command.categoria_id)
-            : null,
-          categoria_nome: nullableText(command.categoria_nome ?? command.categoria),
-          grupo_categoria: nullableText(command.grupo_categoria || 'DESPESAS EMPRESA'),
-          periodicidade: nullableText(command.periodicidade),
-          fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-          fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
-          ...buildDocumentFields(command.anexos_json),
-          subcategoria_1: nullableText(command.subcategoria_1),
-          subcategoria_2: nullableText(command.subcategoria_2),
-          subcategoria_3: nullableText(command.subcategoria_3),
-          subcategoria_4: nullableText(command.subcategoria_4),
-          fluxo: 'SAIDA',
-          natureza: 'DESPESA',
-          tipo_caixa: command.tipo_caixa || 'SHARE',
-          valor_centavos: amount,
-          valor_total: amount / 100,
-          valor: amount / 100,
-          status: 'PAGO',
-          data_lancamento: command.data,
-          data_emissao: command.data,
-          data_pagamento: dateValue(command.data_pagamento ?? command.data),
-          pago_diretamente: 1,
-          pago_por_cotista_aeronave_id: nullableText(command.cotista_pagador_id),
-          reembolsavel: 0,
-          reembolso_quitado: 0,
-          origem_tipo: command.recibo_id ? 'RECIBO' : 'DESPESA',
-          origem_id: command.recibo_id || lancamentoId,
-          numero_recibo: nullableText(command.numero_recibo),
-          url_recibo: nullableText(command.url_recibo),
-          idempotency_key: command.idempotency_key,
-          criado_por: userId,
-        },
-        ['id', 'descricao', 'fluxo', 'valor_centavos'],
-      ),
-      ...statements,
-      ...rateioIds.map((rateioId) => linkStatement(db, schema, 'DESPESA', lancamentoId, 'RATEIO', rateioId, 'DESPESA_RATEIO', userId)),
-      auditStatement(
-        db,
-        schema,
-        'lancamentos',
-        lancamentoId,
-        'CRIACAO_DESPESA_DIRETA',
-        userId,
-        null,
-        amount,
-        nullableText(command.motivo),
-        nullableText(command.idempotency_key),
-      ),
-    ])
-    return {
-      id: lancamentoId,
-      lancamento_id: lancamentoId,
-      rateio_ids: rateioIds,
-      conta_pagar_id: null,
-      valor_centavos: amount,
-      status: 'PAGO',
-      idempotent: false,
-    }
-  }
 
   const lancamentoId = text(command.id) || id()
   const ehDespesaCliente = String(command.tipo_caixa || '').toUpperCase() === 'CLIENTE'
@@ -1963,7 +1935,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
     : null
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
-    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', pago_por: userId, data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
+    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
     ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
@@ -2076,7 +2048,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   }
   if (shareId) {
     const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
-    if (novoStatusConta === 'RECEBIDO') statements.push(updateStatement(db, schema, 'lancamentos', { status: 'RECEBIDO', data_pagamento: lastDate, conta_bancaria_id: lastBank, comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
+    if (novoStatusConta === 'RECEBIDO') statements.push(updateStatement(db, schema, 'lancamentos', { status: reimbursement ? 'REEMBOLSADO' : 'RECEBIDO', data_pagamento: lastDate, conta_bancaria_id: lastBank, comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
     const origem = await db.prepare('SELECT origem_id FROM lancamentos WHERE id = ?').bind(shareId).first<Row>()
     const client = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(origem?.origem_id ?? null).first<Row>()
     if (client && allPaid) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: lastDate, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
