@@ -19,6 +19,37 @@ type Variables = { userId: string | null }
 
 export const dashboardCotistaRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
+function documentosVinculados(anexosJson: unknown, campos: Array<{ nome: string; url: unknown; numero?: unknown; tipo?: unknown }>) {
+  let anexos: Array<Record<string, unknown>> = []
+  try {
+    const parsed = JSON.parse(String(anexosJson || '[]'))
+    if (Array.isArray(parsed)) anexos = parsed.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+  } catch {
+    anexos = []
+  }
+  const documentos = [
+    ...anexos.map((anexo) => ({
+      id: String(anexo.id ?? ''),
+      nome: String(anexo.nome ?? anexo.filename ?? anexo.nome_arquivo ?? anexo.tipo ?? 'Documento'),
+      url: String(anexo.url ?? anexo.arquivo_url ?? '').trim(),
+      numero: anexo.numero == null ? null : String(anexo.numero),
+      tipo: anexo.tipo == null ? null : String(anexo.tipo),
+    })),
+    ...campos.map((campo) => ({
+      id: '', nome: campo.nome, url: String(campo.url ?? '').trim(),
+      numero: campo.numero == null ? null : String(campo.numero),
+      tipo: campo.tipo == null ? null : String(campo.tipo),
+    })),
+  ].filter((documento) => documento.url)
+  const vistos = new Set<string>()
+  return documentos.filter((documento) => {
+    const chave = `${documento.url}|${documento.numero ?? ''}`
+    if (vistos.has(chave)) return false
+    vistos.add(chave)
+    return true
+  })
+}
+
 dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -76,7 +107,8 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
              COALESCE(r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.numero_doc, r.documento_numero) AS numero_doc,
              r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.url_doc, r.url_demonstrativo, r.url_nf, r.url_recibo, r.url_boleto,
-             r.fornecedor_id, NULL AS fornecedor_nome, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.periodicidade,
+             ${selecionarColunaOpcional(schema, 'rateio_despesas', 'r', ['anexos_json'], 'anexos_json')}, r.subcategoria_1, r.subcategoria_2, r.subcategoria_3, r.subcategoria_4,
+             r.fornecedor_id, NULL AS fornecedor_nome, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.tipo_rateio, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
@@ -100,7 +132,12 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_nf'], 'url_nf')},
              ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_recibo'], 'url_recibo')},
              ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_boleto'], 'url_boleto')},
-             r.fornecedor_id, r.fornecedor AS fornecedor_nome, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.periodicidade,
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['anexos_json'], 'anexos_json')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['subcategoria_1'], 'subcategoria_1')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['subcategoria_2'], 'subcategoria_2')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['subcategoria_3'], 'subcategoria_3')},
+             ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['subcategoria_4'], 'subcategoria_4')},
+             r.fornecedor_id, r.fornecedor AS fornecedor_nome, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.tipo_rateio, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
@@ -115,7 +152,8 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       SELECT l.id, l.aeronave_id, l.cotista_aeronave_id AS participante_id, l.data_emissao AS data, l.descricao AS descricao,
              COALESCE(l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.numero_doc) AS numero_doc,
              l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
-             l.fornecedores_favoritos_id AS fornecedor_id, l.fornecedor_nome AS fornecedor_nome, l.categoria_nome, l.grupo_categoria, l.periodicidade,
+             ${selecionarColunaOpcional(schema, 'lancamentos', 'l', ['anexos_json'], 'anexos_json')}, l.subcategoria_1, l.subcategoria_2, l.subcategoria_3, l.subcategoria_4,
+             l.fornecedores_favoritos_id AS fornecedor_id, l.fornecedor_nome AS fornecedor_nome, l.categoria_nome, l.grupo_categoria, l.tipo_rateio, l.periodicidade,
              l.data_vencimento, l.data_pagamento, l.fluxo, l.valor_centavos, l.valor_centavos AS valor_rateado_centavos,
              0 AS valor_pago_real_centavos, NULL AS percentual_sociedade, NULL AS percentual_uso, l.pago_por,
              l.pago_diretamente, l.reembolsavel, l.reembolso_quitado,
@@ -131,7 +169,8 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       SELECT mh.id, mh.aeronave_id, mh.socio_id AS participante_id, mh.data_emissao AS data, mh.descricao AS descricao,
              COALESCE(mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.numero_doc) AS numero_doc,
              mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.url_doc, mh.url_demonstrativo, mh.url_nf, mh.url_recibo, mh.url_boleto,
-             mh.fornecedor_id, mh.fornecedor_nome AS fornecedor_nome, mh.categoria_nome, mh.grupo_categoria, mh.periodicidade, mh.data_vencimento, mh.data_pagamento,
+             ${selecionarColunaOpcional(schema, 'movimentos_holding', 'mh', ['anexos_json'], 'anexos_json')}, mh.subcategoria_1, mh.subcategoria_2, mh.subcategoria_3, mh.subcategoria_4,
+             mh.fornecedor_id, mh.fornecedor_nome AS fornecedor_nome, mh.categoria_nome, mh.grupo_categoria, mh.tipo_rateio, mh.periodicidade, mh.data_vencimento, mh.data_pagamento,
              CASE WHEN UPPER(mh.fluxo) IN ('ENTRADA', 'APORTE', 'ESTORNO') THEN 'ENTRADA' ELSE 'SAIDA' END AS fluxo,
              mh.valor_centavos, mh.valor_centavos AS valor_rateado_centavos, 0 AS valor_pago_real_centavos,
              NULL AS percentual_sociedade, NULL AS percentual_uso, NULL AS pago_por,
@@ -144,7 +183,17 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
        WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
       ORDER BY 4 DESC, 1 DESC LIMIT 1000
     `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
-    const rowsParaExibicao = consolidarRateiosLancamentos(rows)
+    const rowsComDocumentos = rows.map((row) => ({
+      ...row,
+      documentos_vinculados: documentosVinculados(row.anexos_json, [
+        { nome: 'Documento', url: row.url_doc, numero: row.numero_doc, tipo: 'documento' },
+        { nome: 'Nota fiscal', url: row.url_nf, numero: row.numero_nf, tipo: 'nota_fiscal' },
+        { nome: 'Recibo', url: row.url_recibo, numero: row.numero_recibo, tipo: 'recibo' },
+        { nome: 'Demonstrativo', url: row.url_demonstrativo, numero: row.numero_demonstrativo, tipo: 'demonstrativo' },
+        { nome: 'Boleto', url: row.url_boleto, tipo: 'boleto' },
+      ]),
+    }))
+    const rowsParaExibicao = consolidarRateiosLancamentos(rowsComDocumentos)
     const aeronaveIds = [...new Set(rowsParaExibicao.map(row => String(row.aeronave_id ?? '').trim()).filter(Boolean))]
     const aeronavesPorId = new Map<string, string>()
     if (aeronaveIds.length) {

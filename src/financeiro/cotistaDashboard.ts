@@ -259,9 +259,18 @@ export function consolidarRateiosLancamentos(rows: Record<string, unknown>[]) {
       percentual_uso: row.percentual_uso,
       valor_rateado_centavos: valorRateado,
       valor_pago_real_centavos: valorPago,
+      data_vencimento: row.data_vencimento,
+      data_pagamento: row.data_pagamento,
+      subcategoria_1: row.subcategoria_1,
+      subcategoria_2: row.subcategoria_2,
+      subcategoria_3: row.subcategoria_3,
+      subcategoria_4: row.subcategoria_4,
+      tipo_rateio: row.tipo_rateio ?? row.grupo_categoria,
+      periodicidade: row.periodicidade,
       pago_por: row.pago_por,
       pago_diretamente: row.pago_diretamente,
       status: row.status,
+      documentos_vinculados: row.documentos_vinculados ?? [],
     })
     grupo.valor_centavos = Number(grupo.valor_centavos ?? 0) + valorRateado
     grupo.valor_rateado_centavos = Number(grupo.valor_rateado_centavos ?? 0) + valorRateado
