@@ -13,6 +13,35 @@ import { statusLancamentoFinanceiro } from './statuses'
 type Bindings = { SHARE_DB: D1Database }
 type Variables = { userId: string | null }
 
+export function buildLancamentoSemRateioPredicate(schema: Map<string, Set<string>>) {
+  const lancamentoColumns = schema.get('lancamentos')
+  const rateioColumns = schema.get('rateio_despesas')
+  const reembolsoColumns = schema.get('reembolsos')
+  const relacionamentosRateio = ['rd.lancamento_id = l.id']
+
+  if (reembolsoColumns?.has('lancamento_cliente_id') && reembolsoColumns.has('lancamento_origem_id')) {
+    relacionamentosRateio.push(
+      'rd.lancamento_id IN (SELECT rb.lancamento_origem_id FROM reembolsos rb WHERE rb.lancamento_cliente_id = l.id)',
+      'rd.lancamento_id IN (SELECT rb.lancamento_cliente_id FROM reembolsos rb WHERE rb.lancamento_origem_id = l.id)',
+    )
+  }
+
+  if (lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('origem_id')
+    && rateioColumns?.has('origem_tipo') && rateioColumns.has('origem_id')) {
+    relacionamentosRateio.push('(l.origem_tipo IS NOT NULL AND l.origem_id IS NOT NULL AND rd.origem_tipo = l.origem_tipo AND rd.origem_id = l.origem_id)')
+  }
+
+  const excluirEntradaReembolso = lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('fluxo')
+    ? ` AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'REEMBOLSO' AND UPPER(COALESCE(l.fluxo, '')) = 'ENTRADA')`
+    : ''
+
+  return `NOT EXISTS (
+        SELECT 1 FROM rateio_despesas rd
+         WHERE UPPER(COALESCE(rd.status, '')) <> 'CANCELADO'
+           AND (${relacionamentosRateio.join('\n             OR ')})
+      )${excluirEntradaReembolso}`
+}
+
 export const dashboardCotistaRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
@@ -64,17 +93,9 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     if (inicio) { filtrosMovimento.push('date(mh.data_emissao) >= date(?)'); paramsMovimento.push(inicio) }
     if (fim) { filtrosMovimento.push('date(mh.data_emissao) <= date(?)'); paramsMovimento.push(fim) }
     if (aeronaveId) { filtrosMovimento.push('mh.aeronave_id = ?'); paramsMovimento.push(aeronaveId) }
-    // Um lançamento só aparece sozinho quando NENHUM rateio o representa. O reembolso cria um par
-    // (lancamento SHARE de origem + lancamento CLIENTE espelho) e o rateio aponta para apenas um
-    // deles; o "irmão" precisa ser tratado como já representado pelo rateio, senão duplica a linha.
-    const lancamentoSemRateio = `NOT EXISTS (
-        SELECT 1 FROM rateio_despesas rd
-         WHERE UPPER(COALESCE(rd.status, '')) <> 'CANCELADO'
-           AND (rd.lancamento_id = l.id
-             OR rd.lancamento_id IN (SELECT rb.lancamento_origem_id FROM reembolsos rb WHERE rb.lancamento_cliente_id = l.id)
-             OR rd.lancamento_id IN (SELECT rb.lancamento_cliente_id FROM reembolsos rb WHERE rb.lancamento_origem_id = l.id)
-             OR (l.origem_tipo IS NOT NULL AND l.origem_id IS NOT NULL AND rd.origem_tipo = l.origem_tipo AND rd.origem_id = l.origem_id)))
-      AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'REEMBOLSO' AND UPPER(COALESCE(l.fluxo, '')) = 'ENTRADA')`
+    // Um lançamento só aparece sozinho quando NENHUM rateio o representa. O reembolso pode criar
+    // um par origem/espelho; os vínculos e colunas de origem são usados quando existem no schema.
+    const lancamentoSemRateio = buildLancamentoSemRateioPredicate(schema)
     const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(db, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,

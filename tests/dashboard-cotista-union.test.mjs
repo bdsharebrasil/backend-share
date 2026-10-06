@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { buildLancamentoSemRateioPredicate } from "../src/financeiro/dashboardCotistaRoutes.ts";
 import { consolidarRateiosLancamentos } from "../src/financeiro/cotistaDashboard.ts";
 
 const source = await readFile(new URL("../src/financeiro/dashboardCotistaRoutes.ts", import.meta.url), "utf8");
@@ -121,4 +122,35 @@ test("ações do lançamento consolidado reconhecem o ID-pai e atualizam o grupo
   assert.match(financeRoutes, /const colunaId = ehRateioPai \? 'lancamento_id' : 'id'/);
   assert.match(financeRoutes, /valor_pago_real_centavos = valor_rateado_centavos/);
   assert.match(financeRoutes, /WHERE lancamento_id = \? AND UPPER\(COALESCE\(status, ''\)\) <> 'CANCELADO'/);
+});
+
+test("predicado de deduplicação não consulta colunas de origem ausentes no schema", () => {
+  const schema = new Map([
+    ["lancamentos", new Set(["fluxo"])],
+    ["rateio_despesas", new Set(["lancamento_id", "status"])],
+    ["reembolsos", new Set(["id"])],
+  ]);
+
+  const predicate = buildLancamentoSemRateioPredicate(schema);
+
+  assert.match(predicate, /rd\.lancamento_id = l\.id/);
+  assert.doesNotMatch(predicate, /rd\.origem_(tipo|id)/);
+  assert.doesNotMatch(predicate, /rb\.lancamento_(cliente|origem)_id/);
+  assert.doesNotMatch(predicate, /l\.origem_tipo/);
+});
+
+test("predicado de deduplicação usa vínculos de reembolso somente quando as colunas existem", () => {
+  const schema = new Map([
+    ["lancamentos", new Set(["fluxo", "origem_tipo", "origem_id"])],
+    ["rateio_despesas", new Set(["lancamento_id", "status", "origem_tipo", "origem_id"])],
+    ["reembolsos", new Set(["lancamento_cliente_id", "lancamento_origem_id"])],
+  ]);
+
+  const predicate = buildLancamentoSemRateioPredicate(schema);
+
+  assert.match(predicate, /rb\.lancamento_origem_id/);
+  assert.match(predicate, /rb\.lancamento_cliente_id/);
+  assert.match(predicate, /rd\.origem_tipo = l\.origem_tipo/);
+  assert.match(predicate, /rd\.origem_id = l\.origem_id/);
+  assert.match(predicate, /AND NOT \(UPPER\(COALESCE\(l\.origem_tipo/);
 });
