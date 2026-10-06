@@ -30,11 +30,20 @@ test("repetir a ação completa vínculos faltantes sem duplicar linhas já vinc
 
 test("recibo pago por cliente persiste envio como origem do rateio", () => {
   assert.match(kernel, /receipt\.pagador_tipo === 'cliente'/);
-  assert.match(kernel, /INSERT INTO envio_despesas/);
+  assert.match(kernel, /insertStatement\(db, schema, 'envio_despesas'/);
   assert.match(kernel, /'RECIBO', \?\, 'ENVIO_DESPESA'/);
   assert.match(kernel, /lancamento_id: envioId/);
   assert.match(kernel, /UPDATE recibos SET lancamento_id = \? WHERE id = \? AND lancamento_id IS NULL/);
   assert.match(kernel, /'ENVIO_DESPESA', \?\, 'RATEIO_DESPESAS'/);
+});
+
+test("rateio usa apenas colunas presentes e leva os documentos do recibo", () => {
+  assert.match(kernel, /compatibleRateioValues = Object\.fromEntries/);
+  assert.match(kernel, /fornecedor_id: nullableText\(command\.fornecedor_id\)/);
+  assert.match(kernel, /numero_recibo: nullableText\(command\.numero_recibo\)/);
+  assert.match(kernel, /url_recibo: nullableText\(command\.url_recibo\)/);
+  assert.match(kernel, /numero_recibo: receipt\.numero_recibo/);
+  assert.match(kernel, /url_recibo: receipt\.url_recibo/);
 });
 
 test("histórico reconhece rateio de recibo sem depender de um lançamento espelho", () => {
