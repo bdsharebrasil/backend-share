@@ -101,7 +101,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         LEFT JOIN hold_socios hs ON hs.id = r.socio_id
         WHERE ${[...filtrosHolding, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
       UNION ALL
-      SELECT l.id, l.aeronave_id, l.cotista_aeronave_id AS participante_id, l.data_emissao AS data,
+      SELECT l.id, l.aeronave_id, l.cotista_aeronave_id AS participante_id, l.data_emissao AS data, l.descricao AS descricao,
              COALESCE(l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.numero_doc) AS numero_doc,
              l.numero_nf, l.numero_recibo, l.numero_demonstrativo, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
              l.fornecedores_favoritos_id AS fornecedor_id, l.categoria_nome, l.grupo_categoria, l.periodicidade,
@@ -116,7 +116,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
        WHERE ${[...filtrosLancamentos, lancamentoSemRateio].join(' AND ')}
       UNION ALL
-      SELECT mh.id, mh.aeronave_id, mh.socio_id AS participante_id, mh.data_emissao AS data,
+      SELECT mh.id, mh.aeronave_id, mh.socio_id AS participante_id, mh.data_emissao AS data, mh.descricao AS descricao,
              COALESCE(mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.numero_doc) AS numero_doc,
              mh.numero_nf, mh.numero_recibo, mh.numero_demonstrativo, mh.url_doc, mh.url_demonstrativo, mh.url_nf, mh.url_recibo, mh.url_boleto,
              mh.fornecedor_id, mh.categoria_nome, mh.grupo_categoria, mh.periodicidade, mh.data_vencimento, mh.data_pagamento,
