@@ -14,8 +14,8 @@ import { mensagensRoutes } from './routes/mensagensRoutes'
 import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
-import { processFinanceQueue } from './financeiro/FinanceiroKernel'
-import { garantirTabelasAuxiliares, validateWorkerSchema } from './lib/schema'
+import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
+import { validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
 import { normalizarHorarioAgendamento } from './lib/schedule'
 import { checkRateLimit, clientIp } from './lib/cache'
@@ -69,11 +69,27 @@ interface HotelReservationHotel {
 
 const app = new Hono<{ Bindings: Bindings }>()
 
+function allowedOrigins(env: Bindings): string[] {
+  return env.ALLOWED_ORIGINS?.split(',').map(origin => origin.trim()).filter(Boolean) ?? []
+}
+
+function originFor(env: Bindings, origin: string): string {
+  return allowedOrigins(env).includes(origin) ? origin : ''
+}
+
+app.onError((error, c) => {
+  if (error instanceof FinanceError) {
+    return c.json({ error: error.message, code: error.code }, error.status as any)
+  }
+
+  console.error('[http] erro interno', error)
+  return c.json({ error: 'erro_interno', code: 'erro_interno' }, 500)
+})
+
 // CRUCIAL: O CORS precisa ser o primeiro middleware global executado
 app.use('*', async (c, next) => {
-  const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
   const corsMiddleware = cors({
-    origin: allowed && allowed.length > 0 ? allowed : '*',
+    origin: origin => originFor(c.env, origin),
     allowHeaders: ['Content-Type', 'Authorization', 'apikey', 'X-Requested-With'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
   })
@@ -148,9 +164,8 @@ function createMcpServer(db: D1Database): McpServer {
 // ─── MCP Roteamento oficial do SDK (web-standard transport) ───────────────────
 
 app.use('/mcp', async (c, next) => {
-  const allowed = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean)
   const corsMiddleware = cors({
-    origin: allowed && allowed.length > 0 ? allowed : '*',
+    origin: origin => originFor(c.env, origin),
     allowHeaders: ['Content-Type', 'Authorization', 'mcp-session-id', 'Last-Event-ID', 'mcp-protocol-version'],
     exposeHeaders: ['mcp-session-id', 'mcp-protocol-version'],
     allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
@@ -167,7 +182,8 @@ app.all('/mcp', async c => {
     await server.connect(transport)
     return transport.handleRequest(c.req.raw)
   } catch (error) {
-    return c.text(`Erro ao iniciar sessão MCP: ${error instanceof Error ? error.message : String(error)}`, 500)
+    console.error('[mcp] erro ao iniciar sessão', error)
+    return c.json({ error: 'erro_interno', code: 'erro_interno' }, 500)
   }
 })
 
@@ -688,14 +704,13 @@ app.post('/api/flight-calculations', async (c) => {
       },
     })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
 // ─── Routes: Upload de arquivos (R2 + short link) ────────────────────────────
 
 app.post('/api/upload', async (c) => {
-  await garantirTabelasAuxiliares(c)
   if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
 
   try {
@@ -731,14 +746,13 @@ app.post('/api/upload', async (c) => {
     return c.json({ url: publicUrl, key, code })
   } catch (e: any) {
     log.error('[upload]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
 // ─── Route: Servir arquivo via short link (público, sem auth) ───────────────
 
 app.get('/r/:code', async (c) => {
-  await garantirTabelasAuxiliares(c)
   const code = c.req.param('code')
   if (!/^[a-f0-9]{32}$/i.test(code)) return c.notFound()
   try {
@@ -761,7 +775,7 @@ app.get('/r/:code', async (c) => {
     return new Response(object.body, { headers })
   } catch (e: any) {
     log.error('[serve-file]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 

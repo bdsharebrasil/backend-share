@@ -2,7 +2,7 @@ import { Hono, Context } from 'hono'
 import { arrayBufferBase64, SIGNATURE_LOGO_BASE64, SIGNATURE_LOGO_CID } from '../lib/emailAssets'
 import { escapeHtml } from '../lib/format'
 import { MAX_ATTACHMENT_TOTAL_SIZE, arrayBufferToBase64, uuid } from '../lib/strings'
-import { garantirTabelasAuxiliares, validateWorkerSchema } from '../lib/schema'
+import { validateWorkerSchema } from '../lib/schema'
 import { authenticatedColaborador, checkInternalAuth, extractSupabaseUserId, requireAuthenticatedUser, shareBrasilUser } from '../lib/auth'
 import { chaveStorageDeUrl, shareBrasilBucket, shareBrasilFileName } from '../lib/storage'
 
@@ -30,7 +30,6 @@ function assinaturaHtml(assinatura: any): string {
 //   2. Envio do email via POST /api/send-email → passa attachments: [{ filename, r2_key: key }]
 
 emailRoutes.post('/api/send-email', async (c) => {
-  await garantirTabelasAuxiliares(c)
   const viaSupabase = await requireAuthenticatedUser(c)
   const viaInternal = !viaSupabase && (await checkInternalAuth(c))
   if (!viaSupabase && !viaInternal) return c.json({ error: 'Unauthorized' }, 401)
@@ -111,18 +110,17 @@ emailRoutes.post('/api/send-email', async (c) => {
 
     if (!resp.ok) {
       log.error('[send-email] Resend error:', JSON.stringify(data))
-      return c.json({ error: 'Falha ao enviar email', details: data }, 500)
+      return c.json({ error: 'Falha ao enviar email' }, 502)
     }
 
     return c.json(data)
   } catch (e: any) {
     log.error('[send-email]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
 emailRoutes.get('/api/email-envios', async (c) => {
-  await garantirTabelasAuxiliares(c)
   if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
   const referenceId = c.req.query('reference_id')
   try {
@@ -132,7 +130,7 @@ emailRoutes.get('/api/email-envios', async (c) => {
     const { results } = await query.all()
     return c.json(results)
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 

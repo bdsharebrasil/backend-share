@@ -5,8 +5,8 @@ import { issueRevenue } from '../src/financeiro/FinanceiroKernel.ts'
 const schemaColumns = [
   'id', 'escopo_financeiro', 'descricao', 'fluxo', 'valor_centavos', 'valor_total', 'valor', 'status',
   'tipo_caixa', 'natureza', 'aeronave_id', 'cotista_aeronave_id', 'cotista_id',
-  'cliente_id', 'socio_id', 'holding_id', 'categoria_id', 'categoria_cliente_id',
-  'categoria_nome', 'grupo_categoria', 'data_emissao', 'data_vencimento',
+  'cliente_id', 'socio_id', 'holding_id', 'categoria_id', 'categoria_cliente_id', 'lancamentos_id',
+  'categoria_nome', 'grupo_categoria', 'descricao_despesa', 'data_emissao', 'data_vencimento',
   'origem_tipo', 'origem_id', 'idempotency_key', 'criado_por', 'atualizado_em',
   'categoria_despesa_subcategoria', 'pago_por', 'pago_diretamente',
   'percentual_sociedade', 'percentual_uso', 'valor_rateado_centavos',

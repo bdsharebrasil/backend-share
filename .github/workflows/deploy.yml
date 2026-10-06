@@ -38,6 +38,9 @@ jobs:
       - name: Type-check
         run: pnpm type-check
 
+      - name: Validate D1 migrations
+        run: pnpm check:migrations
+
       - name: Run tests
         run: pnpm test
 
@@ -63,6 +66,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Apply D1 migrations
+        run: pnpm exec wrangler d1 migrations apply bd_sharebrasil --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy to Cloudflare Workers
         run: pnpm run deploy

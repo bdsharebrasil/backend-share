@@ -1,6 +1,5 @@
 import { Hono, Context } from 'hono'
 import { authenticatedColaborador } from '../lib/auth'
-import { garantirTabelasAuxiliares } from '../lib/schema'
 import { shareBrasilBucket, shareBrasilFileName, salvarArquivoShareBrasil } from '../lib/storage'
 import { uuid } from '../lib/strings'
 import { assinaturaOperacional } from './emailsRoutes'
@@ -12,10 +11,6 @@ export const mensagensRoutes = new Hono<{ Bindings: Bindings; Variables: Variabl
 
 const log = { debug: (..._args: unknown[]) => undefined, warn: (...args: unknown[]) => console.warn(...args), error: (...args: unknown[]) => console.error(...args) }
 // ─── Routes: Mensageria Interna (Inbox / D1) ──────────────────────────────────
-
-// 📩 1. Enviar nova mensagem
-mensagensRoutes.use('/api/mensagens', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
-mensagensRoutes.use('/api/mensagens/*', async (c, next) => { await garantirTabelasAuxiliares(c); return next() })
 
 type PastaMensagem = 'inbox' | 'nao-lidas' | 'favoritas' | 'enviadas' | 'arquivo'
 
@@ -125,7 +120,7 @@ mensagensRoutes.post('/api/mensagens', async (c) => {
     return c.json({ success: true, id, destinatario_id: destinatarioId, anexos: anexosMensagemPublicos(anexos), message: 'Mensagem enviada com sucesso' }, 201)
   } catch (e: any) {
     log.error('[mensagens:send]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -135,7 +130,7 @@ mensagensRoutes.get('/api/mensagens/inbox', async (c) => {
   if (!user) return c.json({ error: 'Não autorizado' }, 401)
   const usuarioId = user.id
   try { return c.json(await listarMensagensPasta(c, usuarioId, 'inbox')) }
-  catch (e: any) { log.error('[mensagens:inbox]', e.message); return c.json({ error: e.message }, 500) }
+  catch (e: any) { log.error('[mensagens:inbox]', e.message); throw e }
 })
 
 mensagensRoutes.get('/api/mensagens/pasta/:pasta', async (c) => {
@@ -146,7 +141,7 @@ mensagensRoutes.get('/api/mensagens/pasta/:pasta', async (c) => {
   if (!usuarioId) return c.json({ error: 'Sessão inválida' }, 401)
   if (!['inbox', 'nao-lidas', 'favoritas', 'enviadas', 'arquivo'].includes(pasta)) return c.json({ error: 'pasta_invalida' }, 400)
   try { return c.json(await listarMensagensPasta(c, usuarioId, pasta)) }
-  catch (e: any) { log.error('[mensagens:pasta]', e.message); return c.json({ error: e.message }, 500) }
+  catch (e: any) { log.error('[mensagens:pasta]', e.message); throw e }
 })
 
 // 📤 3. Listar Caixa de Saída (Enviados)
@@ -155,7 +150,7 @@ mensagensRoutes.get('/api/mensagens/outbox', async (c) => {
   if (!user) return c.json({ error: 'Não autorizado' }, 401)
   const usuarioId = user.id
   try { return c.json(await listarMensagensPasta(c, usuarioId, 'enviadas')) }
-  catch (e: any) { log.error('[mensagens:outbox]', e.message); return c.json({ error: e.message }, 500) }
+  catch (e: any) { log.error('[mensagens:outbox]', e.message); throw e }
 })
 
 // 🔔 4. Obter contagem de mensagens NÃO LIDAS (para badges de notificação)
@@ -194,7 +189,7 @@ mensagensRoutes.patch('/api/mensagens/:id/estado', async (c) => {
     return c.json({ success: true, mensagem_id: mensagemId })
   } catch (e: any) {
     log.error('[mensagens:estado]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -221,7 +216,7 @@ mensagensRoutes.get('/api/mensagens/:id', async (c) => {
     return c.json(msg)
   } catch (e: any) {
     log.error('[mensagens:get]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -238,7 +233,7 @@ mensagensRoutes.delete('/api/mensagens/:id', async (c) => {
     return c.json({ success: true, message: 'Mensagem movida para a lixeira' })
   } catch (e: any) {
     log.error('[mensagens:delete]', e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 

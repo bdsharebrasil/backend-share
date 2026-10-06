@@ -17,7 +17,6 @@ export async function validateWorkerSchema(
     const query = await db.prepare('SELECT name FROM pragma_table_info(?)')
       .bind(requirement.table)
       .all<{ name: string }>()
-      .catch(() => ({ results: [] as { name: string }[] }))
     const columns = new Set((query.results || []).map(column => String(column.name)))
 
     if (!columns.size) {
@@ -33,11 +32,4 @@ export async function validateWorkerSchema(
   if (missing.length) {
     throw new Error(`Schema incompatível; aplique a migration D1 correspondente. Ausências: ${missing.join(', ')}`)
   }
-}
-
-export async function garantirTabelasAuxiliares(c: SchemaContext): Promise<void> {
-  await validateWorkerSchema(c, [
-    { table: 'mensagens', columns: ['id', 'anexos_mensagens'] },
-    { table: 'mensagens_usuario', columns: ['mensagem_id', 'usuario_id', 'papel', 'lida', 'favorita', 'arquivada', 'excluida'] },
-  ])
 }

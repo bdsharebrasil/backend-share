@@ -271,7 +271,6 @@ export async function loadSchema(db: Database): Promise<SchemaCache> {
     const result = await db
       .prepare(`SELECT name FROM pragma_table_info('${table}')`)
       .all<{ name: string }>()
-      .catch(() => ({ results: [] as Array<{ name: string }> }))
 
     schema.set(
       table,
@@ -344,24 +343,6 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'valor_total_despesa_centavos', 'cotista_pagador_id', 'origem_tipo_conta',
 ])
 
-const OPTIONAL_SCHEMA_COLUMNS = new Set([
-  'idempotency_key', 'aeronave_id', 'cotista_aeronave_id', 'holding_id', 'socio_id',
-  'cliente_id', 'fornecedor_id', 'fornecedores_favoritos_id', 'fornecedor_nome', 'categoria_id', 'categoria_nome',
-  'grupo_categoria', 'categoria_cliente_id', 'data', 'data_lancamento', 'data_emissao', 'data_vencimento',
-  'data_pagamento', 'prazo', 'valor', 'valor_total', 'tipo', 'natureza', 'tipo_caixa',
-  'caixa', 'pago_por', 'pago_por_cotista_id', 'pago_por_socio_id', 'pago_diretamente',
-  'reembolsavel', 'reembolso_quitado', 'forma_pagamento', 'conta_bancaria_id',
-  'comprovante_url', 'observacoes', 'anexos_json', 'criado_por', 'origem_tipo',
-  'origem_id', 'colaborador_ref_id', 'nf_saida_id', 'lancamentos_id', 'lancamento_id',
-  'lancamento_cliente_id', 'movimentos_holding_id', 'movimento_holding_id',
-  'numero_nf', 'url_nf',
-  'periodicidade', 'tipo_rateio', 'percentual_sociedade', 'percentual_uso',
-  'valor_total_centavos', 'valor_rateado_centavos', 'valor_pago_real_centavos',
-  'valor_total', 'valor_rateado', 'descricao_despesa', 'categoria_custo_id',
-  'cotista_nome', 'aeronave_registro', 'recibo_url', 'numero_recibo', 'motivo',
-  'usuario_id', 'valor_anterior_centavos', 'valor_novo_centavos',
-])
-
 function validateFrontendContract(body: Row): void {
   const unknown = Object.keys(body).filter((field) => !FRONTEND_CONTRACT_FIELDS.has(field))
   if (unknown.length) {
@@ -401,9 +382,7 @@ function addKnownColumns(
     }
   }
 
-  const incompatible = Object.keys(values).filter(
-    (column) => !available.has(column) && !OPTIONAL_SCHEMA_COLUMNS.has(column),
-  )
+  const incompatible = Object.keys(values).filter((column) => !available.has(column))
   if (incompatible.length) {
     throw new FinanceError(
       `Colunas incompatíveis em ${table}: ${incompatible.join(', ')}`,
@@ -478,9 +457,7 @@ function updateStatement(
     )
   }
 
-  const incompatible = Object.keys(values).filter(
-    (column) => !available.has(column) && !OPTIONAL_SCHEMA_COLUMNS.has(column),
-  )
+  const incompatible = Object.keys(values).filter((column) => !available.has(column))
   if (incompatible.length) {
     throw new FinanceError(
       `Colunas incompatíveis em ${table}: ${incompatible.join(', ')}`,

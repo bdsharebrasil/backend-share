@@ -294,7 +294,7 @@ aiswebRoutes.get('/api/weather/:icao', async (c) => {
     return c.json(normalizeMet(data, icao))
   } catch (e: any) {
     log.error(`[weather] ${icao}:`, e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -345,7 +345,7 @@ aiswebRoutes.get('/api/charts/:icao', async (c) => {
       () => fetchAisweb(c, 'cartas', { icaoCode: icao, especie, tipo }))
     return c.json(normalizeCharts(data))
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -370,7 +370,7 @@ async function getRotaer(c: Context<{ Bindings: Bindings; Variables: Variables }
     return c.json(data)
   } catch (e: any) {
     log.error(`[rotaer] ${icaoCode ?? `${adep ?? ''}-${ades ?? ''}`}:`, e.message)
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 }
 
@@ -429,7 +429,7 @@ aiswebRoutes.get('/api/solar/:icao', async (c) => {
       })),
     })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -442,7 +442,7 @@ aiswebRoutes.get('/api/nearest', async (c) => {
     const airports = (await fetchNearby(c, lat, lon)).sort((a, b) => a.distKm - b.distKm)
     return c.json({ nearest: airports[0] ?? null, alternates: airports.slice(0, 5) })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -457,7 +457,7 @@ aiswebRoutes.get('/api/geiloc/nearby', async (c) => {
       .slice(0, 10)
     return c.json({ alternates: airports })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
 
@@ -594,6 +594,6 @@ aiswebRoutes.get('/api/flightplan', async (c) => {
       notam_count: notamAlerts.length,
     })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    throw e
   }
 })
