@@ -50,6 +50,7 @@ class FakeD1 {
   }
 
   async first(sql, values) {
+    if (sql.includes('SELECT designativo_icao FROM aerodromo WHERE id = ?1 OR')) return ['aerodrome-uuid', 'SBSP'].includes(values[0]) ? { designativo_icao: 'SBSP' } : null
     if (sql.includes('SELECT horimetro_inicio, horimetro_final FROM diario_mes')) return this.month.id === values[0] ? this.month : null
     if (sql.includes('SELECT * FROM diario_mes WHERE id')) return this.month.id === values[0] ? this.month : null
     if (sql.includes('SELECT id, consumo_combustivel FROM aeronave')) return { id: 'aircraft-1', consumo_combustivel: 40 }
@@ -229,6 +230,16 @@ test('PATCH do diário calcula horímetro ativo ao alterar inicial/final e permi
   const manual = await alterarMes(db, 'month-1', { horimetro_inicio: 120.5, horimetro_final: 125.75, horimetro_ativo: 4.5 })
   assert.equal(manual.status, 200)
   assert.equal((await manual.json()).horimetro_ativo, 4.5)
+})
+
+test('PATCH do diário converte UUID da base para designativo ICAO', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-diario-test' })
+  const db = new FakeD1()
+  const response = await alterarMes(db, 'month-1', { aerodromo_base: 'aerodrome-uuid' })
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).aerodromo_base, 'SBSP')
 })
 
 test('criação vincula a perna ao lançamento e impede incluí-la novamente', async (t) => {

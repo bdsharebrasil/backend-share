@@ -54,6 +54,13 @@ async function normalizarLocalAbastecimento(db: D1Database, valor: unknown): Pro
   return aerodromo?.designativo_icao?.trim().toUpperCase() || null
 }
 
+async function normalizarAerodromoBase(db: D1Database, valor: unknown): Promise<string | null> {
+  const base = String(valor ?? '').trim()
+  if (!base) return null
+  const aerodromo = await db.prepare('SELECT designativo_icao FROM aerodromo WHERE id = ?1 OR upper(trim(designativo_icao)) = upper(trim(?1)) LIMIT 1').bind(base).first<{ designativo_icao: string }>()
+  return aerodromo?.designativo_icao?.trim().toUpperCase() || null
+}
+
 function normalizarHorarioJornada(data: string, valor: unknown, referencia?: string | null): string | null {
   const texto = String(valor ?? '').trim()
   if (!texto) return null
@@ -396,6 +403,9 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/mes', async c => {
   const existing = await db.prepare('SELECT id FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<{ id: string }>()
   if (existing) return c.json({ error: 'diario_mes_ja_existe', id: existing.id }, 409)
   const anterior = await db.prepare('SELECT celula_atual_ttotal, celula_atual_tvoo, celula_prox_revisao_ttotal, celula_prox_revisao_tvoo, horimetro_final, aerodromo_base, consumo_combustivel, tem_tarifa_diaria, tarifa_diaria FROM diario_mes WHERE aeronave_id = ?1 AND (ano < ?2 OR (ano = ?2 AND mes < ?3)) ORDER BY ano DESC, mes DESC LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
+  const aerodromoBaseInformado = await normalizarAerodromoBase(db, body.aerodromo_base)
+  if (body.aerodromo_base && !aerodromoBaseInformado) return c.json({ error: 'aerodromo_base_invalido' }, 400)
+  const aerodromoBaseAnterior = await normalizarAerodromoBase(db, anterior?.aerodromo_base)
   const anteriorTotal = diarioNumber(body.celula_anterior_ttotal, diarioNumber(anterior?.celula_atual_ttotal))
   const anteriorVoo = diarioNumber(body.celula_anterior_tvoo, diarioNumber(anterior?.celula_atual_tvoo))
   const id = uuid()
@@ -403,7 +413,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/mes', async c => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
     id, aeronaveId, ano, mes, anteriorTotal, anteriorTotal, diarioNumber(body.celula_prox_revisao_ttotal, diarioNumber(anterior?.celula_prox_revisao_ttotal)), 0,
     diarioNumber(body.horimetro_inicio, diarioNumber(anterior?.horimetro_final)), diarioNumber(body.horimetro_final, diarioNumber(anterior?.horimetro_final)), diarioNumber(body.horimetro_ativo), 0,
-    body.aerodromo_base?.trim() || anterior?.aerodromo_base || null, diarioNumber(body.tarifa_diaria, diarioNumber(anterior?.tarifa_diaria)), body.consumo_combustivel?.trim() || anterior?.consumo_combustivel || null, diarioBoolean(body.tem_tarifa_diaria ?? anterior?.tem_tarifa_diaria ?? true),
+    aerodromoBaseInformado || aerodromoBaseAnterior, diarioNumber(body.tarifa_diaria, diarioNumber(anterior?.tarifa_diaria)), body.consumo_combustivel?.trim() || anterior?.consumo_combustivel || null, diarioBoolean(body.tem_tarifa_diaria ?? anterior?.tem_tarifa_diaria ?? true),
     anteriorVoo, 0, anteriorVoo, diarioNumber(body.celula_prox_revisao_tvoo, diarioNumber(anterior?.celula_prox_revisao_tvoo)), modoCelula,
   ).run()
   await recalcularDiarioMes(c, id)
@@ -422,6 +432,11 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/mes/:id', async c => {
       const final = diarioNumber(body.horimetro_final, diarioNumber(current.horimetro_final))
       body.horimetro_ativo = Number(Math.max(0, final - inicio).toFixed(2))
     }
+  }
+  if (body.aerodromo_base !== undefined) {
+    const aerodromoBase = await normalizarAerodromoBase(c.env.SHARE_DB, body.aerodromo_base)
+    if (body.aerodromo_base && !aerodromoBase) return c.json({ error: 'aerodromo_base_invalido' }, 400)
+    body.aerodromo_base = aerodromoBase
   }
   const allowed: Record<string, (value: unknown) => unknown> = {
     celula_anterior_ttotal: value => diarioNumber(value), celula_atual_ttotal: value => diarioNumber(value), celula_prox_revisao_ttotal: value => diarioNumber(value), celula_disponivel_ttotal: value => diarioNumber(value),
