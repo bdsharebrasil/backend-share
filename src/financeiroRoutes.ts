@@ -183,12 +183,19 @@ async function origemRateio(db: D1Database, origemTipo: string, origemId: string
   if (origemTipo === 'lancamentos') {
     const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
     if (!lancamento) return null
-    return { kind: 'cliente' as const, source: lancamento, movimentoId: null }
+    return { kind: 'cliente' as const, source: lancamento, movimentoId: null, origemTipo }
+  }
+  if (origemTipo === 'abastecimentos') {
+    const abastecimento = await db.prepare(`SELECT a.*, f.nome_fornecedor AS fornecedor_nome
+      FROM abastecimentos a LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id
+      WHERE a.id = ?`).bind(origemId).first<Record<string, unknown>>()
+    if (!abastecimento) return null
+    return { kind: 'cliente' as const, source: { ...abastecimento, valor_centavos: Math.round(Number(abastecimento.valor_total || 0) * 100), descricao: abastecimento.observacao || 'Abastecimento', categoria_nome: 'Combustível', data_emissao: abastecimento.data }, movimentoId: null, origemTipo }
   }
   if (origemTipo === 'movimentos_holding') {
     const movimento = await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
     if (!movimento) return null
-    return { kind: 'holding' as const, source: movimento, movimentoId: origemId }
+    return { kind: 'holding' as const, source: movimento, movimentoId: origemId, origemTipo }
   }
   if (origemTipo === 'rateio_hold') {
     const rateio = await db.prepare('SELECT * FROM rateio_hold WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
@@ -196,7 +203,7 @@ async function origemRateio(db: D1Database, origemTipo: string, origemId: string
     const movimentoId = String(rateio.movimento_id ?? rateio.movimentos_id ?? '').trim()
     const movimento = movimentoId ? await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(movimentoId).first<Record<string, unknown>>() : null
     if (!movimento) return null
-    return { kind: 'holding' as const, source: movimento, movimentoId }
+    return { kind: 'holding' as const, source: movimento, movimentoId, origemTipo }
   }
   return null
 }
@@ -241,6 +248,31 @@ financeiroRoutes.post('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId
     const descricao = String(origem.source.descricao ?? origem.source.descricao_despesa ?? 'Despesa financeira')
     const categoriaId = origem.source.categoria_id ?? null
     const categoriaNome = origem.source.categoria_nome ?? null
+    if (origem.origemTipo === 'abastecimentos') {
+      const resultado = await createExpense(db, {
+        idempotency_key: `abastecimento-rateio:${c.req.param('origemId')}`,
+        abastecimentos_id: c.req.param('origemId'),
+        aeronave_id: aeronaveId,
+        descricao,
+        data: dataEmissao,
+        data_emissao: dataEmissao,
+        data_vencimento: dataVencimento,
+        fornecedor_id: origem.source.fornecedor_id ?? null,
+        fornecedor_nome: origem.source.fornecedor_nome ?? null,
+        categoria_id: categoriaId,
+        categoria_nome: categoriaNome,
+        tipo_caixa: 'CLIENTE',
+        tipo_rateio: tipoRateio,
+        periodicidade,
+        reembolsavel: false,
+        rateio_linhas: linhas.map((linha) => ({
+          cotista_id: String(linha.cotista_id ?? ''),
+          percentual: Number(linha.percentual),
+          valor_centavos: Math.round(valorTotal * Number(linha.percentual) / 100),
+        })),
+      }, c.get('userId') || null, { internal: true })
+      return c.json({ ok: true, lancamento_id: resultado.lancamento_id ?? resultado.id, rateio_ids: resultado.rateio_ids ?? [] }, 201)
+    }
     const rateioIds: string[] = []
     const statements: D1PreparedStatement[] = []
     const valoresRateados = allocateCentsByPercentages(valorTotal, linhas.map((linha) => Number(linha.percentual)))

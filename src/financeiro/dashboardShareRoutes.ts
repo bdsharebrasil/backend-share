@@ -141,7 +141,7 @@ dashboardShareRoutes.get('/dashboard/financeiro', async (c) => {
     const schema = await loadSchema(db)
     const holdingColumn = holdingMovementColumn(schema)
     const camposRateioHolding = camposDocumentaisRateioHolding(schema, 'rh', 'rateio_')
-    const [receber, pagar, movimentacoes, movimentosHolding, rateiosDespesas, rateiosHold, emailsEnviados] = await Promise.all([
+    const [receber, pagar, movimentacoes, movimentosHolding, rateiosDespesas, rateiosHold, emailsEnviados, abastecimentos] = await Promise.all([
       listar(db, "SELECT ar.valor_centavos, ar.status FROM contas_areceber ar LEFT JOIN lancamentos l ON l.id = ar.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND ar.status <> 'CANCELADO'"),
       listar(db, "SELECT cp.id, cp.lancamentos_id, cp.valor_centavos, cp.status, cp.data_vencimento FROM contas_apagar cp LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND cp.status <> 'CANCELADO'"),
       listar(db, `SELECT l.*, cl.email_principal AS destinatario_email, COALESCE(NULLIF(cl.codigo_cliente, ''), NULLIF(ca.codigo_cliente, ''), (SELECT NULLIF(ca_cliente.codigo_cliente, '') FROM cotista_aeronave ca_cliente WHERE ca_cliente.aeronave_id = l.aeronave_id AND ca_cliente.cliente_id = l.cliente_id LIMIT 1)) AS codigo_cliente FROM lancamentos l LEFT JOIN cliente cl ON cl.id = l.cliente_id LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id WHERE l.escopo_financeiro = 'FINANCEIRO' ORDER BY l.criado_em DESC LIMIT 100`),
@@ -149,6 +149,7 @@ dashboardShareRoutes.get('/dashboard/financeiro', async (c) => {
       listar(db, `SELECT l.*, e.id AS envio_id, e.tipo_caixa AS envio_tipo_caixa, e.fornecedor_id AS envio_fornecedor_id, e.fornecedor AS envio_fornecedor, COALESCE(l.id, e.id) AS origem_id, rd.id AS rateio_id, rd.cotista_id AS rateio_cotista_id, rd.data_emissao AS rateio_data_emissao, rd.data_vencimento AS rateio_data_vencimento, rd.categoria_nome AS rateio_categoria_nome, rd.tipo_rateio AS rateio_tipo_rateio, rd.percentual_sociedade AS rateio_percentual, rd.valor_rateado_centavos AS rateio_valor_centavos, rd.valor_pago_real_centavos AS rateio_valor_pago_centavos, rd.email_enviado_em AS rateio_email_enviado_em, rd.status AS rateio_status, rd.descricao_despesa AS rateio_descricao, rd.documento_numero AS rateio_documento, rd.numero_nf AS rateio_numero_nf, rd.numero_recibo AS rateio_numero_recibo, rd.numero_boleto AS rateio_numero_boleto, rd.numero_demonstrativo AS rateio_numero_demonstrativo, rd.numero_doc AS rateio_numero_doc, rd.url_nf AS rateio_url_nf, rd.url_recibo AS rateio_url_recibo, rd.url_boleto AS rateio_url_boleto, rd.url_demonstrativo AS rateio_url_demonstrativo, rd.url_doc AS rateio_url_doc, ca.codigo_cliente AS rateio_codigo_cliente, cl.razao_social AS rateio_participante_nome FROM rateio_despesas rd LEFT JOIN lancamentos l ON l.id = rd.lancamento_id LEFT JOIN envio_despesas e ON e.id = rd.lancamento_id LEFT JOIN cotista_aeronave ca ON ca.id = rd.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id WHERE COALESCE(l.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO' AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO' ORDER BY rd.criado_em DESC LIMIT 300`),
       listar(db, `SELECT mh.*, e.tipo_caixa AS envio_tipo_caixa, e.fornecedor_id AS envio_fornecedor_id, e.fornecedor AS envio_fornecedor, rh.id AS rateio_id, rh.socio_id AS rateio_socio_id, rh.data_emissao AS rateio_data_emissao, rh.data_vencimento AS rateio_data_vencimento, rh.categoria_nome AS rateio_categoria_nome, rh.tipo_rateio AS rateio_tipo_rateio, rh.percentual_uso AS rateio_percentual, rh.valor_rateado_centavos AS rateio_valor_centavos, rh.valor_pago_real_centavos AS rateio_valor_pago_centavos, rh.email_enviado_em AS rateio_email_enviado_em, rh.status AS rateio_status, rh.descricao_despesa AS rateio_descricao, rh.documento_numero AS rateio_documento, ${camposRateioHolding}, hs.nome AS rateio_participante_nome FROM rateio_hold rh JOIN movimentos_holding mh ON mh.id = rh.${holdingColumn} LEFT JOIN envio_despesas e ON e.movimentos_holding_id = mh.id LEFT JOIN hold_socios hs ON hs.id = rh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO' ORDER BY rh.criado_em DESC LIMIT 300`),
       listar(db, `SELECT e.id, e.destinatarios, e.assunto, e.status, e.anexos, e.erro_mensagem AS erro, e.criado_em, e.email_enviado_em FROM emails_enviados e WHERE (lower(COALESCE(e.referencia_tipo, '')) NOT IN ('nf_saida', 'recibo_saida', 'recibo_colaborador', 'despesa_empresa', 'solicitacao_compra') OR EXISTS (SELECT 1 FROM lancamentos l WHERE l.email_enviado_id = e.id AND l.escopo_financeiro = 'FINANCEIRO')) ORDER BY e.criado_em DESC LIMIT 200`),
+      listar(db, `SELECT a.*, cl.email_principal AS destinatario_email, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, a.cliente_id, a.socio_id, 'Cotista não informado') AS participante_nome, ca.codigo_cliente, f.nome_fornecedor AS fornecedor_nome FROM abastecimentos a LEFT JOIN cliente cl ON cl.id = a.cliente_id LEFT JOIN hold_socios hs ON hs.id = a.socio_id LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = a.aeronave_id AND ((a.cliente_id IS NOT NULL AND ca.cliente_id = a.cliente_id) OR (a.socio_id IS NOT NULL AND ca.socio_id = a.socio_id)) LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id WHERE NOT EXISTS (SELECT 1 FROM lancamentos l WHERE l.abastecimentos_id = a.id AND UPPER(COALESCE(l.status, '')) <> 'CANCELADO') ORDER BY date(a.data) DESC, a.id DESC LIMIT 300`),
     ])
     const contaPendente = (row: Record<string, unknown>) => {
       const status = String(row.status ?? '').toUpperCase()
@@ -156,7 +157,24 @@ dashboardShareRoutes.get('/dashboard/financeiro', async (c) => {
     }
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const totalPago = pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
-    const lancamentosComFornecedor: Record<string, unknown>[] = (await enriquecerFornecedores(db, movimentacoes)).map((row): Record<string, unknown> => ({
+    const abastecimentosPendentes: Record<string, unknown>[] = abastecimentos.map((row): Record<string, unknown> => ({
+      ...row,
+      id: row.id,
+      origem_id: row.id,
+      origem_tipo: 'abastecimentos',
+      descricao: row.observacao ?? `Abastecimento${row.trecho ? ` · ${row.trecho}` : ''}`,
+      categoria_nome: 'Combustível',
+      grupo_categoria: 'OPERACIONAL',
+      tipo_caixa: 'CLIENTE',
+      fluxo: 'SAIDA',
+      data_emissao: row.data,
+      data_vencimento: row.data_vencimento_boleto ?? row.data,
+      valor_centavos: Math.round(Number(row.valor_total || 0) * 100),
+      status: row.status ?? 'PENDENTE',
+      numero_doc: row.numero_nf ?? row.numero_comanda ?? null,
+      email_enviado: false,
+    }))
+    const lancamentosComFornecedor: Record<string, unknown>[] = (await enriquecerFornecedores(db, [...movimentacoes, ...abastecimentosPendentes])).map((row): Record<string, unknown> => ({
       ...row,
       status: statusLancamentoFinanceiro(row.status, row.data_vencimento),
     }))
