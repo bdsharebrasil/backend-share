@@ -1,7 +1,7 @@
 type Row = Record<string, unknown>
 type Database = D1Database
 
-import { dateValue, nullableText, text, uuid } from '../lib/strings'
+import { dateValue, isIsoDate, nullableText, text, uuid } from '../lib/strings'
 import { mensagemFinanceiraStatements } from './financeiroNotifications'
 import {
   allocateReceiptNumber,
@@ -503,6 +503,13 @@ function normalizeCommand(body: Row, userId: string | null, options: NormalizeOp
   if (!['ENTRADA', 'SAIDA'].includes(fluxo)) {
     throw new FinanceError('Fluxo inválido', 'fluxo_invalido')
   }
+  const dataEmissaoInformada = nullableText(body.data_emissao ?? body.data)
+  if (!dataEmissaoInformada) {
+    throw new FinanceError('Data de emissão obrigatória', 'data_emissao_obrigatoria')
+  }
+  if (!isIsoDate(dataEmissaoInformada)) {
+    throw new FinanceError('Data de emissão inválida', 'data_emissao_invalida')
+  }
 
   const firstLine = (
     Array.isArray(body.rateio_linhas) ? body.rateio_linhas[0]
@@ -516,7 +523,8 @@ function normalizeCommand(body: Row, userId: string | null, options: NormalizeOp
     valor_centavos: valorCentavos,
     descricao,
     fluxo,
-    data: dateValue(body.data ?? body.data_emissao),
+    data: dateValue(dataEmissaoInformada),
+    data_emissao: dateValue(dataEmissaoInformada),
     data_vencimento: nullableText(body.data_vencimento ?? body.vencimento),
     aeronave_id: nullableText(body.aeronave_id),
     cotista_aeronave_id: nullableText(
