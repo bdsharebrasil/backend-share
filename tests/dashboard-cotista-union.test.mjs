@@ -67,3 +67,15 @@ test("dashboard Cotista converte IDs de fornecedor em nomes antes de responder",
   assert.match(source, /SELECT id, nome_completo FROM fornecedores_favoritos WHERE id IN/);
   assert.match(source, /fornecedoresPorId\.get\(String\(row\.fornecedor_id/);
 });
+
+
+test("dashboard Cotista lê fornecedor e fornecedor_id do rateio_hold", () => {
+  const queryStart = source.indexOf("const rows = await listar(db, `");
+  const queryEnd = source.indexOf("`, ...paramsCliente", queryStart);
+  assert.notEqual(queryStart, -1, "consulta consolidada do dashboard deve existir");
+  assert.notEqual(queryEnd, -1, "consulta consolidada do dashboard deve terminar corretamente");
+  const holdBranch = source.slice(queryStart, queryEnd).split(/\bUNION ALL\b/i)[1];
+  assert.ok(holdBranch);
+  assert.match(holdBranch, /r\.fornecedor_id,\s*r\.fornecedor AS fornecedor_nome/);
+  assert.match(source, /row\.fornecedor_nome \?\? fornecedoresPorId\.get/);
+});
