@@ -779,6 +779,15 @@ async function receiptAllocationLines(
   }))
 }
 
+function linhasRateioPagasPelaEmpresa(linhas: Row[]): Row[] {
+  return linhas.map((linha) => ({
+    ...linha,
+    pago_por: null,
+    pago_diretamente: false,
+    valor_pago_real_centavos: 0,
+  }))
+}
+
 async function validateAllocationLines(
   db: Database,
   command: Row,
@@ -2333,14 +2342,22 @@ async function buildReceiptPagamento(
     )
   }
 
+  const linhasInformadas = await receiptAllocationLines(db, command, input)
   if (!pagadorCotista) {
+    const rateioLinhas = linhasRateioPagasPelaEmpresa(linhasInformadas)
     return createExpense(db, {
       ...command,
-      tipo_caixa: 'SHARE',
+      recibo_id: receiptId,
+      tipo_caixa: rateioLinhas.length ? 'CLIENTE' : 'SHARE',
       fluxo: 'SAIDA',
-      sem_rateio: true,
+      categoria_id: input.categoria_movimentacao_id,
+      categoria_cliente_id: rateioLinhas.length ? input.categoria_movimentacao_id : null,
+      aeronave_id: input.aeronave_id || command.aeronave_id,
+      rateio_linhas: rateioLinhas,
+      sem_rateio: !rateioLinhas.length,
       pago_diretamente: false,
       reembolsavel: false,
+      idempotency_key: `recibo-pagamento:${receiptId}`,
     }, userId, { internal: true })
   }
 
@@ -2355,8 +2372,6 @@ async function buildReceiptPagamento(
      ORDER BY CASE WHEN aeronave_id = ?3 AND ?3 <> '' THEN 0 ELSE 1 END, id
      LIMIT 1
   `).bind(pagadorId, String(input.pagador_tipo), aeronaveInformada).first<{ id: string; aeronave_id: string; socio_id: string | null; percentual_sociedade: number | null }>()
-
-  const linhasInformadas = await receiptAllocationLines(db, command, input)
 
   // Pagador que não é cotista da aeronave, mas informou o rateio entre os cotistas.
   if (!cotista?.id) {
@@ -2505,48 +2520,101 @@ export async function enviarReciboPagamentoParaRateio(
   const existingClient = await db.prepare(
     `SELECT id FROM rateio_despesas WHERE lancamento_id = ?1 LIMIT 1`,
   ).bind(receipt.lancamento_id ?? null).first<{ id: string }>().catch(() => null)
+  const existingDirectClient = await db.prepare(
+    `SELECT id FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
+  ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const existingHolding = await db.prepare(
     `SELECT id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
-  if (existingClient?.id || existingHolding?.id) {
-    return {
-      ok: true,
-      recibo_id: receiptId,
-      lancamento_id: receipt.lancamento_id || null,
-      rateio_ids: [existingClient?.id || existingHolding!.id],
-      idempotent: true,
+  const rateioExistente = Boolean(existingClient?.id || existingDirectClient?.id || existingHolding?.id)
+  let result: Row | null = null
+
+  // Recupera recibos da empresa que já tenham lançamento, mas cuja primeira
+  // tentativa de rateio tenha falhado antes de gravar as linhas.
+  if (!rateioExistente && receipt.pagador_tipo === 'empresa' && text(receipt.lancamento_id)) {
+    const lancamentoShare = await db.prepare(
+      `SELECT id FROM lancamentos WHERE id = ?1 AND tipo_caixa = 'SHARE' LIMIT 1`,
+    ).bind(receipt.lancamento_id).first<{ id: string }>()
+    if (lancamentoShare?.id) {
+      const rateioLinhas = linhasRateioPagasPelaEmpresa(
+        Array.isArray(body.rateio_linhas) ? body.rateio_linhas as Row[] : [],
+      )
+      const rateioCommand: Row = {
+        ...receipt,
+        ...body,
+        recibo_id: receiptId,
+        lancamento_id: lancamentoShare.id,
+        aeronave_id: text(body.aeronave_id) || receipt.aeronave_id,
+        data: receipt.data_emissao,
+        data_emissao: receipt.data_emissao,
+        data_vencimento: text(body.data_vencimento) || receipt.data_vencimento,
+        descricao: receipt.descricao,
+        valor_centavos: receipt.valor,
+        tipo_caixa: 'CLIENTE',
+        pago_diretamente: false,
+        rateio_linhas: rateioLinhas,
+      }
+      const command = normalizeCommand(rateioCommand, userId, { internal: true })
+      const linhas = allocationLines(command)
+      if (!linhas.length) throw new FinanceError('Despesa precisa de rateio', 'rateio_obrigatorio')
+      await validateAllocationLines(db, command, linhas, asPositiveCents(receipt.valor))
+      result = await createClientExpenseRateios(db, rateioCommand, userId, { internal: true })
     }
   }
 
-  const result = await finalizarRecibo(db, receiptId, userId, {
-    aeronave_id: text(body.aeronave_id) || receipt.aeronave_id || null,
-    numero_voo: text(body.numero_voo) || receipt.numero_voo || null,
-    rateio_linhas: Array.isArray(body.rateio_linhas) ? body.rateio_linhas : undefined,
-    tipo_rateio: text(body.tipo_rateio) || receipt.tipo_rateio || undefined,
-    data_vencimento: text(body.data_vencimento) || receipt.data_vencimento || null,
-    observacoes: text(body.observacoes) || receipt.observacoes || null,
-  })
-  const rateios = await db.prepare(
-    `SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor
-       FROM rateio_despesas WHERE lancamento_id = ?1
-     UNION ALL
-     SELECT rh.id, ca.id AS cotista_id, rh.percentual_uso AS percentual, rh.valor_rateado_centavos AS valor
-       FROM rateio_hold rh LEFT JOIN cotista_aeronave ca ON ca.socio_id = rh.socio_id AND ca.aeronave_id = rh.aeronave_id
-      WHERE rh.origem_tipo = 'RECIBO' AND rh.origem_id = ?1`,
-  ).bind(receipt.lancamento_id ?? null, receiptId).all<{ id: string; cotista_id: string | null; percentual: number | null; valor: number }>().catch(() => ({ results: [] as { id: string; cotista_id: string | null; percentual: number | null; valor: number }[] }))
-  if (!rateios.results?.length) throw new FinanceError('Não foi possível criar o rateio do recibo', 'rateio_nao_criado', 500)
-  const reciboRateioExistente = await db.prepare('SELECT id FROM recibo_rateio WHERE recibo_id = ?1 LIMIT 1').bind(receiptId).first<{ id: string }>().catch(() => null)
-  if (!reciboRateioExistente) {
-    await db.batch(rateios.results.map((rateio) => db.prepare(
+  if (!rateioExistente && !result) {
+    result = await finalizarRecibo(db, receiptId, userId, {
+      aeronave_id: text(body.aeronave_id) || receipt.aeronave_id || null,
+      numero_voo: text(body.numero_voo) || receipt.numero_voo || null,
+      rateio_linhas: Array.isArray(body.rateio_linhas) ? body.rateio_linhas : undefined,
+      tipo_rateio: text(body.tipo_rateio) || receipt.tipo_rateio || undefined,
+      data_vencimento: text(body.data_vencimento) || receipt.data_vencimento || null,
+      observacoes: text(body.observacoes) || receipt.observacoes || null,
+    })
+  }
+  if (receipt.pagador_tipo === 'empresa' && (rateioExistente || result)) {
+    await db.prepare(`
+      UPDATE lancamentos
+         SET escopo_financeiro = 'FINANCEIRO'
+       WHERE id = ?1 AND tipo_caixa = 'SHARE'
+    `).bind(receipt.lancamento_id || result?.lancamento_id || null).run()
+  }
+  const rateioLancamentoId = text(
+    result?.lancamento_cliente_id ?? result?.lancamento_id ?? receipt.lancamento_id,
+  )
+  type ReceiptRateio = { id: string; cotista_id: string | null; percentual: number | null; valor: number }
+  const [rateiosPorLancamento, rateiosDiretos, rateiosHold] = await Promise.all([
+    db.prepare(
+      'SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor FROM rateio_despesas WHERE lancamento_id = ?1',
+    ).bind(rateioLancamentoId || null).all<ReceiptRateio>().catch(() => ({ results: [] as ReceiptRateio[] })),
+    db.prepare(
+      `SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1`,
+    ).bind(receiptId).all<ReceiptRateio>().catch(() => ({ results: [] as ReceiptRateio[] })),
+    db.prepare(
+      `SELECT rh.id, ca.id AS cotista_id, rh.percentual_uso AS percentual, rh.valor_rateado_centavos AS valor FROM rateio_hold rh LEFT JOIN cotista_aeronave ca ON ca.socio_id = rh.socio_id AND ca.aeronave_id = rh.aeronave_id WHERE rh.origem_tipo = 'RECIBO' AND rh.origem_id = ?1`,
+    ).bind(receiptId).all<ReceiptRateio>().catch(() => ({ results: [] as ReceiptRateio[] })),
+  ])
+  const rateios = [...new Map(
+    [...(rateiosPorLancamento.results ?? []), ...(rateiosDiretos.results ?? []), ...(rateiosHold.results ?? [])]
+      .map((rateio) => [String(rateio.id), rateio] as const),
+  ).values()]
+  if (!rateios.length) throw new FinanceError('Não foi possível criar o rateio do recibo', 'rateio_nao_criado', 500)
+  const rateiosVinculados = await db.prepare(
+    'SELECT rateio_id FROM recibo_rateio WHERE recibo_id = ?1',
+  ).bind(receiptId).all<{ rateio_id: string }>()
+  const rateioIdsVinculados = new Set((rateiosVinculados.results ?? []).map((row) => String(row.rateio_id)))
+  const vinculosPendentes = rateios.filter((rateio) => !rateioIdsVinculados.has(String(rateio.id)))
+  if (vinculosPendentes.length) {
+    await db.batch(vinculosPendentes.map((rateio) => db.prepare(
       'INSERT INTO recibo_rateio (id, recibo_id, rateio_id, percentual, valor, cotista_id) VALUES (?, ?, ?, ?, ?, ?)',
     ).bind(id(), receiptId, rateio.id, Number(rateio.percentual || 0), Number(rateio.valor || 0), rateio.cotista_id)))
   }
   return {
     ok: true,
     recibo_id: receiptId,
-    lancamento_id: result.lancamento_id || null,
-    rateio_ids: rateios.results.map((row) => row.id),
-    idempotent: false,
+    lancamento_id: result?.lancamento_id || receipt.lancamento_id || null,
+    rateio_ids: rateios.map((row) => row.id),
+    idempotent: rateioExistente || Boolean(result?.idempotent),
   }
 }
 
