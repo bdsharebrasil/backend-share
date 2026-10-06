@@ -2203,7 +2203,7 @@ function validarAerodromo(body: AerodromoPayload) {
 }
 async function autorizarGestaoAerodromo(c: Context<{ Bindings: Bindings }>) {
   const user = await shareBrasilUser(c)
-  return user && await isMeetingManager(c, user)
+  return user && await isColaboradorManager(c, user)
 }
 app.post('/api/interno/aerodromos', async c => {
   if (!(await autorizarGestaoAerodromo(c))) return c.json({ error: 'permissao_necessaria' }, 403)
