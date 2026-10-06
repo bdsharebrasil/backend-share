@@ -14,6 +14,7 @@ export function mapConta(row: Record<string, unknown>): Record<string, unknown> 
     fornecedorId: row.fornecedor_id ?? row.fornecedores_favoritos_id ?? null,
     fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
     cotistaId: row.cotista_id ?? null,
+    cotistaNome: row.cotista_nome ?? null,
     tipoCaixa: row.tipo_caixa ?? (row.movimentos_id ? 'HOLDING' : 'SHARE'),
     holdingId: row.holding_id ?? null,
     movimentoHoldingId: row.movimentos_id ?? null,

@@ -19,6 +19,12 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const params: unknown[] = []
   const alias = table === 'contas_apagar' ? 'cp' : 'cr'
   const origem = table === 'contas_apagar' ? ' LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id' : ' LEFT JOIN lancamentos l ON l.id = cr.lancamentos_id'
+  const joinsCotista = table === 'contas_areceber'
+    ? ' LEFT JOIN cotista_aeronave ca ON ca.id = COALESCE(cr.cotista_id, l.cotista_aeronave_id) LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id'
+    : ''
+  const nomeCotista = table === 'contas_areceber'
+    ? "COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), NULLIF(TRIM(ca.codigo_cliente), '')) AS cotista_nome"
+    : 'NULL AS cotista_nome'
   if (table === 'contas_apagar') {
     filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') = 'SHARE'")
     filtros.push('COALESCE(l.reembolsavel, 0) = 0')
@@ -29,7 +35,7 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   if (cotistaId && table === 'contas_areceber') { filtros.push(`${alias}.cotista_id = ?`); params.push(cotistaId) }
   if (fornecedorId && table === 'contas_apagar') { filtros.push(`${alias}.fornecedor_id = ?`); params.push(fornecedorId) }
   if (vencidasAte) { filtros.push(`date(${alias}.data_vencimento) <= date(?)`); params.push(vencidasAte) }
-  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc FROM ${table} ${alias}${origem}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
+  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc, ${nomeCotista} FROM ${table} ${alias}${origem}${joinsCotista}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
   const mapped = (await enriquecerFornecedores(c.env.SHARE_DB, rows)).map(mapConta)
   if (table !== 'contas_areceber') return mapped
 

@@ -87,13 +87,18 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
   try {
     const db = c.env.SHARE_DB
     const [envios, reembolsos] = await Promise.all([
-      listar(db, `SELECT e.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email, e.criado_por) AS solicitante_nome
-        FROM envio_despesas e LEFT JOIN user_profiles u ON u.id = e.criado_por
+      listar(db, `SELECT e.*,
+          COALESCE(NULLIF(TRIM(e.fornecedor), ''), NULLIF(TRIM(ff.apelido), ''), NULLIF(TRIM(ff.nome_completo), ''), NULLIF(TRIM(fc.nome_fornecedor), ''), NULLIF(TRIM(fc.nome_cidade), '')) AS fornecedor_nome,
+          COALESCE(u.nome_exibicao, u.nome_completo, u.email, e.criado_por) AS solicitante_nome
+        FROM envio_despesas e
+        LEFT JOIN fornecedores_favoritos ff ON ff.id = e.fornecedor_id
+        LEFT JOIN fornecedores_combustivel fc ON fc.id = e.fornecedor_id
+        LEFT JOIN user_profiles u ON u.id = e.criado_por
         WHERE e.tipo IN ('cliente', 'reembolso') ORDER BY e.criado_em DESC LIMIT 500`),
       listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id,
           a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
           mh.holding_id, CASE WHEN cp.movimentos_id IS NOT NULL THEN 'HOLDING' ELSE COALESCE(l.tipo_caixa, 'SHARE') END AS tipo_caixa,
-          COALESCE(u.nome_exibicao, u.nome_completo, u.email, cp.colaborador_id) AS solicitante_nome
+          COALESCE(NULLIF(TRIM(u.nome_exibicao), ''), NULLIF(TRIM(u.nome_completo), ''), NULLIF(TRIM(u.email), '')) AS solicitante_nome
         FROM contas_apagar cp
         LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id
         LEFT JOIN movimentos_holding mh ON mh.id = cp.movimentos_id
@@ -102,6 +107,7 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
         WHERE (COALESCE(l.reembolsavel, 0) = 1
           OR UPPER(COALESCE(cp.origem_tipo, '')) = 'RELATORIO_DESPESA_VIAGEM'
           OR UPPER(COALESCE(cp.categoria_nome, '')) LIKE '%REEMBOLS%')
+          AND NULLIF(TRIM(cp.colaborador_id), '') IS NOT NULL
           AND UPPER(cp.status) NOT IN ('PAGO', 'CANCELADO')
         ORDER BY date(cp.data_vencimento) ASC LIMIT 500`),
     ])
