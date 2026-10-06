@@ -27,7 +27,7 @@ export type CotistaKind = 'CLIENTE' | 'HOLDING'
  */
 export type ReembolsoModo = 'RESPONSAVEL_UNICO' | 'RESPONSAVEL_COM_BALANCO' | 'PARTE_PROPRIA'
 
-export const STATUS_LANCAMENTO = ['EM_ABERTO', 'PAGO', 'RECEBIDO', 'ATRASADO', 'EM_ATRASO', 'CANCELADO'] as const
+export { STATUS_LANCAMENTO } from './statuses'
 export const STATUS_CONTA_PAGAR = ['EM_ABERTO', 'EM_ATRASO', 'PAGO', 'CANCELADO'] as const
 export const STATUS_CONTA_RECEBER = ['EM_ABERTO', 'EM_ATRASO', 'RECEBIDO', 'PAGO', 'CANCELADO'] as const
 export const STATUS_RATEIO = ['EM_ABERTO', 'PAGO', 'CANCELADO'] as const

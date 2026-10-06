@@ -20,6 +20,7 @@ import { escapeHtml } from './lib/format'
 import { normalizarHorarioAgendamento } from './lib/schedule'
 import { checkRateLimit, clientIp } from './lib/cache'
 import { salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
+import { getPontoServerTimestamp } from './lib/ponto'
 import { uuid } from './lib/strings'
 import type { Env } from './types/env'
 import {
@@ -1748,10 +1749,8 @@ app.get('/api/sharebrasil/ponto', async c => {
 app.post('/api/sharebrasil/ponto/marcar', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const body = await c.req.json<{ acao?: string; data?: string; hora?: string }>().catch(() => ({} as { acao?: string; data?: string; hora?: string }))
+  const body = await c.req.json<{ acao?: string }>().catch(() => ({} as { acao?: string }))
   const acao = body.acao || ''
-  const data = /^\d{4}-\d{2}-\d{2}$/.test(body.data || '') ? body.data! : new Date().toISOString().slice(0, 10)
-  const hora = /^\d{2}:\d{2}(:\d{2})?$/.test(body.hora || '') ? body.hora!.slice(0, 5) : new Date().toISOString().slice(11, 16)
   const columns: Record<string, { campo: string; status: string }> = {
     entrada: { campo: 'entrada_hora', status: 'working' },
     inicio_almoco: { campo: 'inicio_almoco', status: 'lunch' },
@@ -1762,18 +1761,23 @@ app.post('/api/sharebrasil/ponto/marcar', async c => {
   }
   const target = columns[acao]
   if (!target) return c.json({ error: 'acao_invalida' }, 400)
+
+  const { data, hora } = getPontoServerTimestamp()
   const db = c.env.SHARE_DB
-  let row = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
-  if (!row) {
-    const id = uuid()
-    await db.prepare('INSERT INTO lancamento_ponto (id, user_id, data_entrada, status) VALUES (?, ?, ?, ?)').bind(id, user.id, data, target.status).run()
-    row = { id, user_id: user.id, data_entrada: data }
-  }
-  const entrada = target.campo === 'entrada_hora' ? hora : row.entrada_hora
-  const saida = target.campo === 'saida_hora' ? hora : row.saida_hora
+  const row = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
+  const entrada = target.campo === 'entrada_hora' ? hora : row?.entrada_hora || null
+  const saida = target.campo === 'saida_hora' ? hora : row?.saida_hora || null
   const total = horasEntre(entrada, saida)
-  await db.prepare(`UPDATE lancamento_ponto SET ${target.campo} = ?, status = ?, horas_totais = COALESCE(?, horas_totais), atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`).bind(hora, target.status, total, row.id, user.id).run()
-  return c.json({ success: true, id: row.id, data_entrada: data, campo: target.campo, hora, status: target.status, horas_totais: total })
+
+  if (!row) {
+    await db.prepare(`INSERT OR IGNORE INTO lancamento_ponto (id, user_id, data_entrada, ${target.campo}, status, horas_totals) VALUES (?, ?, ?, ?, ?, ?)`).bind(uuid(), user.id, data, hora, target.status, total).run()
+  }
+
+  const persisted = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
+  if (!persisted) return c.json({ error: 'falha_ao_criar_lancamento' }, 500)
+
+  await db.prepare(`UPDATE lancamento_ponto SET ${target.campo} = ?, status = ?, horas_totals = COALESCE(?, horas_totals), atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`).bind(hora, target.status, total, persisted.id, user.id).run()
+  return c.json({ success: true, id: persisted.id, data_entrada: data, campo: target.campo, hora, status: target.status, horas_totals: total })
 })
 
 app.post('/api/sharebrasil/ponto/correcao', async c => {

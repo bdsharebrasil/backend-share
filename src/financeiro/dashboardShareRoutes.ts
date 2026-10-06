@@ -5,6 +5,7 @@ import { listar } from './repositories/d1'
 import { enriquecerFornecedores } from './repositories/contas'
 import { loadSchema, holdingMovementColumn } from './FinanceiroKernel'
 import { selecionarColunaOpcional } from './schemaSql'
+import { statusLancamentoFinanceiro } from './statuses'
 
 type Bindings = { SHARE_DB: D1Database }
 type Variables = { userId: string | null }
@@ -43,12 +44,16 @@ function periodoFinanceiro(periodo: string | undefined): { inicio?: string; fim?
   }
 }
 
-function statusFinanceiro(status: unknown): string {
-  const value = String(status ?? '').toUpperCase()
+function statusFinanceiro(status: unknown, dataVencimento?: unknown): string {
+  const statusNormalizado = String(status ?? '').toUpperCase()
+  if (['PENDENTE', 'ATRASADO', 'VENCIDO', 'APROVADO', 'EMAIL_ENVIADO'].includes(statusNormalizado)) return 'Pendente'
+  if (statusNormalizado === 'EM_ATRASO') return 'Atrasado'
+  if (['PAGO_DIRETAMENTE', 'REEMBOLSADO'].includes(statusNormalizado)) return 'Pago'
+  const value = statusLancamentoFinanceiro(status, dataVencimento)
+  if (value === 'EM_ATRASO') return 'Atrasado'
   if (value === 'EM_ABERTO') return 'Pendente'
-  if (value === 'EM_ATRASO' || value === 'ATRASADO') return 'Atrasado'
   if (value === 'RECEBIDO') return 'Recebido'
-  if (value === 'PAGO' || value === 'PAGO_DIRETAMENTE' || value === 'REEMBOLSADO') return 'Pago'
+  if (value === 'PAGO') return 'Pago'
   if (value === 'CANCELADO') return 'Cancelado'
   return 'Pendente'
 }
@@ -88,8 +93,8 @@ async function dashboardShare(c: any) {
     atual.saldo = atual.entradas - atual.saidas
     porMes.set(mes, atual)
   })
-  const payables = pagar.map(row => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao ?? row.lancamento_descricao, fornecedor: row.fornecedor_nome ?? 'Não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', cotistaCliente: row.cotista_aeronave_id ?? 'Share Brasil', valor: valorReais(row), status: statusFinanceiro(row.status), documento: row.numero_nf ?? row.numero_doc ?? '', banco: row.banco_pagamento_nome ?? null }))
-  const receivables = receber.map(row => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao_real ?? 'Recebimento', cliente: row.cotista_id ?? 'Cliente não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', valor: valorReais(row), status: statusFinanceiro(row.status), banco: row.banco_recebimento ?? null, nf: row.numero_nf ?? row.numero_doc ?? null }))
+  const payables = pagar.map(row => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao ?? row.lancamento_descricao, fornecedor: row.fornecedor_nome ?? 'Não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', cotistaCliente: row.cotista_aeronave_id ?? 'Share Brasil', valor: valorReais(row), status: statusFinanceiro(row.status, row.data_vencimento), documento: row.numero_nf ?? row.numero_doc ?? '', banco: row.banco_pagamento_nome ?? null }))
+  const receivables = receber.map(row => ({ id: row.id, vencimento: row.data_vencimento, descricao: row.descricao_real ?? 'Recebimento', cliente: row.cotista_id ?? 'Cliente não informado', categoria: row.categoria_nome ?? 'Sem categoria', aeronave: row.aeronave ?? 'Todas', valor: valorReais(row), status: statusFinanceiro(row.status, row.data_vencimento), banco: row.banco_recebimento ?? null, nf: row.numero_nf ?? row.numero_doc ?? null }))
   const reimbursements = reembolsos.map(row => {
     const totalCentavos = Number(row.valor_centavos ?? 0)
     const recebidoCentavos = Number(row.valor_recebido_centavos ?? 0)
@@ -145,15 +150,16 @@ dashboardShareRoutes.get('/dashboard/financeiro', async (c) => {
       listar(db, `SELECT mh.*, e.tipo_caixa AS envio_tipo_caixa, rh.id AS rateio_id, rh.socio_id AS rateio_socio_id, rh.data_emissao AS rateio_data_emissao, rh.data_vencimento AS rateio_data_vencimento, rh.categoria_nome AS rateio_categoria_nome, rh.tipo_rateio AS rateio_tipo_rateio, rh.percentual_uso AS rateio_percentual, rh.valor_rateado_centavos AS rateio_valor_centavos, rh.valor_pago_real_centavos AS rateio_valor_pago_centavos, rh.email_enviado_em AS rateio_email_enviado_em, rh.status AS rateio_status, rh.descricao_despesa AS rateio_descricao, rh.documento_numero AS rateio_documento, ${camposRateioHolding}, hs.nome AS rateio_participante_nome FROM rateio_hold rh JOIN movimentos_holding mh ON mh.id = rh.${holdingColumn} LEFT JOIN envio_despesas e ON e.movimentos_holding_id = mh.id LEFT JOIN hold_socios hs ON hs.id = rh.socio_id WHERE mh.escopo_financeiro = 'FINANCEIRO' AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO' ORDER BY rh.criado_em DESC LIMIT 300`),
       listar(db, `SELECT e.id, e.destinatarios, e.assunto, e.status, e.anexos, e.erro_mensagem AS erro, e.criado_em, e.email_enviado_em FROM emails_enviados e WHERE (lower(COALESCE(e.referencia_tipo, '')) NOT IN ('nf_saida', 'recibo_saida', 'recibo_colaborador', 'despesa_empresa', 'solicitacao_compra') OR EXISTS (SELECT 1 FROM lancamentos l WHERE l.email_enviado_id = e.id AND l.escopo_financeiro = 'FINANCEIRO')) ORDER BY e.criado_em DESC LIMIT 200`),
     ])
-    const hoje = new Date().toISOString().slice(0, 10)
     const contaPendente = (row: Record<string, unknown>) => {
       const status = String(row.status ?? '').toUpperCase()
-      const vencida = Boolean(row.data_vencimento) && String(row.data_vencimento).slice(0, 10) < hoje
-      return status === 'EM_ABERTO' || status === 'PENDENTE' || status === 'ATRASADO' || status === 'VENCIDO' || (vencida && !['PAGO', 'CANCELADO', 'RECEBIDO'].includes(status))
+      return status === 'EM_ATRASO' || statusLancamentoFinanceiro(status, row.data_vencimento) === 'EM_ATRASO' || status === 'EM_ABERTO'
     }
     const totalAReceber = receber.reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
     const totalPago = pagar.filter((row) => String(row.status).toUpperCase() === 'PAGO').reduce((total, row) => total + Number(row.valor_centavos || 0) / 100, 0)
-    const lancamentosComFornecedor = await enriquecerFornecedores(db, movimentacoes)
+    const lancamentosComFornecedor: Record<string, unknown>[] = (await enriquecerFornecedores(db, movimentacoes)).map((row): Record<string, unknown> => ({
+      ...row,
+      status: statusLancamentoFinanceiro(row.status, row.data_vencimento),
+    }))
     const movimentosHoldingComFornecedor = await enriquecerFornecedores(db, movimentosHolding)
     const rateiosDespesasComFornecedor = await enriquecerFornecedores(db, rateiosDespesas.map((row) => ({
       ...row,

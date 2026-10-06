@@ -24,6 +24,7 @@ import { movimentosHoldingRoutes } from './financeiro/movimentosHoldingRoutes'
 import { demonstrativoIARoutes } from './financeiro/demonstrativoIARoutes'
 import { recibosRoutes } from './financeiro/recibosRoutes'
 import { enviosPagamentoRoutes } from './financeiro/enviosPagamentoRoutes'
+import { STATUS_LANCAMENTO } from './financeiro/statuses'
 
 type Bindings = {
   SHARE_DB: D1Database
@@ -368,7 +369,7 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (origem === 'lancamentos') {
       const camposLegados = ['data_pagamento', 'status', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
-      if (body.status != null && !['EM_ABERTO', 'PENDENTE', 'PAGO', 'RECEBIDO', 'ATRASADO', 'EM_ATRASO', 'CANCELADO'].includes(String(body.status).toUpperCase())) return c.json({ error: 'status_lancamento_invalido' }, 400)
+      if (body.status != null && !STATUS_LANCAMENTO.includes(String(body.status).toUpperCase() as (typeof STATUS_LANCAMENTO)[number])) return c.json({ error: 'status_lancamento_invalido' }, 400)
     }
     if (body.valor_centavos != null || body.valorCentavos != null) {
       const valor = Number(body.valor_centavos ?? body.valorCentavos)

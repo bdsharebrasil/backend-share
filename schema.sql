@@ -1,3 +1,4 @@
+  ''EM_ABERTO'',''PAGO'',''RECEITA'',''ESTORNO'',''RECEBIDO'',''SAIDA'',''ENTRADA'',''SAIDA_REEMBOLSO'',''ENTRADA_REEMBOLSO'',''AGUARDANDO_REEMBOLSO'',''REEMBOLSADO'',''CANCELADO'')),
 INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE _cf_KV (
         key TEXT PRIMARY KEY,
         value BLOB
@@ -1654,7 +1655,9 @@ INSERT INTO "sqlite_master"("sql") VALUES('CREATE TABLE holdings (
     ausencia_aprovada_por TEXT,
     ausencia_aprovada_em TEXT,
 
-    motivo_da_ausencia TEXT
+    motivo_da_ausencia TEXT,
+
+    UNIQUE (user_id, data_entrada)
 )'), ('CREATE TABLE lancamento_ponto_anexos (
     id TEXT PRIMARY KEY NOT NULL,
 
