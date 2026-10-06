@@ -47,7 +47,7 @@ abastecimentosRoutes.get('/api/interno/abastecimentos/opcoes', async c => {
   const aeronaveId = texto(c.req.query('aeronave_id'))
   const [clientes, socios, aeronaves, fornecedores, aerodromos, diarios] = await Promise.all([
     db.prepare('SELECT id, razao_social AS nome, codigo_cliente FROM cliente ORDER BY razao_social').all(),
-    db.prepare('SELECT s.id, s.nome, s.cliente_id, c.razao_social AS cliente_nome FROM hold_socios s LEFT JOIN cliente c ON c.id = s.cliente_id ORDER BY s.nome').all(),
+    db.prepare('SELECT id, nome FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare('SELECT id, nome_fornecedor, codigo_icao, nome_cidade, pessoa_contato, telefone, preco_avgas, preco_jet FROM fornecedores_combustivel ORDER BY nome_fornecedor').all(),
     db.prepare('SELECT id, nome, designativo_icao FROM aerodromo ORDER BY designativo_icao').all(),
