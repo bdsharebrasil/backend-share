@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { consolidarRateiosLancamentos } from "../src/financeiro/cotistaDashboard.ts";
 
 const source = await readFile(new URL("../src/financeiro/dashboardCotistaRoutes.ts", import.meta.url), "utf8");
+const financeRoutes = await readFile(new URL("../src/financeiroRoutes.ts", import.meta.url), "utf8");
 
 function projectionColumnCount(branch) {
   const selectIndex = branch.search(/\bSELECT\b/i);
@@ -91,4 +93,32 @@ test("dashboard Cotista filtra rateio_despesas por cotista_aeronave_id", () => {
     /filtrosCliente\.push\('r\.cotista_id = \?'\); paramsCliente\.push\(cotistaClienteId\)/,
     "rateios não podem ser filtrados pelo cliente_id",
   );
+});
+
+test("dashboard Cotista consolida as linhas pelo lançamento pai e preserva os detalhes", () => {
+  const rows = consolidarRateiosLancamentos([
+    { id: "rateio-1", lancamento_id: "pai-1", origem_rateio: "rateio_despesas", participante_id: "cotista-1", participante_nome: "Cotista 1", percentual_uso: 50, valor_rateado_centavos: 300000, valor_pago_real_centavos: 0, status: "EM_ABERTO" },
+    { id: "rateio-2", lancamento_id: "pai-1", origem_rateio: "rateio_despesas", participante_id: "cotista-2", participante_nome: "Cotista 2", percentual_uso: 50, valor_rateado_centavos: 300000, valor_pago_real_centavos: 300000, status: "PAGO" },
+    { id: "rateio-3", lancamento_id: "pai-2", origem_rateio: "rateio_despesas", participante_id: "cotista-1", participante_nome: "Cotista 1", percentual_uso: 100, valor_rateado_centavos: 125000, status: "EM_ABERTO" },
+    { id: "solto", origem_rateio: "lancamentos", valor_centavos: 70000 },
+  ]);
+
+  assert.equal(rows.length, 3, "duas despesas rateadas e um lançamento sem rateio devem resultar em três itens");
+  assert.equal(rows[0].id, "pai-1", "o identificador do pai permite operar sobre todas as linhas do rateio");
+  assert.equal(rows[0].lancamento_id, "pai-1");
+  assert.equal(rows[0].valor_centavos, 600000);
+  assert.equal(rows[0].valor_rateado_centavos, 600000);
+  assert.equal(rows[0].valor_pago_real_centavos, 300000);
+  assert.equal(rows[0].participante_nome, "Rateio entre cotistas");
+  assert.equal(rows[0].rateio_linhas.length, 2);
+  assert.deepEqual(rows[0].rateio_linhas.map((item) => item.cotista_nome), ["Cotista 1", "Cotista 2"]);
+  assert.equal(rows[0].status, "EM_ABERTO", "um rateio pendente mantém o item pai pendente");
+  assert.equal(rows[2].id, "solto", "lançamentos sem rateio permanecem inalterados");
+});
+
+test("ações do lançamento consolidado reconhecem o ID-pai e atualizam o grupo de rateios", () => {
+  assert.match(financeRoutes, /SELECT lancamento_id AS id, "rateio_despesas_pai" AS origem FROM rateio_despesas WHERE lancamento_id = \? LIMIT 1/);
+  assert.match(financeRoutes, /const colunaId = ehRateioPai \? 'lancamento_id' : 'id'/);
+  assert.match(financeRoutes, /valor_pago_real_centavos = valor_rateado_centavos/);
+  assert.match(financeRoutes, /WHERE lancamento_id = \? AND UPPER\(COALESCE\(status, ''\)\) <> 'CANCELADO'/);
 });

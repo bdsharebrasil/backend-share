@@ -3,7 +3,7 @@ import {
   holdingMovementColumn,
   loadSchema,
 } from './FinanceiroKernel'
-import { calcularCompensacaoBalanco, resumirHoldings } from './cotistaDashboard'
+import { calcularCompensacaoBalanco, consolidarRateiosLancamentos, resumirHoldings } from './cotistaDashboard'
 import { calcularMediasCotista, calcularMediasCotistaPorMes, type VooMediasCotista } from './mediasCotista'
 import { errorResponse } from './errorResponse'
 import { listar, listarTodos } from './repositories/d1'
@@ -75,11 +75,13 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
              COALESCE(r.email_enviado_em, l.email_enviado_em) AS email_enviado_em, 'rateio_despesas' AS origem_rateio, NULL AS local,
-             COALESCE(cl.razao_social, ca.codigo_cliente, r.cotista_id) AS participante_nome
+             COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, r.cotista_id) AS participante_nome,
+             r.lancamento_id AS lancamento_id
         FROM rateio_despesas r
         LEFT JOIN lancamentos l ON l.id = r.lancamento_id
         LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id
         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+        LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
         WHERE ${[...filtrosCliente, "UPPER(COALESCE(r.status, '')) <> 'CANCELADO'"].join(' AND ')}
       UNION ALL
       SELECT r.id, r.aeronave_id, r.socio_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
@@ -97,7 +99,8 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
              COALESCE(r.email_enviado_em, mh.email_enviado_em) AS email_enviado_em, 'rateio_hold' AS origem_rateio, NULL AS local,
-             COALESCE(hs.nome, r.socio_id) AS participante_nome
+             COALESCE(hs.nome, r.socio_id) AS participante_nome,
+             r.${holdingColumn} AS lancamento_id
         FROM rateio_hold r
         LEFT JOIN movimentos_holding mh ON mh.id = r.${holdingColumn}
         LEFT JOIN hold_socios hs ON hs.id = r.socio_id
@@ -112,7 +115,8 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              l.pago_diretamente, l.reembolsavel, l.reembolso_quitado,
              l.status, l.observacoes,
              l.email_enviado_em, 'lancamentos' AS origem_rateio, NULL AS local,
-             COALESCE(cl.razao_social, ca.codigo_cliente, l.cotista_aeronave_id) AS participante_nome
+             COALESCE(cl.razao_social, ca.codigo_cliente, l.cotista_aeronave_id) AS participante_nome,
+             NULL AS lancamento_id
         FROM lancamentos l
         LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id
         LEFT JOIN cliente cl ON cl.id = ca.cliente_id
@@ -127,19 +131,21 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              NULL AS percentual_sociedade, NULL AS percentual_uso, NULL AS pago_por,
              mh.pago_diretamente, 0 AS reembolsavel,
              0 AS reembolso_quitado, mh.status, mh.observacoes, mh.email_enviado_em, 'movimentos_holding' AS origem_rateio,
-             NULL AS local, COALESCE(hs.nome, mh.socio_id) AS participante_nome
+             NULL AS local, COALESCE(hs.nome, mh.socio_id) AS participante_nome,
+             NULL AS lancamento_id
         FROM movimentos_holding mh
         LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
        WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
       ORDER BY 4 DESC, 1 DESC LIMIT 1000
     `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
-    const aeronaveIds = [...new Set(rows.map(row => String(row.aeronave_id ?? '').trim()).filter(Boolean))]
+    const rowsParaExibicao = consolidarRateiosLancamentos(rows)
+    const aeronaveIds = [...new Set(rowsParaExibicao.map(row => String(row.aeronave_id ?? '').trim()).filter(Boolean))]
     const aeronavesPorId = new Map<string, string>()
     if (aeronaveIds.length) {
       const aeronaves = await listar(db, `SELECT id, matricula_registro FROM aeronave WHERE id IN (${aeronaveIds.map(() => '?').join(', ')})`, ...aeronaveIds)
       aeronaves.forEach(row => { if (row.id && row.matricula_registro) aeronavesPorId.set(String(row.id), String(row.matricula_registro)) })
     }
-    const fornecedorIds = [...new Set(rows.map(row => String(row.fornecedor_id ?? '').trim()).filter(Boolean))]
+    const fornecedorIds = [...new Set(rowsParaExibicao.map(row => String(row.fornecedor_id ?? '').trim()).filter(Boolean))]
     const fornecedoresPorId = new Map<string, string>()
     if (fornecedorIds.length) {
       const fornecedores = await listar(db, `SELECT id, nome_completo FROM fornecedores_favoritos WHERE id IN (${fornecedorIds.map(() => '?').join(', ')})`, ...fornecedorIds)
@@ -178,13 +184,13 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       movimentosHolding.map(row => ({ id: String(row.id), holding_id: row.holding_id ? String(row.holding_id) : null, socio_id: row.socio_id ? String(row.socio_id) : null, fluxo: row.fluxo ? String(row.fluxo) : null, status: row.status ? String(row.status) : null, valor_centavos: row.valor_centavos as number | string | null, pago_diretamente: row.pago_diretamente as number | boolean | null })),
       rateiosHolding.map(row => ({ movimento_id: row.movimento_id ? String(row.movimento_id) : null, socio_id: String(row.socio_id), status: row.status ? String(row.status) : null, pago_diretamente: row.pago_diretamente as number | boolean | null, valor_rateado_centavos: row.valor_rateado_centavos as number | string | null, valor_pago_real_centavos: row.valor_pago_real_centavos as number | string | null })),
     )
-    const lancamentos = rows.map(row => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, aeronaveNome: aeronavesPorId.get(String(row.aeronave_id ?? '')) ?? null, participanteId: row.participante_id ?? null, participanteNome: row.participante_nome ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, numeroNf: row.numero_nf ?? null, numeroRecibo: row.numero_recibo ?? null, numeroDemonstrativo: row.numero_demonstrativo ?? null, numeroDoc: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? fornecedoresPorId.get(String(row.fornecedor_id ?? "")) ?? row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, periodicidade: row.periodicidade ?? null, prazo: row.data_vencimento ?? null, dataPagamento: row.data_pagamento ?? null, fluxo: String(row.fluxo ?? 'SAIDA').toUpperCase(), valorCentavos: Number(row.valor_centavos || row.valor_rateado_centavos || 0), valorRateadoCentavos: Number(row.valor_rateado_centavos || row.valor_centavos || 0), valorPagoRealCentavos: Number(row.valor_pago_real_centavos || row.valor_centavos || 0), percentualSociedade: row.percentual_sociedade == null ? null : Number(row.percentual_sociedade), percentualUso: row.percentual_uso == null ? null : Number(row.percentual_uso), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.origem_rateio === 'lancamentos' ? statusLancamentoFinanceiro(row.status, row.data_vencimento) : row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, urlDoc: row.url_doc ?? null, urlDemonstrativo: row.url_demonstrativo ?? null, urlNf: row.url_nf ?? null, urlRecibo: row.url_recibo ?? null, urlBoleto: row.url_boleto ?? null, emailEnviadoEm: row.email_enviado_em ?? null, local: row.local ?? null, rateios: [] }))
+    const lancamentos = rowsParaExibicao.map(row => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, aeronaveNome: aeronavesPorId.get(String(row.aeronave_id ?? '')) ?? null, participanteId: row.participante_id ?? null, participanteNome: row.participante_nome ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, numeroNf: row.numero_nf ?? null, numeroRecibo: row.numero_recibo ?? null, numeroDemonstrativo: row.numero_demonstrativo ?? null, numeroDoc: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? fornecedoresPorId.get(String(row.fornecedor_id ?? "")) ?? row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, periodicidade: row.periodicidade ?? null, prazo: row.data_vencimento ?? null, dataPagamento: row.data_pagamento ?? null, fluxo: String(row.fluxo ?? 'SAIDA').toUpperCase(), valorCentavos: Number(row.valor_centavos ?? row.valor_rateado_centavos ?? 0), valorRateadoCentavos: Number(row.valor_rateado_centavos ?? row.valor_centavos ?? 0), valorPagoRealCentavos: Number(row.valor_pago_real_centavos ?? 0), percentualSociedade: row.percentual_sociedade == null ? null : Number(row.percentual_sociedade), percentualUso: row.percentual_uso == null ? null : Number(row.percentual_uso), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.origem_rateio === 'lancamentos' ? statusLancamentoFinanceiro(row.status, row.data_vencimento) : row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, urlDoc: row.url_doc ?? null, urlDemonstrativo: row.url_demonstrativo ?? null, urlNf: row.url_nf ?? null, urlRecibo: row.url_recibo ?? null, urlBoleto: row.url_boleto ?? null, emailEnviadoEm: row.email_enviado_em ?? null, local: row.local ?? null, rateios: Array.isArray(row.rateio_linhas) ? row.rateio_linhas.map((rateio: Record<string, unknown>) => ({ id: String(rateio.id ?? ''), cotistaId: rateio.cotista_id ? String(rateio.cotista_id) : null, cotista: String(rateio.cotista_nome ?? rateio.cotista_id ?? 'Cotista não informado'), percentual: Number(rateio.percentual_uso ?? rateio.percentual_sociedade ?? 0), percentualSociedade: rateio.percentual_sociedade == null ? null : Number(rateio.percentual_sociedade), valorCentavos: Number(rateio.valor_rateado_centavos ?? 0), valorPagoRealCentavos: Number(rateio.valor_pago_real_centavos ?? 0), pagoPor: rateio.pago_por ? String(rateio.pago_por) : null, pagoDiretamente: Boolean(rateio.pago_diretamente), status: String(rateio.status ?? 'EM_ABERTO') })) : [] }))
     const extratoHolding = movimentosHolding.slice(0, 1000).map(row => ({ id: String(row.id), holdingId: row.holding_id ? String(row.holding_id) : null, holdingNome: row.holding_nome ? String(row.holding_nome) : null, socioId: row.socio_id ? String(row.socio_id) : null, socioNome: row.socio_nome ? String(row.socio_nome) : null, aeronaveId: row.aeronave_id ? String(row.aeronave_id) : null, data: row.data ? String(row.data) : '', dataPagamento: row.data_pagamento ? String(row.data_pagamento) : null, descricao: String(row.descricao ?? ''), categoria: row.categoria_nome ? String(row.categoria_nome) : null, fluxo: String(row.fluxo ?? '').toUpperCase(), valorCentavos: Number(row.valor_centavos || 0), status: String(row.status ?? 'EM_ABERTO').toUpperCase(), contaBancaria: row.conta_bancaria ? String(row.conta_bancaria) : null, diretamentePago: Boolean(row.pago_diretamente) }))
     const entradas = lancamentos.filter(row => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const saidas = lancamentos.filter(row => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()
     const porCategoria = new Map<string, { valor: number; quantidade: number; grupo: string }>()
-    rows.forEach(row => {
+    rowsParaExibicao.forEach(row => {
       const mes = String(row.data ?? '').slice(0, 7)
       if (mes) { const atual = porMes.get(mes) ?? { mes, entradas: 0, saidas: 0, custoRateado: 0, lancamentos: 0, saldo: 0, mediaPorLancamento: 0 }; const valor = Number(row.valor_centavos || 0) / 100; if (String(row.fluxo).toUpperCase() === 'ENTRADA') atual.entradas += valor; else { atual.saidas += valor; atual.custoRateado += Number(row.valor_rateado_centavos || row.valor_centavos || 0) / 100; } atual.lancamentos += 1; atual.saldo = atual.entradas - atual.saidas; atual.mediaPorLancamento = atual.lancamentos ? atual.saidas / atual.lancamentos : 0; porMes.set(mes, atual) }
       if (String(row.fluxo).toUpperCase() !== 'SAIDA') return; const categoria = String(row.categoria_nome ?? 'SEM CATEGORIA'); const atual = porCategoria.get(categoria) ?? { valor: 0, quantidade: 0, grupo: String(row.grupo_categoria ?? '') }; atual.valor += Number(row.valor_centavos || 0) / 100; atual.quantidade += 1; porCategoria.set(categoria, atual)
@@ -204,7 +210,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       : []
     const medias = calcularMediasCotista(voosMedias as VooMediasCotista[], Math.round(saidas * 100))
     const custosPorMes = new Map<string, number>()
-    for (const row of rows) {
+    for (const row of rowsParaExibicao) {
       if (String(row.fluxo ?? 'SAIDA').toUpperCase() !== 'SAIDA') continue
       const mes = String(row.data ?? '').slice(0, 7)
       if (!/^\d{4}-\d{2}$/.test(mes)) continue

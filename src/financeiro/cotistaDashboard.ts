@@ -212,3 +212,75 @@ export function calcularCompensacaoBalanco(rows: Record<string, unknown>[], part
   }
   return { saldos, matrizCompensacao: matriz }
 }
+
+/**
+ * Apresenta um único lançamento-pai no extrato, mantendo cada rateio como detalhe.
+ * A lista original continua disponível para os cálculos de compensação por cotista.
+ */
+export function consolidarRateiosLancamentos(rows: Record<string, unknown>[]) {
+  const resultado: Record<string, unknown>[] = []
+  const agrupados = new Map<string, Record<string, unknown>>()
+
+  for (const row of rows) {
+    if (row.origem_rateio !== 'rateio_despesas' || !row.lancamento_id) {
+      resultado.push(row)
+      continue
+    }
+
+    const lancamentoId = String(row.lancamento_id)
+    let grupo = agrupados.get(lancamentoId)
+    if (!grupo) {
+      grupo = {
+        ...row,
+        id: lancamentoId,
+        rateio_linhas: [],
+        valor_centavos: 0,
+        valor_rateado_centavos: 0,
+        valor_pago_real_centavos: 0,
+        participante_id: null,
+        participante_nome: 'Rateio entre cotistas',
+        percentual_sociedade: null,
+        percentual_uso: null,
+        pago_diretamente: 0,
+        pago_por: null,
+      }
+      agrupados.set(lancamentoId, grupo)
+      resultado.push(grupo)
+    }
+
+    const valorRateado = Number(row.valor_rateado_centavos ?? row.valor_centavos ?? 0)
+    const valorPago = Number(row.valor_pago_real_centavos ?? 0)
+    const rateioLinhas = grupo.rateio_linhas as Record<string, unknown>[]
+    rateioLinhas.push({
+      id: row.id,
+      cotista_id: row.participante_id,
+      cotista_nome: row.participante_nome,
+      percentual_sociedade: row.percentual_sociedade,
+      percentual_uso: row.percentual_uso,
+      valor_rateado_centavos: valorRateado,
+      valor_pago_real_centavos: valorPago,
+      pago_por: row.pago_por,
+      pago_diretamente: row.pago_diretamente,
+      status: row.status,
+    })
+    grupo.valor_centavos = Number(grupo.valor_centavos ?? 0) + valorRateado
+    grupo.valor_rateado_centavos = Number(grupo.valor_rateado_centavos ?? 0) + valorRateado
+    grupo.valor_pago_real_centavos = Number(grupo.valor_pago_real_centavos ?? 0) + valorPago
+
+    const rateiosAtuais = grupo.rateio_linhas as Record<string, unknown>[]
+    const statusRateios = rateiosAtuais.map((rateio) => String(rateio.status ?? '').toUpperCase())
+    const todosPagos = rateiosAtuais.every((rateio) =>
+      ['PAGO', 'RECEBIDO', 'CONFIRMADO', 'LIQUIDADO'].includes(String(rateio.status ?? '').toUpperCase()),
+    )
+    grupo.status = statusRateios.includes('EM_ATRASO')
+      ? 'EM_ATRASO'
+      : todosPagos ? 'PAGO' : statusRateios.find((status) => !['PAGO', 'RECEBIDO', 'CONFIRMADO', 'LIQUIDADO'].includes(status)) || 'EM_ABERTO'
+
+    grupo.pago_por = null
+    grupo.pago_diretamente = rateiosAtuais.length > 0 && rateiosAtuais.every((rateio) =>
+      rateio.pago_diretamente === true || Number(rateio.pago_diretamente ?? 0) === 1,
+    ) ? 1 : 0
+  }
+
+  return resultado
+}

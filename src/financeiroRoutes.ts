@@ -346,6 +346,8 @@ financeiroRoutes.get('/salarios/resumo', async (c) => {
 async function entidadeLancamentoFinanceiro(db: D1Database, id: string) {
   const rateio = await db.prepare('SELECT id, "rateio_despesas" AS origem FROM rateio_despesas WHERE id = ?').bind(id).first<Record<string, unknown>>()
   if (rateio) return rateio
+  const rateioPai = await db.prepare('SELECT lancamento_id AS id, "rateio_despesas_pai" AS origem FROM rateio_despesas WHERE lancamento_id = ? LIMIT 1').bind(id).first<Record<string, unknown>>()
+  if (rateioPai) return rateioPai
   const rateioHold = await db.prepare('SELECT id, "rateio_hold" AS origem FROM rateio_hold WHERE id = ?').bind(id).first<Record<string, unknown>>()
   if (rateioHold) return rateioHold
   const lancamento = await db.prepare('SELECT id, "lancamentos" AS origem FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
@@ -360,7 +362,8 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     const body = await c.req.json<Record<string, unknown>>()
     const entidade = await entidadeLancamentoFinanceiro(db, id)
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
-    const origem = String(entidade.origem)
+    const ehRateioPai = String(entidade.origem) === 'rateio_despesas_pai'
+    const origem = ehRateioPai ? 'rateio_despesas' : String(entidade.origem)
     const tabelas: Record<string, { descricao: string; data: string; valor: string }> = {
       rateio_despesas: { descricao: 'descricao_despesa', data: 'data_emissao', valor: 'valor_rateado_centavos' },
       rateio_hold: { descricao: 'descricao_despesa', data: 'data_emissao', valor: 'valor_rateado_centavos' },
@@ -385,12 +388,14 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
       campos.push([meta.valor, valor])
     }
     if (!campos.length) return c.json({ error: 'nenhum_campo_para_atualizar' }, 400)
-    await db.prepare(`UPDATE ${origem} SET ${campos.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...campos.map(([, valor]) => valor), id).run()
+    const colunaId = ehRateioPai ? 'lancamento_id' : 'id'
+    await db.prepare(`UPDATE ${origem} SET ${campos.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE ${colunaId} = ?`).bind(...campos.map(([, valor]) => valor), id).run()
     const valorAtualizado = campos.find(([campo]) => campo === 'valor_centavos')?.[1]
     if (origem === 'lancamentos' && valorAtualizado != null) await db.batch([
       db.prepare('UPDATE contas_apagar SET valor_centavos = ? WHERE lancamentos_id = ?').bind(valorAtualizado, id),
       db.prepare('UPDATE contas_areceber SET valor_centavos = ? WHERE lancamentos_id = ?').bind(valorAtualizado, id),
     ])
+    if (ehRateioPai) return c.json({ lancamento_id: id, rateios: (await db.prepare('SELECT * FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(id).all()).results ?? [] })
     return c.json(await db.prepare(`SELECT * FROM ${origem} WHERE id = ?`).bind(id).first())
   } catch (error) { return errorResponse(c, error) }
 })
@@ -400,7 +405,15 @@ financeiroRoutes.delete('/lancamentos/:id', async (c) => {
     const id = c.req.param('id')
     const entidade = await entidadeLancamentoFinanceiro(db, id)
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
-    const origem = String(entidade.origem)
+    const ehRateioPai = String(entidade.origem) === 'rateio_despesas_pai'
+    const origem = ehRateioPai ? 'rateio_despesas' : String(entidade.origem)
+    if (ehRateioPai) {
+      await db.batch([
+        db.prepare("UPDATE rateio_despesas SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE lancamento_id = ?").bind(id),
+        db.prepare("UPDATE lancamentos SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(id),
+      ])
+      return c.json({ ok: true, id, status: 'CANCELADO', origem })
+    }
     await db.prepare(`UPDATE ${origem} SET status = 'CANCELADO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(id).run()
     return c.json({ ok: true, id, status: 'CANCELADO', origem })
   } catch (error) { return errorResponse(c, error) }
@@ -412,9 +425,17 @@ financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const entidade = await entidadeLancamentoFinanceiro(db, id)
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
-    const origem = String(entidade.origem)
+    const ehRateioPai = String(entidade.origem) === 'rateio_despesas_pai'
+    const origem = ehRateioPai ? 'rateio_despesas' : String(entidade.origem)
     const data = String(body.data_pagamento ?? body.dataPagamento ?? new Date().toISOString().slice(0, 10))
     if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return c.json({ error: 'data_pagamento_invalida' }, 400)
+    if (ehRateioPai) {
+      const sets = ["status = 'PAGO'", 'data_pagamento = ?', 'valor_pago_real_centavos = valor_rateado_centavos', 'atualizado_em = CURRENT_TIMESTAMP']
+      const values: unknown[] = [data]
+      if (body.pago_por || body.pagoPor) { sets.push('pago_por = ?'); values.push(body.pago_por ?? body.pagoPor) }
+      await db.prepare(`UPDATE rateio_despesas SET ${sets.join(', ')} WHERE lancamento_id = ? AND UPPER(COALESCE(status, '')) <> 'CANCELADO'`).bind(...values, id).run()
+      return c.json({ ok: true, id, origem, status: 'PAGO', data_pagamento: data })
+    }
     const valor = body.valor_pago_real_centavos ?? body.valorPagoRealCentavos
     const tabela = ['rateio_despesas', 'rateio_hold'].includes(origem) ? origem : origem === 'movimentos_holding' ? origem : 'lancamentos'
     const sets = ['status = ?', 'data_pagamento = ?', 'atualizado_em = CURRENT_TIMESTAMP']
