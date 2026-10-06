@@ -20,8 +20,8 @@ import { escapeHtml } from './lib/format'
 import { normalizarHorarioAgendamento } from './lib/schedule'
 import { checkRateLimit, clientIp } from './lib/cache'
 import { normalizarPastaUpload, salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
-import { getPontoServerTimestamp } from './lib/ponto'
 import { uuid } from './lib/strings'
+import { shareBrasilPontoRoutes } from './routes/shareBrasilPontoRoutes'
 import { createLogger } from './lib/logger'
 import type { Env } from './types/env'
 import {
@@ -112,6 +112,7 @@ app.route('/', emailRoutes)
 app.route('/', mensagensRoutes)
 app.route('/', tripulacaoRoutes)
 app.route('/', ctmRoutes)
+app.route('/api/sharebrasil/ponto', shareBrasilPontoRoutes)
 // ─── Financeiro: único ponto de entrada para comandos financeiros ────────────
 // As rotas legadas de escrita foram removidas abaixo para evitar dois fluxos
 // gravando diretamente no mesmo D1. O kernel é o único dono dessas operações.
@@ -1749,15 +1750,6 @@ function shareBrasilMonth(value: string | undefined): { inicio: string; fim: str
   return { inicio: `${month}-01`, fim: `${month}-31` }
 }
 
-function horasEntre(inicio: string | null, fim: string | null): number | null {
-  if (!inicio || !fim) return null
-  const [ih, im] = inicio.split(':').map(Number)
-  const [fh, fm] = fim.split(':').map(Number)
-  if (![ih, im, fh, fm].every(Number.isFinite)) return null
-  const total = ((fh * 60 + fm) - (ih * 60 + im)) / 60
-  return total >= 0 ? Math.round(total * 100) / 100 : null
-}
-
 app.get('/api/sharebrasil/ponto', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -1770,40 +1762,6 @@ app.get('/api/sharebrasil/ponto', async c => {
     db.prepare('SELECT * FROM solicitacoes_correcao_ponto WHERE user_id = ?1 AND date(data_entrada) BETWEEN ?2 AND ?3 ORDER BY data_entrada DESC, criado_em DESC').bind(user.id, inicio, fim).all(),
   ])
   return c.json({ mes: inicio.slice(0, 7), lancamentos: lancamentos.results, anexos: anexos.results.map((item: any) => ({ ...item, arquivo_url: `/api/sharebrasil/ponto/anexos/${item.id}/arquivo` })), justificativas: justificativas.results, correcoes: correcoes.results })
-})
-
-app.post('/api/sharebrasil/ponto/marcar', async c => {
-  const user = await shareBrasilUser(c)
-  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const body = await c.req.json<{ acao?: string }>().catch(() => ({} as { acao?: string }))
-  const acao = body.acao || ''
-  const columns: Record<string, { campo: string; status: string }> = {
-    entrada: { campo: 'entrada_hora', status: 'working' },
-    inicio_almoco: { campo: 'inicio_almoco', status: 'lunch' },
-    fim_almoco: { campo: 'fim_almoco', status: 'working' },
-    pausa: { campo: 'inicio_almoco', status: 'paused' },
-    saida: { campo: 'saida_hora', status: 'finished' },
-    encerrar: { campo: 'saida_hora', status: 'finished' },
-  }
-  const target = columns[acao]
-  if (!target) return c.json({ error: 'acao_invalida' }, 400)
-
-  const { data, hora } = getPontoServerTimestamp()
-  const db = c.env.SHARE_DB
-  const row = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
-  const entrada = target.campo === 'entrada_hora' ? hora : row?.entrada_hora || null
-  const saida = target.campo === 'saida_hora' ? hora : row?.saida_hora || null
-  const total = horasEntre(entrada, saida)
-
-  if (!row) {
-    await db.prepare(`INSERT OR IGNORE INTO lancamento_ponto (id, user_id, data_entrada, ${target.campo}, status, horas_totals) VALUES (?, ?, ?, ?, ?, ?)`).bind(uuid(), user.id, data, hora, target.status, total).run()
-  }
-
-  const persisted = await db.prepare('SELECT * FROM lancamento_ponto WHERE user_id = ?1 AND data_entrada = ?2 LIMIT 1').bind(user.id, data).first<any>()
-  if (!persisted) return c.json({ error: 'falha_ao_criar_lancamento' }, 500)
-
-  await db.prepare(`UPDATE lancamento_ponto SET ${target.campo} = ?, status = ?, horas_totals = COALESCE(?, horas_totals), atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`).bind(hora, target.status, total, persisted.id, user.id).run()
-  return c.json({ success: true, id: persisted.id, data_entrada: data, campo: target.campo, hora, status: target.status, horas_totals: total })
 })
 
 app.post('/api/sharebrasil/ponto/correcao', async c => {

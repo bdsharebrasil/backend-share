@@ -1,12 +1,11 @@
 -- Mantém um único lançamento por usuário e dia, independentemente de cliques
--- concorrentes. As duplicatas legadas são removidas preservando o primeiro
--- lançamento por ordem de criação.
+-- concorrentes. O rowid preserva o primeiro registro inserido e mantém também
+-- os dias que já não possuem duplicatas.
 DELETE FROM lancamento_ponto
-WHERE id NOT IN (
-  SELECT MIN(id)
+WHERE rowid NOT IN (
+  SELECT MIN(rowid)
   FROM lancamento_ponto
   GROUP BY user_id, data_entrada
-  HAVING COUNT(*) > 1
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_lancamento_ponto_user_data
