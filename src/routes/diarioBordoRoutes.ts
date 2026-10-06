@@ -4,7 +4,8 @@ import { requireShareInternal, extractSupabaseUserId } from '../lib/auth'
 import { fetchAisweb } from '../lib/aiswebClient'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
-
+import { haversineKm } from '../lib/geo'
+import { agruparJornadasVoo } from './jornadasRoutes'
 type Bindings = {
   SHARE_DB: D1Database
   CACHE_KV: KVNamespace
@@ -510,6 +511,154 @@ diarioBordoRoutes.delete('/api/interno/diario-bordo/lancamentos/:id', async c =>
   await c.env.SHARE_DB.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1').bind(id).run()
   await recalcularDiarioMes(c, current.diario_mes_id)
   return c.json({ success: true })
+})
+
+diarioBordoRoutes.get('/api/interno/diario-bordo/preenchimento-jornada/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await validateWorkerSchema(c, [
+    { table: 'jornadas_voo', columns: ['id', 'solicitacao_id', 'jornada_principal_id', 'aeronave_id', 'data', 'horario_apresentacao', 'funcao_tripulante'] },
+    { table: 'pernas_jornada_voo', columns: ['id', 'jornada_id', 'numero', 'origem', 'destino', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte'] },
+  ])
+  const jornadaId = c.req.param('id')
+  const jornada = await c.env.SHARE_DB.prepare(`SELECT j.*, s.numero_voo, s.cliente_id, s.socio_id, s.voo_emprestado, s.cliente_emprestimo_id, s.socio_emprestimo_id,
+      s.aeronave_id AS solicitacao_aeronave_id, s.piloto_id, s.copiloto_id,
+      COALESCE(t.canac, f.canac) AS pic_canac, COALESCE(t.nome_completo, f.nome_completo) AS pic_nome,
+      COALESCE(t2.canac, f2.canac) AS sic_canac, COALESCE(t2.nome_completo, f2.nome_completo) AS sic_nome
+    FROM jornadas_voo j
+    LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id
+    LEFT JOIN tripulacao t ON t.id = CASE WHEN j.funcao_tripulante = 'PIC' THEN COALESCE(j.tripulante_id, s.piloto_id) ELSE s.piloto_id END
+    LEFT JOIN tripulacao_freelancer f ON f.id = CASE WHEN j.funcao_tripulante = 'PIC' THEN COALESCE(j.tripulante_id, s.piloto_id) ELSE s.piloto_id END
+    LEFT JOIN tripulacao t2 ON t2.id = CASE WHEN j.funcao_tripulante = 'SIC' THEN COALESCE(j.tripulante_id, s.copiloto_id) ELSE s.copiloto_id END
+    LEFT JOIN tripulacao_freelancer f2 ON f2.id = CASE WHEN j.funcao_tripulante = 'SIC' THEN COALESCE(j.tripulante_id, s.copiloto_id) ELSE s.copiloto_id END
+    WHERE j.id = ?1`).bind(jornadaId).first<any>()
+  if (!jornada) return c.notFound()
+  const raizId = String(jornada.jornada_principal_id || jornada.id)
+  const pernas = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(raizId).all<any>()
+  const hhmm = (iso: string | null) => iso ? String(iso).slice(11, 16) : null
+  const preenchimentos = await Promise.all((pernas.results || []).map(async (perna: any) => {
+    const data = String(perna.horario_ac || jornada.data).slice(0, 10)
+    const calculados = await calcularDadosOperacionais(c, {
+      acionamento_utc: perna.horario_ac, decolagem_utc: perna.horario_dep,
+      pouso_utc: perna.horario_pouso, corte_utc: perna.horario_corte,
+      aerodromo_partida: perna.origem,
+    }, data, perna.origem)
+    return {
+      perna_jornada_id: perna.id, ja_lancado: Boolean(perna.lancamento_diario_id),
+      lancamento_diario_id: perna.lancamento_diario_id || null, data_registro: data,
+      numero_voo: jornada.numero_voo || null, jornada_id: raizId,
+      aeronave_id: jornada.aeronave_id || jornada.solicitacao_aeronave_id,
+      cliente_id: jornada.cliente_id || null, socio_id: jornada.socio_id || null,
+      voo_emprestado: jornada.voo_emprestado === 'sim' ? 1 : 0,
+      cliente_tomador_emprestimo_id: jornada.cliente_emprestimo_id || null,
+      socio_tomador_emprestimo_id: jornada.socio_emprestimo_id || null,
+      aerodromo_partida: perna.origem, aerodromo_chegada: perna.destino,
+      trecho: `${perna.origem} X ${perna.destino}`, pic_canac: jornada.pic_canac || '',
+      pic_nome: jornada.pic_nome || null, sic_canac: jornada.sic_canac || null, sic_nome: jornada.sic_nome || null,
+      tripulacao_checkin_hora: hhmm(jornada.horario_apresentacao), tempo_ac: hhmm(perna.horario_ac),
+      tempo_dep: hhmm(perna.horario_dep), tempo_pou: hhmm(perna.horario_pouso), tempo_cor: hhmm(perna.horario_corte),
+      tempo_voo: calculados.tempo_voo, tempo_total: calculados.tempo_total || calculados.tempo_voo,
+      horas_diurnas: calculados.horas_diurnas, horas_noturnas: calculados.horas_noturnas,
+      pousos_total: perna.horario_pouso ? 1 : 0,
+      passageiros: perna.numero_passageiros ?? perna.passageiros ?? 0,
+    }
+  }))
+  return c.json({ jornada_id: raizId, solicitacao_id: jornada.solicitacao_id, aeronave_id: jornada.aeronave_id || jornada.solicitacao_aeronave_id, pernas: preenchimentos })
+})
+
+diarioBordoRoutes.get('/api/interno/diario-bordo/numeros-voo/:aeronaveId', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = c.req.param('aeronaveId')
+  if (!aeronaveId) return c.json({ voos: [] })
+  const db = c.env.SHARE_DB
+  const aeronave = await db.prepare('SELECT consumo_combustivel FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ consumo_combustivel: number | string | null }>()
+  const schema = await db.prepare("SELECT name FROM pragma_table_info('jornadas_voo')").all<{ name: string }>().catch(() => ({ results: [] as { name: string }[] }))
+  const jornadaColumns = new Set((schema.results || []).map((item) => String(item.name)))
+  const pernaSchema = await db.prepare("SELECT name FROM pragma_table_info('pernas_jornada_voo')").all<{ name: string }>().catch(() => ({ results: [] as { name: string }[] }))
+  const pernaColumns = new Set((pernaSchema.results || []).map((item) => String(item.name)))
+  const jornadaDisponivel = jornadaColumns.has('id')
+  const pernasDisponiveis = pernaColumns.has('id')
+  const colunaPouso = jornadaColumns.has('horario_pouso') ? 'horario_pouso' : 'horario_corte_inicio'
+  const colunaCorte = jornadaColumns.has('horario_corte') ? 'horario_corte' : 'horario_corte_final'
+  const colunaPassageiros = pernaColumns.has('passageiros') ? 'COALESCE(p.passageiros, 0)' : '0'
+  const colunaLancamento = pernaColumns.has('lancamento_diario_id') ? 'p.lancamento_diario_id' : 'NULL'
+  const escopoAeronave = jornadaDisponivel
+    ? '(s.aeronave_id = ?1 OR EXISTS (SELECT 1 FROM jornadas_voo jv WHERE jv.solicitacao_id = s.id AND jv.aeronave_id = ?1))'
+    : 's.aeronave_id = ?1'
+  const rows = await db.prepare(`
+    SELECT s.id AS solicitacao_id, s.numero_voo, s.origem, s.destino, s.data_agendada,
+           s.cliente_id, s.socio_id, s.voo_emprestado, s.cliente_emprestimo_id, s.socio_emprestimo_id,
+           s.piloto_id, s.copiloto_id,
+           COALESCE(t.canac, f.canac) AS pic_canac, COALESCE(t.nome_completo, f.nome_completo) AS pic_nome,
+           COALESCE(t2.canac, f2.canac) AS sic_canac, COALESCE(t2.nome_completo, f2.nome_completo) AS sic_nome
+    FROM solicitacoes_reserva_voo s
+    LEFT JOIN tripulacao t ON t.id = s.piloto_id
+    LEFT JOIN tripulacao_freelancer f ON f.id = s.piloto_id
+    LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
+    LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
+    WHERE ${escopoAeronave} AND s.numero_voo IS NOT NULL AND TRIM(s.numero_voo) <> ''
+    ORDER BY datetime(s.data_agendada) DESC LIMIT 300
+  `).bind(aeronaveId).all<any>()
+  const voos = await Promise.all((rows.results || []).map(async (voo: any) => {
+    if (!jornadaDisponivel) return { ...voo, jornadas: [] }
+    let jornadas: { results?: any[] } = { results: [] }
+    try {
+      jornadas = await db.prepare(`SELECT id, id AS jornada_id, jornada_principal_id, numero_jornada, data, status,
+          horario_apresentacao, horario_acionamento, ${colunaPouso} AS horario_pouso, ${colunaCorte} AS horario_corte
+        FROM jornadas_voo WHERE solicitacao_id = ?1 ORDER BY numero_jornada DESC, date(data) DESC, id`).bind(voo.solicitacao_id).all<any>()
+    } catch (error) {
+      console.error('[diario-bordo] jornadas indisponíveis para número de voo', error)
+      return { ...voo, jornadas: [] }
+    }
+    const gruposJornada = agruparJornadasVoo(jornadas.results || [])
+    const jornadasComPernas = await Promise.all(gruposJornada.map(async (grupo) => {
+      const jornada = grupo.representante
+      const raizId = grupo.raizId
+      if (!pernasDisponiveis) return { ...jornada, pernas: [] }
+      let pernas: { results?: any[] } = { results: [] }
+      try {
+        pernas = await db.prepare(`SELECT p.id AS perna_id, p.numero, p.origem, p.destino,
+            ${colunaPassageiros} AS numero_passageiros, p.horario_ac, p.horario_dep,
+            p.horario_pouso, p.horario_corte, p.status, ${colunaLancamento} AS lancamento_diario_id,
+            ap.coordenadas AS origem_coordenadas, ad.coordenadas AS destino_coordenadas
+          FROM pernas_jornada_voo p
+          LEFT JOIN aerodromo ap ON upper(ap.designativo_icao) = upper(p.origem)
+          LEFT JOIN aerodromo ad ON upper(ad.designativo_icao) = upper(p.destino)
+          WHERE p.jornada_id = ?1 ORDER BY p.numero`).bind(raizId).all<any>()
+      } catch (error) {
+        console.error(`[diario-bordo] pernas indisponíveis para jornada ${raizId}`, error)
+        return { ...jornada, pernas: [] }
+      }
+      const consumoHora = diarioNumber(aeronave?.consumo_combustivel)
+      const calculadas = await Promise.all((pernas.results || []).map(async (perna: any) => {
+        const { origem_coordenadas: _origem, destino_coordenadas: _destino, ...publica } = perna
+        const coordenada = (value: unknown) => {
+          const [lat, lon] = String(value || '').split(',').map(Number)
+          return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] as const : null
+        }
+        const origem = coordenada(perna.origem_coordenadas)
+        const destino = coordenada(perna.destino_coordenadas)
+        const distancia_nm = origem && destino ? Number((haversineKm(origem[0], origem[1], destino[0], destino[1]) * 0.539957).toFixed(1)) : 0
+        try {
+          const dados = await calcularDadosOperacionais(c, {
+            acionamento_utc: perna.horario_ac, decolagem_utc: perna.horario_dep,
+            pouso_utc: perna.horario_pouso, corte_utc: perna.horario_corte,
+            aerodromo_partida: perna.origem,
+          }, String(perna.horario_ac || jornada.data).slice(0, 10), perna.origem)
+          return { ...publica, distancia_nm, tempo_voo: dados.tempo_voo, tempo_total: dados.tempo_total,
+            horas_diurnas: dados.horas_diurnas, horas_noturnas: dados.horas_noturnas,
+            consumo_combustivel_voo: Number((dados.tempo_voo * consumoHora).toFixed(2)),
+            consumo_combustivel_total: Number((dados.tempo_total * consumoHora).toFixed(2)), solar_status: dados.solar_status }
+        } catch (error) {
+          console.error(`[diario-bordo] falha ao calcular dados da perna ${perna.perna_id}`, error)
+          return { ...publica, distancia_nm, tempo_voo: 0, tempo_total: 0, horas_diurnas: 0,
+            horas_noturnas: 0, consumo_combustivel_voo: 0, consumo_combustivel_total: 0, solar_status: 'not_calculated' }
+        }
+      }))
+      return { ...jornada, jornada_principal_id: raizId, pernas: calculadas }
+    }))
+    return { ...voo, jornadas: jornadasComPernas }
+  }))
+  return c.json({ voos })
 })
 
 export default diarioBordoRoutes

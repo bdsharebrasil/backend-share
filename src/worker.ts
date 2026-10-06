@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { financeiroRoutes } from './financeiroRoutes'
 import { abastecimentosRoutes } from './routes/abastecimentosRoutes'
 import { diarioBordoRoutes } from './routes/diarioBordoRoutes'
+import { jornadasRoutes } from './routes/jornadasRoutes'
 import { aiswebRoutes } from './routes/aiswebRoutes'
 import { valuationRoutes } from './routes/valuationRoutes'
 import { portalRoutes } from './routes/portalRoutes'
@@ -105,6 +106,7 @@ app.use('*', async (c, next) => {
 })
 app.route('/', abastecimentosRoutes)
 app.route('/', diarioBordoRoutes)
+app.route('/', jornadasRoutes)
 app.route('/', aiswebRoutes)
 app.route('/', valuationRoutes)
 app.route('/', portalRoutes)
@@ -1572,162 +1574,6 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   }
   const id = uuid(); if (alertaId) await c.env.SHARE_DB.prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(id, alertaId).run(); await c.env.SHARE_DB.prepare('INSERT INTO checklists_pre_voo (id, solicitacao_id, aeronave_id, executado_por, executado_por_nome, respostas, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em, numero_voo, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, agendamento.aeronave_id || null, userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, agendamento.numero_voo || null, userId).run()
   return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
-})
-
-async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings }>) {
-  await validateWorkerSchema(c, [
-    { table: 'jornadas_voo', columns: ['id', 'solicitacao_id', 'aeronave_id', 'data', 'horario_acionamento', 'horario_apresentacao', 'tripulante_id', 'funcao_tripulante', 'jornada_principal_id', 'status'] },
-    { table: 'pernas_jornada_voo', columns: ['id', 'jornada_id', 'numero', 'origem', 'destino', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'passageiros', 'status'] },
-  ])
-}
-
-function normalizarPernaJornada(perna: any) {
-  return {
-    ...perna,
-    numero_passageiros: perna.numero_passageiros ?? (perna.passageiros == null ? 0 : Number(perna.passageiros)),
-  }
-}
-
-function normalizarJornadaRegistro(jornada: any) {
-  return {
-    ...jornada,
-    horario_dep: jornada.horario_dep ?? jornada.tempo_dep ?? null,
-    horario_pouso: jornada.horario_pouso ?? jornada.horario_corte_inicio ?? null,
-    horario_corte: jornada.horario_corte ?? jornada.horario_corte_final ?? null,
-    pernas: Array.isArray(jornada.pernas) ? jornada.pernas.map(normalizarPernaJornada) : jornada.pernas,
-  }
-}
-const LIMITES_JORNADA = { dia: 540, semana: 2640, mes: 10560, posCorte: 30 } as const
-
-function minutosEntre(inicio: string | null, fim: string | null): number {
-  if (!inicio || !fim) return 0
-  const a = new Date(inicio).getTime()
-  const b = new Date(fim).getTime()
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0
-  const diferenca = b - a
-  if (diferenca >= 0 && diferenca <= 86_400_000) return Math.round(diferenca / 60000)
-
-  const hora = String(fim).match(/T(\d{2}:\d{2})(?::\d{2})?/)?.[1]
-  if (!hora) return 0
-  let ajustado = new Date(`${String(inicio).slice(0, 10)}T${hora}:00Z`).getTime()
-  while (ajustado < a) ajustado += 86_400_000
-  return ajustado - a <= 86_400_000 ? Math.round((ajustado - a) / 60000) : 0
-}
-
-function nivelAlertaJornada(minutos: number, limite: number): 'normal' | 'atencao' | 'critico' | 'excedido' {
-  const pct = limite > 0 ? minutos / limite : 0
-  return pct > 1 ? 'excedido' : pct >= 0.9 ? 'critico' : pct >= 0.75 ? 'atencao' : 'normal'
-}
-
-function minutosDaJornada(jornada: any, fimPrevisto?: string | null): number {
-  const pernas = Array.isArray(jornada.pernas) ? jornada.pernas : []
-  if (!pernas.length) return 0
-  const ultima = pernas[pernas.length - 1]
-  const inicio = jornada.horario_apresentacao || pernas[0]?.horario_ac
-  const fimVoo = fimPrevisto || ultima?.horario_corte || ultima?.horario_pouso
-  if (!inicio || !fimVoo) return 0
-  return minutosEntre(inicio, fimVoo) + LIMITES_JORNADA.posCorte
-}
-
-async function acumuladoTripulante(db: D1Database, tripulanteId: string | null, data: string, ignorarId = '') {
-  if (!tripulanteId) return { semana: 0, mes: 0 }
-  const [semana, mes] = await Promise.all([
-    db.prepare(`SELECT COALESCE(SUM(minutos_jornada), 0) AS minutos FROM jornadas_voo
-      WHERE tripulante_id = ?1 AND status = 'encerrada' AND id <> ?2
-        AND date(data) BETWEEN date(?3, '-6 days') AND date(?3)`).bind(tripulanteId, ignorarId, data).first<any>(),
-    db.prepare(`SELECT COALESCE(SUM(minutos_jornada), 0) AS minutos FROM jornadas_voo
-      WHERE tripulante_id = ?1 AND status = 'encerrada' AND id <> ?2
-        AND strftime('%Y-%m', data) = strftime('%Y-%m', ?3)`).bind(tripulanteId, ignorarId, data).first<any>(),
-  ])
-  return { semana: Number(semana?.minutos || 0), mes: Number(mes?.minutos || 0) }
-}
-
-async function avaliarLimitesJornada(c: Context<{ Bindings: Bindings }>, jornada: any, fimPrevisto?: string | null) {
-  const db = c.env.SHARE_DB
-  const raizId = jornada.jornada_principal_id || jornada.id
-  const minutos = minutosDaJornada(jornada, fimPrevisto)
-  const acumulado = await acumuladoTripulante(db, jornada.tripulante_id, jornada.data, jornada.id)
-  const limiteDia = Number(jornada.limite_jornada_minutos || LIMITES_JORNADA.dia)
-  const limiteSemana = Number(jornada.limite_semanal_minutos || LIMITES_JORNADA.semana)
-  const limiteMes = Number(jornada.limite_mensal_minutos || LIMITES_JORNADA.mes)
-  const semana = acumulado.semana + minutos
-  const mes = acumulado.mes + minutos
-  const pernasAbertas = await db.prepare("SELECT COUNT(*) AS total FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo'").bind(raizId).first<any>()
-  const niveis = [nivelAlertaJornada(minutos, limiteDia), nivelAlertaJornada(semana, limiteSemana), nivelAlertaJornada(mes, limiteMes)]
-  const ordem = ['normal', 'atencao', 'critico', 'excedido']
-  return {
-    jornada_id: jornada.id, tripulante_id: jornada.tripulante_id, data: jornada.data, minutos_jornada: minutos,
-    limite_jornada_minutos: limiteDia, restante_minutos: limiteDia - minutos,
-    nivel_alerta: niveis.reduce((maior, item) => (ordem.indexOf(item) > ordem.indexOf(maior) ? item : maior), 'normal'),
-    semana: { minutos: semana, limite: limiteSemana, restante: limiteSemana - semana, nivel: niveis[1] },
-    mes: { minutos: mes, limite: limiteMes, restante: limiteMes - mes, nivel: niveis[2] },
-    pernas_abertas: Number(pernasAbertas?.total || 0),
-  }
-}
-
-function statusPerna(p: { horario_ac?: string | null; horario_corte?: string | null; horario_pouso?: string | null; horario_dep?: string | null }) {
-  if (p.horario_corte) return 'cortado'
-  if (p.horario_pouso) return 'pousado'
-  if (p.horario_dep) return 'em_voo'
-  return 'programada'
-}
-app.get('/api/interno/agendamento/:id/jornada', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  try {
-    await garantirTabelaJornadas(c)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : 'O schema de jornadas não está disponível no banco operacional.'
-    log.error('[jornada] schema incompatível', error)
-    return c.json({ error: 'jornada_schema_incompativel', detail }, 503)
-  }
-  const idSolicitacao = c.req.param('id')
-  const jornadas = await c.env.SHARE_DB.prepare('SELECT * FROM jornadas_voo WHERE solicitacao_id = ?1 ORDER BY numero_jornada DESC').bind(idSolicitacao).all<any>()
-  const registrosBase = (jornadas.results || []).map(normalizarJornadaRegistro)
-  const registros = await Promise.all(registrosBase.map(async (registro: any) => {
-    if (!registro.tripulante_id) return registro
-    const tripulante = await c.env.SHARE_DB.prepare(`SELECT COALESCE(t.nome_completo, f.nome_completo) AS tripulante_nome
-      FROM (SELECT ?1 AS id) x
-      LEFT JOIN tripulacao t ON t.id = x.id
-      LEFT JOIN tripulacao_freelancer f ON f.id = x.id`).bind(registro.tripulante_id).first<{ tripulante_nome: string | null }>()
-    return { ...registro, tripulante_nome: tripulante?.tripulante_nome || null }
-  }))
-  const principal = registros.find((j: any) => j.status !== 'encerrada' && !j.jornada_principal_id)
-    || registros.find((j: any) => j.status !== 'encerrada')
-    || registros[0]
-  if (!principal) return c.json(null)
-  const raiz = principal.jornada_principal_id || principal.id
-  const pernas = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(raiz).all<any>()
-  let pernasNormalizadas = (pernas.results || []).map(normalizarPernaJornada)
-  if (!pernasNormalizadas.length && principal.status !== 'encerrada' && (principal.horario_acionamento || principal.horario_dep || principal.horario_pouso || principal.horario_corte)) {
-    const voo = await c.env.SHARE_DB.prepare('SELECT origem, destino FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<{ origem: string | null; destino: string | null }>()
-    const origem = String(voo?.origem || '').trim().toUpperCase()
-    const destino = String(voo?.destino || '').trim().toUpperCase()
-    if (origem && destino) {
-      const status = statusPerna({ horario_dep: principal.horario_dep, horario_pouso: principal.horario_pouso, horario_corte: principal.horario_corte })
-      const pernaId = uuid()
-      await c.env.SHARE_DB.prepare(`INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, passageiros, horario_ac, horario_dep, horario_pouso, horario_corte, status)
-        VALUES (?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)`).bind(pernaId, raiz, origem, destino, principal.horario_acionamento || null, principal.horario_dep || null, principal.horario_pouso || null, principal.horario_corte || null, status === 'programada' && principal.status === 'em_rota' ? 'em_voo' : status).run()
-      pernasNormalizadas = [(await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(pernaId).first<any>())].filter(Boolean).map(normalizarPernaJornada)
-    }
-  }
-  const doVoo = registros.filter((j: any) => j.numero_jornada === principal.numero_jornada)
-  const jornadaPorNumero = new Map<number, any>()
-  for (const jornada of registros) {
-    const numero = Number(jornada.numero_jornada)
-    const atual = jornadaPorNumero.get(numero)
-    if (!atual || jornada.funcao_tripulante === 'PIC') jornadaPorNumero.set(numero, jornada)
-  }
-  const historico = await Promise.all([...jornadaPorNumero.values()].map(async (j: any) => ({
-    ...j,
-    pernas: (await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(j.jornada_principal_id || j.id).all<any>()).results.map(normalizarPernaJornada),
-  })))
-  return c.json({
-    ...principal,
-    pernas: pernasNormalizadas,
-    limites: await avaliarLimitesJornada(c, { ...principal, pernas: pernasNormalizadas }),
-    tripulantes: await Promise.all(doVoo.map(async (j: any) => ({ ...j, pernas: pernasNormalizadas, limites: await avaliarLimitesJornada(c, { ...j, pernas: pernasNormalizadas }) }))),
-    historico,
-  })
 })
 
 // ─── Share Brasil: ponto, documentos, senhas e contatos ─────────────────────
