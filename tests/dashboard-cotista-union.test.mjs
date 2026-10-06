@@ -79,3 +79,16 @@ test("dashboard Cotista lê fornecedor e fornecedor_id do rateio_hold", () => {
   assert.match(holdBranch, /r\.fornecedor_id,\s*r\.fornecedor AS fornecedor_nome/);
   assert.match(source, /row\.fornecedor_nome \?\? fornecedoresPorId\.get/);
 });
+
+test("dashboard Cotista filtra rateio_despesas por cotista_aeronave_id", () => {
+  assert.match(
+    source,
+    /if \(cotistaAeronaveId && !cotistaSocioId\) \{ filtrosCliente\.push\('r\.cotista_id = \?'\); paramsCliente\.push\(cotistaAeronaveId\) \}/,
+    "rateios do cliente devem usar o ID da relação cotista-aeronave",
+  );
+  assert.doesNotMatch(
+    source,
+    /filtrosCliente\.push\('r\.cotista_id = \?'\); paramsCliente\.push\(cotistaClienteId\)/,
+    "rateios não podem ser filtrados pelo cliente_id",
+  );
+});

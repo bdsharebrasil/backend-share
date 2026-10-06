@@ -54,7 +54,9 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     if (inicio) { filtrosCliente.push('date(r.data_emissao) >= date(?)'); paramsCliente.push(inicio); filtrosHolding.push('date(r.data_emissao) >= date(?)'); paramsHolding.push(inicio); filtrosLancamentos.push('date(l.data_emissao) >= date(?)'); paramsLancamentos.push(inicio) }
     if (fim) { filtrosCliente.push('date(r.data_emissao) <= date(?)'); paramsCliente.push(fim); filtrosHolding.push('date(r.data_emissao) <= date(?)'); paramsHolding.push(fim); filtrosLancamentos.push('date(l.data_emissao) <= date(?)'); paramsLancamentos.push(fim) }
     if (aeronaveId) { filtrosCliente.push('r.aeronave_id = ?'); paramsCliente.push(aeronaveId); filtrosHolding.push('r.aeronave_id = ?'); paramsHolding.push(aeronaveId); filtrosLancamentos.push('l.aeronave_id = ?'); paramsLancamentos.push(aeronaveId) }
-    if (cotistaClienteId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaClienteId) }
+    // rateio_despesas.cotista_id referencia cotista_aeronave.id, não cliente.id.
+    // O cliente_id é usado apenas para resolver o nome do participante no JOIN.
+    if (cotistaAeronaveId && !cotistaSocioId) { filtrosCliente.push('r.cotista_id = ?'); paramsCliente.push(cotistaAeronaveId) }
     if (cotistaAeronaveId) { filtrosLancamentos.push('l.cotista_aeronave_id = ?'); paramsLancamentos.push(cotistaAeronaveId) }
     if (cotistaId && cotistaSocioId) filtrosCliente.push('1 = 0')
     if (cotistaId && !cotistaSocioId) { filtrosHolding.push('1 = 0'); filtrosMovimento.push('1 = 0') }
