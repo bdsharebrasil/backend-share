@@ -64,7 +64,17 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     if (inicio) { filtrosMovimento.push('date(mh.data_emissao) >= date(?)'); paramsMovimento.push(inicio) }
     if (fim) { filtrosMovimento.push('date(mh.data_emissao) <= date(?)'); paramsMovimento.push(fim) }
     if (aeronaveId) { filtrosMovimento.push('mh.aeronave_id = ?'); paramsMovimento.push(aeronaveId) }
-    const lancamentoSemRateio = "NOT EXISTS (SELECT 1 FROM rateio_despesas rd WHERE rd.lancamento_id = l.id AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO')"
+    // Um lançamento só aparece sozinho quando NENHUM rateio o representa. O reembolso cria um par
+    // (lancamento SHARE de origem + lancamento CLIENTE espelho) e o rateio aponta para apenas um
+    // deles; o "irmão" precisa ser tratado como já representado pelo rateio, senão duplica a linha.
+    const lancamentoSemRateio = `NOT EXISTS (
+        SELECT 1 FROM rateio_despesas rd
+         WHERE UPPER(COALESCE(rd.status, '')) <> 'CANCELADO'
+           AND (rd.lancamento_id = l.id
+             OR rd.lancamento_id IN (SELECT rb.lancamento_origem_id FROM reembolsos rb WHERE rb.lancamento_cliente_id = l.id)
+             OR rd.lancamento_id IN (SELECT rb.lancamento_cliente_id FROM reembolsos rb WHERE rb.lancamento_origem_id = l.id)
+             OR (l.origem_tipo IS NOT NULL AND l.origem_id IS NOT NULL AND rd.origem_tipo = l.origem_tipo AND rd.origem_id = l.origem_id)))
+      AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'REEMBOLSO' AND UPPER(COALESCE(l.fluxo, '')) = 'ENTRADA')`
     const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(db, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
