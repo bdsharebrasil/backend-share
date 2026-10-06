@@ -194,10 +194,19 @@ async function recalcularDiarioMes(c: Context<{ Bindings: Bindings; Variables: V
     FROM lancamentos_diario_bordo WHERE diario_mes_id = ?1`).bind(diarioMesId).first<any>()
   const celulaAtualTotal = Number((Number(diario.celula_anterior_ttotal || 0) + Number(totais?.tempo_total || 0)).toFixed(2))
   const celulaAtualVoo = Number((Number(diario.celula_anterior_tvoo || 0) + Number(totais?.tempo_voo || 0)).toFixed(2))
-  const disponivelTotal = Number(diario.celula_prox_revisao_ttotal || 0) > 0 ? Number((Number(diario.celula_prox_revisao_ttotal || 0) - celulaAtualTotal).toFixed(2)) : 0
-  const disponivelVoo = Number(diario.celula_prox_revisao_tvoo || 0) > 0 ? Number((Number(diario.celula_prox_revisao_tvoo || 0) - celulaAtualVoo).toFixed(2)) : 0
-  await db.prepare('UPDATE diario_mes SET celula_atual_ttotal = ?1, celula_disponivel_ttotal = ?2, celula_atual_tvoo = ?3, celula_disponivel_tvoo = ?4 WHERE id = ?5')
-    .bind(celulaAtualTotal, disponivelTotal, celulaAtualVoo, disponivelVoo, diarioMesId).run()
+  let revisaoTotal = diarioNumber(diario.celula_prox_revisao_ttotal)
+  let revisaoVoo = diarioNumber(diario.celula_prox_revisao_tvoo)
+  const disponivelTotalInformada = revisaoTotal > 0
+  const disponivelVooInformada = revisaoVoo > 0
+  if (disponivelTotalInformada && !disponivelVooInformada) {
+    revisaoVoo = Number((celulaAtualVoo + revisaoTotal - celulaAtualTotal).toFixed(2))
+  } else if (disponivelVooInformada && !disponivelTotalInformada) {
+    revisaoTotal = Number((celulaAtualTotal + revisaoVoo - celulaAtualVoo).toFixed(2))
+  }
+  const disponivelTotal = revisaoTotal > 0 ? Number((revisaoTotal - celulaAtualTotal).toFixed(2)) : 0
+  const disponivelVoo = revisaoVoo > 0 ? Number((revisaoVoo - celulaAtualVoo).toFixed(2)) : 0
+  await db.prepare('UPDATE diario_mes SET celula_atual_ttotal = ?1, celula_prox_revisao_ttotal = ?2, celula_disponivel_ttotal = ?3, celula_atual_tvoo = ?4, celula_prox_revisao_tvoo = ?5, celula_disponivel_tvoo = ?6 WHERE id = ?7')
+    .bind(celulaAtualTotal, revisaoTotal, disponivelTotal, celulaAtualVoo, revisaoVoo, disponivelVoo, diarioMesId).run()
 }
 
 type LeituraCelula = { celula: number; celula_tvoo: number }
