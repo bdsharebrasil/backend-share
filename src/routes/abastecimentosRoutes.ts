@@ -21,7 +21,7 @@ async function garantirTabelaAbastecimentos(c: AppContext) {
 }
 
 async function garantirTabelaFornecedoresCombustivel(c: AppContext) {
-  await validateWorkerSchema(c, [{ table: 'fornecedores_combustivel', columns: ['id', 'nome_fornecedor', 'codigo_icao', 'preco_jet', 'preco_avgas', 'status'] }])
+  await validateWorkerSchema(c, [{ table: 'fornecedores_combustivel', columns: ['id', 'nome_fornecedor', 'codigo_icao', 'preco_jet', 'preco_avgas'] }])
 }
 
 async function normalizarLocalAbastecimento(db: D1Database, valor: unknown): Promise<string | null> {
@@ -46,10 +46,10 @@ abastecimentosRoutes.get('/api/interno/abastecimentos/opcoes', async c => {
   const db = c.env.SHARE_DB
   const aeronaveId = texto(c.req.query('aeronave_id'))
   const [clientes, socios, aeronaves, fornecedores, aerodromos, diarios] = await Promise.all([
-    db.prepare("SELECT id, razao_social AS nome, codigo_cliente FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
-    db.prepare("SELECT s.id, s.nome, s.cliente_id, c.razao_social AS cliente_nome FROM hold_socios s LEFT JOIN cliente c ON c.id = s.cliente_id WHERE lower(COALESCE(s.status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY s.nome").all(),
-    db.prepare("SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%' ORDER BY matricula_registro").all(),
-    db.prepare("SELECT id, nome_fornecedor, codigo_icao, nome_cidade, pessoa_contato, telefone, preco_avgas, preco_jet FROM fornecedores_combustivel WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY nome_fornecedor").all(),
+    db.prepare('SELECT id, razao_social AS nome, codigo_cliente FROM cliente ORDER BY razao_social').all(),
+    db.prepare('SELECT s.id, s.nome, s.cliente_id, c.razao_social AS cliente_nome FROM hold_socios s LEFT JOIN cliente c ON c.id = s.cliente_id ORDER BY s.nome').all(),
+    db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
+    db.prepare('SELECT id, nome_fornecedor, codigo_icao, nome_cidade, pessoa_contato, telefone, preco_avgas, preco_jet FROM fornecedores_combustivel ORDER BY nome_fornecedor').all(),
     db.prepare('SELECT id, nome, designativo_icao FROM aerodromo ORDER BY designativo_icao').all(),
     db.prepare(`SELECT id, aeronave_id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal FROM diario_mes WHERE (?1 IS NULL OR aeronave_id = ?1) ORDER BY ano DESC, mes DESC`).bind(aeronaveId).all(),
   ])
@@ -75,7 +75,7 @@ abastecimentosRoutes.get('/api/interno/abastecimentos', async c => {
   if (fornecedorId) add('a.fornecedor_id = ?', fornecedorId)
   if (status) add('lower(a.status) = lower(?)', status)
   if (busca) { const termo = `%${busca}%`; conditions.push('(lower(COALESCE(a.trecho, \'\')) LIKE lower(?) OR lower(COALESCE(a.local, \'\')) LIKE lower(?) OR lower(COALESCE(a.numero_comanda, \'\')) LIKE lower(?) OR lower(COALESCE(a.numero_nf, \'\')) LIKE lower(?))'); binds.push(termo, termo, termo, termo) }
-  const query = `SELECT a.*, c.razao_social AS cliente_nome, s.nome AS socio_nome, ar.matricula_registro, ar.fabricante, ar.modelo, f.nome_fornecedor, ad.nome AS aerodromo_nome, ad.designativo_icao AS aerodromo_icao FROM abastecimentos a LEFT JOIN cliente c ON c.id = a.cliente_id LEFT JOIN hold_socios s ON s.id = a.socio_id LEFT JOIN aeronave ar ON ar.id = a.aeronave_id LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id LEFT JOIN aerodromo ad ON upper(ad.designativo_icao) = upper(a.local) WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.criado_em DESC`
+  const query = `SELECT a.* FROM abastecimentos a WHERE ${conditions.join(' AND ')} ORDER BY date(a.data) DESC, a.id DESC`
   const result = await db.prepare(query).bind(...binds).all()
   return c.json({ abastecimentos: result.results, resumo_mensal: [] })
 })
@@ -126,7 +126,7 @@ abastecimentosRoutes.post('/api/interno/abastecimentos/fornecedores', async c =>
   const body = (await c.req.json().catch(() => ({}))) as Record<string, any>
   if (!texto(body.nome_fornecedor)) return c.json({ error: 'fornecedor_nome_obrigatorio' }, 400)
   const id = crypto.randomUUID()
-  await c.env.SHARE_DB.prepare('INSERT INTO fornecedores_combustivel (id, nome_cidade, codigo_icao, nome_fornecedor, pessoa_contato, telefone, preco_avgas, preco_jet, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, texto(body.nome_cidade), texto(body.codigo_icao)?.toUpperCase(), texto(body.nome_fornecedor), texto(body.pessoa_contato), texto(body.telefone), body.preco_avgas == null ? null : numero(body.preco_avgas), body.preco_jet == null ? null : numero(body.preco_jet), 'ativo').run()
+  await c.env.SHARE_DB.prepare('INSERT INTO fornecedores_combustivel (id, nome_cidade, codigo_icao, nome_fornecedor, pessoa_contato, telefone, preco_avgas, preco_jet) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, texto(body.nome_cidade), texto(body.codigo_icao)?.toUpperCase(), texto(body.nome_fornecedor), texto(body.pessoa_contato), texto(body.telefone), body.preco_avgas == null ? null : numero(body.preco_avgas), body.preco_jet == null ? null : numero(body.preco_jet)).run()
   return c.json({ id, success: true }, 201)
 })
 
@@ -146,7 +146,7 @@ abastecimentosRoutes.patch('/api/interno/abastecimentos/fornecedores/:id', async
 abastecimentosRoutes.delete('/api/interno/abastecimentos/fornecedores/:id', async c => {
   if (!(await validarAcesso(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaFornecedoresCombustivel(c)
-  const result = await c.env.SHARE_DB.prepare("UPDATE fornecedores_combustivel SET status = 'inativo' WHERE id = ?").bind(c.req.param('id')).run()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM fornecedores_combustivel WHERE id = ?').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.json({ error: 'fornecedor_nao_encontrado' }, 404)
   return c.json({ success: true })
 })
