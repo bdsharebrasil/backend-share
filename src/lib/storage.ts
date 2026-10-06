@@ -13,6 +13,14 @@ export function shareBrasilFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
 }
 
+export function normalizarPastaUpload(value: unknown, fallback = 'geral'): string {
+  const folder = String(value ?? fallback).trim().replace(/^\/+|\/+$/g, '')
+  if (!folder || folder.length > 120 || folder.split('/').some(segment => !/^[a-zA-Z0-9_-]+$/.test(segment))) {
+    throw new Error('pasta_invalida')
+  }
+  return folder
+}
+
 export async function salvarArquivoShareBrasil(
   c: StorageContext,
   userId: string,

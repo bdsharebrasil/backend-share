@@ -19,7 +19,7 @@ import { garantirTabelasAuxiliares, validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
 import { normalizarHorarioAgendamento } from './lib/schedule'
 import { checkRateLimit, clientIp } from './lib/cache'
-import { salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
+import { normalizarPastaUpload, salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
 import { getPontoServerTimestamp } from './lib/ponto'
 import { uuid } from './lib/strings'
 import type { Env } from './types/env'
@@ -50,7 +50,6 @@ interface ReservationRequest {
   hospedeTelefone: string
   hospedeEmail?: string
   observacoes?: string
-  userId?: string
 }
 
 interface HotelReservationHotel {
@@ -184,7 +183,7 @@ const log = {
 // ─── Helpers: arquivos, short links e auth ────────────────────────────────────
 
 function shortCode(): string {
-  return crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
 /**
@@ -702,7 +701,12 @@ app.post('/api/upload', async (c) => {
   try {
     const formData = await c.req.formData()
     const file = formData.get('file') as File | null
-    const folder = (formData.get('folder') as string) || 'geral'
+    let folder: string
+    try {
+      folder = normalizarPastaUpload(formData.get('folder'))
+    } catch {
+      return c.json({ error: 'Pasta inválida' }, 400)
+    }
 
     if (!file) return c.json({ error: 'Arquivo ausente' }, 400)
 
@@ -736,6 +740,7 @@ app.post('/api/upload', async (c) => {
 app.get('/r/:code', async (c) => {
   await garantirTabelasAuxiliares(c)
   const code = c.req.param('code')
+  if (!/^[a-f0-9]{32}$/i.test(code)) return c.notFound()
   try {
     const row = await c.env.SHARE_DB.prepare('SELECT r2_key FROM short_links WHERE code = ?')
       .bind(code)
@@ -749,6 +754,8 @@ app.get('/r/:code', async (c) => {
     const headers = new Headers()
     object.writeHttpMetadata(headers)
     headers.set('etag', object.httpEtag)
+    headers.set('Content-Disposition', `inline; filename="${shareBrasilFileName(row.r2_key.split('/').pop() || 'arquivo')}"`)
+    headers.set('X-Content-Type-Options', 'nosniff')
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
 
     return new Response(object.body, { headers })
@@ -857,6 +864,8 @@ app.post('/api/demonstrativo-rateio', async (c) => {
 
 app.post('/api/hotel-reservation', async (c) => {
   try {
+    if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'auth_required' }, 401)
+    const authenticatedUserId = extractSupabaseUserId(c)
     const allowed = await checkRateLimit(c, `hotel-reservation:${clientIp(c)}`, 5)
     if (!allowed) return c.json({ error: 'Limite de solicitações atingido, tente novamente em instantes' }, 429)
 
@@ -950,7 +959,7 @@ app.post('/api/hotel-reservation', async (c) => {
         Prefer: 'return=representation',
       },
       body: JSON.stringify({
-        user_id: body.userId ?? null,
+        user_id: authenticatedUserId,
         hotel_id: hotel.id,
         nome_hotel: hotel.nome,
         endereco_hotel: hotel.endereco,

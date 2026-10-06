@@ -80,8 +80,20 @@ type PortalSession = PortalUser & { exp: number }
 const portalEncoder = new TextEncoder()
 const portalDecoder = new TextDecoder()
 const PORTAL_SESSION_TTL = 8 * 60 * 60
+const MAX_RESERVATION_DAYS = 30
+const MAX_RESERVATION_PASSENGERS = 20
 // O workerd em produção limita PBKDF2 a 100.000 iterações.
 const PORTAL_PBKDF2_ITERATIONS = 100_000
+
+function portalValidIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function portalReservationEnd(start: string, days: number): string {
+  return new Date(Date.parse(`${start}T00:00:00Z`) + (days - 1) * 86_400_000).toISOString().slice(0, 10)
+}
 
 function portalBase64Url(bytes: Uint8Array): string {
   let binary = ''
@@ -247,10 +259,12 @@ portalRoutes.get('/api/portal/aerodromos', async c => {
 })
 
 portalRoutes.get('/api/portal/disponibilidade', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cliente_nao_vinculado' }, 409)
   const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
   const to = c.req.query('ate') || from
   const [aircraft, reservations] = await Promise.all([
-    c.env.SHARE_DB.prepare("SELECT id, matricula_registro, fabricante, modelo, tipo_aeronave, status FROM aeronave WHERE lower(status) = 'ativa' ORDER BY matricula_registro").all(),
+    c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.status FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE lower(a.status) = 'ativa' AND (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY a.matricula_registro").bind(user.cliente_id, user.socio_id).all(),
     c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
   ])
   return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
@@ -271,13 +285,21 @@ portalRoutes.post('/api/portal/solicitacoes', async c => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null)
   if (!body || !body.aeronave_id || !body.origem || !body.destino || !body.data_agendada) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
   const dataAgendada = String(body.data_agendada).trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataAgendada)) return c.json({ error: 'data_agendada_invalida' }, 400)
+  const hoje = new Date().toISOString().slice(0, 10)
+  if (!portalValidIsoDate(dataAgendada) || dataAgendada < hoje) return c.json({ error: 'data_agendada_invalida' }, 400)
   const horarioPrevisto = body.horario_previsto_agendamento ? normalizarHorarioAgendamento(dataAgendada, body.horario_previsto_agendamento) : null
   if (body.horario_previsto_agendamento && !horarioPrevisto) return c.json({ error: 'horario_previsto_invalido' }, 400)
-  const aircraft = await c.env.SHARE_DB.prepare("SELECT id, status FROM aeronave WHERE id = ?1").bind(String(body.aeronave_id)).first<{ id: string; status: string }>()
-  if (!aircraft || aircraft.status.toLowerCase() !== 'ativa') return c.json({ error: 'aeronave_indisponivel' }, 409)
+  const diasDuracao = body.dias_duracao == null ? 1 : Number(body.dias_duracao)
+  const numeroPassageiros = body.numero_passageiros == null ? 1 : Number(body.numero_passageiros)
+  if (!Number.isInteger(diasDuracao) || diasDuracao < 1 || diasDuracao > MAX_RESERVATION_DAYS) return c.json({ error: 'dias_duracao_invalido' }, 400)
+  if (!Number.isInteger(numeroPassageiros) || numeroPassageiros < 1 || numeroPassageiros > MAX_RESERVATION_PASSENGERS) return c.json({ error: 'numero_passageiros_invalido' }, 400)
+  const dataFim = portalReservationEnd(dataAgendada, diasDuracao)
+  const aircraft = await c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.status FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE a.id = ?1 AND lower(a.status) = 'ativa' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)").bind(String(body.aeronave_id), user?.cliente_id, user?.socio_id).first<{ id: string; status: string }>()
+  if (!aircraft) return c.json({ error: 'aeronave_indisponivel' }, 409)
+  const conflict = await c.env.SHARE_DB.prepare("SELECT id FROM solicitacoes_reserva_voo WHERE aeronave_id = ?1 AND status IN ('pendente', 'aprovada') AND date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?3) LIMIT 1").bind(aircraft.id, dataFim, dataAgendada).first<{ id: string }>()
+  if (conflict) return c.json({ error: 'aeronave_indisponivel_no_periodo' }, 409)
   const id = crypto.randomUUID()
-  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), dataAgendada, horarioPrevisto, Number(body.dias_duracao) || 1, Number(body.numero_passageiros) || 1, body.observacoes ? String(body.observacoes) : null).run()
+  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, body.observacoes ? String(body.observacoes) : null).run()
   const row = await c.env.SHARE_DB.prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
   let notificationSent = true
   try {
