@@ -414,6 +414,15 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/mes/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const id = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  if (body.horimetro_inicio !== undefined || body.horimetro_final !== undefined || body.horimetro_ativo !== undefined) {
+    const current = await c.env.SHARE_DB.prepare('SELECT horimetro_inicio, horimetro_final FROM diario_mes WHERE id = ?1').bind(id).first<{ horimetro_inicio: number; horimetro_final: number }>()
+    if (!current) return c.notFound()
+    if (body.horimetro_ativo === undefined) {
+      const inicio = diarioNumber(body.horimetro_inicio, diarioNumber(current.horimetro_inicio))
+      const final = diarioNumber(body.horimetro_final, diarioNumber(current.horimetro_final))
+      body.horimetro_ativo = Number(Math.max(0, final - inicio).toFixed(2))
+    }
+  }
   const allowed: Record<string, (value: unknown) => unknown> = {
     celula_anterior_ttotal: value => diarioNumber(value), celula_atual_ttotal: value => diarioNumber(value), celula_prox_revisao_ttotal: value => diarioNumber(value), celula_disponivel_ttotal: value => diarioNumber(value),
     horimetro_inicio: value => diarioNumber(value), horimetro_final: value => diarioNumber(value), horimetro_ativo: value => diarioNumber(value), fechado: value => diarioBoolean(value),

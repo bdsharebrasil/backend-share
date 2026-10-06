@@ -35,6 +35,7 @@ class FakeD1 {
       id: 'month-1', aeronave_id: 'aircraft-1', ano: 2026, mes: 10, fechado: 0,
       celula_anterior_ttotal: 100, celula_prox_revisao_ttotal: 500,
       celula_anterior_tvoo: 100, celula_prox_revisao_tvoo: 500,
+      horimetro_inicio: 100, horimetro_final: 100, horimetro_ativo: 0,
     }
   }
 
@@ -49,6 +50,8 @@ class FakeD1 {
   }
 
   async first(sql, values) {
+    if (sql.includes('SELECT horimetro_inicio, horimetro_final FROM diario_mes')) return this.month.id === values[0] ? this.month : null
+    if (sql.includes('SELECT * FROM diario_mes WHERE id')) return this.month.id === values[0] ? this.month : null
     if (sql.includes('SELECT id, consumo_combustivel FROM aeronave')) return { id: 'aircraft-1', consumo_combustivel: 40 }
     if (sql.includes('SELECT id, aeronave_id, ano, mes, fechado, celula_atual_ttotal, celula_atual_tvoo FROM diario_mes')) {
       return { ...this.month, celula_atual_ttotal: 100, celula_atual_tvoo: 100 }
@@ -123,7 +126,15 @@ class FakeD1 {
       fields.forEach((field, index) => { launch[field] = values[index] })
       return { success: true, meta: { changes: 1 } }
     }
-    if (sql.startsWith('UPDATE diario_mes SET')) return { success: true, meta: { changes: 1 } }
+    if (sql.startsWith('UPDATE diario_mes SET')) {
+      const match = sql.match(/UPDATE diario_mes SET (.*?) WHERE id = \?\d*$/)
+      assert.ok(match)
+      const fields = match[1].split(', ').map((assignment) => assignment.split(' = ')[0])
+      const monthId = values[values.length - 1]
+      if (monthId !== this.month.id) return { success: true, meta: { changes: 0 } }
+      fields.forEach((field, index) => { this.month[field] = values[index] })
+      return { success: true, meta: { changes: 1 } }
+    }
     if (sql.startsWith('DELETE FROM abastecimentos')) return { success: true, meta: { changes: 0 } }
     if (sql.startsWith('DELETE FROM lancamentos_diario_bordo')) {
       const changes = this.launches.delete(values[0]) ? 1 : 0
@@ -189,6 +200,36 @@ async function excluirLancamento(db, id) {
     SUPABASE_ANON_KEY: 'sb_publishable_diario-test-key',
   })
 }
+async function alterarMes(db, id, body) {
+  return diarioBordoRoutes.fetch(new Request(`https://worker.test/api/interno/diario-bordo/mes/${id}`, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer diario-bordo-regression-token', apikey: 'sb_publishable_diario-test-key', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }), {
+    SHARE_DB: db,
+    CACHE_KV: cacheKv,
+    SUPABASE_URL: 'https://supabase.test',
+    SUPABASE_ANON_KEY: 'sb_publishable_diario-test-key',
+  })
+}
+
+test('PATCH do diário calcula horímetro ativo ao alterar inicial/final e permite valor manual', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-diario-test' })
+  const db = new FakeD1()
+
+  const automatico = await alterarMes(db, 'month-1', { horimetro_inicio: 120.5, horimetro_final: 125.75 })
+  assert.equal(automatico.status, 200)
+  const calculado = await automatico.json()
+  assert.equal(calculado.horimetro_inicio, 120.5)
+  assert.equal(calculado.horimetro_final, 125.75)
+  assert.equal(calculado.horimetro_ativo, 5.25)
+
+  const manual = await alterarMes(db, 'month-1', { horimetro_inicio: 120.5, horimetro_final: 125.75, horimetro_ativo: 4.5 })
+  assert.equal(manual.status, 200)
+  assert.equal((await manual.json()).horimetro_ativo, 4.5)
+})
 
 test('criação vincula a perna ao lançamento e impede incluí-la novamente', async (t) => {
   const originalFetch = globalThis.fetch
