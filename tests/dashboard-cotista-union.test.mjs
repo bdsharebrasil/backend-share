@@ -56,3 +56,14 @@ test("dashboard Cotista mantém a mesma projeção nas quatro fontes do UNION AL
     assert.match(branch, descriptionSlots[index], `a fonte ${index + 1} deve preencher a coluna descricao na mesma posição`);
   });
 });
+
+
+test("dashboard Cotista prioriza a data de envio de e-mail registrada no rateio", () => {
+  assert.match(source, /COALESCE\(r\.email_enviado_em, l\.email_enviado_em\) AS email_enviado_em/);
+  assert.match(source, /COALESCE\(r\.email_enviado_em, mh\.email_enviado_em\) AS email_enviado_em/);
+});
+
+test("dashboard Cotista converte IDs de fornecedor em nomes antes de responder", () => {
+  assert.match(source, /SELECT id, nome_completo FROM fornecedores_favoritos WHERE id IN/);
+  assert.match(source, /fornecedoresPorId\.get\(String\(row\.fornecedor_id/);
+});
