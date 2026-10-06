@@ -1233,6 +1233,37 @@ async function validarElegibilidadeTripulante(c: Context<{ Bindings: Bindings }>
   return null
 }
 
+async function garantirTabelaSequenciaVoos(c: Context<{ Bindings: Bindings }>): Promise<void> {
+  await validateWorkerSchema(c, [{ table: 'voo_sequencia_cotista', columns: ['cotista_key', 'ultimo_numero'] }])
+}
+
+async function portalNextFlightSequence(c: Context<{ Bindings: Bindings }>, cotistaKey: string): Promise<number> {
+  const sequence = await c.env.SHARE_DB.prepare(`INSERT INTO voo_sequencia_cotista (cotista_key, ultimo_numero) VALUES (?1, 1)
+    ON CONFLICT(cotista_key) DO UPDATE SET ultimo_numero = ultimo_numero + 1
+    RETURNING ultimo_numero`).bind(cotistaKey).first<{ ultimo_numero: number }>()
+  if (!sequence) throw new Error('flight_sequence_not_initialized')
+  return sequence.ultimo_numero
+}
+
+async function portalFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, cotistaKey: string): Promise<string> {
+  const sequence = await portalNextFlightSequence(c, cotistaKey)
+  const codigo = clientCode.trim().toUpperCase().slice(0, 3)
+  const ano = String(new Date().getFullYear()).slice(-2)
+  return `${codigo}-${String(sequence).padStart(4, '0')}/${ano}`
+}
+
+function portalAircraftSuffix(registration: string | null | undefined): string {
+  const normalized = String(registration ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  return normalized.replace(/^PR/, '').slice(-3) || 'AER'
+}
+
+async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clientCode: string, registration: string | null | undefined, cotistaKey: string): Promise<string> {
+  const codigo = clientCode.trim().toUpperCase().slice(0, 3)
+  const ano = String(new Date().getFullYear()).slice(-2)
+  const sequence = await portalNextFlightSequence(c, cotistaKey)
+  return `${codigo}-${portalAircraftSuffix(registration)}${String(sequence).padStart(3, '0')}/${ano}`
+}
+
 app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
@@ -1463,6 +1494,91 @@ app.post('/api/interno/agendamento', async c => {
   await c.env.SHARE_DB.prepare(`INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, cliente_emprestimo_id, socio_emprestimo_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, piloto_id, copiloto_id, numero_voo, aprovado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, clienteId, socio?.id || null, clienteEmprestimoId, socioEmprestimoId, aeronaveId, vooEmprestado, origem, destino, dataAgendada, horarioPrevisto, diasDuracao, Math.max(1, Number(body?.numero_passageiros || 1)), 'pendente', body?.observacoes?.trim() || null, piloto?.id || null, copiloto?.id || null, null, null).run()
   return c.json({ id, status: 'pendente', numero_voo: null }, 201)
+})
+
+app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaDisponibilidadeTripulacao(c)
+  await garantirTabelaSequenciaVoos(c)
+  const id = c.req.param('id')
+  const reservation = await c.env.SHARE_DB.prepare(`SELECT s.*, a.matricula_registro
+    FROM solicitacoes_reserva_voo s
+    LEFT JOIN aeronave a ON a.id = s.aeronave_id
+    WHERE s.id = ?1`).bind(id).first<{
+      status: string
+      cliente_id: string | null
+      socio_id: string | null
+      matricula_registro: string | null
+      aeronave_id: string
+      cliente_emprestimo_id: string | null
+      socio_emprestimo_id: string | null
+      voo_emprestado: string | null
+    }>()
+  if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
+  const body = await c.req.json<{ piloto_id?: string; copiloto_id?: string }>().catch(() => ({} as { piloto_id?: string; copiloto_id?: string }))
+  if (!body.piloto_id) return c.json({ error: 'piloto_obrigatorio' }, 400)
+  if (body.copiloto_id && body.copiloto_id === body.piloto_id) return c.json({ error: 'tripulantes_iguais' }, 400)
+  const piloto = await buscarTripulante(c, body.piloto_id)
+  const copiloto = body.copiloto_id ? await buscarTripulante(c, body.copiloto_id) : null
+  if (!piloto) return c.json({ error: 'piloto_nao_encontrado' }, 400)
+  if (body.copiloto_id && !copiloto) return c.json({ error: 'copiloto_nao_encontrado' }, 400)
+  for (const assigned of [body.piloto_id, body.copiloto_id].filter((value): value is string => Boolean(value))) {
+    const eligibility = await validarElegibilidadeTripulante(c, assigned, reservation.aeronave_id)
+    if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
+  }
+
+  const vooEmprestado = Boolean(reservation.cliente_emprestimo_id || reservation.socio_emprestimo_id)
+    || ['sim', 'true', '1'].includes(String(reservation.voo_emprestado).toLowerCase())
+  const cotistaQuery = vooEmprestado
+    ? `SELECT ca.codigo_cliente, ca.socio_id
+       FROM cotista_aeronave ca
+       WHERE ca.codigo_cliente IS NOT NULL
+         AND (ca.socio_id = ?1 OR ca.cliente_id = ?2)
+       ORDER BY CASE WHEN ca.socio_id = ?1 THEN 0 WHEN ca.cliente_id = ?2 THEN 1 ELSE 2 END
+       LIMIT 1`
+    : `SELECT ca.codigo_cliente, ca.socio_id
+       FROM cotista_aeronave ca
+       WHERE ca.aeronave_id = ?3 AND ca.codigo_cliente IS NOT NULL
+         AND (ca.socio_id = ?1 OR ca.cliente_id = ?2)
+       ORDER BY CASE WHEN ca.socio_id = ?1 THEN 0 WHEN ca.cliente_id = ?2 THEN 1 ELSE 2 END
+       LIMIT 1`
+  const cotistaStatement = c.env.SHARE_DB.prepare(cotistaQuery)
+  const cotista = vooEmprestado
+    ? await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id).first<{ codigo_cliente: string; socio_id: string | null }>()
+    : await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id, reservation.aeronave_id).first<{ codigo_cliente: string; socio_id: string | null }>()
+  if (!cotista?.codigo_cliente?.trim()) {
+    return c.json({
+      error: 'codigo_cotista_nao_encontrado',
+      detail: vooEmprestado
+        ? 'Voo emprestado: nenhum codigo_cliente foi encontrado para o cotista tomador, independentemente da aeronave cedida.'
+        : 'Nenhum registro em cotista_aeronave possui codigo_cliente para esta aeronave e este cliente/socio.',
+      solicitacao_id: id,
+      cliente_id: reservation.cliente_id,
+      socio_id: reservation.socio_id,
+      aeronave_id: reservation.aeronave_id,
+      voo_emprestado: vooEmprestado,
+    }, 409)
+  }
+
+  const cotistaKey = cotista.socio_id ? `socio:${cotista.socio_id}` : `cliente:${reservation.cliente_id}`
+  const numeroVoo = vooEmprestado
+    ? await portalLoanFlightSequence(c, cotista.codigo_cliente, reservation.matricula_registro, cotistaKey)
+    : await portalFlightSequence(c, cotista.codigo_cliente, cotistaKey)
+  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'")
+    .bind(numeroVoo, piloto.id, copiloto?.id || null, id).run()
+  if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
+  return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: numeroVoo, piloto, copiloto })
+})
+
+app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<{ motivo_rejeicao?: string }>().catch(() => ({} as { motivo_rejeicao?: string }))
+  if (!body.motivo_rejeicao?.trim()) return c.json({ error: 'motivo_rejeicao_obrigatorio' }, 400)
+  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'reprovada', motivo_rejeicao = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'")
+    .bind(body.motivo_rejeicao.trim(), c.req.param('id')).run()
+  if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
+  return c.json({ success: true, status: 'reprovada', solicitacao_id: c.req.param('id') })
 })
 
 app.delete('/api/interno/agendamento/:id', async c => {
