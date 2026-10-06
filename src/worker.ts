@@ -2206,7 +2206,7 @@ async function autorizarGestaoAerodromo(c: Context<{ Bindings: Bindings }>) {
   return user && await isColaboradorManager(c, user)
 }
 app.post('/api/interno/aerodromos', async c => {
-  if (!(await autorizarGestaoAerodromo(c))) return c.json({ error: 'permissao_necessaria' }, 403)
+  if (!(await requireAuthenticatedUser(c))) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<AerodromoPayload>().catch(() => ({} as AerodromoPayload)); const { nome, icao, coordenadas } = validarAerodromo(body)
   if (!nome || !/^[A-Z0-9]{4}$/.test(icao)) return c.json({ error: 'nome_e_icao_obrigatorios' }, 400)
   const id = uuid()

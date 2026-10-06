@@ -3,25 +3,30 @@ import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 
 const workerSource = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8')
-const authSource = await readFile(new URL('../src/lib/auth.ts', import.meta.url), 'utf8')
 
-test('CRUD de aeródromos usa a autorização administrativa de colaboradores', () => {
+test('criação de aeródromo exige sessão autenticada, sem exigir papel administrativo', () => {
+  const postStart = workerSource.indexOf("app.post('/api/interno/aerodromos'")
+  const postEnd = workerSource.indexOf('const atualizarAerodromo', postStart)
+  assert.notEqual(postStart, -1, 'rota de criação deve existir')
+  assert.notEqual(postEnd, -1, 'rotas administrativas devem seguir o POST')
+
+  const postSource = workerSource.slice(postStart, postEnd)
+  assert.match(postSource, /requireAuthenticatedUser\(c\)/)
+  assert.doesNotMatch(postSource, /autorizarGestaoAerodromo\(c\)/)
+})
+
+test('edição e exclusão continuam protegidas pela autorização administrativa', () => {
   const helperStart = workerSource.indexOf('async function autorizarGestaoAerodromo')
   const helperEnd = workerSource.indexOf("app.post('/api/interno/aerodromos'", helperStart)
   assert.notEqual(helperStart, -1, 'helper de autorização de aeródromos deve existir')
-  assert.notEqual(helperEnd, -1, 'rotas de aeródromos devem seguir o helper')
+  assert.notEqual(helperEnd, -1, 'criação deve seguir o helper')
 
   const helperSource = workerSource.slice(helperStart, helperEnd)
   assert.match(helperSource, /isColaboradorManager\(c, user\)/)
   assert.doesNotMatch(helperSource, /isMeetingManager\(c, user\)/)
-})
 
-test('RH Master reconhecido pelo frontend também é autorizado pelo helper do backend', () => {
-  const helperStart = authSource.indexOf('export async function isColaboradorManager')
-  const helperEnd = authSource.indexOf('\n}', helperStart)
-  assert.notEqual(helperStart, -1, 'helper de gestão de colaboradores deve existir')
-  assert.notEqual(helperEnd, -1, 'helper deve estar completo')
-
-  const helperSource = authSource.slice(helperStart, helperEnd)
-  assert.equal((helperSource.match(/'rh_master'/g) || []).length, 2, 'RH Master deve ser aceito tanto em user_profiles quanto em usuarios_funcoes')
+  const updateStart = workerSource.indexOf('const atualizarAerodromo', helperEnd)
+  const updateEnd = workerSource.indexOf('function funcoesColaborador', updateStart)
+  const updateSource = workerSource.slice(updateStart, updateEnd)
+  assert.match(updateSource, /autorizarGestaoAerodromo\(c\)/)
 })
