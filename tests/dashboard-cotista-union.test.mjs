@@ -67,3 +67,11 @@ test("dashboard Cotista converte IDs de fornecedor em nomes antes de responder",
   assert.match(source, /SELECT id, nome_completo FROM fornecedores_favoritos WHERE id IN/);
   assert.match(source, /fornecedoresPorId\.get\(String\(row\.fornecedor_id/);
 });
+
+
+test("dashboard Cotista não lê fornecedor_id inexistente na tabela rateio_hold", () => {
+  const holdBranch = source.split(/\bUNION ALL\b/i)[1];
+  assert.ok(holdBranch);
+  assert.match(holdBranch, /NULL AS fornecedor_id/);
+  assert.doesNotMatch(holdBranch, /r\.fornecedor_id/);
+});

@@ -90,7 +90,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_nf'], 'url_nf')},
              ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_recibo'], 'url_recibo')},
              ${selecionarColunaOpcional(schema, 'rateio_hold', 'r', ['url_boleto'], 'url_boleto')},
-             r.fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.periodicidade,
+             NULL AS fornecedor_id, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
