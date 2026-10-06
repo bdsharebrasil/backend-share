@@ -187,7 +187,7 @@ export function calcularCompensacaoBalanco(rows: Record<string, unknown>[], part
     const valorDevido = Math.max(0, Number(row.valor_rateado_centavos ?? row.valor_centavos ?? 0))
     if (participante) devido.set(participante, (devido.get(participante) || 0) + valorDevido)
     const pagador = String(row.pago_por ?? '').trim() || (Number(row.pago_diretamente || 0) ? participante : '')
-    const valorPago = Math.max(0, Number(row.valor_pago_centavos ?? 0))
+    const valorPago = Math.max(0, Number(row.valor_pago_real_centavos ?? 0))
     if (pagador && valorPago) pago.set(pagador, (pago.get(pagador) || 0) + valorPago)
   }
   const ids = [...new Set([...devido.keys(), ...pago.keys()])]
@@ -198,8 +198,8 @@ export function calcularCompensacaoBalanco(rows: Record<string, unknown>[], part
   }).sort((a, b) => Math.abs(b.saldoCentavos) - Math.abs(a.saldoCentavos))
   const matriz: Record<string, Record<string, number>> = {}
   for (const credor of ids) matriz[credor] = Object.fromEntries(ids.map((devedor) => [devedor, 0]))
-  const credores = saldos.filter((item) => item.saldoCentavos > 0).map((item) => ({ id: item.cotista, valor: item.saldoCentavos }))
-  const devedores = saldos.filter((item) => item.saldoCentavos < 0).map((item) => ({ id: item.cotista, valor: -item.saldoCentavos }))
+  const credores = saldos.filter((item) => item.saldoCentavos > 0).map((item) => ({ id: item.cotistaId, valor: item.saldoCentavos }))
+  const devedores = saldos.filter((item) => item.saldoCentavos < 0).map((item) => ({ id: item.cotistaId, valor: -item.saldoCentavos }))
   let credorIndex = 0
   let devedorIndex = 0
   while (credorIndex < credores.length && devedorIndex < devedores.length) {

@@ -86,7 +86,6 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     const filtrosMovimento: string[] = ["mh.tipo_caixa = 'HOLD'", "UPPER(COALESCE(mh.fluxo, '')) IN ('SAIDA', 'ENTRADA', 'APORTE', 'REEMBOLSO', 'ESTORNO')", "UPPER(COALESCE(mh.status, '')) <> 'CANCELADO'"]
     const paramsMovimento: unknown[] = []
     if (schema.get('movimentos_holding')?.has('escopo_financeiro')) filtrosMovimento.push("COALESCE(mh.escopo_financeiro, 'FINANCEIRO') = 'FINANCEIRO'")
-    if (inicio) { filtrosCliente.push('date(r.data_emissao) >= date(?)'); paramsCliente.push(inicio); filtrosHolding.push('date(r.data_emissao) >= date(?)'); paramsHolding.push(inicio); filtrosLancamentos.push('date(l.data_emissao) >= date(?)'); paramsLancamentos.push(inicio) }
     if (fim) { filtrosCliente.push('date(r.data_emissao) <= date(?)'); paramsCliente.push(fim); filtrosHolding.push('date(r.data_emissao) <= date(?)'); paramsHolding.push(fim); filtrosLancamentos.push('date(l.data_emissao) <= date(?)'); paramsLancamentos.push(fim) }
     if (aeronaveId) { filtrosCliente.push('r.aeronave_id = ?'); paramsCliente.push(aeronaveId); filtrosHolding.push('r.aeronave_id = ?'); paramsHolding.push(aeronaveId); filtrosLancamentos.push('l.aeronave_id = ?'); paramsLancamentos.push(aeronaveId) }
     // rateio_despesas.cotista_id referencia cotista_aeronave.id, não cliente.id.
@@ -96,7 +95,6 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     if (cotistaId && cotistaSocioId) filtrosCliente.push('1 = 0')
     if (cotistaId && !cotistaSocioId) { filtrosHolding.push('1 = 0'); filtrosMovimento.push('1 = 0') }
     if (cotistaSocioId) { filtrosHolding.push('r.socio_id = ?'); paramsHolding.push(cotistaSocioId); filtrosMovimento.push('mh.socio_id = ?'); paramsMovimento.push(cotistaSocioId) }
-    if (inicio) { filtrosMovimento.push('date(mh.data_emissao) >= date(?)'); paramsMovimento.push(inicio) }
     if (fim) { filtrosMovimento.push('date(mh.data_emissao) <= date(?)'); paramsMovimento.push(fim) }
     if (aeronaveId) { filtrosMovimento.push('mh.aeronave_id = ?'); paramsMovimento.push(aeronaveId) }
     // Um lançamento só aparece sozinho quando NENHUM rateio o representa. O reembolso pode criar
@@ -181,8 +179,14 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         FROM movimentos_holding mh
         LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
        WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
-      ORDER BY 4 DESC, 1 DESC LIMIT 1000
+      ORDER BY 4 DESC, 1 DESC
     `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
+    const dentroDoPeriodo = (row: Record<string, unknown>) => {
+      const data = String(row.data ?? '').slice(0, 10)
+      if (inicio && (!data || data < inicio)) return false
+      if (fim && (!data || data > fim)) return false
+      return true
+    }
     const rowsComDocumentos = rows.map((row) => ({
       ...row,
       documentos_vinculados: documentosVinculados(row.anexos_json, [
@@ -193,7 +197,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         { nome: 'Boleto', url: row.url_boleto, tipo: 'boleto' },
       ]),
     }))
-    const rowsParaExibicao = consolidarRateiosLancamentos(rowsComDocumentos)
+    const rowsParaExibicao = consolidarRateiosLancamentos(rowsComDocumentos.filter(dentroDoPeriodo))
     const aeronaveIds = [...new Set(rowsParaExibicao.map(row => String(row.aeronave_id ?? '').trim()).filter(Boolean))]
     const aeronavesPorId = new Map<string, string>()
     if (aeronaveIds.length) {
@@ -240,7 +244,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       rateiosHolding.map(row => ({ movimento_id: row.movimento_id ? String(row.movimento_id) : null, socio_id: String(row.socio_id), status: row.status ? String(row.status) : null, pago_diretamente: row.pago_diretamente as number | boolean | null, valor_rateado_centavos: row.valor_rateado_centavos as number | string | null, valor_pago_real_centavos: row.valor_pago_real_centavos as number | string | null })),
     )
     const lancamentos = rowsParaExibicao.map(row => ({ id: row.id, aeronaveId: row.aeronave_id ?? null, aeronaveNome: aeronavesPorId.get(String(row.aeronave_id ?? '')) ?? null, participanteId: row.participante_id ?? null, participanteNome: row.participante_nome ?? null, data: row.data, descricao: row.descricao, documento: row.numero_doc ?? null, numeroNf: row.numero_nf ?? null, numeroRecibo: row.numero_recibo ?? null, numeroDemonstrativo: row.numero_demonstrativo ?? null, numeroDoc: row.numero_doc ?? null, fornecedor: row.fornecedor_nome ?? fornecedoresPorId.get(String(row.fornecedor_id ?? "")) ?? row.fornecedor_id ?? null, categoria: row.categoria_nome ?? 'SEM CATEGORIA', grupoCategoria: row.grupo_categoria ?? '', tipo: row.origem_rateio ?? null, periodicidade: row.periodicidade ?? null, prazo: row.data_vencimento ?? null, dataPagamento: row.data_pagamento ?? null, fluxo: String(row.fluxo ?? 'SAIDA').toUpperCase(), valorCentavos: Number(row.valor_centavos ?? row.valor_rateado_centavos ?? 0), valorRateadoCentavos: Number(row.valor_rateado_centavos ?? row.valor_centavos ?? 0), valorPagoRealCentavos: Number(row.valor_pago_real_centavos ?? 0), percentualSociedade: row.percentual_sociedade == null ? null : Number(row.percentual_sociedade), percentualUso: row.percentual_uso == null ? null : Number(row.percentual_uso), pagoPor: row.pago_por ?? '', caixa: row.tipo_caixa ?? 'SHARE', pagoDiretamente: Boolean(row.pago_diretamente), reembolsavel: Boolean(row.reembolsavel), reembolsoQuitado: Boolean(row.reembolso_quitado), status: row.origem_rateio === 'lancamentos' ? statusLancamentoFinanceiro(row.status, row.data_vencimento) : row.status ?? 'EM_ABERTO', observacoes: row.observacoes ?? null, urlDoc: row.url_doc ?? null, urlDemonstrativo: row.url_demonstrativo ?? null, urlNf: row.url_nf ?? null, urlRecibo: row.url_recibo ?? null, urlBoleto: row.url_boleto ?? null, emailEnviadoEm: row.email_enviado_em ?? null, local: row.local ?? null, rateios: Array.isArray(row.rateio_linhas) ? row.rateio_linhas.map((rateio: Record<string, unknown>) => ({ id: String(rateio.id ?? ''), cotistaId: rateio.cotista_id ? String(rateio.cotista_id) : null, cotista: String(rateio.cotista_nome ?? rateio.cotista_id ?? 'Cotista não informado'), percentual: Number(rateio.percentual_uso ?? rateio.percentual_sociedade ?? 0), percentualSociedade: rateio.percentual_sociedade == null ? null : Number(rateio.percentual_sociedade), valorCentavos: Number(rateio.valor_rateado_centavos ?? 0), valorPagoRealCentavos: Number(rateio.valor_pago_real_centavos ?? 0), pagoPor: rateio.pago_por ? String(rateio.pago_por) : null, pagoDiretamente: Boolean(rateio.pago_diretamente), status: String(rateio.status ?? 'EM_ABERTO') })) : [] }))
-    const extratoHolding = movimentosHolding.slice(0, 1000).map(row => ({ id: String(row.id), holdingId: row.holding_id ? String(row.holding_id) : null, holdingNome: row.holding_nome ? String(row.holding_nome) : null, socioId: row.socio_id ? String(row.socio_id) : null, socioNome: row.socio_nome ? String(row.socio_nome) : null, aeronaveId: row.aeronave_id ? String(row.aeronave_id) : null, data: row.data ? String(row.data) : '', dataPagamento: row.data_pagamento ? String(row.data_pagamento) : null, descricao: String(row.descricao ?? ''), categoria: row.categoria_nome ? String(row.categoria_nome) : null, fluxo: String(row.fluxo ?? '').toUpperCase(), valorCentavos: Number(row.valor_centavos || 0), status: String(row.status ?? 'EM_ABERTO').toUpperCase(), contaBancaria: row.conta_bancaria ? String(row.conta_bancaria) : null, diretamentePago: Boolean(row.pago_diretamente) }))
+    const extratoHolding = movimentosHolding.filter(dentroDoPeriodo).map(row => ({ id: String(row.id), holdingId: row.holding_id ? String(row.holding_id) : null, holdingNome: row.holding_nome ? String(row.holding_nome) : null, socioId: row.socio_id ? String(row.socio_id) : null, socioNome: row.socio_nome ? String(row.socio_nome) : null, aeronaveId: row.aeronave_id ? String(row.aeronave_id) : null, data: row.data ? String(row.data) : '', dataPagamento: row.data_pagamento ? String(row.data_pagamento) : null, descricao: String(row.descricao ?? ''), categoria: row.categoria_nome ? String(row.categoria_nome) : null, fluxo: String(row.fluxo ?? '').toUpperCase(), valorCentavos: Number(row.valor_centavos || 0), status: String(row.status ?? 'EM_ABERTO').toUpperCase(), contaBancaria: row.conta_bancaria ? String(row.conta_bancaria) : null, diretamentePago: Boolean(row.pago_diretamente) }))
     const entradas = lancamentos.filter(row => row.fluxo === 'ENTRADA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const saidas = lancamentos.filter(row => row.fluxo === 'SAIDA').reduce((total, row) => total + row.valorCentavos / 100, 0)
     const porMes = new Map<string, { mes: string; entradas: number; saidas: number; custoRateado: number; lancamentos: number; saldo: number; mediaPorLancamento: number }>()

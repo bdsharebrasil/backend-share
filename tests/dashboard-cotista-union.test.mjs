@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { buildLancamentoSemRateioPredicate } from "../src/financeiro/dashboardCotistaRoutes.ts";
-import { consolidarRateiosLancamentos } from "../src/financeiro/cotistaDashboard.ts";
+import { calcularCompensacaoBalanco, consolidarRateiosLancamentos } from "../src/financeiro/cotistaDashboard.ts";
 
 const source = await readFile(new URL("../src/financeiro/dashboardCotistaRoutes.ts", import.meta.url), "utf8");
 const financeRoutes = await readFile(new URL("../src/financeiroRoutes.ts", import.meta.url), "utf8");
@@ -71,6 +71,28 @@ test("dashboard Cotista converte IDs de fornecedor em nomes antes de responder",
   assert.match(source, /fornecedoresPorId\.get\(String\(row\.fornecedor_id/);
 });
 
+
+test("balanço usa o pagamento real e mantém IDs na matriz de compensação", () => {
+  const resultado = calcularCompensacaoBalanco([
+    { participante_id: "cotista-a", participante_nome: "Cotista A", valor_rateado_centavos: 10000, valor_pago_real_centavos: 20000, pago_por: "cotista-a", fluxo: "SAIDA" },
+    { participante_id: "cotista-b", participante_nome: "Cotista B", valor_rateado_centavos: 10000, valor_pago_real_centavos: 0, pago_por: null, fluxo: "SAIDA" },
+  ]);
+  const saldoA = resultado.saldos.find((saldo) => saldo.cotistaId === "cotista-a");
+  const saldoB = resultado.saldos.find((saldo) => saldo.cotistaId === "cotista-b");
+  assert.equal(saldoA?.saldoCentavos, 10000);
+  assert.equal(saldoB?.saldoCentavos, -10000);
+  assert.deepEqual(Object.keys(resultado.matrizCompensacao), ["cotista-a", "cotista-b"]);
+  assert.equal(resultado.matrizCompensacao["cotista-a"]["cotista-b"], 10000);
+  assert.doesNotMatch(JSON.stringify(resultado.matrizCompensacao), /Cotista A|Cotista B/);
+});
+
+test("consulta do balanço não limita o histórico e separa período exibido do acumulado", () => {
+  assert.doesNotMatch(source, /ORDER BY 4 DESC, 1 DESC LIMIT 1000/);
+  assert.match(source, /consolidarRateiosLancamentos\(rowsComDocumentos\.filter\(dentroDoPeriodo\)\)/);
+  assert.match(source, /const compensacao = calcularCompensacaoBalanco\(rows, participantesPermitidos\)/);
+  assert.doesNotMatch(source, /filtrosCliente\.push\('date\(r\.data_emissao\) >= date\(\?\)'\)/);
+  assert.doesNotMatch(source, /filtrosMovimento\.push\('date\(mh\.data_emissao\) >= date\(\?\)'\)/);
+});
 
 test("dashboard Cotista lê fornecedor e fornecedor_id do rateio_hold", () => {
   const queryStart = source.indexOf("const rows = await listar(db, `");
