@@ -15,3 +15,16 @@ test("emissão de recibo e lançamentos usam somente o valor em centavos do D1",
   assert.doesNotMatch(issueRevenue, /valor_total:\s*amount\s*\/\s*100/);
   assert.doesNotMatch(issueRevenue, /valor:\s*amount\s*\/\s*100/);
 });
+
+test("rateio de recibo de saída usa colunas D1 e vínculo por lancamento_id", () => {
+  const inicioRateio = issueRevenue.indexOf("'rateio_despesas'");
+  const fimRateio = issueRevenue.indexOf("if (!reciboSaida)", inicioRateio);
+  const insertRateio = issueRevenue.slice(inicioRateio, fimRateio);
+
+  assert.notEqual(inicioRateio, -1, "o caminho de inserção do rateio deve existir");
+  assert.match(insertRateio, /lancamento_id:\s*clientLancamentoId/);
+  assert.match(insertRateio, /valor_total_centavos:\s*amount/);
+  assert.match(insertRateio, /valor_rateado_centavos:\s*amount/);
+  assert.doesNotMatch(insertRateio, /\bvalor_rateado\s*:/);
+  assert.doesNotMatch(insertRateio, /\borigem_id\s*:/);
+});
