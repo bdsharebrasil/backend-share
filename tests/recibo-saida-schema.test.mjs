@@ -32,6 +32,23 @@ test("rateio de recibo de saída usa colunas D1 e vínculo por lancamento_id", (
   assert.doesNotMatch(insertRateio, /\borigem_id\s*:/);
 });
 
+test("lancamento de receita só grava cliente_id que existe no destino da FK do D1", () => {
+  assert.match(issueRevenue, /SELECT id FROM clientes WHERE id = \? LIMIT 1/);
+  assert.match(issueRevenue, /cliente_id: clienteLancamento\?\.id \?\? null/);
+  assert.doesNotMatch(issueRevenue, /cliente_id: context\?\.clienteId/);
+});
+
+test("recibo de saída valida cotista, aeronave e categoria do rateio antes de alocar número", () => {
+  const rota = recibosSaidaRoutes.slice(
+    recibosSaidaRoutes.indexOf("recibosSaidaRoutes.post('/recibos-saida'"),
+    recibosSaidaRoutes.indexOf("recibosSaidaRoutes.patch('/recibos-saida/:id'"),
+  );
+  assert.match(rota, /FROM cotista_aeronave WHERE id = \? AND COALESCE\(status, 'ativo'\) <> 'inativo'/);
+  assert.match(rota, /FROM aeronave WHERE id = \?/);
+  assert.match(rota, /FROM categoria_movimentacao_cliente WHERE id = \?/);
+  assert.ok(rota.indexOf('categoria_despesa_invalida') < rota.indexOf('alocarNumeroReciboSaida'));
+});
+
 test("salvar o PDF atualiza rateio_despesas.url_recibo conforme o schema D1", () => {
   assert.match(recibosSaidaRoutes, /UPDATE rateio_despesas SET numero_recibo = \?, url_recibo = \? WHERE lancamento_id = \?/);
   assert.doesNotMatch(recibosSaidaRoutes, /\brecibo_url\b/);

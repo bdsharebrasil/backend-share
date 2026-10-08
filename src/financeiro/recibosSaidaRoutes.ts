@@ -61,19 +61,35 @@ recibosSaidaRoutes.post('/recibos-saida', async (c) => {
     if (!cotistaId || !aeronaveId || !(valor > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao) || !descricao) {
       return c.json({ error: 'cotista_aeronave_id, aeronave_id, valor_total, data_emissao e descricao_servico são obrigatórios' }, 400)
     }
-    const id = crypto.randomUUID()
-    const numero = await alocarNumeroReciboSaida(c.env.SHARE_DB, cotistaId, dataEmissao, body.codigo_cliente)
+    const cotista = await c.env.SHARE_DB.prepare("SELECT id, aeronave_id FROM cotista_aeronave WHERE id = ? AND COALESCE(status, 'ativo') <> 'inativo'").bind(cotistaId).first<{ id: string; aeronave_id: string | null }>()
+    if (!cotista) return c.json({ error: 'cotista_aeronave_invalido' }, 400)
+    const aeronaveIdD1 = String(cotista.aeronave_id ?? '').trim()
+    const aeronave = aeronaveIdD1
+      ? await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?').bind(aeronaveIdD1).first<{ id: string }>()
+      : null
+    if (!aeronave) return c.json({ error: 'aeronave_do_cotista_invalida' }, 400)
+    if (aeronaveId !== aeronaveIdD1) return c.json({ error: 'aeronave_nao_corresponde_ao_cotista' }, 400)
+
     const categoriaInformada = String(body.categoria_receita_id ?? body.categoria_id ?? '').trim()
     const categoriaExiste = categoriaInformada
       ? Boolean(await c.env.SHARE_DB.prepare('SELECT id FROM categoria_movimentacao_share WHERE id = ?').bind(categoriaInformada).first())
       : false
+    if (categoriaInformada && !categoriaExiste) return c.json({ error: 'categoria_receita_invalida' }, 400)
+    const categoriaClienteInformada = String(body.categoria_cliente_id ?? body.categoria_despesa_id ?? '').trim()
+    const categoriaClienteExiste = categoriaClienteInformada
+      ? Boolean(await c.env.SHARE_DB.prepare('SELECT id FROM categoria_movimentacao_cliente WHERE id = ?').bind(categoriaClienteInformada).first())
+      : false
+    if (categoriaClienteInformada && !categoriaClienteExiste) return c.json({ error: 'categoria_despesa_invalida' }, 400)
+
+    const id = crypto.randomUUID()
+    const numero = await alocarNumeroReciboSaida(c.env.SHARE_DB, cotistaId, dataEmissao, body.codigo_cliente)
     await issueRevenue(c.env.SHARE_DB, {
       idempotency_key: `recibo_saida:${id}`,
       valor_centavos: Math.round(valor * 100), descricao,
       data_emissao: dataEmissao, data_vencimento: dataVencimento,
-      aeronave_id: aeronaveId, cotista_aeronave_id: cotistaId,
+      aeronave_id: aeronaveIdD1, cotista_aeronave_id: cotistaId,
       categoria_id: categoriaExiste ? categoriaInformada : null,
-      categoria_cliente_id: body.categoria_cliente_id ?? body.categoria_despesa_id ?? null,
+      categoria_cliente_id: categoriaClienteInformada || null,
       categoria_cliente_nome: body.categoria_cliente_nome ?? body.categoria_despesa_subcategoria ?? null,
       categoria_nome: body.categoria_receita_nome ?? body.nome_categoria,
       numero_recibo: numero,
@@ -96,7 +112,7 @@ recibosSaidaRoutes.post('/recibos-saida', async (c) => {
        nome_categoria, categoria_id, subcategoria_1, data_emissao, data_vencimento,
        status, contas_areceber_id, lancamentos_id, criado_por)
       VALUES (?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', ?, ?, ?)`)
-      .bind(id, numero, cotistaId, aeronaveId, valor, descricao,
+      .bind(id, numero, cotistaId, aeronaveIdD1, valor, descricao,
         body.categoria_receita_nome ?? body.nome_categoria ?? null,
         categoriaExiste ? categoriaInformada : null,
         body.categoria_despesa_subcategoria ?? null, dataEmissao, dataVencimento,

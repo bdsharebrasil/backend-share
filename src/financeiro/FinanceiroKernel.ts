@@ -1410,6 +1410,14 @@ export async function issueRevenue(
   if (existing) return existing
 
   const context = await resolveCotista(db, command)
+  // D1 declara lancamentos.cliente_id -> clientes(id), enquanto o cliente_id
+  // vindo de cotista_aeronave é obtido da tabela legada `cliente`. Grave o
+  // vínculo direto somente quando o identificador também existir no destino
+  // da FK; cotista_aeronave_id continua preservando o vínculo de negócio.
+  const clienteLancamento = context?.clienteId
+    ? await db.prepare('SELECT id FROM clientes WHERE id = ? LIMIT 1')
+      .bind(context.clienteId).first<{ id: string }>()
+    : null
   const amount = asPositiveCents(command.valor_centavos)
   const lancamentoId = id()
   const contaReceberId = id()
@@ -1491,7 +1499,7 @@ export async function issueRevenue(
           escopo_financeiro: escopo,
           aeronave_id: context?.aeronaveId || command.aeronave_id,
           cotista_aeronave_id: context?.cotistaAeronaveId,
-          cliente_id: context?.clienteId,
+          cliente_id: clienteLancamento?.id ?? null,
           descricao: command.descricao,
           fluxo: 'SAIDA',
           tipo_caixa: 'CLIENTE',
