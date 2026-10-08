@@ -5,6 +5,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod'
 import { financeiroRoutes } from './financeiroRoutes'
 import { abastecimentosRoutes } from './routes/abastecimentosRoutes'
+import { gestorContratosRoutes } from './routes/gestorContratosRoutes'
 import { diarioBordoRoutes } from './routes/diarioBordoRoutes'
 import { jornadasRoutes } from './routes/jornadasRoutes'
 import { aiswebRoutes } from './routes/aiswebRoutes'
@@ -105,6 +106,7 @@ app.use('*', async (c, next) => {
   await next()
 })
 app.route('/', abastecimentosRoutes)
+app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
 app.route('/', jornadasRoutes)
 app.route('/', aiswebRoutes)
