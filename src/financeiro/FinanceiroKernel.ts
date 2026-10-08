@@ -2512,13 +2512,10 @@ export async function enviarReciboPagamentoParaRateio(
   const existingClient = await db.prepare(
     `SELECT id FROM rateio_despesas WHERE lancamento_id = ?1 LIMIT 1`,
   ).bind(receipt.lancamento_id ?? null).first<{ id: string }>().catch(() => null)
-  const existingDirectClient = await db.prepare(
-    `SELECT id FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
-  ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const existingHolding = await db.prepare(
     `SELECT id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
-  const rateioExistente = Boolean(existingClient?.id || existingDirectClient?.id || existingHolding?.id)
+  const rateioExistente = Boolean(existingClient?.id || existingHolding?.id)
   const envioVinculado = await db.prepare(
     `SELECT destino_id AS id FROM financeiro_vinculos WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 AND destino_tipo = 'ENVIO_DESPESA' LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
@@ -2679,19 +2676,16 @@ export async function enviarReciboPagamentoParaRateio(
     result?.lancamento_cliente_id ?? result?.lancamento_id ?? receipt.lancamento_id,
   )
   type ReceiptRateio = { id: string; cotista_id: string | null; percentual: number | null; valor: number }
-  const [rateiosPorLancamento, rateiosDiretos, rateiosHold] = await Promise.all([
+  const [rateiosPorLancamento, rateiosHold] = await Promise.all([
     db.prepare(
       'SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor FROM rateio_despesas WHERE lancamento_id = ?1',
     ).bind(rateioLancamentoId || null).all<ReceiptRateio>().catch(() => ({ results: [] as ReceiptRateio[] })),
-    db.prepare(
-      `SELECT id, cotista_id, percentual_uso AS percentual, valor_rateado_centavos AS valor FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = ?1`,
-    ).bind(receiptId).all<ReceiptRateio>().catch(() => ({ results: [] as ReceiptRateio[] })),
     db.prepare(
       `SELECT rh.id, ca.id AS cotista_id, rh.percentual_uso AS percentual, rh.valor_rateado_centavos AS valor FROM rateio_hold rh LEFT JOIN cotista_aeronave ca ON ca.socio_id = rh.socio_id AND ca.aeronave_id = rh.aeronave_id WHERE rh.origem_tipo = 'RECIBO' AND rh.origem_id = ?1`,
     ).bind(receiptId).all<ReceiptRateio>().catch(() => ({ results: [] as ReceiptRateio[] })),
   ])
   const rateios = [...new Map(
-    [...(rateiosPorLancamento.results ?? []), ...(rateiosDiretos.results ?? []), ...(rateiosHold.results ?? [])]
+    [...(rateiosPorLancamento.results ?? []), ...(rateiosHold.results ?? [])]
       .map((rateio) => [String(rateio.id), rateio] as const),
   ).values()]
   if (!rateios.length) throw new FinanceError('Não foi possível criar o rateio do recibo', 'rateio_nao_criado', 500)

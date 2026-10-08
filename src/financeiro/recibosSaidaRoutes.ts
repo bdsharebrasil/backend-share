@@ -124,7 +124,7 @@ recibosSaidaRoutes.patch('/recibos-saida/:id', async (c) => {
     const ids = [principal?.id, cliente?.id].filter((id): id is string => Boolean(id))
     for (const lancamentoId of ids) {
       await c.env.SHARE_DB.prepare(`UPDATE lancamentos SET numero_recibo = ?, url_recibo = ?, origem_tipo = CASE WHEN tipo_caixa = 'CLIENTE' THEN 'RECIBO_SAIDA' ELSE origem_tipo END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(recibo?.numero_recibo ?? null, pdfUrl, lancamentoId).run()
-      await c.env.SHARE_DB.prepare('UPDATE rateio_despesas SET numero_recibo = ?, recibo_url = ? WHERE lancamento_id = ?').bind(recibo?.numero_recibo ?? null, pdfUrl, lancamentoId).run().catch(() => undefined)
+      await c.env.SHARE_DB.prepare('UPDATE rateio_despesas SET numero_recibo = ?, url_recibo = ? WHERE lancamento_id = ?').bind(recibo?.numero_recibo ?? null, pdfUrl, lancamentoId).run()
     }
     const reciboAtualizado = await c.env.SHARE_DB.prepare('SELECT * FROM recibos_saida WHERE id = ?').bind(c.req.param('id')).first()
     return c.json({ recibo: reciboAtualizado })

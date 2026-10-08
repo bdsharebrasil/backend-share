@@ -18,7 +18,7 @@ test("recibo pago pela empresa materializa as linhas escolhidas no histórico", 
 test("criação do rateio consulta o lançamento retornado pela finalização", () => {
   assert.match(kernel, /result\?\.lancamento_cliente_id \?\? result\?\.lancamento_id \?\? receipt\.lancamento_id/);
   assert.match(kernel, /FROM rateio_despesas WHERE lancamento_id = \?1/);
-  assert.match(kernel, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id = \?1/);
+  assert.doesNotMatch(kernel, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id/);
   assert.match(kernel, /SET escopo_financeiro = 'FINANCEIRO'[\s\S]{0,100}WHERE id = \?1 AND tipo_caixa = 'SHARE'/);
 });
 
@@ -47,6 +47,7 @@ test("rateio usa apenas colunas presentes e leva os documentos do recibo", () =>
 });
 
 test("histórico reconhece rateio de recibo sem depender de um lançamento espelho", () => {
-  assert.match(routes, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id IN/);
+  assert.match(routes, /INNER JOIN lancamentos l ON l\.id = rd\.lancamento_id/);
+  assert.doesNotMatch(routes, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id/);
   assert.match(routes, /FROM recibo_rateio/);
 });

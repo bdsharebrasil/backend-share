@@ -121,11 +121,8 @@ recibosRoutes.get('/recibos', async (c) => {
          WHERE origem_tipo = 'RECIBO' AND origem_id IN (${reciboIds.map(() => '?').join(', ')})
       `, ...reciboIds, ...reciboIds, ...reciboIds).catch(() => [])
     : []
-  const rateiosDiretos = reciboIds.length
-    ? await listar(db, `SELECT DISTINCT origem_id AS recibo_id FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id IN (${reciboIds.map(() => '?').join(', ')})`, ...reciboIds).catch(() => [])
-    : []
   const contaProgramadaPorRecibo = new Map(contasProgramadas.map((row) => [String(row.recibo_id), String(row.conta_pagar_id)]))
-  const rateioCriadoPorRecibo = new Set([...rateiosCriados, ...rateiosDiretos].map((row) => String(row.recibo_id)))
+  const rateioCriadoPorRecibo = new Set(rateiosCriados.map((row) => String(row.recibo_id)))
   const cotistas = cotistaIds.length
     ? await listar(db, `SELECT ca.id, ca.cliente_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome, COALESCE(cl.cnpj, hs.cpf) AS documento, COALESCE(cl.endereco, hs.endereco) AS endereco, COALESCE(cl.cidade, hs.cidade) AS cidade, COALESCE(cl.uf, hs.uf) AS uf FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id IN (${cotistaIds.map(() => '?').join(', ')}) OR ca.cliente_id IN (${cotistaIds.map(() => '?').join(', ')})`, ...cotistaIds, ...cotistaIds)
     : []
