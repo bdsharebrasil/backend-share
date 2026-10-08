@@ -17,7 +17,7 @@ type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>
 export const abastecimentosRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 async function garantirTabelaAbastecimentos(c: AppContext) {
-  await validateWorkerSchema(c, [{ table: 'abastecimentos', columns: ['id', 'cliente_id', 'socio_id', 'aeronave_id', 'data', 'tipo_combustivel', 'trecho', 'local', 'numero_comanda', 'numero_nf', 'litros', 'valor_unitario', 'valor_total', 'desconto', 'fornecedor_id', 'status', 'observacao', 'criado_por', 'lancamento_diario_id', 'voo_emprestado', 'numero_voo', 'prazo_envio_cliente', 'atualizado_em'] }])
+  await validateWorkerSchema(c, [{ table: 'abastecimentos', columns: ['id', 'cliente_id', 'socio_id', 'aeronave_id', 'data', 'tipo_combustivel', 'trecho', 'local', 'numero_comanda', 'numero_nf', 'litros', 'valor_unitario', 'valor_total', 'desconto', 'fornecedor_id', 'status', 'observacao', 'criado_por', 'lancamento_diario_id', 'voo_emprestado', 'numero_voo', 'prazo_envio_cliente', 'rateio_entre_cotistas', 'atualizado_em'] }])
 }
 
 async function garantirTabelaFornecedoresCombustivel(c: AppContext) {
@@ -92,11 +92,11 @@ abastecimentosRoutes.post('/api/interno/abastecimentos', async c => {
   const id = crypto.randomUUID()
   const desconto = numero(body.desconto)
   const valorTotal = Math.max(0, numero(body.valor_total) || litros * valorUnitario - desconto)
-  await db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo, prazo_envio_cliente) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, texto(body.cliente_id), texto(body.socio_id), body.aeronave_id, body.data, texto(body.tipo_combustivel), texto(body.trecho), local, texto(body.numero_comanda), texto(body.numero_nf), litros, valorUnitario, valorTotal, desconto, texto(body.fornecedor_id), texto(body.status) || 'pendente', texto(body.observacao), extractSupabaseUserId(c), texto(body.lancamento_diario_id), booleano(body.voo_emprestado) ? 1 : 0, texto(body.numero_voo), texto(body.prazo_envio_cliente)).run()
+  await db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo, prazo_envio_cliente, rateio_entre_cotistas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, texto(body.cliente_id), texto(body.socio_id), body.aeronave_id, body.data, texto(body.tipo_combustivel), texto(body.trecho), local, texto(body.numero_comanda), texto(body.numero_nf), litros, valorUnitario, valorTotal, desconto, texto(body.fornecedor_id), texto(body.status) || 'pendente', texto(body.observacao), extractSupabaseUserId(c), texto(body.lancamento_diario_id), booleano(body.voo_emprestado) ? 1 : 0, texto(body.numero_voo), texto(body.prazo_envio_cliente), booleano(body.rateio_entre_cotistas) ? 1 : 0).run()
   return c.json({ id, success: true }, 201)
 })
 
-const camposAbastecimento = ['cliente_id', 'socio_id', 'aeronave_id', 'data', 'tipo_combustivel', 'trecho', 'local', 'numero_comanda', 'numero_nf', 'litros', 'valor_unitario', 'valor_total', 'desconto', 'fornecedor_id', 'status', 'observacao', 'lancamento_diario_id', 'voo_emprestado', 'numero_voo', 'prazo_envio_cliente'] as const
+const camposAbastecimento = ['cliente_id', 'socio_id', 'aeronave_id', 'data', 'tipo_combustivel', 'trecho', 'local', 'numero_comanda', 'numero_nf', 'litros', 'valor_unitario', 'valor_total', 'desconto', 'fornecedor_id', 'status', 'observacao', 'lancamento_diario_id', 'voo_emprestado', 'numero_voo', 'prazo_envio_cliente', 'rateio_entre_cotistas'] as const
 
 abastecimentosRoutes.patch('/api/interno/abastecimentos/:id', async c => {
   if (!(await validarAcesso(c))) return c.json({ error: 'internal_auth_required' }, 401)
@@ -104,7 +104,7 @@ abastecimentosRoutes.patch('/api/interno/abastecimentos/:id', async c => {
   const id = c.req.param('id')
   const body = (await c.req.json().catch(() => ({}))) as Record<string, any>
   const updates: Array<[string, unknown]> = []
-  for (const campo of camposAbastecimento) if (body[campo] !== undefined) updates.push([campo, campo === 'local' ? await normalizarLocalAbastecimento(c.env.SHARE_DB, body[campo]) : campo === 'voo_emprestado' ? (booleano(body[campo]) ? 1 : 0) : campo === 'litros' || campo === 'valor_unitario' || campo === 'valor_total' || campo === 'desconto' ? numero(body[campo]) : body[campo]])
+  for (const campo of camposAbastecimento) if (body[campo] !== undefined) updates.push([campo, campo === 'local' ? await normalizarLocalAbastecimento(c.env.SHARE_DB, body[campo]) : campo === 'voo_emprestado' || campo === 'rateio_entre_cotistas' ? (booleano(body[campo]) ? 1 : 0) : campo === 'litros' || campo === 'valor_unitario' || campo === 'valor_total' || campo === 'desconto' ? numero(body[campo]) : body[campo]])
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   const result = await c.env.SHARE_DB.prepare(`UPDATE abastecimentos SET ${updates.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(([, valor]) => valor), id).run()
   if (!result.meta.changes) return c.json({ error: 'abastecimento_nao_encontrado' }, 404)

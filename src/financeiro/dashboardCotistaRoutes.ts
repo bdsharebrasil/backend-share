@@ -100,6 +100,17 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     // Um lançamento só aparece sozinho quando NENHUM rateio o representa. O reembolso pode criar
     // um par origem/espelho; os vínculos e colunas de origem são usados quando existem no schema.
     const lancamentoSemRateio = buildLancamentoSemRateioPredicate(schema)
+    if (schema.get('abastecimentos')?.has('rateio_entre_cotistas')) {
+      filtrosCliente.push(`NOT (r.percentual_uso = 100 AND r.valor_rateado_centavos = r.valor_total_centavos AND EXISTS (
+        SELECT 1 FROM lancamentos la
+        JOIN abastecimentos ab ON ab.id = la.abastecimentos_id
+        JOIN cotista_aeronave titular ON titular.aeronave_id = ab.aeronave_id
+          AND ((ab.cliente_id IS NOT NULL AND titular.cliente_id = ab.cliente_id)
+            OR (ab.socio_id IS NOT NULL AND titular.socio_id = ab.socio_id))
+        WHERE la.id = r.lancamento_id AND ab.rateio_entre_cotistas = 1 AND titular.id = r.cotista_id
+      ))`)
+      filtrosLancamentos.push(`NOT EXISTS (SELECT 1 FROM abastecimentos ab WHERE ab.id = l.abastecimentos_id AND ab.rateio_entre_cotistas = 1)`)
+    }
     const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(db, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
