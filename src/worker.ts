@@ -1972,7 +1972,7 @@ app.post('/api/sharebrasil/clientes', async c => {
   const statements = [
     c.env.SHARE_DB.prepare('INSERT INTO cliente (id, razao_social, cnpj, inscricao_estadual, proprietario, endereco, cidade, uf, contato_financeiro, telefone_financeiro, telefone_cliente, telefone_outro, email_principal, emails, status, holding, codigo_cliente, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.razao_social.trim(), body.cnpj || null, body.inscricao_estadual || null, body.proprietario || null, body.endereco || null, body.cidade || null, body.uf || null, body.contato_financeiro || null, body.telefone_financeiro || null, body.telefone_cliente || null, body.telefone_outro || null, body.email_principal || null, JSON.stringify(body.emails || []), body.status || 'ativo', body.holding ? 1 : 0, body.codigo_cliente || null, body.observacoes || null),
   ]
-  if (aeronaveId) statements.push(c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(uuid(), id, aeronaveId, percentual, body.codigo_cliente || null))
+  if (aeronaveId) statements.push(c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente, status) VALUES (?, ?, ?, ?, ?, ?)').bind(uuid(), id, aeronaveId, percentual, body.codigo_cliente || null, 'ativo'))
   await c.env.SHARE_DB.batch(statements)
   return c.json({ id, aeronave_id: aeronaveId, percentual_sociedade: aeronaveId ? percentual : null }, 201)
 })
@@ -1985,6 +1985,7 @@ app.patch('/api/sharebrasil/clientes/:id', async c => {
   const values = fields.map((field) => body[field] ?? null)
   const result = await c.env.SHARE_DB.prepare(`UPDATE cliente SET ${fields.map((field) => `${field} = COALESCE(?, ${field})`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...values, c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
+  if (body.status !== undefined) await c.env.SHARE_DB.prepare('UPDATE cotista_aeronave SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE cliente_id = ?').bind(body.status === 'inativo' ? 'inativo' : 'ativo', c.req.param('id')).run()
   return c.json({ success: true })
 })
 
@@ -1994,10 +1995,13 @@ app.patch('/api/sharebrasil/socios/:id', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const fields = ['nome', 'cpf', 'email_principal', 'telefone', 'endereco', 'cidade', 'uf', 'observacoes']
   const provided = fields.filter((field) => body[field] !== undefined)
-  if (!provided.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
+  if (!provided.length && body.status === undefined) return c.json({ error: 'nenhum_campo_informado' }, 400)
   const values = provided.map((field) => body[field] ?? null)
-  const result = await c.env.SHARE_DB.prepare(`UPDATE hold_socios SET ${provided.map((field) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...values, c.req.param('id')).run()
-  if (!result.meta.changes) return c.notFound()
+  const result = provided.length
+    ? await c.env.SHARE_DB.prepare(`UPDATE hold_socios SET ${provided.map((field) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...values, c.req.param('id')).run()
+    : await c.env.SHARE_DB.prepare('SELECT id FROM hold_socios WHERE id = ?').bind(c.req.param('id')).first()
+  if (!result || (provided.length && Number((result as any).meta?.changes || 0) === 0)) return c.notFound()
+  if (body.status !== undefined) await c.env.SHARE_DB.prepare('UPDATE cotista_aeronave SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE socio_id = ?').bind(body.status === 'inativo' ? 'inativo' : 'ativo', c.req.param('id')).run()
   return c.json({ success: true })
 })
 app.post('/api/sharebrasil/clientes/:id/aeronave', async c => {
@@ -2006,7 +2010,7 @@ app.post('/api/sharebrasil/clientes/:id/aeronave', async c => {
   const body = await c.req.json<{ aeronave_id?: string; percentual_sociedade?: number; codigo_cliente?: string }>().catch(() => ({} as any))
   if (!body.aeronave_id) return c.json({ error: 'aeronave_obrigatoria' }, 400)
   const id = uuid()
-  await c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente) VALUES (?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, Number(body.percentual_sociedade || 100), body.codigo_cliente || null).run()
+  await c.env.SHARE_DB.prepare('INSERT INTO cotista_aeronave (id, cliente_id, aeronave_id, percentual_sociedade, codigo_cliente, status) VALUES (?, ?, ?, ?, ?, ?)').bind(id, c.req.param('id'), body.aeronave_id, Number(body.percentual_sociedade || 100), body.codigo_cliente || null, 'ativo').run()
   return c.json({ id }, 201)
 })
 

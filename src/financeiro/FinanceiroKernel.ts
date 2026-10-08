@@ -633,7 +633,8 @@ async function resolveCotista(
          FROM cotista_aeronave ca
          LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
          LEFT JOIN cliente cl ON cl.id = ca.cliente_id
-        WHERE (? <> '' AND ca.id = ?) OR (? <> '' AND ca.socio_id = ?)`,
+        WHERE COALESCE(ca.status, 'ativo') <> 'inativo'
+          AND ((? <> '' AND ca.id = ?) OR (? <> '' AND ca.socio_id = ?))`,
     )
     .bind(cotistaId || '', cotistaId || '', socioId || '', socioId || '')
     .first<Row>()
@@ -762,7 +763,7 @@ async function receiptAllocationLines(
     throw new FinanceError('Aeronave obrigatória para rateio', 'rateio_aeronave_obrigatoria')
   }
   const cotistas = await db.prepare(
-    'SELECT id, percentual_sociedade FROM cotista_aeronave WHERE aeronave_id = ? ORDER BY id',
+    "SELECT id, percentual_sociedade FROM cotista_aeronave WHERE aeronave_id = ? AND COALESCE(status, 'ativo') <> 'inativo' ORDER BY id",
   ).bind(aeronaveId).all<{ id: string; percentual_sociedade: number | null }>()
   const ids = cotistas.results ?? []
   if (!ids.length) {
@@ -802,7 +803,7 @@ async function validateAllocationLines(
   const ids = [...new Set(lines.map((line) => line.cotistaId))]
   const placeholders = ids.map(() => '?').join(', ')
   const rows = await db.prepare(
-    `SELECT id FROM cotista_aeronave WHERE id IN (${placeholders}) AND aeronave_id = ?`,
+    `SELECT id FROM cotista_aeronave WHERE id IN (${placeholders}) AND aeronave_id = ? AND COALESCE(status, 'ativo') <> 'inativo'`,
   ).bind(...ids, command.aeronave_id).all<{ id: string }>()
   if ((rows.results || []).length !== ids.length) {
     throw new FinanceError('Todos os cotistas do rateio devem pertencer à aeronave', 'rateio_cotistas_invalidos')
@@ -1060,6 +1061,12 @@ export async function createExpense(
   // holding, as linhas são validadas por socio_id em holdingAllocationStatements.
   if (context?.kind !== 'HOLDING') {
     await validateAllocationLines(db, command, lines, amount)
+  } else if (lines.length) {
+    const socioIds = [...new Set(lines.map((line) => line.socioId).filter(Boolean))] as string[]
+    if (!socioIds.length) throw new FinanceError('Rateio de holding precisa de socio_id', 'socio_holding_obrigatorio')
+    const placeholders = socioIds.map(() => '?').join(', ')
+    const ativos = await db.prepare(`SELECT DISTINCT socio_id FROM cotista_aeronave WHERE socio_id IN (${placeholders}) AND aeronave_id = ? AND COALESCE(status, 'ativo') <> 'inativo'`).bind(...socioIds, command.aeronave_id).all<{ socio_id: string }>()
+    if ((ativos.results || []).length !== socioIds.length) throw new FinanceError('Todos os sócios do rateio devem estar ativos na aeronave', 'rateio_cotistas_invalidos')
   }
 
   if (direct) {
