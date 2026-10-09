@@ -7,7 +7,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "type-check": "tsc --noEmit --pretty false",
-    "test:relatorio-financeiro": "node --experimental-strip-types --test tests/relatorioFinanceiro.test.mjs",
+    "test:relatorio-financeiro": "pnpm type-check && pnpm test",
     "test": "tsx --test tests/*.test.mjs"
   },
   "dependencies": {
