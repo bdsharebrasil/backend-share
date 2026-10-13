@@ -2572,11 +2572,32 @@ app.post('/api/sharebrasil/tarefas/:id/comentarios', async c => {
   return c.json({ id, tarefa_id: task.id, comentario: body.comentario.trim() }, 201)
 })
 
+app.get('/api/sharebrasil/notificacoes', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await c.env.SHARE_DB.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem
+    FROM tarefas_notificacoes n LEFT JOIN tarefas t ON t.id = n.id_da_tarefa
+    WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all()
+  return c.json({ notificacoes: result.results || [] })
+})
 app.patch('/api/sharebrasil/notificacoes/:id/lida', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const result = await c.env.SHARE_DB.prepare('UPDATE tarefas_notificacoes SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
   if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+app.delete('/api/sharebrasil/notificacoes/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM tarefas_notificacoes WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
+  if (!result.meta.changes) return c.notFound()
+  return c.json({ success: true })
+})
+app.delete('/api/sharebrasil/notificacoes', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await c.env.SHARE_DB.prepare('DELETE FROM tarefas_notificacoes WHERE user_id = ?1').bind(user.id).run()
   return c.json({ success: true })
 })
 
@@ -3365,12 +3386,12 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
       FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<any>()
     if (!atual) return c.notFound()
     const statusAtual = statusRelatorioViagem(atual.status)
-    const bloqueadoPorEnvioOuDecisao = ['aguardando_aprovacao', 'aprovado', 'enviado_cliente'].includes(statusAtual)
+    const bloqueadoPorEnvioOuDecisao = statusAtual !== 'ajuste_necessario' && (['aguardando_aprovacao', 'aprovado', 'enviado_cliente'].includes(statusAtual)
       || Boolean(atual.enviado_para_tripulante_em || atual.enviado_para_tripulante_2_em || atual.aprovado_tripulante_1_em || atual.aprovado_tripulante_2_em || atual.aprovado_tripulante_em)
       || ['aprovado', 'reprovado'].includes(String(atual.status_aprovacao_tripulante || '').toLowerCase())
-      || ['aprovado', 'reprovado'].includes(String(atual.status_aprovacao_tripulante_2 || '').toLowerCase())
+      || ['aprovado', 'reprovado'].includes(String(atual.status_aprovacao_tripulante_2 || '').toLowerCase()))
     if (bloqueadoPorEnvioOuDecisao) return c.json({ error: 'relatorio_bloqueado_apos_envio_ou_decisao' }, 409)
-    if (!['rascunho', 'finalizado'].includes(statusAtual)) return c.json({ error: 'relatorio_nao_editavel_neste_estado' }, 409)
+    if (!['rascunho', 'finalizado', 'ajuste_necessario'].includes(statusAtual)) return c.json({ error: 'relatorio_nao_editavel_neste_estado' }, 409)
     const body = await c.req.json<Record<string, any>>().catch(() => null)
     if (!body) return c.json({ error: 'payload_invalido' }, 400)
 
@@ -3413,14 +3434,17 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
         ? await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
         : undefined
     const despesas = body.despesas === undefined ? undefined : JSON.stringify(despesasRelatorioViagem(body.despesas))
-    const novoStatus = statusAtual === 'finalizado' ? 'finalizado' : statusRelatorioViagem(body.status || statusAtual)
+    const novoStatus = ['finalizado', 'ajuste_necessario'].includes(statusAtual) ? statusAtual : statusRelatorioViagem(body.status || statusAtual)
     const updateResult = await db.prepare(`UPDATE relatorio_despesa_viagem SET
         numero_relatorio = COALESCE(?1, numero_relatorio), numero_voo = ?2, cliente_id = ?3, socio_id = ?4,
         aeronave_id = ?5, matricula_aeronave = ?6, rota = ?7, data_inicio = ?8, data_fim = ?9,
         quantidade_dias = COALESCE(?10, quantidade_dias), tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
         despesas = COALESCE(?, despesas), status = ?, total_valor = ?, total_combustivel = ?, total_hospedagem = ?, total_alimentacao = ?,
         total_transporte = ?, total_outros = ?, total_tripulacao = ?, total_tripulante_1 = ?, total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?,
-        pdf_url = CASE WHEN ? = 1 THEN NULL ELSE pdf_url END, pdf_path = CASE WHEN ? = 1 THEN NULL ELSE pdf_path END,
+        pdf_url = CASE WHEN ? = 1 OR ? = 'ajuste_necessario' THEN NULL ELSE pdf_url END, pdf_path = CASE WHEN ? = 1 OR ? = 'ajuste_necessario' THEN NULL ELSE pdf_path END,
+        status_aprovacao_tripulante = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE status_aprovacao_tripulante END, status_aprovacao_tripulante_2 = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE status_aprovacao_tripulante_2 END,
+        aprovado_tripulante_1_em = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE aprovado_tripulante_1_em END, aprovado_tripulante_2_em = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE aprovado_tripulante_2_em END, aprovado_tripulante_em = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE aprovado_tripulante_em END,
+        enviado_para_tripulante_em = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE enviado_para_tripulante_em END, enviado_para_tripulante_2_em = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE enviado_para_tripulante_2_em END, token_aprovacao_tripulante_1 = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE token_aprovacao_tripulante_1 END, token_aprovacao_tripulante_2 = CASE WHEN ? = 'ajuste_necessario' THEN NULL ELSE token_aprovacao_tripulante_2 END,
         atualizado_em = CURRENT_TIMESTAMP WHERE id = ?
           AND (? = 0 OR lower(COALESCE(status, 'rascunho')) = 'rascunho')
           AND (? = 0 OR NOT EXISTS (SELECT 1 FROM relatorio_despesa_viagem outro WHERE upper(trim(outro.numero_relatorio)) = upper(?) AND outro.id <> ?))`)
@@ -3430,7 +3454,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
         body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
         Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0), Number(body.total_alimentacao || 0),
         Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
-        Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), documentoDependenteAlterado ? 1 : 0, documentoDependenteAlterado ? 1 : 0, id,
+        Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), documentoDependenteAlterado ? 1 : 0, statusAtual, documentoDependenteAlterado ? 1 : 0, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, id,
         numero && numero !== numeroAnterior ? 1 : 0, numero && numero !== numeroAnterior ? 1 : 0, numero || numeroAnterior, id).run()
     if (!updateResult.meta.changes) return c.json({ error: numero && numero !== numeroAnterior ? 'numero_relatorio_ja_utilizado_ou_relatorio_alterado' : 'relatorio_alterado_concorrente' }, 409)
     if (numeroFoiAlterado) {
@@ -3929,15 +3953,16 @@ async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report:
     WHERE id <> ?1
       AND (status IS NULL OR lower(status) IN ('ativo', 'active'))
       AND (
-        lower(trim(COALESCE(departamento, ''))) IN ('financeiro', 'administrativo', 'admin', 'financeiro_master')
-        OR lower(trim(COALESCE(tipo_user, ''))) IN ('admin', 'financeiro_master', 'financeiro')
+        lower(replace(replace(trim(COALESCE(departamento, '')), ' ', '_'), '-', '_')) IN ('financeiro', 'administrativo', 'admin', 'financeiro_master', 'financeiro_admin', 'operacoes', 'operacao')
+        OR lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('admin', 'administrador', 'financeiro_master', 'financeiro_admin', 'financeiro', 'operacoes', 'operacao')
+        OR id IN (SELECT user_id FROM usuarios_funcoes WHERE lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiro_master', 'admin', 'operacoes', 'operacao'))
       )`).bind(rejectedBy || '').all<{ id: string }>()
   const uniqueRecipients = [...new Set((recipients.results || []).map((item) => item.id).filter(Boolean))]
   if (!uniqueRecipients.length) return
   const taskId = uuid()
   const numero = String(report.numero_relatorio || report.id)
   const mensagem = `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
-  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero}`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
+  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero} [RELATORIO:${report.id}]`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
   for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, 'ajuste_necessario').run()
 }
 
@@ -3945,9 +3970,9 @@ async function notifyReportDecision(c: Context<{ Bindings: Bindings }>, report: 
   const db = c.env.SHARE_DB
   const recipients = await db.prepare(`SELECT id FROM user_profiles
     WHERE id <> ?1 AND (status IS NULL OR lower(status) IN ('ativo', 'active')) AND (
-      lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master')
-      OR lower(replace(replace(trim(COALESCE(departamento, '')), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master')
-      OR id IN (SELECT user_id FROM usuarios_funcoes WHERE lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master'))
+      lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master', 'financeiro', 'admin', 'administrador', 'operacoes', 'operacao')
+      OR lower(replace(replace(trim(COALESCE(departamento, '')), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master', 'financeiro', 'admin', 'administrativo', 'operacoes', 'operacao')
+      OR id IN (SELECT user_id FROM usuarios_funcoes WHERE lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('financeiro_admin', 'financeiro_master', 'financeiro', 'admin', 'administrador', 'operacoes', 'operacao'))
     )`).bind(decidedBy || '').all<{ id: string }>()
   const uniqueRecipients = [...new Set((recipients.results || []).map((item) => item.id).filter(Boolean))]
   if (!uniqueRecipients.length) return
@@ -3957,7 +3982,7 @@ async function notifyReportDecision(c: Context<{ Bindings: Bindings }>, report: 
   const mensagem = aprovado
     ? `O tripulante ${report.nome_tripulante || 'não identificado'} aprovou o relatório ${numero}. O pagamento foi lançado para programação.`
     : `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
-  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem ${aprovado ? 'aprovado' : 'rejeitado'}: ${numero}`, mensagem, decidedBy || null, JSON.stringify(uniqueRecipients)).run()
+  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem ${aprovado ? 'aprovado' : 'rejeitado'}: ${numero}${aprovado ? '' : ` [RELATORIO:${report.id}]`}`, mensagem, decidedBy || null, JSON.stringify(uniqueRecipients)).run()
   for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, decision).run()
 }
 
