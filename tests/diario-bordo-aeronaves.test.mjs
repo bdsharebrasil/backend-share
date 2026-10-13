@@ -7,7 +7,7 @@ const inicioResumo = source.indexOf("diarioBordoRoutes.get('/api/interno/diario-
 const fimResumo = source.indexOf("diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes'", inicioResumo);
 const rotaResumo = source.slice(inicioResumo, fimResumo);
 
-test("resumo do Diário de Bordo inclui aeronaves de qualquer status", () => {
+test("resumo do Diário de Bordo lista somente aeronaves ativas", () => {
   assert.match(rotaResumo, /FROM aeronave a/);
-  assert.doesNotMatch(rotaResumo, /WHERE\s+lower\(COALESCE\(a\.status,\s*'ativa'\)\)\s+LIKE\s+'ativ%'/i);
+  assert.match(rotaResumo, /WHERE\s+lower\(COALESCE\(a\.status,\s*'ativa'\)\)\s+LIKE\s+'ativ%'/i);
 });

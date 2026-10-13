@@ -321,6 +321,7 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
       COALESCE(dm.fechado, 0) AS fechado
     FROM aeronave a
     LEFT JOIN diario_mes dm ON dm.id = (SELECT dm2.id FROM diario_mes dm2 WHERE dm2.aeronave_id = a.id AND dm2.ano = ?1 ORDER BY dm2.mes DESC LIMIT 1)
+    WHERE lower(COALESCE(a.status, 'ativa')) LIKE 'ativ%'
     ORDER BY a.matricula_registro`).bind(String(ano)).all<any>()
   return c.json({ ano, aeronaves: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), celula_disponivel_ttotal: Number(row.celula_disponivel_ttotal || 0), celula_atual_tvoo: Number(row.celula_atual_tvoo || 0), celula_prox_revisao_tvoo: Number(row.celula_prox_revisao_tvoo || 0), celula_disponivel_tvoo: Number(row.celula_disponivel_tvoo || 0), fechado: Number(row.fechado || 0) })) })
 })
@@ -334,7 +335,7 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes', async c => {
   if (!Number.isInteger(ano) || !Number.isInteger(mes) || mes < 1 || mes > 12) return c.json({ error: 'periodo_invalido' }, 400)
   const db = c.env.SHARE_DB
   await garantirTabelaAbastecimentos(c)
-  const aeronave = await db.prepare('SELECT id, matricula_registro, fabricante, modelo, status, consumo_combustivel, base FROM aeronave WHERE id = ?1').bind(aeronaveId).first<any>()
+  const aeronave = await db.prepare("SELECT id, matricula_registro, fabricante, modelo, status, consumo_combustivel, base FROM aeronave WHERE id = ?1 AND lower(COALESCE(status, 'ativa')) LIKE 'ativ%'").bind(aeronaveId).first<any>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
   let diarioMes = await db.prepare('SELECT * FROM diario_mes WHERE aeronave_id = ?1 AND ano = ?2 AND mes = ?3 LIMIT 1').bind(aeronaveId, ano, mes).first<any>()
   if (diarioMes) {

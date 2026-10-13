@@ -86,6 +86,36 @@ ctmRoutes.get('/api/ctm/dashboard', async c => {
   return c.json({ data: { aeronaves: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
 })
 
+ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const aeronaveId = String(c.req.query('aeronave_id') || '').trim()
+  const filtro = aeronaveId ? ' WHERE r.aeronave_id = ?' : ''
+  const params = aeronaveId ? [aeronaveId] : []
+  const [reports, aircraft] = await Promise.all([
+    ctmRead(c, 'relatorios_manutencao', `${filtro} ORDER BY date(r.data_relatorio) DESC, r.id DESC`, params),
+    ctmRead(c, 'aeronave', ' ORDER BY matricula_registro'),
+  ])
+  const aeronaves = aircraft.results.map((item: any) => ({
+    id: item.id,
+    registration: item.matricula_registro,
+    model: item.modelo,
+    image_url: item.url_imagem || null,
+    status: item.status,
+  }))
+  const aeronavesPorId = new Map(aeronaves.map((item: any) => [String(item.id), item]))
+  const data = reports.results.map((report: any) => ({
+    ...report,
+    aircraft: aeronavesPorId.get(String(report.aeronave_id)),
+    aircraft_id: report.aeronave_id,
+    report_date: report.data_relatorio,
+    description: report.observacoes || report.description || '',
+    reported_by: report.mecanico_responsavel || report.responsavel_tecnico || null,
+    severity: report.severity || 'medium',
+    corrective_action: report.acao_corretiva || report.corrective_action || null,
+  }))
+  return c.json({ data, aeronaves })
+})
+
 for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
   ctmRoutes.get(`/api/ctm/${slug}`, async c => {
     if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
