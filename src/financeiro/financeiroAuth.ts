@@ -61,6 +61,8 @@ async function validarUsuarioSupabase(c: FinanceiroAuthContext): Promise<string 
 }
 function colaboradorPodeSolicitar(path: string, method: string): boolean {
   if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
+  if (method === 'GET' && path === '/relatorios-despesa-viagem/minhas') return true
+  if (method === 'POST' && /^\/relatorios-despesa-viagem\/[^/]+\/aprovacao$/.test(path)) return true
   if (method !== 'GET') return false
   return path === '/envios-pagamento/opcoes'
     || /^\/envios-pagamento\/aeronave\/[^/]+\/cotistas$/.test(path)

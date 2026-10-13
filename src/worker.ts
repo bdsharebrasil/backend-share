@@ -3255,6 +3255,51 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
   }
 })
 
+app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    const rows = await c.env.SHARE_DB.prepare(`SELECT r.*,
+        a.matricula_registro AS aeronave_matricula,
+        COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo) AS nome_tripulante,
+        COALESCE(NULLIF(r.nome_tripulante_2, ''), t2.nome_completo) AS nome_tripulante_2,
+        CASE WHEN t1.user_id = ?1 THEN 1 ELSE 2 END AS tripulante_pos,
+        COALESCE((SELECT SUM(cp.valor_centavos) FROM contas_apagar cp
+          WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+            AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'), 0) AS pagamento_total_centavos,
+        COALESCE((SELECT SUM(CASE WHEN upper(COALESCE(cp.status, '')) = 'PAGO' THEN cp.valor_centavos ELSE 0 END) FROM contas_apagar cp
+          WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+            AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'), 0) AS pagamento_pago_centavos,
+        COALESCE((SELECT COUNT(*) FROM contas_apagar cp
+          WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+            AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'), 0) AS pagamentos_total,
+        COALESCE((SELECT COUNT(*) FROM contas_apagar cp
+          WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+            AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'
+            AND upper(COALESCE(cp.status, '')) = 'PAGO'), 0) AS pagamentos_concluidos
+      FROM relatorio_despesa_viagem r
+      LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
+      LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
+      LEFT JOIN aeronave a ON a.id = r.aeronave_id
+      WHERE t1.user_id = ?1 OR t2.user_id = ?1
+      ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(user.id).all<Record<string, any>>()
+    return c.json({ relatorios: (rows.results || []).map((row) => ({
+      ...row,
+      status: statusRelatorioViagem(row.status),
+      despesas: despesasRelatorioViagem(row.despesas),
+      pagamento_status: Number(row.pagamentos_total || 0) > 0
+        ? Number(row.pagamentos_concluidos || 0) === Number(row.pagamentos_total) ? 'PAGO' : 'PENDENTE'
+        : 'NAO_PROGRAMADO',
+      pagamento_valor: Number(row.pagamento_pago_centavos || 0) / 100,
+      pagamento_total: Number(row.pagamento_total_centavos || 0) / 100,
+    })) })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:minhas]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_listar_relatorios_do_tripulante' }, 500)
+  }
+})
+
 app.get('/api/financeiro/relatorios-despesa-viagem', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -3633,6 +3678,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     const report = await c.env.SHARE_DB.prepare(`SELECT r.*, t1.user_id AS user1_id, t2.user_id AS user2_id FROM relatorio_despesa_viagem r LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2 WHERE r.id = ?1`).bind(id).first<any>()
     if (!report) return c.notFound()
     if ((pos === 1 ? report.user1_id : report.user2_id) !== colaborador.id) return c.json({ error: 'tripulante_nao_autorizado_para_este_relatorio' }, 403)
+    const approvalStatus = String(pos === 1 ? report.status_aprovacao_tripulante || '' : report.status_aprovacao_tripulante_2 || '').toLowerCase()
+    if (statusRelatorioViagem(report.status) !== 'aguardando_aprovacao' || ['aprovado', 'reprovado'].includes(approvalStatus)) {
+      return c.json({ error: 'relatorio_nao_esta_pendente_de_aprovacao' }, 409)
+    }
     if (body.aprovado === undefined) return c.json({ error: 'decisao_obrigatoria' }, 400)
     if (!body.aprovado && !String(body.observacoes || '').trim()) return c.json({ error: 'motivo_obrigatorio_para_rejeicao' }, 400)
     const statusColumn = pos === 1 ? 'status_aprovacao_tripulante' : 'status_aprovacao_tripulante_2'
