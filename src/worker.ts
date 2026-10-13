@@ -3094,6 +3094,7 @@ async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindi
   await validateWorkerSchema(c, [
     { table: 'relatorio_despesa_viagem_anexos', columns: ['id'] },
     { table: 'relatorio_despesa_viagem', columns: ['id', 'anexos_rejeicao'] },
+    { table: 'relatorio_despesa_viagem_historico_ajustes', columns: ['id', 'relatorio_despesa_viagem_id', 'tripulante_pos', 'motivo', 'anexos', 'criado_em'] },
     { table: 'sequencia_relatorios_despesa_viagem', columns: ['codigo_cotista', 'aeronave_id', 'ano', 'ultimo_numero'] },
   ])
 }
@@ -3344,12 +3345,20 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
       ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(userId).all<Record<string, any>>()
     const reportRows = rows.results || []
     const anexosPorRelatorio = new Map<string, Record<string, any>[]>()
+    const ajustesPorRelatorio = new Map<string, Record<string, any>[]>()
     if (reportRows.length) {
       const placeholders = reportRows.map(() => '?').join(', ')
-      const anexos = await c.env.SHARE_DB.prepare(`SELECT id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em
-        FROM relatorio_despesa_viagem_anexos
-        WHERE relatorio_despesa_viagem_id IN (${placeholders})
-        ORDER BY relatorio_despesa_viagem_id, indice_despesa, criado_em`).bind(...reportRows.map((row) => row.id)).all<Record<string, any>>()
+      const reportIds = reportRows.map((row) => row.id)
+      const [anexos, ajustes] = await Promise.all([
+        c.env.SHARE_DB.prepare(`SELECT id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em
+          FROM relatorio_despesa_viagem_anexos
+          WHERE relatorio_despesa_viagem_id IN (${placeholders})
+          ORDER BY relatorio_despesa_viagem_id, indice_despesa, criado_em`).bind(...reportIds).all<Record<string, any>>(),
+        c.env.SHARE_DB.prepare(`SELECT id, relatorio_despesa_viagem_id, tripulante_pos, motivo, anexos, criado_em
+          FROM relatorio_despesa_viagem_historico_ajustes
+          WHERE relatorio_despesa_viagem_id IN (${placeholders})
+          ORDER BY criado_em, id`).bind(...reportIds).all<Record<string, any>>(),
+      ])
       for (const anexo of anexos.results || []) {
         const lista = anexosPorRelatorio.get(anexo.relatorio_despesa_viagem_id) || []
         lista.push({
@@ -3358,6 +3367,20 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
         })
         anexosPorRelatorio.set(anexo.relatorio_despesa_viagem_id, lista)
       }
+      for (const ajuste of ajustes.results || []) {
+        const lista = ajustesPorRelatorio.get(ajuste.relatorio_despesa_viagem_id) || []
+        lista.push({
+          id: ajuste.id,
+          tripulante_pos: ajuste.tripulante_pos,
+          motivo: ajuste.motivo,
+          criado_em: ajuste.criado_em,
+          anexos: parseAdjustmentAttachments(ajuste.anexos).map((anexo) => ({
+            ...anexo,
+            url_arquivo: `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(ajuste.relatorio_despesa_viagem_id)}/anexos-rejeicao/${encodeURIComponent(anexo.id)}/arquivo`,
+          })),
+        })
+        ajustesPorRelatorio.set(ajuste.relatorio_despesa_viagem_id, lista)
+      }
     }
     return c.json({ relatorios: reportRows.map((row) => ({
       ...row,
@@ -3365,6 +3388,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
       despesas: despesasRelatorioViagem(row.despesas),
       anexos_rejeicao: rejectionAttachments(row.anexos_rejeicao, row.id),
       anexos: anexosPorRelatorio.get(row.id) || [],
+      historico_ajustes: ajustesPorRelatorio.get(row.id) || [],
       pagamento_status: Number(row.pagamentos_total || 0) > 0
         ? Number(row.pagamentos_concluidos || 0) === Number(row.pagamentos_total) ? 'PAGO' : 'PENDENTE'
         : 'NAO_PROGRAMADO',
@@ -3633,12 +3657,19 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     // Nunca gere outro número na finalização, pois outros rascunhos podem ter sido criados depois.
     const statusAtual = statusRelatorioViagem(relatorio.status)
     const statusFinalizado = statusAtual === 'ajuste_necessario' ? 'ajuste_concluido' : 'finalizado'
-    const result = await db.prepare(`UPDATE relatorio_despesa_viagem SET
+    const updateStatement = db.prepare(`UPDATE relatorio_despesa_viagem SET
       status = ?1,
       status_aprovacao_tripulante = CASE WHEN ?1 = 'ajuste_concluido' THEN 'pendente' ELSE status_aprovacao_tripulante END,
       status_aprovacao_tripulante_2 = CASE WHEN ?1 = 'ajuste_concluido' THEN 'pendente' ELSE status_aprovacao_tripulante_2 END,
       atualizado_em = CURRENT_TIMESTAMP
-      WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = ?3`).bind(statusFinalizado, id, statusAtual).run()
+      WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = ?3`).bind(statusFinalizado, id, statusAtual)
+    const result = statusAtual === 'ajuste_necessario'
+      ? (await db.batch([
+        ajusteAnteriorStatement(db, relatorio, 1),
+        ajusteAnteriorStatement(db, relatorio, 2),
+        updateStatement,
+      ]))[2]
+      : await updateStatement.run()
     if (!result.meta.changes) return c.json({ error: 'relatorio_alterado_concorrente' }, 409)
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
@@ -3777,8 +3808,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     if (!report) return c.notFound()
     if ((pos === 1 ? report.user1_id : report.user2_id) !== userId) return c.json({ error: 'tripulante_nao_autorizado_para_este_relatorio' }, 403)
     const approvalStatus = String(pos === 1 ? report.status_aprovacao_tripulante || '' : report.status_aprovacao_tripulante_2 || '').toLowerCase()
-    const retryApprovedSync = body.aprovado === true && approvalStatus === 'aprovado' && statusRelatorioViagem(report.status) === 'aprovado'
-    if (!retryApprovedSync && (statusRelatorioViagem(report.status) !== 'aguardando_aprovacao' || ['aprovado', 'reprovado'].includes(approvalStatus))) {
+    const reportStatus = statusRelatorioViagem(report.status)
+    const pendingAdjustment = reportStatus === 'ajuste_concluido' && approvalStatus === 'pendente'
+    const retryApprovedSync = body.aprovado === true && approvalStatus === 'aprovado' && reportStatus === 'aprovado'
+    if (!retryApprovedSync && (!(reportStatus === 'aguardando_aprovacao' || pendingAdjustment) || ['aprovado', 'reprovado'].includes(approvalStatus))) {
       return c.json({ error: 'relatorio_nao_esta_pendente_de_aprovacao' }, 409)
     }
     if (body.aprovado === undefined) return c.json({ error: 'decisao_obrigatoria' }, 400)
@@ -3801,17 +3834,25 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
         : 'aguardando_aprovacao'
     const segundoAplicavel = requerAprovacaoTripulanteRelatorio(report.despesas, 2)
     let anexosRejeicaoJson: string | null = null
+    let anexoHistorico: any[] = []
     if (!body.aprovado && body.anexo_rejeicao) {
       const arquivo = body.anexo_rejeicao
       const anexoId = uuid()
       const caminho = await salvarArquivoShareBrasil(c, userId, arquivo, `relatorio_despesa_viagem/anexos_notas/${id}`)
+      const metadataAnexo = { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() }
+      anexoHistorico = [metadataAnexo]
       anexosRejeicaoJson = JSON.stringify([
         ...parseRejectionAttachments(report.anexos_rejeicao),
-        { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), caminho_arquivo: caminho, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() },
+        { ...metadataAnexo, caminho_arquivo: caminho },
       ])
     }
     if (!retryApprovedSync) {
-      await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, id).run()
+      const updateStatement = c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = CASE WHEN ? = 'reprovado' THEN ? ELSE ${reasonColumn} END, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, decision, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, id)
+      if (decision === 'reprovado') {
+        await c.env.SHARE_DB.batch([...historicoAjusteStatements(c.env.SHARE_DB, report, pos, String(body.observacoes || '').trim(), anexoHistorico), updateStatement])
+      } else {
+        await updateStatement.run()
+      }
     }
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
@@ -3989,8 +4030,10 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
     const decision = body.aprovado ? 'aprovado' : 'reprovado'
     const currentApprovalStatus = String(pos === 1 ? row.status_aprovacao_tripulante || '' : row.status_aprovacao_tripulante_2 || '').toLowerCase()
-    const retryApprovedSync = body.aprovado === true && currentApprovalStatus === 'aprovado' && statusRelatorioViagem(row.status) === 'aprovado'
-    if (!retryApprovedSync && (statusRelatorioViagem(row.status) !== 'aguardando_aprovacao' || ['aprovado', 'reprovado'].includes(currentApprovalStatus))) {
+    const reportStatus = statusRelatorioViagem(row.status)
+    const pendingAdjustment = reportStatus === 'ajuste_concluido' && currentApprovalStatus === 'pendente'
+    const retryApprovedSync = body.aprovado === true && currentApprovalStatus === 'aprovado' && reportStatus === 'aprovado'
+    if (!retryApprovedSync && (!(reportStatus === 'aguardando_aprovacao' || pendingAdjustment) || ['aprovado', 'reprovado'].includes(currentApprovalStatus))) {
       return c.json({ error: 'relatorio_nao_esta_pendente_de_aprovacao' }, 409)
     }
     const nextTripulante1Status = pos === 1 ? decision : row.status_aprovacao_tripulante
@@ -4002,6 +4045,7 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
         ? 'aprovado'
         : 'aguardando_aprovacao'
     let anexosRejeicaoJson: string | null = null
+    let anexoHistorico: any[] = []
     if (!body.aprovado && body.anexo_rejeicao) {
       const arquivo = body.anexo_rejeicao
       const anexosExistentes = Array.isArray(row.anexos_rejeicao) ? row.anexos_rejeicao : (() => {
@@ -4009,10 +4053,17 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
       })()
       const anexoId = uuid()
       const caminho = await salvarArquivoShareBrasil(c, decidedBy || 'tripulante', arquivo, `relatorio_despesa_viagem/anexos_notas/${row.id}`)
-      anexosRejeicaoJson = JSON.stringify([...anexosExistentes, { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), caminho_arquivo: caminho, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() }])
+      const metadataAnexo = { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() }
+      anexoHistorico = [metadataAnexo]
+      anexosRejeicaoJson = JSON.stringify([...anexosExistentes, { ...metadataAnexo, caminho_arquivo: caminho }])
     }
     if (!retryApprovedSync) {
-      await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, row.id).run()
+      const updateStatement = c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = CASE WHEN ? = 'reprovado' THEN ? ELSE ${reasonColumn} END, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, decision, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, row.id)
+      if (decision === 'reprovado') {
+        await c.env.SHARE_DB.batch([...historicoAjusteStatements(c.env.SHARE_DB, row, pos, String(body.motivo || '').trim(), anexoHistorico), updateStatement])
+      } else {
+        await updateStatement.run()
+      }
     }
     const updatedForNotification = await buscarRelatorioViagemComNomes(c, row.id)
     if (updatedForNotification) {
@@ -4183,6 +4234,33 @@ function parseRejectionAttachments(value: unknown): any[] {
     const parsed = Array.isArray(value) ? value : JSON.parse(String(value || '[]'))
     return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.id === 'string') : []
   } catch { return [] }
+}
+function parseAdjustmentAttachments(value: unknown): any[] {
+  try {
+    const parsed = Array.isArray(value) ? value : JSON.parse(String(value || '[]'))
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => item && typeof item.id === 'string').map(({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }) => ({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }))
+      : []
+  } catch { return [] }
+}
+function ajusteAnteriorStatement(db: D1Database, report: any, pos: 1 | 2) {
+  const previousReason = String(pos === 1 ? report.motivo_reprovacao_tripulante_1 || '' : report.motivo_reprovacao_tripulante_2 || '').trim()
+  const legacyId = `legacy-${report.id}-${pos}`
+  const legacyAttachments = parseRejectionAttachments(report.anexos_rejeicao).map(({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }) => ({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }))
+  return db.prepare(`INSERT OR IGNORE INTO relatorio_despesa_viagem_historico_ajustes
+    (id, relatorio_despesa_viagem_id, tripulante_pos, motivo, anexos, criado_em)
+    SELECT ?1, ?2, ?3, ?4, ?5, COALESCE(?6, CURRENT_TIMESTAMP)
+    WHERE trim(?4) <> '' AND NOT EXISTS (
+      SELECT 1 FROM relatorio_despesa_viagem_historico_ajustes
+      WHERE relatorio_despesa_viagem_id = ?2 AND tripulante_pos = ?3
+    )`).bind(legacyId, report.id, pos, previousReason, JSON.stringify(legacyAttachments), report.atualizado_em || null)
+}
+function historicoAjusteStatements(db: D1Database, report: any, pos: 1 | 2, reason: string, attachments: any[]) {
+  const criadoEm = new Date().toISOString()
+  const currentInsert = db.prepare(`INSERT INTO relatorio_despesa_viagem_historico_ajustes
+    (id, relatorio_despesa_viagem_id, tripulante_pos, motivo, anexos, criado_em)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)`).bind(uuid(), report.id, pos, reason, JSON.stringify(attachments), criadoEm)
+  return [ajusteAnteriorStatement(db, report, pos), currentInsert]
 }
 function rejectionAttachments(value: unknown, reportId: string): any[] {
   return parseRejectionAttachments(value).map(({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }) => ({

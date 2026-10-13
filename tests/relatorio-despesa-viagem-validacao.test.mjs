@@ -5,6 +5,7 @@ import { calcularVencimentoReembolsoTripulante } from "../src/relatorioFinanceir
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
 const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
+const migrationHistorico = await readFile(new URL("../migrations/20261013_relatorio_despesa_viagem_historico_ajustes.sql", import.meta.url), "utf8");
 const inicioEnvioCliente = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente'");
 const fimEnvioCliente = worker.indexOf("app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token'", inicioEnvioCliente);
 const rotaEnvioCliente = worker.slice(inicioEnvioCliente, fimEnvioCliente);
@@ -56,10 +57,29 @@ test("aprovação já gravada pode repetir a sincronização financeira sem dupl
   const fimPublica = worker.indexOf("app.delete('/api/financeiro/relatorios-despesa-viagem/:id'", inicioPublica);
   const rotaPublica = worker.slice(inicioPublica, fimPublica);
 
-  assert.match(rotaPublica, /retryApprovedSync = body\.aprovado === true && currentApprovalStatus === 'aprovado' && statusRelatorioViagem\(row\.status\) === 'aprovado'/);
-  assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*await c\.env\.SHARE_DB\.prepare\(`UPDATE relatorio_despesa_viagem/);
+  assert.match(rotaPublica, /retryApprovedSync = body\.aprovado === true && currentApprovalStatus === 'aprovado' && reportStatus === 'aprovado'/);
+  assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*const updateStatement = c\.env\.SHARE_DB\.prepare\(`UPDATE relatorio_despesa_viagem/);
   assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*try \{\s*await notifyReportDecision/);
   assert.match(rotaPublica, /await sincronizarRelatorioViagemFinanceiro\(c\.env\.SHARE_DB, \{ \.\.\.updated, data_vencimento_reembolso: dataVencimentoReembolso \}/);
+});
+
+test("ajuste concluído pode ser aprovado novamente pela rota autenticada e pelo link público", () => {
+  assert.match(rotaAprovacaoAutenticada, /pendingAdjustment = reportStatus === 'ajuste_concluido' && approvalStatus === 'pendente'/);
+  assert.match(rotaAprovacaoAutenticada, /reportStatus === 'aguardando_aprovacao' \|\| pendingAdjustment/);
+
+  const inicioPublica = worker.indexOf("app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token'");
+  const fimPublica = worker.indexOf("app.delete('/api/financeiro/relatorios-despesa-viagem/:id'", inicioPublica);
+  const rotaPublica = worker.slice(inicioPublica, fimPublica);
+  assert.match(rotaPublica, /pendingAdjustment = reportStatus === 'ajuste_concluido' && currentApprovalStatus === 'pendente'/);
+  assert.match(rotaPublica, /reportStatus === 'aguardando_aprovacao' \|\| pendingAdjustment/);
+});
+
+test("rejeições são guardadas no histórico e a migração cria a tabela de solicitações", () => {
+  assert.match(worker, /historicoAjusteStatements\(c\.env\.SHARE_DB, report, pos/);
+  assert.match(worker, /historicoAjusteStatements\(c\.env\.SHARE_DB, row, pos/);
+  assert.match(rotaMinhas, /historico_ajustes: ajustesPorRelatorio\.get\(row\.id\) \|\| \[\]/);
+  assert.match(migrationHistorico, /CREATE TABLE IF NOT EXISTS relatorio_despesa_viagem_historico_ajustes/);
+  assert.match(migrationHistorico, /CREATE INDEX IF NOT EXISTS idx_relatorio_viagem_historico_ajustes_relatorio/);
 });
 
 test("aprovação persiste vencimento e normaliza cliente/data de emissão antes de gerar os financeiros", () => {
