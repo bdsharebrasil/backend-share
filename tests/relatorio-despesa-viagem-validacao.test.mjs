@@ -40,10 +40,16 @@ test("aprovação já gravada pode repetir a sincronização financeira sem dupl
   assert.match(rotaPublica, /await sincronizarRelatorioViagemFinanceiro\(c\.env\.SHARE_DB, \{ \.\.\.updated, data_vencimento_reembolso: dataVencimentoReembolso \}/);
 });
 
-test("aprovação persiste vencimento do reembolso e usa data de criação do relatório na despesa Share", () => {
+test("aprovação persiste vencimento e normaliza cliente/data de emissão antes de gerar os financeiros", () => {
   assert.equal(calcularVencimentoReembolsoTripulante({ aprovado_tripulante_1_em: "2026-10-13T20:00:00.000Z" }), "2026-10-16");
-  assert.match(financeiro, /data_emissao: dateValue\(report\.criado_em, dateValue\(report\.data_inicio/);
+  assert.match(financeiro, /async function dataEmissaoRelatorio\(db: D1Database, report: ReportRow, lancamentoId: string \| null\)/);
+  assert.match(financeiro, /AND \(\?2 IS NULL OR id <> \?2\)/);
+  assert.match(financeiro, /dateValue\(sibling\?\.data_emissao, dateValue\(approvalDate, new Date\(\)\.toISOString\(\)\.slice\(0, 10\)\)\)/);
+  assert.match(financeiro, /const dataEmissao = await dataEmissaoRelatorio\(db, report, lancamentoId\)/);
+  assert.match(financeiro, /const dataEmissao = await dataEmissaoRelatorio\(db, report, null\)/);
   assert.match(financeiro, /cliente_id = \?, data_emissao = \?, data_vencimento = \?/);
+  assert.match(financeiro, /SELECT id FROM clientes WHERE id = \?1 LIMIT 1/);
+  assert.match(financeiro, /cliente_id: kind === 'CLIENTE' \? clienteLancamentoId : null/);
   assert.match(worker, /persistirMetadadosFinanceirosRelatorio\(c\.env\.SHARE_DB, id, userId, null, false, dataVencimentoReembolso\)/);
   assert.match(financeiro, /addTripulantePayableStatements\(/);
 });

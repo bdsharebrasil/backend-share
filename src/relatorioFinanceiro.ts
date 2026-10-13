@@ -145,6 +145,29 @@ async function findTripulanteUserId(db: D1Database, tripulacaoId: unknown): Prom
   return nullableText(row?.user_id)
 }
 
+async function findLancamentoClientId(db: D1Database, clientId: unknown): Promise<string | null> {
+  const id = text(clientId)
+  if (!id) return null
+  // lancamentos.cliente_id aponta para clientes(id), mas o ID do relatório
+  // vem de cliente(id); só gravamos o vínculo direto se existir no destino da FK.
+  const row = await db.prepare('SELECT id FROM clientes WHERE id = ?1 LIMIT 1').bind(id).first<{ id: string }>()
+  return text(row?.id) || null
+}
+
+async function dataEmissaoRelatorio(db: D1Database, report: ReportRow, lancamentoId: string | null): Promise<string> {
+  const sibling = await db.prepare(`SELECT data_emissao FROM lancamentos
+    WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
+      AND (?2 IS NULL OR id <> ?2) AND COALESCE(trim(data_emissao), '') <> ''
+    ORDER BY CASE WHEN categoria_nome = 'DESPESAS REEMBOLSÁVEIS' THEN 1 ELSE 0 END, criado_em
+    LIMIT 1`).bind(text(report.id), lancamentoId).first<{ data_emissao: string | null }>()
+  const approvalDates = [report.aprovado_tripulante_1_em, report.aprovado_tripulante_2_em, report.aprovado_tripulante_em]
+    .map((value) => text(value))
+    .filter((value) => /^\d{4}-\d{2}-\d{2}/.test(value))
+    .sort()
+  const approvalDate = approvalDates[approvalDates.length - 1]
+  return dateValue(sibling?.data_emissao, dateValue(approvalDate, new Date().toISOString().slice(0, 10)))
+}
+
 async function addLinkStatements(
   db: D1Database,
   statements: D1PreparedStatement[],
@@ -331,6 +354,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
   const expenses = expensesFromReport(report)
   if (!expenses.length) throw new Error('relatorio_sem_despesas')
+  const clienteLancamentoId = await findLancamentoClientId(db, report.cliente_id)
   const grouped = new Map<Payer, Array<Record<string, any>>>()
   for (const expense of expenses) {
     const payer = normalizePayer(expense.pago_por ?? expense.paid_by)
@@ -365,9 +389,10 @@ export async function sincronizarRelatorioViagemFinanceiro(
           WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1 AND idempotency_key = ?2
           LIMIT 1`).bind(reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).first<{ id: string }>()
         lancamentoId = text(lancamentoExistente?.id) || null
+        const dataEmissao = await dataEmissaoRelatorio(db, report, lancamentoId)
         if (lancamentoId) {
           await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, periodicidade = 'EVENTUAL', url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_emissao = ?, data_vencimento = ?
-            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, text(report.cliente_id) || null, dateValue(report.criado_em, dateValue(report.data_inicio, existingDueDate)), existingDueDate, lancamentoId).run()
+            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, clienteLancamentoId, dataEmissao, existingDueDate, lancamentoId).run()
         } else if (payer === 'tripulante_1' || payer === 'tripulante_2') {
           const tripulanteId = payer === 'tripulante_1' ? report.tripulacao_id : report.tripulante_id_2
           const tripulanteUserId = await findTripulanteUserId(db, tripulanteId)
@@ -376,7 +401,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
             id: lancamentoId,
             aeronave_id: text(report.aeronave_id),
             colaborador_id: tripulanteUserId,
-            data_emissao: dateValue(report.criado_em, dateValue(report.data_inicio, existingDueDate)),
+            data_emissao: dataEmissao,
             data_vencimento: existingDueDate,
             data_pagamento: null,
             descricao: description,
@@ -446,12 +471,13 @@ export async function sincronizarRelatorioViagemFinanceiro(
 
     if (payer !== 'cliente' && kind === 'CLIENTE') {
       lancamentoId = uuid()
+      const dataEmissao = await dataEmissaoRelatorio(db, report, null)
       const reembolsavel = payer === 'tripulante_1' || payer === 'tripulante_2'
       statements.push(await prepareInsert(db, 'lancamentos', {
         id: lancamentoId,
         aeronave_id: text(report.aeronave_id),
         colaborador_id: tripulanteUserId,
-        data_emissao: dateValue(report.data_inicio, fallbackDate),
+        data_emissao: dataEmissao,
         data_vencimento: dueDate,
         periodicidade: 'EVENTUAL',
         data_pagamento: null,
@@ -461,7 +487,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
         numero_voo: numeroVooId,
         url_doc: text(report.pdf_path) || null,
         cotista_aeronave_id: allocations[0]?.id || null,
-        cliente_id: kind === 'CLIENTE' ? text(report.cliente_id) || null : null,
+        cliente_id: kind === 'CLIENTE' ? clienteLancamentoId : null,
         categoria_nome: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
         grupo_categoria: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
         status: 'EM_ABERTO',
