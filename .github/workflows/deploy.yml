@@ -64,12 +64,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Apply notification table schema
-        run: pnpm exec wrangler d1 execute bd_sharebrasil --remote --file migrations/20261013_notificacoes.sql
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
       - name: Deploy to Cloudflare Workers
         run: pnpm run deploy
         env:

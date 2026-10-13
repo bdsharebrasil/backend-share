@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
-const migration = await readFile(new URL("../migrations/20261013_notificacoes.sql", import.meta.url), "utf8");
 const inicioNotifyTask = worker.indexOf("async function notifyTask(");
 const fimNotifyTask = worker.indexOf("async function notifyUsers(", inicioNotifyTask);
 const notifyTask = worker.slice(inicioNotifyTask, fimNotifyTask);
@@ -15,27 +14,24 @@ const inicioRoute = worker.indexOf("app.get('/api/sharebrasil/notificacoes'");
 const fimRoute = worker.indexOf("app.get('/api/sharebrasil/calendario/categorias'", inicioRoute);
 const notificationRoutes = worker.slice(inicioRoute, fimRoute);
 
-test("notificações de tarefas permanecem na tabela exclusiva de tarefas", () => {
+test("notificações de tarefas permanecem exclusivamente em tarefas_notificacoes", () => {
   assert.match(notifyTask, /INSERT INTO tarefas_notificacoes/);
   assert.doesNotMatch(notifyTask, /INSERT INTO notificacoes/);
 });
 
-test("eventos de aprovação e rejeição do relatório usam notificacoes e id_from", () => {
+test("relatórios usam a tabela notificacoes existente com id_from e destinatário", () => {
   assert.match(notifyReports, /notifyUsers\(db, uniqueRecipients, `relatorio_despesa_viagem\/\$\{report\.id\}`/);
   assert.doesNotMatch(notifyReports, /tarefas_notificacoes|INSERT INTO tarefas/);
-  assert.match(worker, /INSERT INTO notificacoes \(id, user_id, id_from, mensagem\)/);
+  assert.match(worker, /INSERT INTO notificacoes \(id, id_from, departamento_destinatario, status, mensagem\)/);
+  assert.doesNotMatch(worker, /CREATE TABLE(?: IF NOT EXISTS)? notificacoes/i);
 });
 
-test("API agrega as duas fontes e atualiza ou remove a tabela correspondente", () => {
+test("API filtra por user/departamento e converte status para estado lido", () => {
   assert.match(notificationRoutes, /FROM tarefas_notificacoes/);
   assert.match(notificationRoutes, /FROM notificacoes n/);
-  assert.match(notificationRoutes, /origem_notificacao/);
-  assert.match(notificationRoutes, /c\.req\.query\('origem'\) === 'geral' \? 'notificacoes' : 'tarefas_notificacoes'/);
-  assert.match(notificationRoutes, /DELETE FROM notificacoes WHERE user_id/);
-});
-
-test("migration define origem obrigatória e mensagem opcional para notificações", () => {
-  assert.match(migration, /id_from TEXT NOT NULL/);
-  assert.match(migration, /mensagem TEXT,/);
-  assert.match(migration, /CREATE TABLE IF NOT EXISTS notificacoes/);
+  assert.match(notificationRoutes, /departamento_destinatario/);
+  assert.match(worker, /'nao_lida'/);
+  assert.match(notificationRoutes, /SET status = 'lida'/);
+  assert.match(notificationRoutes, /CASE WHEN lower\(COALESCE\(n\.status, ''\)\) IN \('lida', 'lido', 'read'\) THEN 1 ELSE 0 END AS lido/);
+  assert.match(notificationRoutes, /DELETE FROM notificacoes WHERE lower\(trim\(COALESCE\(departamento_destinatario/);
 });

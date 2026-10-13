@@ -2507,8 +2507,13 @@ async function notifyTask(c: Context<{ Bindings: Bindings }>, taskId: string, re
 async function notifyUsers(db: D1Database, recipients: string[], idFrom: string, mensagem: string): Promise<void> {
   const uniqueRecipients = [...new Set(recipients.filter(Boolean))]
   for (const recipient of uniqueRecipients) {
-    await db.prepare('INSERT INTO notificacoes (id, user_id, id_from, mensagem) VALUES (?, ?, ?, ?)').bind(uuid(), recipient, idFrom, mensagem || null).run()
+    await db.prepare("INSERT INTO notificacoes (id, id_from, departamento_destinatario, status, mensagem) VALUES (?, ?, ?, 'nao_lida', ?)").bind(uuid(), idFrom, recipient, mensagem || null).run()
   }
+}
+function notificationDestinations(user: Colaborador): string[] {
+  return [...new Set([user.id, user.departamento, ...(user.departamentos_email || '').split(',')]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean))]
 }
 
 app.get('/api/sharebrasil/tarefas/usuarios', async c => {
@@ -2583,6 +2588,8 @@ app.get('/api/sharebrasil/notificacoes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const db = c.env.SHARE_DB
+  const destinations = notificationDestinations(user)
+  const destinationPlaceholders = destinations.map((_, index) => `?${index + 1}`).join(', ')
   const [taskResult, generalResult] = await Promise.all([
     db.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem,
         CASE WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
@@ -2597,12 +2604,16 @@ app.get('/api/sharebrasil/notificacoes', async c => {
           instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
         ELSE NULL END
       WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all<any>(),
-    db.prepare(`SELECT n.*, NULL AS id_da_tarefa, NULL AS status_alterado_para,
+    db.prepare(`SELECT n.id, n.id_from, n.departamento_destinatario, n.status, n.mensagem,
+        n.criado_em, NULL AS atualizado_em,
+        CASE WHEN lower(COALESCE(n.status, '')) IN ('lida', 'lido', 'read') THEN 1 ELSE 0 END AS lido,
+        NULL AS id_da_tarefa, NULL AS status_alterado_para,
         NULL AS tarefa_titulo, NULL AS tarefa_origem, r.id AS relatorio_id,
         r.anexos_rejeicao, 'geral' AS origem_notificacao
       FROM notificacoes n
       LEFT JOIN relatorio_despesa_viagem r ON n.id_from = 'relatorio_despesa_viagem/' || r.id
-      WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all<any>(),
+      WHERE lower(trim(COALESCE(n.departamento_destinatario, ''))) IN (${destinationPlaceholders})
+      ORDER BY n.criado_em DESC LIMIT 100`).bind(...destinations).all<any>(),
   ])
   const notificacoes = [...(taskResult.results || []), ...(generalResult.results || [])]
     .sort((a, b) => Date.parse(b.criado_em) - Date.parse(a.criado_em))
@@ -2612,25 +2623,44 @@ app.get('/api/sharebrasil/notificacoes', async c => {
 app.patch('/api/sharebrasil/notificacoes/:id/lida', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const table = c.req.query('origem') === 'geral' ? 'notificacoes' : 'tarefas_notificacoes'
-  const result = await c.env.SHARE_DB.prepare(`UPDATE ${table} SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2`).bind(c.req.param('id'), user.id).run()
+  const db = c.env.SHARE_DB
+  const id = c.req.param('id')
+  let result
+  if (c.req.query('origem') === 'geral') {
+    const destinations = notificationDestinations(user)
+    const placeholders = destinations.map((_, index) => `?${index + 2}`).join(', ')
+    result = await db.prepare(`UPDATE notificacoes SET status = 'lida' WHERE id = ?1 AND lower(trim(COALESCE(departamento_destinatario, ''))) IN (${placeholders})`).bind(id, ...destinations).run()
+  } else {
+    result = await db.prepare('UPDATE tarefas_notificacoes SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2').bind(id, user.id).run()
+  }
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/notificacoes/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const table = c.req.query('origem') === 'geral' ? 'notificacoes' : 'tarefas_notificacoes'
-  const result = await c.env.SHARE_DB.prepare(`DELETE FROM ${table} WHERE id = ?1 AND user_id = ?2`).bind(c.req.param('id'), user.id).run()
+  const db = c.env.SHARE_DB
+  const id = c.req.param('id')
+  let result
+  if (c.req.query('origem') === 'geral') {
+    const destinations = notificationDestinations(user)
+    const placeholders = destinations.map((_, index) => `?${index + 2}`).join(', ')
+    result = await db.prepare(`DELETE FROM notificacoes WHERE id = ?1 AND lower(trim(COALESCE(departamento_destinatario, ''))) IN (${placeholders})`).bind(id, ...destinations).run()
+  } else {
+    result = await db.prepare('DELETE FROM tarefas_notificacoes WHERE id = ?1 AND user_id = ?2').bind(id, user.id).run()
+  }
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/notificacoes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  await c.env.SHARE_DB.batch([
-    c.env.SHARE_DB.prepare('DELETE FROM tarefas_notificacoes WHERE user_id = ?1').bind(user.id),
-    c.env.SHARE_DB.prepare('DELETE FROM notificacoes WHERE user_id = ?1').bind(user.id),
+  const db = c.env.SHARE_DB
+  const destinations = notificationDestinations(user)
+  const placeholders = destinations.map((_, index) => `?${index + 1}`).join(', ')
+  await db.batch([
+    db.prepare('DELETE FROM tarefas_notificacoes WHERE user_id = ?1').bind(user.id),
+    db.prepare(`DELETE FROM notificacoes WHERE lower(trim(COALESCE(departamento_destinatario, ''))) IN (${placeholders})`).bind(...destinations),
   ])
   return c.json({ success: true })
 })
