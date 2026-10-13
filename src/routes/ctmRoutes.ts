@@ -89,11 +89,13 @@ ctmRoutes.get('/api/ctm/dashboard', async c => {
 ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const aeronaveId = String(c.req.query('aeronave_id') || '').trim()
-  const filtro = aeronaveId ? ' WHERE r.aeronave_id = ?' : ''
+  const filtro = aeronaveId
+    ? " WHERE r.aeronave_id = ? AND r.aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%')"
+    : " WHERE r.aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%')"
   const params = aeronaveId ? [aeronaveId] : []
   const [reports, aircraft] = await Promise.all([
     ctmRead(c, 'relatorios_manutencao', `${filtro} ORDER BY date(r.data_relatorio) DESC, r.id DESC`, params),
-    ctmRead(c, 'aeronave', ' ORDER BY matricula_registro'),
+    ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%' ORDER BY matricula_registro"),
   ])
   const aeronaves = aircraft.results.map((item: any) => ({
     id: item.id,
