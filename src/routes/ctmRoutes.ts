@@ -3,6 +3,7 @@ import { extractSupabaseUserId, requireShareInternal, shareBrasilUser } from '..
 import { validateWorkerSchema } from '../lib/schema'
 import { shareBrasilFileName } from '../lib/storage'
 import { uuid } from '../lib/strings'
+import { getAircraftIdsInMaintenance, isActiveCTMServiceOrder } from '../lib/ctmMaintenanceStatus'
 import { buscarTripulante } from './tripulacaoRoutes'
 
 type Bindings = {
@@ -83,7 +84,7 @@ ctmRoutes.get('/api/ctm/dashboard', async c => {
     ctmRead(c, 'ctm_carregamentos', `${filtro} ORDER BY data_voo DESC`, id ? [id] : []),
   ])
   const totalOrcamento = (orcamentos.results || []).reduce((total: number, item: any) => total + Number(item.total || item.valor_total || 0), 0)
-  return c.json({ data: { aeronaves: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => !['concluido', 'concluida', 'cancelado', 'cancelada'].includes(String(item.status || '').toLowerCase())).length, orcamento_total: totalOrcamento } } })
+  return c.json({ data: { aeronaves: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => isActiveCTMServiceOrder(item.status)).length, orcamento_total: totalOrcamento } } })
 })
 
 ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
@@ -93,16 +94,18 @@ ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
     ? " WHERE r.aeronave_id = ? AND r.aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%')"
     : " WHERE r.aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%')"
   const params = aeronaveId ? [aeronaveId] : []
-  const [reports, aircraft] = await Promise.all([
+  const [reports, aircraft, orders] = await Promise.all([
     ctmRead(c, 'relatorios_manutencao', `${filtro} ORDER BY date(r.data_relatorio) DESC, r.id DESC`, params),
     ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%' ORDER BY matricula_registro"),
+    ctmRead(c, 'ctm_ordem_acompanhamento_servico', " WHERE aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%') ORDER BY data_entrada DESC"),
   ])
+  const aircraftInMaintenance = getAircraftIdsInMaintenance(orders.results || [])
   const aeronaves = aircraft.results.map((item: any) => ({
     id: item.id,
     registration: item.matricula_registro,
     model: item.modelo,
     image_url: item.url_imagem || null,
-    status: item.status,
+    in_maintenance: aircraftInMaintenance.has(String(item.id)),
   }))
   const aeronavesPorId = new Map(aeronaves.map((item: any) => [String(item.id), item]))
   const data = reports.results.map((report: any) => ({
