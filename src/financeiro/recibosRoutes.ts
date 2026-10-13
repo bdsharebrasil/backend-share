@@ -251,8 +251,8 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     if (!receipt) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     const lancamentoVinculadoId = String(receipt.lancamento_id ?? '').trim()
     const lancamento = lancamentoVinculadoId
-      ? await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_id, categoria_nome, data_emissao, data_vencimento FROM lancamentos WHERE id = ?`).bind(lancamentoVinculadoId).first<Record<string, unknown>>()
-      : await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_id, categoria_nome, data_emissao, data_vencimento FROM lancamentos WHERE origem_id = ? AND origem_tipo = 'RECIBO_REEMBOLSO' ORDER BY criado_em DESC LIMIT 1`).bind(reciboId).first<Record<string, unknown>>()
+      ? await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_share_id, categoria_nome, data_emissao, data_vencimento FROM lancamentos WHERE id = ?`).bind(lancamentoVinculadoId).first<Record<string, unknown>>()
+      : await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_share_id, categoria_nome, data_emissao, data_vencimento FROM lancamentos WHERE origem_id = ? AND origem_tipo = 'RECIBO_REEMBOLSO' ORDER BY criado_em DESC LIMIT 1`).bind(reciboId).first<Record<string, unknown>>()
     const lancamentoId = String(lancamento?.id ?? '').trim()
     if (!lancamentoId) return c.json({ error: 'lancamento_do_recibo_nao_encontrado' }, 409)
     if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
@@ -289,7 +289,7 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     // A conta a pagar pertence ao caixa Share; seu FK de categoria aponta
     // para categoria_movimentacao_share. O rateio, por outro lado, usa a
     // categoria selecionada do cliente.
-    const categoriaIdConta = lancamento.categoria_id ?? receipt.categoria_movimentacao_id ?? null
+    const categoriaIdConta = lancamento.categoria_share_id ?? receipt.categoria_movimentacao_id ?? null
     const categoriaNomeConta = lancamento.categoria_nome ?? receipt.categoria_nome ?? receipt.grupo_categoria ?? null
     const categoriaIdRateio = body.categoria_id ?? null
     const categoriaNomeRateio = body.categoria_nome ?? null

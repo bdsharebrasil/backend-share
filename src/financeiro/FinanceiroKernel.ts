@@ -1216,7 +1216,7 @@ export async function createExpense(
         descricao: command.descricao,
         fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-        categoria_id: ehDespesaCliente ? null : nullableText(command.categoria_id),
+        categoria_share_id: ehDespesaCliente ? null : nullableText(command.categoria_id),
         categoria_cliente_id: ehDespesaCliente ? nullableText(command.categoria_cliente_id ?? command.categoria_id) : null,
         categoria_nome: nullableText(
           command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA',
@@ -1445,7 +1445,7 @@ export async function issueRevenue(
         fluxo: 'ENTRADA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
-        categoria_id: nullableText(command.categoria_id),
+        categoria_share_id: nullableText(command.categoria_id),
         categoria_nome: nullableText(
           command.categoria_nome ?? 'RECEITAS OPERACIONAIS',
         ),
@@ -1504,7 +1504,7 @@ export async function issueRevenue(
           fluxo: 'SAIDA',
           tipo_caixa: 'CLIENTE',
           valor_centavos: amount,
-          categoria_id: null,
+          categoria_share_id: null,
           categoria_cliente_id: nullableText(
             command.categoria_cliente_id ?? command.categoria_id,
           ),
@@ -1757,7 +1757,7 @@ export async function createReimbursement(
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
-        categoria_id: null,
+        categoria_share_id: null,
         categoria_cliente_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
         categoria_nome: nullableText(command.categoria_nome ?? 'REEMBOLSOS ENTRADAS'),
         grupo_categoria: nullableText(command.grupo_categoria ?? 'REEMBOLSOS ENTRADAS'),
@@ -1791,9 +1791,9 @@ export async function createReimbursement(
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
-        // lancamentos.categoria_id referencia a categoria Share; a categoria
+        // lancamentos.categoria_share_id referencia a categoria Share; a categoria
         // do cliente fica em categoria_cliente_id.
-        categoria_id: null,
+        categoria_share_id: null,
         categoria_cliente_id: nullableText(command.categoria_cliente_id),
         categoria_nome: nullableText(
           command.categoria_cliente_nome ?? command.categoria_nome ?? 'REEMBOLSO',
@@ -1984,12 +1984,12 @@ export async function settleReceivable(db: Database, receivableId: string, body:
 
   if (reimbursement && rateioLancamentoId && !(rateios.results || []).length) {
     const cotista = await db.prepare('SELECT percentual_sociedade FROM cotista_aeronave WHERE id = ?').bind(reimbursement.cotista_id).first<Row>()
-    const clientLancamento = await db.prepare('SELECT aeronave_id, data_emissao, data_vencimento, descricao, categoria_id, categoria_nome FROM lancamentos WHERE id = ?').bind(rateioLancamentoId).first<Row>()
+    const clientLancamento = await db.prepare('SELECT aeronave_id, data_emissao, data_vencimento, descricao, categoria_share_id, categoria_nome FROM lancamentos WHERE id = ?').bind(rateioLancamentoId).first<Row>()
     if (!clientLancamento?.aeronave_id || !reimbursement.cotista_id) throw new FinanceError('Dados do reembolso incompletos para gerar o rateio', 'reembolso_incompleto')
     const rateioId = id()
     statements.push(db.prepare(`INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, tipo_rateio, periodicidade, status, descricao_despesa, pago_diretamente) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'FIXO', 'ÚNICO', 'AGUARDANDO_REEMBOLSO', ?, 0)`).bind(
       rateioId, rateioLancamentoId, clientLancamento.aeronave_id, reimbursement.cotista_id, clientLancamento.data_emissao, clientLancamento.data_vencimento,
-      clientLancamento.categoria_id ?? null, clientLancamento.categoria_nome ?? 'REEMBOLSO', Number(cotista?.percentual_sociedade ?? 0), 100,
+      clientLancamento.categoria_share_id ?? null, clientLancamento.categoria_nome ?? 'REEMBOLSO', Number(cotista?.percentual_sociedade ?? 0), 100,
       total, total, clientLancamento.descricao ?? 'Reembolso de despesa',
     ))
     rateios = { results: [{ id: rateioId, valor_rateado_centavos: total }] }
@@ -2255,7 +2255,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       cotista_aeronave_id: cotistaId,
       cliente_id: clienteId,
       descricao: input.descricao,
-      categoria_id: categoriaShare?.id ?? null,
+      categoria_share_id: categoriaShare?.id ?? null,
       categoria_nome: 'REEMBOLSOS SHARE',
       grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
       fluxo: 'SAIDA',
@@ -2746,7 +2746,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
        ORDER BY e.criado_em DESC LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id,
-      l.categoria_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome
+      l.categoria_share_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome
     FROM recibos r LEFT JOIN lancamentos l ON l.id = r.lancamento_id
     WHERE r.id = ? AND r.tipo_recibo = 'recibo_reembolso' LIMIT 1`).bind(receiptId).first<Row>()
   if (!receipt || !text(receipt.share_lancamento_id)) throw new FinanceError('Recibo de reembolso não encontrado', 'recibo_reembolso_nao_encontrado', 404)

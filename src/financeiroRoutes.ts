@@ -246,7 +246,7 @@ financeiroRoutes.post('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId
     const periodicidade = String(body.periodicidade ?? 'EVENTUAL').toUpperCase()
     const tipoRateio = String(body.tipo_rateio ?? 'EXTRA').toUpperCase()
     const descricao = String(origem.source.descricao ?? origem.source.descricao_despesa ?? 'Despesa financeira')
-    const categoriaId = origem.source.categoria_id ?? null
+    const categoriaId = origem.source.categoria_share_id ?? origem.source.categoria_id ?? null
     const categoriaNome = origem.source.categoria_nome ?? null
     if (origem.origemTipo === 'abastecimentos') {
       const resultado = await createExpense(db, {
@@ -411,8 +411,11 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (body.periodicidade !== undefined && origem !== 'lancamentos') campos.push(['periodicidade', body.periodicidade || null])
     if (body.observacoes !== undefined) campos.push(['observacoes', body.observacoes || null])
     if (origem === 'lancamentos') {
-      const camposLegados = ['data_pagamento', 'status', 'categoria_id', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
+      if (Object.prototype.hasOwnProperty.call(body, 'categoria_id') || Object.prototype.hasOwnProperty.call(body, 'categoria_share_id')) {
+        campos.push(['categoria_share_id', body.categoria_share_id ?? body.categoria_id ?? null])
+      }
       if (body.status != null && !STATUS_LANCAMENTO.includes(String(body.status).toUpperCase() as (typeof STATUS_LANCAMENTO)[number])) return c.json({ error: 'status_lancamento_invalido' }, 400)
     }
     if (body.valor_centavos != null || body.valorCentavos != null) {
@@ -492,7 +495,7 @@ financeiroRoutes.post('/lancamentos/:id/duplicar', async (c) => {
     const source = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
     if (!source) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
-    const payload = { descricao: body.descricao ?? source.descricao, data: body.data ?? source.data_emissao, data_emissao: body.data_emissao ?? body.data ?? source.data_emissao, data_vencimento: body.data_vencimento ?? source.data_vencimento, valor_centavos: body.valor_centavos ?? source.valor_centavos, categoria_id: source.categoria_id, categoria_nome: source.categoria_nome, grupo_categoria: source.grupo_categoria, fornecedor_nome: source.fornecedor_nome, aeronave_id: source.aeronave_id, cotista_aeronave_id: source.cotista_aeronave_id, tipo_caixa: source.tipo_caixa, reembolsavel: source.reembolsavel, idempotency_key: `duplicado:${source.id}:${crypto.randomUUID()}` }
+    const payload = { descricao: body.descricao ?? source.descricao, data: body.data ?? source.data_emissao, data_emissao: body.data_emissao ?? body.data ?? source.data_emissao, data_vencimento: body.data_vencimento ?? source.data_vencimento, valor_centavos: body.valor_centavos ?? source.valor_centavos, categoria_id: source.categoria_share_id, categoria_nome: source.categoria_nome, grupo_categoria: source.grupo_categoria, fornecedor_nome: source.fornecedor_nome, aeronave_id: source.aeronave_id, cotista_aeronave_id: source.cotista_aeronave_id, tipo_caixa: source.tipo_caixa, reembolsavel: source.reembolsavel, idempotency_key: `duplicado:${source.id}:${crypto.randomUUID()}` }
     const result = String(source.fluxo).toUpperCase() === 'ENTRADA' ? await issueRevenue(db, payload, c.get('userId') || null) : await createExpense(db, payload, c.get('userId') || null)
     return c.json(result, 201)
   } catch (error) { return errorResponse(c, error) }
