@@ -3115,7 +3115,7 @@ function requerAprovacaoTripulanteRelatorio(despesas: unknown, pos: 1 | 2) {
 
 function statusRelatorioViagem(valor: unknown) {
   const normalizado = String(valor || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\s-]+/g, '_')
-  const validos = new Set(['rascunho', 'finalizado', 'aguardando_aprovacao', 'ajuste_necessario', 'aprovado', 'enviado_cliente'])
+  const validos = new Set(['rascunho', 'finalizado', 'aguardando_aprovacao', 'ajuste_necessario', 'ajuste_concluido', 'aprovado', 'enviado_cliente'])
   return validos.has(normalizado) ? normalizado : String(valor || 'rascunho')
 }
 
@@ -3631,7 +3631,15 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     if (!numero) return c.json({ error: 'numero_relatorio_obrigatorio' }, 409)
     // O número é reservado na criação do rascunho e deve permanecer imutável.
     // Nunca gere outro número na finalização, pois outros rascunhos podem ter sido criados depois.
-    await db.prepare("UPDATE relatorio_despesa_viagem SET status = 'finalizado', atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND lower(COALESCE(status, 'rascunho')) = 'rascunho'").bind(id).run()
+    const statusAtual = statusRelatorioViagem(relatorio.status)
+    const statusFinalizado = statusAtual === 'ajuste_necessario' ? 'ajuste_concluido' : 'finalizado'
+    const result = await db.prepare(`UPDATE relatorio_despesa_viagem SET
+      status = ?1,
+      status_aprovacao_tripulante = CASE WHEN ?1 = 'ajuste_concluido' THEN 'pendente' ELSE status_aprovacao_tripulante END,
+      status_aprovacao_tripulante_2 = CASE WHEN ?1 = 'ajuste_concluido' THEN 'pendente' ELSE status_aprovacao_tripulante_2 END,
+      atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ?2 AND lower(COALESCE(status, 'rascunho')) = ?3`).bind(statusFinalizado, id, statusAtual).run()
+    if (!result.meta.changes) return c.json({ error: 'relatorio_alterado_concorrente' }, 409)
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:finalizar]', error?.message || error)
@@ -3690,7 +3698,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     if (!tripulanteId) return c.json({ error: 'tripulante_nao_informado' }, 400)
     const tokenAtual = String(relatorio[tokenColumn] || '').trim()
     const novoToken = tokenAtual || crypto.randomUUID()
-    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = COALESCE(NULLIF(trim(${tokenColumn}), ''), ?), ${sentColumn} = COALESCE(NULLIF(trim(${sentColumn}), ''), CURRENT_TIMESTAMP), status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, '')) IN ('finalizado', 'aguardando_aprovacao', 'ajuste_necessario')`).bind(novoToken, id).run()
+    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = COALESCE(NULLIF(trim(${tokenColumn}), ''), ?), ${sentColumn} = COALESCE(NULLIF(trim(${sentColumn}), ''), CURRENT_TIMESTAMP), status = CASE WHEN status IN ('finalizado', 'ajuste_concluido') THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, '')) IN ('finalizado', 'ajuste_concluido', 'aguardando_aprovacao')`).bind(novoToken, id).run()
     if (!envio.meta.changes) return c.json({ error: 'relatorio_nao_pode_ser_enviado_para_aprovacao' }, 409)
     const dadosEnvio = await c.env.SHARE_DB.prepare(`SELECT numero_relatorio, ${tokenColumn} AS token FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<{ numero_relatorio: string; token: string }>()
     if (!dadosEnvio?.token) return c.json({ error: 'token_de_aprovacao_nao_persistido' }, 500)

@@ -35,6 +35,22 @@ test("atualização rejeita campos obrigatórios vazios e preserva valores não 
   assert.match(rotaAtualizacao, /tripulacaoId \|\| null, nomeTripulante \|\| null/);
 });
 
+test("finalização de relatório rejeitado conclui o ajuste e reabre a aprovação", () => {
+  const inicioFinalizacao = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar'");
+  const fimFinalizacao = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/voltar-rascunho'", inicioFinalizacao);
+  const rotaFinalizacao = worker.slice(inicioFinalizacao, fimFinalizacao);
+  const inicioEnvio = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao'");
+  const fimEnvio = worker.indexOf("app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token'", inicioEnvio);
+  const rotaEnvio = worker.slice(inicioEnvio, fimEnvio);
+
+  assert.match(worker, /'ajuste_concluido'/);
+  assert.match(rotaFinalizacao, /statusAtual === 'ajuste_necessario' \? 'ajuste_concluido' : 'finalizado'/);
+  assert.match(rotaFinalizacao, /status_aprovacao_tripulante = CASE WHEN \?1 = 'ajuste_concluido' THEN 'pendente'/);
+  assert.match(rotaFinalizacao, /lower\(COALESCE\(status, 'rascunho'\)\) = \?3/);
+  assert.match(rotaEnvio, /status IN \('finalizado', 'ajuste_concluido'\)/);
+  assert.match(rotaEnvio, /status = CASE WHEN status IN \('finalizado', 'ajuste_concluido'\) THEN 'aguardando_aprovacao'/);
+});
+
 test("aprovação já gravada pode repetir a sincronização financeira sem duplicar decisão", () => {
   const inicioPublica = worker.indexOf("app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token'");
   const fimPublica = worker.indexOf("app.delete('/api/financeiro/relatorios-despesa-viagem/:id'", inicioPublica);
