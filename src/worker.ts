@@ -20,7 +20,7 @@ import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel
 import { sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
 import { validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
-import { normalizarHorarioAgendamento } from './lib/schedule'
+import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from './lib/schedule'
 import { checkRateLimit, clientIp } from './lib/cache'
 import { normalizarPastaUpload, salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
 import { uuid } from './lib/strings'
@@ -1454,13 +1454,10 @@ app.post('/api/interno/agendamento', async c => {
   const dataFim = body?.data_fim?.trim() || dataAgendada
   const aeronaveId = body?.aeronave_id?.trim() || ''
   if (!origem || !destino || !dataAgendada || !dataFim || !aeronaveId) return c.json({ error: 'origem_destino_periodo_e_aeronave_obrigatorios' }, 400)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataAgendada) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim) || dataFim < dataAgendada) return c.json({ error: 'periodo_invalido' }, 400)
+  const diasDuracao = calcularDiasPeriodoAgendamento(dataAgendada, dataFim)
+  if (!diasDuracao) return c.json({ error: 'periodo_invalido' }, 400)
   const horarioPrevisto = body?.horario_previsto_agendamento ? normalizarHorarioAgendamento(dataAgendada, body.horario_previsto_agendamento) : null
   if (body?.horario_previsto_agendamento && !horarioPrevisto) return c.json({ error: 'horario_previsto_invalido' }, 400)
-  const inicioMs = Date.parse(`${dataAgendada}T00:00:00Z`)
-  const fimMs = Date.parse(`${dataFim}T00:00:00Z`)
-  const diasDuracao = Math.floor((fimMs - inicioMs) / 86_400_000) + 1
-  if (!Number.isFinite(diasDuracao) || diasDuracao < 1) return c.json({ error: 'periodo_invalido' }, 400)
   const aeronave = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string }>()
   if (!aeronave) return c.json({ error: 'aeronave_nao_disponivel' }, 409)
   const cliente = body?.cliente_id ? await c.env.SHARE_DB.prepare('SELECT id, codigo_cliente FROM cliente WHERE id = ?1').bind(body.cliente_id).first<{ id: string; codigo_cliente: string | null }>() : null
@@ -1516,10 +1513,52 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
       cliente_emprestimo_id: string | null
       socio_emprestimo_id: string | null
       voo_emprestado: string | null
+      data_agendada: string
+      dias_duracao: number
+      horario_previsto_agendamento: string | null
+      numero_passageiros: number
     }>()
   if (!reservation) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
   if (reservation.status !== 'pendente') return c.json({ error: 'solicitacao_nao_pendente' }, 409)
-  const body = await c.req.json<{ piloto_id?: string; copiloto_id?: string }>().catch(() => ({} as { piloto_id?: string; copiloto_id?: string }))
+  type CorpoConfirmacao = {
+    piloto_id?: string
+    copiloto_id?: string
+    aeronave_id?: string
+    data_agendada?: string
+    data_fim?: string
+    horario_previsto_agendamento?: string | null
+    numero_passageiros?: number
+    cliente_emprestimo_id?: string | null
+    socio_emprestimo_id?: string | null
+  }
+  const body = await c.req.json<CorpoConfirmacao>().catch(() => ({} as CorpoConfirmacao))
+  const aeronaveId = body.aeronave_id?.trim() || reservation.aeronave_id
+  const dataAgendada = body.data_agendada?.trim() || reservation.data_agendada.slice(0, 10)
+  const dataFimAtual = new Date(Date.parse(`${dataAgendada}T00:00:00Z`) + (Math.max(1, Number(reservation.dias_duracao) || 1) - 1) * 86_400_000).toISOString().slice(0, 10)
+  const dataFim = body.data_fim?.trim() || dataFimAtual
+  const diasDuracao = calcularDiasPeriodoAgendamento(dataAgendada, dataFim)
+  if (!diasDuracao) return c.json({ error: 'periodo_invalido' }, 400)
+  const numeroPassageiros = body.numero_passageiros === undefined ? Number(reservation.numero_passageiros || 1) : Number(body.numero_passageiros)
+  if (!Number.isInteger(numeroPassageiros) || numeroPassageiros < 1) return c.json({ error: 'numero_passageiros_invalido' }, 400)
+  const horarioEnviado = body.horario_previsto_agendamento !== undefined ? body.horario_previsto_agendamento : reservation.horario_previsto_agendamento
+  const horarioPrevisto = horarioEnviado ? normalizarHorarioAgendamento(dataAgendada, horarioEnviado) : null
+  if (horarioEnviado && !horarioPrevisto) return c.json({ error: 'horario_previsto_invalido' }, 400)
+  const aeronave = await c.env.SHARE_DB.prepare('SELECT id, matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string; matricula_registro: string | null }>()
+  if (!aeronave) return c.json({ error: 'aeronave_nao_disponivel' }, 409)
+  const clienteEmprestimoId = body.cliente_emprestimo_id !== undefined ? body.cliente_emprestimo_id?.trim() || null : reservation.cliente_emprestimo_id
+  const socioEmprestimoId = body.socio_emprestimo_id !== undefined ? body.socio_emprestimo_id?.trim() || null : reservation.socio_emprestimo_id
+  if (clienteEmprestimoId && socioEmprestimoId) return c.json({ error: 'selecione_apenas_um_cedente' }, 400)
+  if (clienteEmprestimoId && clienteEmprestimoId === reservation.cliente_id) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
+  if (socioEmprestimoId && socioEmprestimoId === reservation.socio_id) return c.json({ error: 'cedente_deve_ser_diferente_do_titular' }, 400)
+  const titularVinculado = await c.env.SHARE_DB.prepare('SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) LIMIT 1')
+    .bind(aeronaveId, reservation.cliente_id, reservation.socio_id).first<{ id: string }>()
+  const cedenteVinculado = clienteEmprestimoId || socioEmprestimoId
+    ? await c.env.SHARE_DB.prepare('SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1 AND (cliente_id = ?2 OR socio_id = ?3) LIMIT 1')
+      .bind(aeronaveId, clienteEmprestimoId, socioEmprestimoId).first<{ id: string }>()
+    : null
+  if ((clienteEmprestimoId || socioEmprestimoId) && !cedenteVinculado) return c.json({ error: 'cedente_nao_vinculado_a_aeronave' }, 400)
+  if (!titularVinculado && !cedenteVinculado) return c.json({ error: 'informe_emprestimo_da_aeronave' }, 400)
+  const vooEmprestado = Boolean(clienteEmprestimoId || socioEmprestimoId)
   if (!body.piloto_id) return c.json({ error: 'piloto_obrigatorio' }, 400)
   if (body.copiloto_id && body.copiloto_id === body.piloto_id) return c.json({ error: 'tripulantes_iguais' }, 400)
   const piloto = await buscarTripulante(c, body.piloto_id)
@@ -1527,12 +1566,10 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   if (!piloto) return c.json({ error: 'piloto_nao_encontrado' }, 400)
   if (body.copiloto_id && !copiloto) return c.json({ error: 'copiloto_nao_encontrado' }, 400)
   for (const assigned of [body.piloto_id, body.copiloto_id].filter((value): value is string => Boolean(value))) {
-    const eligibility = await validarElegibilidadeTripulante(c, assigned, reservation.aeronave_id)
+    const eligibility = await validarElegibilidadeTripulante(c, assigned, aeronaveId)
     if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
   }
 
-  const vooEmprestado = Boolean(reservation.cliente_emprestimo_id || reservation.socio_emprestimo_id)
-    || ['sim', 'true', '1'].includes(String(reservation.voo_emprestado).toLowerCase())
   const cotistaQuery = vooEmprestado
     ? `SELECT ca.codigo_cliente, ca.socio_id
        FROM cotista_aeronave ca
@@ -1549,7 +1586,7 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   const cotistaStatement = c.env.SHARE_DB.prepare(cotistaQuery)
   const cotista = vooEmprestado
     ? await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id).first<{ codigo_cliente: string; socio_id: string | null }>()
-    : await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id, reservation.aeronave_id).first<{ codigo_cliente: string; socio_id: string | null }>()
+    : await cotistaStatement.bind(reservation.socio_id, reservation.cliente_id, aeronaveId).first<{ codigo_cliente: string; socio_id: string | null }>()
   if (!cotista?.codigo_cliente?.trim()) {
     return c.json({
       error: 'codigo_cotista_nao_encontrado',
@@ -1559,19 +1596,19 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
       solicitacao_id: id,
       cliente_id: reservation.cliente_id,
       socio_id: reservation.socio_id,
-      aeronave_id: reservation.aeronave_id,
+      aeronave_id: aeronaveId,
       voo_emprestado: vooEmprestado,
     }, 409)
   }
 
   const cotistaKey = cotista.socio_id ? `socio:${cotista.socio_id}` : `cliente:${reservation.cliente_id}`
   const numeroVoo = vooEmprestado
-    ? await portalLoanFlightSequence(c, cotista.codigo_cliente, reservation.matricula_registro, cotistaKey)
+    ? await portalLoanFlightSequence(c, cotista.codigo_cliente, aeronave.matricula_registro, cotistaKey)
     : await portalFlightSequence(c, cotista.codigo_cliente, cotistaKey)
-  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'")
-    .bind(numeroVoo, piloto.id, copiloto?.id || null, id).run()
+  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aeronave_id = ?, cliente_emprestimo_id = ?, socio_emprestimo_id = ?, voo_emprestado = ?, data_agendada = ?, horario_previsto_agendamento = ?, dias_duracao = ?, numero_passageiros = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'")
+    .bind(numeroVoo, piloto.id, copiloto?.id || null, aeronaveId, clienteEmprestimoId, socioEmprestimoId, vooEmprestado ? 'sim' : 'nao', dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, id).run()
   if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
-  return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: numeroVoo, piloto, copiloto })
+  return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: numeroVoo, aeronave_id: aeronaveId, data_agendada: dataAgendada, horario_previsto_agendamento: horarioPrevisto, dias_duracao: diasDuracao, numero_passageiros: numeroPassageiros, voo_emprestado: vooEmprestado ? 'sim' : 'nao', piloto, copiloto })
 })
 
 app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
