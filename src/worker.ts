@@ -3046,17 +3046,32 @@ function normalizarMatriculaRelatorio(value: unknown): string {
   return String(value || '').trim().toUpperCase().replace(/\s+/g, ' ')
 }
 
+async function buscarVooRelatorio(db: D1Database, numeroVoo: string, clienteId: string, socioId: string | null, aeronaveId: string) {
+  const voo = await db.prepare(`SELECT id, numero_voo, cliente_id, socio_id, aeronave_id
+    FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 LIMIT 1`).bind(numeroVoo).first<any>()
+  if (!voo) return { error: 'voo_nao_encontrado', numero_voo: numeroVoo }
+  const cotistaCompativel = socioId
+    ? voo.socio_id === socioId && voo.cliente_id === clienteId
+    : !voo.socio_id && voo.cliente_id === clienteId
+  if (voo.aeronave_id !== aeronaveId || !cotistaCompativel) {
+    return { error: 'voo_incompativel_com_cotista_ou_aeronave', numero_voo: numeroVoo, solicitacao_id: voo.id, cliente_id: voo.cliente_id, socio_id: voo.socio_id, aeronave_id: voo.aeronave_id }
+  }
+  return { voo }
+}
+
 async function gerarNumeroRelatorioViagem(
   db: D1Database,
   clienteId: string,
   socioId: string | null,
   aeronaveId: string,
   dataInicio: string,
-  relatorioIdExcluir: string | null = null,
 ): Promise<string> {
   const codigoRow = socioId
     ? await db.prepare(`SELECT ca.codigo_cliente AS codigo_cliente FROM hold_socios hs LEFT JOIN cotista_aeronave ca ON ca.id = hs.cotista_id WHERE hs.id = ?1 LIMIT 1`).bind(socioId).first<{ codigo_cliente: string | null }>()
-    : await db.prepare(`SELECT COALESCE(NULLIF(c.codigo_cliente, ''), NULLIF(ca.codigo_cliente, '')) AS codigo_cliente FROM cliente c LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = ?2 AND (ca.cliente_id = c.id OR ca.id = ?1) WHERE c.id = ?1 LIMIT 1`).bind(clienteId, aeronaveId).first<{ codigo_cliente: string | null }>()
+    : await db.prepare(`SELECT COALESCE(NULLIF(c.codigo_cliente, ''), NULLIF(ca.codigo_cliente, '')) AS codigo_cliente
+        FROM cliente c LEFT JOIN holdings h ON h.id = ?1
+        LEFT JOIN cotista_aeronave ca ON ca.aeronave_id = ?2 AND (ca.cliente_id = ?1 OR ca.cliente_id = c.id OR ca.id = ?1)
+        WHERE c.id = ?1 OR h.id = ?1 LIMIT 1`).bind(clienteId, aeronaveId).first<{ codigo_cliente: string | null }>()
   const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
   const codigo = normalizarCodigoRelatorio(codigoRow?.codigo_cliente)
   const matricula = normalizarMatriculaRelatorio(aeronave?.matricula_registro)
@@ -3064,22 +3079,22 @@ async function gerarNumeroRelatorioViagem(
   if (!codigo) throw new Error('codigo_cotista_obrigatorio')
   if (!matricula) throw new Error('matricula_aeronave_obrigatoria')
   if (!ano) throw new Error('ano_relatorio_invalido')
-  const prefixo = `REL-${codigo}-`
-  const sufixo = `/${ano} ${matricula}`
-  const anterioresQuery = relatorioIdExcluir
-    ? db.prepare('SELECT id, numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2 AND id <> ?3').bind(`${prefixo}%${sufixo}`, aeronaveId, relatorioIdExcluir)
-    : db.prepare('SELECT id, numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2').bind(`${prefixo}%${sufixo}`, aeronaveId)
-  const anteriores = await anterioresQuery.all<{ id: string; numero_relatorio: string }>()
+  const anteriores = await db.prepare('SELECT numero_relatorio FROM relatorio_despesa_viagem WHERE numero_relatorio LIKE ?1 AND aeronave_id = ?2').bind(`REL-${codigo}-%/${ano} ${matricula}`, aeronaveId).all<{ numero_relatorio: string }>()
   const maiorExistente = (anteriores.results || []).reduce((maior, item) => {
     const numero = String(item.numero_relatorio || '')
-    if (!numero.startsWith(prefixo) || !numero.endsWith(sufixo)) return maior
-    const sequencia = Number(numero.slice(prefixo.length, -sufixo.length))
+    const inicio = `REL-${codigo}-`
+    const fim = `/${ano} ${matricula}`
+    if (!numero.startsWith(inicio) || !numero.endsWith(fim)) return maior
+    const sequencia = Number(numero.slice(inicio.length, -fim.length))
     return Number.isInteger(sequencia) && sequencia > maior ? sequencia : maior
   }, 0)
   const proximoNumero = maiorExistente + 1
-  const proximo = await db.prepare(`INSERT INTO sequencia_relatorios_despesa_viagem (codigo_cotista, aeronave_id, ano, ultimo_numero) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(codigo_cotista, aeronave_id, ano) DO UPDATE SET ultimo_numero = excluded.ultimo_numero RETURNING ultimo_numero`).bind(codigo, aeronaveId, ano, proximoNumero).first<{ ultimo_numero: number }>()
+  const proximo = await db.prepare(`INSERT INTO sequencia_relatorios_despesa_viagem (codigo_cotista, aeronave_id, ano, ultimo_numero)
+    VALUES (?1, ?2, ?3, ?4)
+    ON CONFLICT(codigo_cotista, aeronave_id, ano) DO UPDATE SET ultimo_numero = MAX(sequencia_relatorios_despesa_viagem.ultimo_numero + 1, excluded.ultimo_numero)
+    RETURNING ultimo_numero`).bind(codigo, aeronaveId, ano, proximoNumero).first<{ ultimo_numero: number }>()
   if (!proximo?.ultimo_numero) throw new Error('falha_ao_gerar_numero_relatorio')
-  return `REL-${codigo}-${String(proximoNumero).padStart(3, '0')}/${ano} ${matricula}`
+  return `REL-${codigo}-${String(proximo.ultimo_numero).padStart(3, '0')}/${ano} ${matricula}`
 }
 
 async function buscarRelatorioViagemComNomes(c: Context<{ Bindings: Bindings }>, id: string): Promise<(Record<string, any> & { despesas: any[] }) | null> {
@@ -3163,7 +3178,11 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
         LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
         LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
         WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
-        ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC LIMIT 200`).all().catch(() => ({ results: [] })),
+          AND (?1 IS NULL OR s.aeronave_id = ?1)
+          AND (?2 IS NULL OR (s.cliente_id = ?2 AND (?3 IS NULL AND (s.socio_id IS NULL OR trim(s.socio_id) = '') OR s.socio_id = ?3)))
+        ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC LIMIT 200`).bind(
+        c.req.query('aeronave_id') || null, c.req.query('cliente_id') || null, c.req.query('socio_id') || null,
+      ).all().catch(() => ({ results: [] })),
     ])
     return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results, socios: socios.results, voos: voos.results })
   } catch (error: any) {
@@ -3254,9 +3273,15 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
     if (dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
 
     const db = c.env.SHARE_DB
-    const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>()
+    const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
+    if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada', aeronave_id: aeronaveId }, 400)
     const id = uuid()
-    const socioId = body.socio_id ? String(body.socio_id) : null
+    const socioId = body.socio_id ? String(body.socio_id).trim() : null
+    const numeroVoo = body.numero_voo == null ? null : String(body.numero_voo || '').trim() || null
+    if (numeroVoo) {
+      const validacaoVoo = await buscarVooRelatorio(db, numeroVoo, clienteId, socioId, aeronaveId)
+      if ('error' in validacaoVoo) return c.json(validacaoVoo, validacaoVoo.error === 'voo_nao_encontrado' ? 400 : 409)
+    }
     const numero = await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
     const status = statusRelatorioViagem(body.status || 'rascunho')
     await db.prepare(`
@@ -3269,7 +3294,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
         total_sharebrasil, criado_por, gerado_por_usuario_id
       ) VALUES (${new Array(31).fill('?').join(', ')})
     `).bind(
-      id, numero, body.numero_voo || null, clienteId, socioId, aeronaveId,
+      id, numero, numeroVoo, clienteId, socioId, aeronaveId,
       aeronave?.matricula_registro || body.matricula_aeronave || null, rota, dataInicio, dataFim,
       Number(body.quantidade_dias || 1), tripulacaoId || null, nomeTripulante || null,
       body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null,
@@ -3296,64 +3321,76 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
     const db = c.env.SHARE_DB
-    const atual = await db.prepare('SELECT id, status FROM relatorio_despesa_viagem WHERE id = ?1').bind(id).first<{ id: string; status: string }>()
+    const atual = await db.prepare(`SELECT id, status, numero_relatorio, numero_voo, cliente_id, socio_id, aeronave_id, matricula_aeronave,
+      data_inicio, data_fim, pdf_path, enviado_para_tripulante_em, enviado_para_tripulante_2_em,
+      aprovado_tripulante_1_em, aprovado_tripulante_2_em, aprovado_tripulante_em,
+      status_aprovacao_tripulante, status_aprovacao_tripulante_2
+      FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<any>()
     if (!atual) return c.notFound()
     const statusAtual = statusRelatorioViagem(atual.status)
-    if (!['rascunho', 'ajuste_necessario'].includes(statusAtual)) return c.json({ error: 'relatorio_ja_finalizado' }, 409)
+    const bloqueadoPorEnvioOuDecisao = ['aguardando_aprovacao', 'aprovado', 'enviado_cliente'].includes(statusAtual)
+      || Boolean(atual.enviado_para_tripulante_em || atual.enviado_para_tripulante_2_em || atual.aprovado_tripulante_1_em || atual.aprovado_tripulante_2_em || atual.aprovado_tripulante_em)
+      || ['aprovado', 'reprovado'].includes(String(atual.status_aprovacao_tripulante || '').toLowerCase())
+      || ['aprovado', 'reprovado'].includes(String(atual.status_aprovacao_tripulante_2 || '').toLowerCase())
+    if (bloqueadoPorEnvioOuDecisao) return c.json({ error: 'relatorio_bloqueado_apos_envio_ou_decisao' }, 409)
+    if (!['rascunho', 'finalizado'].includes(statusAtual)) return c.json({ error: 'relatorio_nao_editavel_neste_estado' }, 409)
     const body = await c.req.json<Record<string, any>>().catch(() => null)
     if (!body) return c.json({ error: 'payload_invalido' }, 400)
-    const novoStatus = statusRelatorioViagem(body.status || statusAtual)
-    const dataInicio = body.data_inicio == null ? null : String(body.data_inicio || '').trim()
-    const dataFim = body.data_fim == null ? null : String(body.data_fim || '').trim()
-    if (dataInicio && dataFim && dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
-    const aeronaveId = body.aeronave_id ? String(body.aeronave_id).trim() : null
-    const aeronave = aeronaveId ? await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string }>() : null
+
+    const clienteId = body.cliente_id === undefined ? String(atual.cliente_id || '').trim() : String(body.cliente_id || '').trim()
+    const socioId = body.socio_id === undefined ? (atual.socio_id ? String(atual.socio_id).trim() : null) : (String(body.socio_id || '').trim() || null)
+    const aeronaveId = body.aeronave_id === undefined ? String(atual.aeronave_id || '').trim() : String(body.aeronave_id || '').trim()
+    const numeroVoo = body.numero_voo === undefined ? (atual.numero_voo ? String(atual.numero_voo).trim() : null) : (String(body.numero_voo || '').trim() || null)
+    if (!clienteId) return c.json({ error: 'cliente_obrigatorio' }, 400)
+    if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+    const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
+    if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada', aeronave_id: aeronaveId }, 400)
+    if (numeroVoo) {
+      const validacaoVoo = await buscarVooRelatorio(db, numeroVoo, clienteId, socioId, aeronaveId)
+      if ('error' in validacaoVoo) return c.json(validacaoVoo, validacaoVoo.error === 'voo_nao_encontrado' ? 400 : 409)
+    }
+    const dataInicio = body.data_inicio === undefined ? String(atual.data_inicio || '') : String(body.data_inicio || '').trim()
+    const dataFim = body.data_fim === undefined ? String(atual.data_fim || '') : String(body.data_fim || '').trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) return c.json({ error: 'datas_obrigatorias' }, 400)
+    if (dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
+    const identificadoresAlterados = clienteId !== String(atual.cliente_id || '').trim() || socioId !== (atual.socio_id ? String(atual.socio_id).trim() : null) || aeronaveId !== String(atual.aeronave_id || '').trim() || dataInicio.slice(0, 4) !== String(atual.data_inicio || '').slice(0, 4)
+    const documentoDependenteAlterado = identificadoresAlterados || numeroVoo !== (atual.numero_voo ? String(atual.numero_voo).trim() : null)
+    const numero = identificadoresAlterados
+      ? await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
+      : undefined
     const despesas = body.despesas === undefined ? undefined : JSON.stringify(despesasRelatorioViagem(body.despesas))
-    const emAjuste = statusAtual === 'ajuste_necessario'
-    await db.prepare(`
-      UPDATE relatorio_despesa_viagem SET
-        numero_relatorio = numero_relatorio, numero_voo = ?, cliente_id = COALESCE(?, cliente_id), socio_id = ?,
-        aeronave_id = COALESCE(?, aeronave_id), matricula_aeronave = COALESCE(?, matricula_aeronave), rota = COALESCE(?, rota),
-        data_inicio = COALESCE(?, data_inicio), data_fim = COALESCE(?, data_fim), quantidade_dias = COALESCE(?, quantidade_dias),
-        tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
-        despesas = COALESCE(?, despesas), status = ?, total_valor = ?, total_combustivel = ?, total_hospedagem = ?,
-        total_alimentacao = ?, total_transporte = ?, total_outros = ?, total_tripulacao = ?, total_tripulante_1 = ?,
-        total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?,
-        status_aprovacao_tripulante = CASE WHEN ? = 1 THEN 'pendente' ELSE status_aprovacao_tripulante END,
-        status_aprovacao_tripulante_2 = CASE WHEN ? = 1 THEN 'pendente' ELSE status_aprovacao_tripulante_2 END,
-        token_aprovacao_tripulante_1 = CASE WHEN ? = 1 THEN NULL ELSE token_aprovacao_tripulante_1 END,
-        token_aprovacao_tripulante_2 = CASE WHEN ? = 1 THEN NULL ELSE token_aprovacao_tripulante_2 END,
-        enviado_para_tripulante_em = CASE WHEN ? = 1 THEN NULL ELSE enviado_para_tripulante_em END,
-        enviado_para_tripulante_2_em = CASE WHEN ? = 1 THEN NULL ELSE enviado_para_tripulante_2_em END,
-        aprovado_tripulante_1_em = CASE WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_1_em END,
-        aprovado_tripulante_em = CASE WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END,
-        aprovado_tripulante_2_em = CASE WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_2_em END,
-        pdf_url = CASE WHEN ? = 1 THEN NULL ELSE pdf_url END,
-        pdf_path = CASE WHEN ? = 1 THEN NULL ELSE pdf_path END,
-        atualizado_em = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).bind(
-      body.numero_voo || null, body.cliente_id || null, body.socio_id || null,
-      aeronaveId, aeronave?.matricula_registro || body.matricula_aeronave || null, body.rota || null, dataInicio || null, dataFim || null,
-      body.quantidade_dias != null ? Number(body.quantidade_dias) : null, body.tripulacao_id || null, body.nome_tripulante || null,
-      body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
-      Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0), Number(body.total_alimentacao || 0),
-      Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
-      Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0),
-      emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0,
-      emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0, emAjuste ? 1 : 0,
-      emAjuste ? 1 : 0, emAjuste ? 1 : 0, id,
-    ).run()
-    if (emAjuste) {
+    const novoStatus = statusAtual === 'finalizado' ? 'finalizado' : statusRelatorioViagem(body.status || statusAtual)
+    await db.prepare(`UPDATE relatorio_despesa_viagem SET
+        numero_relatorio = COALESCE(?1, numero_relatorio), numero_voo = ?2, cliente_id = ?3, socio_id = ?4,
+        aeronave_id = ?5, matricula_aeronave = ?6, rota = COALESCE(?7, rota), data_inicio = ?8, data_fim = ?9,
+        quantidade_dias = COALESCE(?10, quantidade_dias), tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
+        despesas = COALESCE(?, despesas), status = ?, total_valor = ?, total_combustivel = ?, total_hospedagem = ?, total_alimentacao = ?,
+        total_transporte = ?, total_outros = ?, total_tripulacao = ?, total_tripulante_1 = ?, total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?,
+        pdf_url = CASE WHEN ? = 1 THEN NULL ELSE pdf_url END, pdf_path = CASE WHEN ? = 1 THEN NULL ELSE pdf_path END,
+        atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(numero || null, numeroVoo, clienteId, socioId, aeronaveId, aeronave.matricula_registro || null,
+        body.rota === undefined ? null : String(body.rota || '').trim(), dataInicio, dataFim,
+        body.quantidade_dias != null ? Number(body.quantidade_dias) : null, body.tripulacao_id || null, body.nome_tripulante || null,
+        body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
+        Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0), Number(body.total_alimentacao || 0),
+        Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
+        Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), documentoDependenteAlterado ? 1 : 0, documentoDependenteAlterado ? 1 : 0, id).run()
+    if (identificadoresAlterados) {
+      await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, usuario_id, motivo)
+        VALUES (?1, 'relatorio_despesa_viagem', ?2, 'ALTERACAO_IDENTIFICADORES', ?3, ?4)`).bind(
+        uuid(), id, user.id, JSON.stringify({ numero_anterior: atual.numero_relatorio || null, numero_novo: numero || null, cliente_anterior: atual.cliente_id || null, cliente_novo: clienteId, socio_anterior: atual.socio_id || null, socio_novo: socioId, aeronave_anterior: atual.aeronave_id || null, aeronave_nova: aeronaveId }),
+      ).run().catch((error) => log.warn('[relatorio-despesa-viagem:auditoria-numero]', error?.message || error))
+    }
+    if (documentoDependenteAlterado) {
+      if (atual.pdf_path) await shareBrasilBucket(c).delete(atual.pdf_path).catch(() => undefined)
       await db.prepare("UPDATE lancamentos SET url_doc = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1").bind(id).run()
     }
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:atualizar]', error?.message || error)
-    return c.json({ error: error?.message || 'falha_ao_atualizar_relatorio' }, 500)
+    return c.json({ error: error?.message || 'falha_ao_atualizar_relatorio' }, 400)
   }
 })
-
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
