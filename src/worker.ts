@@ -3359,7 +3359,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     const id = c.req.param('id')
     const db = c.env.SHARE_DB
     const atual = await db.prepare(`SELECT id, status, numero_relatorio, numero_voo, cliente_id, socio_id, aeronave_id, matricula_aeronave,
-      data_inicio, data_fim, pdf_path, enviado_para_tripulante_em, enviado_para_tripulante_2_em,
+      rota, tripulacao_id, nome_tripulante, data_inicio, data_fim, pdf_path, enviado_para_tripulante_em, enviado_para_tripulante_2_em,
       aprovado_tripulante_1_em, aprovado_tripulante_2_em, aprovado_tripulante_em,
       status_aprovacao_tripulante, status_aprovacao_tripulante_2
       FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<any>()
@@ -3388,8 +3388,13 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     const socioId = body.socio_id === undefined ? (atual.socio_id ? String(atual.socio_id).trim() : null) : (String(body.socio_id || '').trim() || null)
     const aeronaveId = body.aeronave_id === undefined ? String(atual.aeronave_id || '').trim() : String(body.aeronave_id || '').trim()
     const numeroVoo = body.numero_voo === undefined ? (atual.numero_voo ? String(atual.numero_voo).trim() : null) : (String(body.numero_voo || '').trim() || null)
+    const rota = body.rota === undefined ? String(atual.rota || '').trim() : String(body.rota || '').trim()
+    const tripulacaoId = body.tripulacao_id === undefined ? String(atual.tripulacao_id || '').trim() : String(body.tripulacao_id || '').trim()
+    const nomeTripulante = body.nome_tripulante === undefined ? String(atual.nome_tripulante || '').trim() : String(body.nome_tripulante || '').trim()
     if (!clienteId) return c.json({ error: 'cliente_obrigatorio' }, 400)
     if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
+    if (!rota) return c.json({ error: 'trecho_obrigatorio' }, 400)
+    if (!tripulacaoId && !nomeTripulante) return c.json({ error: 'tripulante_obrigatorio' }, 400)
     const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
     if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada', aeronave_id: aeronaveId }, 400)
     if (numeroVoo) {
@@ -3411,7 +3416,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     const novoStatus = statusAtual === 'finalizado' ? 'finalizado' : statusRelatorioViagem(body.status || statusAtual)
     const updateResult = await db.prepare(`UPDATE relatorio_despesa_viagem SET
         numero_relatorio = COALESCE(?1, numero_relatorio), numero_voo = ?2, cliente_id = ?3, socio_id = ?4,
-        aeronave_id = ?5, matricula_aeronave = ?6, rota = COALESCE(?7, rota), data_inicio = ?8, data_fim = ?9,
+        aeronave_id = ?5, matricula_aeronave = ?6, rota = ?7, data_inicio = ?8, data_fim = ?9,
         quantidade_dias = COALESCE(?10, quantidade_dias), tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
         despesas = COALESCE(?, despesas), status = ?, total_valor = ?, total_combustivel = ?, total_hospedagem = ?, total_alimentacao = ?,
         total_transporte = ?, total_outros = ?, total_tripulacao = ?, total_tripulante_1 = ?, total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?,
@@ -3420,8 +3425,8 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
           AND (? = 0 OR lower(COALESCE(status, 'rascunho')) = 'rascunho')
           AND (? = 0 OR NOT EXISTS (SELECT 1 FROM relatorio_despesa_viagem outro WHERE upper(trim(outro.numero_relatorio)) = upper(?) AND outro.id <> ?))`)
       .bind(numero || null, numeroVoo, clienteId, socioId, aeronaveId, aeronave.matricula_registro || null,
-        body.rota === undefined ? null : String(body.rota || '').trim(), dataInicio, dataFim,
-        body.quantidade_dias != null ? Number(body.quantidade_dias) : null, body.tripulacao_id || null, body.nome_tripulante || null,
+        rota, dataInicio, dataFim,
+        body.quantidade_dias != null ? Number(body.quantidade_dias) : null, tripulacaoId || null, nomeTripulante || null,
         body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
         Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0), Number(body.total_alimentacao || 0),
         Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
