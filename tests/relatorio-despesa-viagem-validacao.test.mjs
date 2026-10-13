@@ -5,6 +5,9 @@ import { calcularVencimentoReembolsoTripulante } from "../src/relatorioFinanceir
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
 const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
+const inicioEnvioCliente = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente'");
+const fimEnvioCliente = worker.indexOf("app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token'", inicioEnvioCliente);
+const rotaEnvioCliente = worker.slice(inicioEnvioCliente, fimEnvioCliente);
 const inicioPatch = worker.indexOf("app.patch('/api/financeiro/relatorios-despesa-viagem/:id'");
 const fimPatch = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar'");
 const rotaAtualizacao = worker.slice(inicioPatch, fimPatch);
@@ -52,6 +55,13 @@ test("aprovação persiste vencimento e normaliza cliente/data de emissão antes
   assert.match(financeiro, /cliente_id: kind === 'CLIENTE' \? clienteLancamentoId : null/);
   assert.match(worker, /persistirMetadadosFinanceirosRelatorio\(c\.env\.SHARE_DB, id, userId, null, false, dataVencimentoReembolso\)/);
   assert.match(financeiro, /addTripulantePayableStatements\(/);
+});
+
+test("envio ao cliente também só grava cliente_id se existir na tabela alvo da FK", () => {
+  assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
+  assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
+  assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);
+  assert.match(rotaEnvioCliente, /\.bind\(cotista\.id, clienteIdLancamentoFk, 'SHARE BRASIL'/);
 });
 
 test("listagem autenticada inclui comprovantes por despesa sem expor o caminho de armazenamento", () => {

@@ -145,7 +145,7 @@ async function findTripulanteUserId(db: D1Database, tripulacaoId: unknown): Prom
   return nullableText(row?.user_id)
 }
 
-async function findLancamentoClientId(db: D1Database, clientId: unknown): Promise<string | null> {
+export async function findLancamentoClientId(db: D1Database, clientId: unknown): Promise<string | null> {
   const id = text(clientId)
   if (!id) return null
   // lancamentos.cliente_id aponta para clientes(id), mas o ID do relatório
