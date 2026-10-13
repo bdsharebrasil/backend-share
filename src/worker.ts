@@ -3337,6 +3337,16 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     const body = await c.req.json<Record<string, any>>().catch(() => null)
     if (!body) return c.json({ error: 'payload_invalido' }, 400)
 
+    const numeroAnterior = String(atual.numero_relatorio || '').trim()
+    const numeroRecebido = body.numero_relatorio === undefined ? numeroAnterior : String(body.numero_relatorio ?? '').trim()
+    if (body.numero_relatorio !== undefined && numeroRecebido !== numeroAnterior) {
+      if (statusAtual !== 'rascunho') return c.json({ error: 'numero_relatorio_alteravel_somente_em_rascunho' }, 409)
+      if (!numeroRecebido) return c.json({ error: 'numero_relatorio_obrigatorio' }, 400)
+      if (numeroRecebido.length > 100 || !/^REL-[A-Z0-9]+-\d{3,}\/\d{2} [A-Z0-9][A-Z0-9 -]{0,29}$/.test(numeroRecebido)) return c.json({ error: 'formato_numero_relatorio_invalido' }, 400)
+      const colisao = await db.prepare('SELECT id FROM relatorio_despesa_viagem WHERE upper(trim(numero_relatorio)) = upper(?1) AND id <> ?2 LIMIT 1').bind(numeroRecebido, id).first<{ id: string }>()
+      if (colisao) return c.json({ error: 'numero_relatorio_ja_utilizado' }, 409)
+    }
+    const numeroFoiAlterado = numeroRecebido !== numeroAnterior
     const clienteId = body.cliente_id === undefined ? String(atual.cliente_id || '').trim() : String(body.cliente_id || '').trim()
     const socioId = body.socio_id === undefined ? (atual.socio_id ? String(atual.socio_id).trim() : null) : (String(body.socio_id || '').trim() || null)
     const aeronaveId = body.aeronave_id === undefined ? String(atual.aeronave_id || '').trim() : String(body.aeronave_id || '').trim()
@@ -3354,36 +3364,57 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) return c.json({ error: 'datas_obrigatorias' }, 400)
     if (dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
     const identificadoresAlterados = clienteId !== String(atual.cliente_id || '').trim() || socioId !== (atual.socio_id ? String(atual.socio_id).trim() : null) || aeronaveId !== String(atual.aeronave_id || '').trim() || dataInicio.slice(0, 4) !== String(atual.data_inicio || '').slice(0, 4)
-    const documentoDependenteAlterado = identificadoresAlterados || numeroVoo !== (atual.numero_voo ? String(atual.numero_voo).trim() : null)
-    const numero = identificadoresAlterados
-      ? await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
-      : undefined
+    const documentoDependenteAlterado = identificadoresAlterados || numeroVoo !== (atual.numero_voo ? String(atual.numero_voo).trim() : null) || numeroFoiAlterado
+    const numero = numeroFoiAlterado
+      ? numeroRecebido
+      : identificadoresAlterados && statusAtual === 'rascunho'
+        ? await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
+        : undefined
     const despesas = body.despesas === undefined ? undefined : JSON.stringify(despesasRelatorioViagem(body.despesas))
     const novoStatus = statusAtual === 'finalizado' ? 'finalizado' : statusRelatorioViagem(body.status || statusAtual)
-    await db.prepare(`UPDATE relatorio_despesa_viagem SET
+    const updateResult = await db.prepare(`UPDATE relatorio_despesa_viagem SET
         numero_relatorio = COALESCE(?1, numero_relatorio), numero_voo = ?2, cliente_id = ?3, socio_id = ?4,
         aeronave_id = ?5, matricula_aeronave = ?6, rota = COALESCE(?7, rota), data_inicio = ?8, data_fim = ?9,
         quantidade_dias = COALESCE(?10, quantidade_dias), tripulacao_id = ?, nome_tripulante = ?, tripulante_id_2 = ?, nome_tripulante_2 = ?, observacoes = ?,
         despesas = COALESCE(?, despesas), status = ?, total_valor = ?, total_combustivel = ?, total_hospedagem = ?, total_alimentacao = ?,
         total_transporte = ?, total_outros = ?, total_tripulacao = ?, total_tripulante_1 = ?, total_tripulante_2 = ?, total_cliente = ?, total_sharebrasil = ?,
         pdf_url = CASE WHEN ? = 1 THEN NULL ELSE pdf_url END, pdf_path = CASE WHEN ? = 1 THEN NULL ELSE pdf_path END,
-        atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`)
+        atualizado_em = CURRENT_TIMESTAMP WHERE id = ?
+          AND (? = 0 OR lower(COALESCE(status, 'rascunho')) = 'rascunho')
+          AND (? = 0 OR NOT EXISTS (SELECT 1 FROM relatorio_despesa_viagem outro WHERE upper(trim(outro.numero_relatorio)) = upper(?) AND outro.id <> ?))`)
       .bind(numero || null, numeroVoo, clienteId, socioId, aeronaveId, aeronave.matricula_registro || null,
         body.rota === undefined ? null : String(body.rota || '').trim(), dataInicio, dataFim,
         body.quantidade_dias != null ? Number(body.quantidade_dias) : null, body.tripulacao_id || null, body.nome_tripulante || null,
         body.tripulante_id_2 || null, body.nome_tripulante_2 || null, body.observacoes || null, despesas, novoStatus,
         Number(body.total_valor || 0), Number(body.total_combustivel || 0), Number(body.total_hospedagem || 0), Number(body.total_alimentacao || 0),
         Number(body.total_transporte || 0), Number(body.total_outros || 0), Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0),
-        Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), documentoDependenteAlterado ? 1 : 0, documentoDependenteAlterado ? 1 : 0, id).run()
+        Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), documentoDependenteAlterado ? 1 : 0, documentoDependenteAlterado ? 1 : 0, id,
+        numero && numero !== numeroAnterior ? 1 : 0, numero && numero !== numeroAnterior ? 1 : 0, numero || numeroAnterior, id).run()
+    if (!updateResult.meta.changes) return c.json({ error: numero && numero !== numeroAnterior ? 'numero_relatorio_ja_utilizado_ou_relatorio_alterado' : 'relatorio_alterado_concorrente' }, 409)
+    if (numeroFoiAlterado) {
+      await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, usuario_id, motivo)
+        VALUES (?1, 'relatorio_despesa_viagem', ?2, 'ALTERACAO_NUMERO_RELATORIO', ?3, ?4)`).bind(
+        uuid(), id, user.id, JSON.stringify({ numero_anterior: numeroAnterior, numero_novo: numeroRecebido, usuario_id: user.id, alterado_em: new Date().toISOString() }),
+      ).run()
+    }
     if (identificadoresAlterados) {
       await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, usuario_id, motivo)
         VALUES (?1, 'relatorio_despesa_viagem', ?2, 'ALTERACAO_IDENTIFICADORES', ?3, ?4)`).bind(
         uuid(), id, user.id, JSON.stringify({ numero_anterior: atual.numero_relatorio || null, numero_novo: numero || null, cliente_anterior: atual.cliente_id || null, cliente_novo: clienteId, socio_anterior: atual.socio_id || null, socio_novo: socioId, aeronave_anterior: atual.aeronave_id || null, aeronave_nova: aeronaveId }),
       ).run().catch((error) => log.warn('[relatorio-despesa-viagem:auditoria-numero]', error?.message || error))
     }
-    if (documentoDependenteAlterado) {
+    if (documentoDependenteAlterado || numeroFoiAlterado) {
       if (atual.pdf_path) await shareBrasilBucket(c).delete(atual.pdf_path).catch(() => undefined)
-      await db.prepare("UPDATE lancamentos SET url_doc = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1").bind(id).run()
+      if (numeroFoiAlterado) {
+        await db.prepare(`UPDATE lancamentos SET numero_doc = ?1,
+          descricao = replace(descricao, ?2, ?3), observacoes = replace(observacoes, ?2, ?3),
+          url_doc = NULL, atualizado_em = CURRENT_TIMESTAMP
+          WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?4`).bind(
+          numeroRecebido, numeroAnterior, numeroRecebido, id,
+        ).run()
+      } else {
+        await db.prepare("UPDATE lancamentos SET url_doc = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1").bind(id).run()
+      }
     }
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) {
@@ -3413,6 +3444,40 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     return c.json({ error: error?.message || 'falha_ao_finalizar_relatorio' }, 400)
   }
 })
+app.post('/api/financeiro/relatorios-despesa-viagem/:id/voltar-rascunho', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    await garantirTabelaRelatorioDespesaViagem(c)
+    await validateWorkerSchema(c, [{ table: 'relatorio_despesa_viagem', columns: ['token_aprovacao_tripulante_1', 'token_aprovacao_tripulante_2'] }])
+    const id = c.req.param('id')
+    const db = c.env.SHARE_DB
+    const atual = await db.prepare(`SELECT status, numero_relatorio, pdf_path, token_aprovacao_tripulante_1, token_aprovacao_tripulante_2
+      FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<any>()
+    if (!atual) return c.notFound()
+    if (statusRelatorioViagem(atual.status) !== 'finalizado') return c.json({ error: 'somente_relatorios_finalizados_podem_voltar_a_rascunho' }, 409)
+    if (atual.token_aprovacao_tripulante_1 || atual.token_aprovacao_tripulante_2) return c.json({ error: 'relatorio_com_token_de_aprovacao_nao_pode_voltar_a_rascunho' }, 409)
+    const result = await db.prepare(`UPDATE relatorio_despesa_viagem SET status = 'rascunho',
+      aprovado_tripulante_1_em = NULL, aprovado_tripulante_2_em = NULL, aprovado_tripulante_em = NULL,
+      enviado_para_tripulante_em = NULL, enviado_para_tripulante_2_em = NULL, enviado_para_cliente_em = NULL,
+      status_aprovacao_tripulante = NULL, status_aprovacao_tripulante_2 = NULL,
+      motivo_reprovacao_tripulante_1 = NULL, motivo_reprovacao_tripulante_2 = NULL,
+      pdf_url = NULL, pdf_path = NULL, atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ?1 AND lower(COALESCE(status, '')) = 'finalizado'
+        AND COALESCE(trim(token_aprovacao_tripulante_1), '') = '' AND COALESCE(trim(token_aprovacao_tripulante_2), '') = ''`).bind(id).run()
+    if (!result.meta.changes) return c.json({ error: 'relatorio_alterado_concorrente_ou_com_token_de_aprovacao' }, 409)
+    await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, usuario_id, motivo)
+      VALUES (?1, 'relatorio_despesa_viagem', ?2, 'VOLTAR_RASCUNHO', ?3, ?4)`).bind(
+      uuid(), id, user.id, JSON.stringify({ numero_relatorio: atual.numero_relatorio || null, usuario_id: user.id, alterado_em: new Date().toISOString() }),
+    ).run()
+    if (atual.pdf_path) await shareBrasilBucket(c).delete(atual.pdf_path).catch(() => undefined)
+    await db.prepare("UPDATE lancamentos SET url_doc = NULL, atualizado_em = CURRENT_TIMESTAMP WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1").bind(id).run()
+    return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:voltar-rascunho]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_voltar_rascunho' }, 400)
+  }
+})
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -3430,7 +3495,8 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     if (statusRelatorioViagem(relatorio.status) === 'rascunho') return c.json({ error: 'relatorio_precisa_ser_finalizado' }, 409)
     const tripulanteId = pos === 1 ? relatorio.tripulacao_id : relatorio.tripulante_id_2
     if (!tripulanteId) return c.json({ error: 'tripulante_nao_informado' }, 400)
-    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = ?, ${sentColumn} = CURRENT_TIMESTAMP, status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(token, id).run()
+    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = ?, ${sentColumn} = CURRENT_TIMESTAMP, status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, '')) IN ('finalizado', 'aguardando_aprovacao', 'ajuste_necessario')`).bind(token, id).run()
+    if (!envio.meta.changes) return c.json({ error: 'relatorio_nao_pode_ser_enviado_para_aprovacao' }, 409)
     const frontendOrigin = c.req.header('origin') || new URL(c.req.url).origin
     const link = `${frontendOrigin}/aprovar-relatorio?token=${encodeURIComponent(token)}`
     const mensagem = `Olá tripulante, segue a sua despesa de viagem para aprovação\n\n${link}`
