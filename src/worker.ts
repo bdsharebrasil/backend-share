@@ -17,7 +17,7 @@ import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
-import { sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
+import { calcularVencimentoReembolsoTripulante, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
 import { validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
 import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from './lib/schedule'
@@ -3724,8 +3724,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     if (!updated) return c.notFound()
     if (body.aprovado && updated.status === 'aprovado') {
       try {
-        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, userId)
-        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, userId)
+        const dataVencimentoReembolso = calcularVencimentoReembolsoTripulante(updated)
+        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, userId, null, false, dataVencimentoReembolso)
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, { ...updated, data_vencimento_reembolso: dataVencimentoReembolso }, userId)
+        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, userId, null, false, dataVencimentoReembolso)
       } catch (error: any) {
         log.error('[relatorio-despesa-viagem:aprovacao-direta-financeiro]', error?.message || error)
         return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'A aprovação foi registrada, mas a conta a pagar não pôde ser gerada. Reenvie a aprovação para tentar novamente.' }, 500)
@@ -3754,8 +3756,10 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', a
   const relatorioAprovado = await buscarRelatorioViagemComNomes(c, row.id)
   if (!relatorioAprovado) return c.notFound()
   try {
-    await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, relatorioAprovado, user.id)
-    await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id)
+    const dataVencimentoReembolso = calcularVencimentoReembolsoTripulante(relatorioAprovado)
+    await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id, null, false, dataVencimentoReembolso)
+    await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, { ...relatorioAprovado, data_vencimento_reembolso: dataVencimentoReembolso }, user.id)
+    await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id, null, false, dataVencimentoReembolso)
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:programacao-financeira]', error?.message || error)
     return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'O relatório está aprovado, mas a conta a pagar não pôde ser gerada. Tente novamente.' }, 500)
@@ -3930,8 +3934,10 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
       const updated = await buscarRelatorioViagemComNomes(c, row.id)
       if (!updated) return c.notFound()
       try {
-        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, extractSupabaseUserId(c))
-        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, extractSupabaseUserId(c))
+        const dataVencimentoReembolso = calcularVencimentoReembolsoTripulante(updated)
+        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, extractSupabaseUserId(c), null, false, dataVencimentoReembolso)
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, { ...updated, data_vencimento_reembolso: dataVencimentoReembolso }, extractSupabaseUserId(c))
+        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, extractSupabaseUserId(c), null, false, dataVencimentoReembolso)
       } catch (error: any) {
         log.error('[relatorio-despesa-viagem:aprovacao-publica-financeiro]', error?.message || error)
         return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'A aprovação foi registrada, mas a conta a pagar não pôde ser gerada. Reenvie a aprovação para tentar novamente.' }, 500)

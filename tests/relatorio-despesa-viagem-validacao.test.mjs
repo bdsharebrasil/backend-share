@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { calcularVencimentoReembolsoTripulante } from "../src/relatorioFinanceiro.ts";
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
 const inicioPatch = worker.indexOf("app.patch('/api/financeiro/relatorios-despesa-viagem/:id'");
 const fimPatch = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar'");
 const rotaAtualizacao = worker.slice(inicioPatch, fimPatch);
@@ -35,7 +37,15 @@ test("aprovação já gravada pode repetir a sincronização financeira sem dupl
   assert.match(rotaPublica, /retryApprovedSync = body\.aprovado === true && currentApprovalStatus === 'aprovado' && statusRelatorioViagem\(row\.status\) === 'aprovado'/);
   assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*await c\.env\.SHARE_DB\.prepare\(`UPDATE relatorio_despesa_viagem/);
   assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*try \{\s*await notifyReportDecision/);
-  assert.match(rotaPublica, /await sincronizarRelatorioViagemFinanceiro\(c\.env\.SHARE_DB, updated/);
+  assert.match(rotaPublica, /await sincronizarRelatorioViagemFinanceiro\(c\.env\.SHARE_DB, \{ \.\.\.updated, data_vencimento_reembolso: dataVencimentoReembolso \}/);
+});
+
+test("aprovação persiste vencimento do reembolso e usa data de criação do relatório na despesa Share", () => {
+  assert.equal(calcularVencimentoReembolsoTripulante({ aprovado_tripulante_1_em: "2026-10-13T20:00:00.000Z" }), "2026-10-16");
+  assert.match(financeiro, /data_emissao: dateValue\(report\.criado_em, dateValue\(report\.data_inicio/);
+  assert.match(financeiro, /cliente_id = \?, data_emissao = \?, data_vencimento = \?/);
+  assert.match(worker, /persistirMetadadosFinanceirosRelatorio\(c\.env\.SHARE_DB, id, userId, null, false, dataVencimentoReembolso\)/);
+  assert.match(financeiro, /addTripulantePayableStatements\(/);
 });
 
 test("listagem autenticada inclui comprovantes por despesa sem expor o caminho de armazenamento", () => {

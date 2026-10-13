@@ -366,8 +366,8 @@ export async function sincronizarRelatorioViagemFinanceiro(
           LIMIT 1`).bind(reportId, `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`).first<{ id: string }>()
         lancamentoId = text(lancamentoExistente?.id) || null
         if (lancamentoId) {
-          await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, periodicidade = 'EVENTUAL', url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_vencimento = ?
-            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, text(report.cliente_id) || null, existingDueDate, lancamentoId).run()
+          await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, periodicidade = 'EVENTUAL', url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_emissao = ?, data_vencimento = ?
+            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, text(report.cliente_id) || null, dateValue(report.criado_em, dateValue(report.data_inicio, existingDueDate)), existingDueDate, lancamentoId).run()
         } else if (payer === 'tripulante_1' || payer === 'tripulante_2') {
           const tripulanteId = payer === 'tripulante_1' ? report.tripulacao_id : report.tripulante_id_2
           const tripulanteUserId = await findTripulanteUserId(db, tripulanteId)
@@ -376,7 +376,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
             id: lancamentoId,
             aeronave_id: text(report.aeronave_id),
             colaborador_id: tripulanteUserId,
-            data_emissao: dateValue(report.data_inicio, existingDueDate),
+            data_emissao: dateValue(report.criado_em, dateValue(report.data_inicio, existingDueDate)),
             data_vencimento: existingDueDate,
             data_pagamento: null,
             descricao: description,
