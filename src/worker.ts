@@ -3285,10 +3285,28 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
       LEFT JOIN aeronave a ON a.id = r.aeronave_id
       WHERE t1.user_id = ?1 OR t2.user_id = ?1
       ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(userId).all<Record<string, any>>()
-    return c.json({ relatorios: (rows.results || []).map((row) => ({
+    const reportRows = rows.results || []
+    const anexosPorRelatorio = new Map<string, Record<string, any>[]>()
+    if (reportRows.length) {
+      const placeholders = reportRows.map(() => '?').join(', ')
+      const anexos = await c.env.SHARE_DB.prepare(`SELECT id, relatorio_despesa_viagem_id, indice_despesa, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em
+        FROM relatorio_despesa_viagem_anexos
+        WHERE relatorio_despesa_viagem_id IN (${placeholders})
+        ORDER BY relatorio_despesa_viagem_id, indice_despesa, criado_em`).bind(...reportRows.map((row) => row.id)).all<Record<string, any>>()
+      for (const anexo of anexos.results || []) {
+        const lista = anexosPorRelatorio.get(anexo.relatorio_despesa_viagem_id) || []
+        lista.push({
+          ...anexo,
+          url_arquivo: `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(anexo.relatorio_despesa_viagem_id)}/anexos/${encodeURIComponent(anexo.id)}/arquivo`,
+        })
+        anexosPorRelatorio.set(anexo.relatorio_despesa_viagem_id, lista)
+      }
+    }
+    return c.json({ relatorios: reportRows.map((row) => ({
       ...row,
       status: statusRelatorioViagem(row.status),
       despesas: despesasRelatorioViagem(row.despesas),
+      anexos: anexosPorRelatorio.get(row.id) || [],
       pagamento_status: Number(row.pagamentos_total || 0) > 0
         ? Number(row.pagamentos_concluidos || 0) === Number(row.pagamentos_total) ? 'PAGO' : 'PENDENTE'
         : 'NAO_PROGRAMADO',

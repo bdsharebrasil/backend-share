@@ -6,6 +6,9 @@ const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf
 const inicioPatch = worker.indexOf("app.patch('/api/financeiro/relatorios-despesa-viagem/:id'");
 const fimPatch = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar'");
 const rotaAtualizacao = worker.slice(inicioPatch, fimPatch);
+const inicioMinhas = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem/minhas'");
+const fimMinhas = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem',", inicioMinhas);
+const rotaMinhas = worker.slice(inicioMinhas, fimMinhas);
 
 test("criação de relatório exige trecho e tripulante", () => {
   const inicioCriacao = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem'");
@@ -33,4 +36,12 @@ test("aprovação já gravada pode repetir a sincronização financeira sem dupl
   assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*await c\.env\.SHARE_DB\.prepare\(`UPDATE relatorio_despesa_viagem/);
   assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*try \{\s*await notifyReportDecision/);
   assert.match(rotaPublica, /await sincronizarRelatorioViagemFinanceiro\(c\.env\.SHARE_DB, updated/);
+});
+
+test("listagem autenticada inclui comprovantes por despesa sem expor o caminho de armazenamento", () => {
+  assert.match(rotaMinhas, /FROM relatorio_despesa_viagem_anexos/);
+  assert.match(rotaMinhas, /WHERE relatorio_despesa_viagem_id IN \(\$\{placeholders\}\)/);
+  assert.match(rotaMinhas, /url_arquivo: `\/api\/financeiro\/relatorios-despesa-viagem/);
+  assert.match(rotaMinhas, /anexos: anexosPorRelatorio\.get\(row\.id\) \|\| \[\]/);
+  assert.doesNotMatch(rotaMinhas, /caminho_arquivo/);
 });
