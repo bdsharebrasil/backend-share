@@ -3487,7 +3487,6 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     const id = c.req.param('id')
     const body = await c.req.json<{ tripulante_pos?: 1 | 2 }>().catch(() => ({} as { tripulante_pos?: 1 | 2 }))
     const pos = body.tripulante_pos === 2 ? 2 : 1
-    const token = crypto.randomUUID()
     const tokenColumn = pos === 1 ? 'token_aprovacao_tripulante_1' : 'token_aprovacao_tripulante_2'
     const sentColumn = pos === 1 ? 'enviado_para_tripulante_em' : 'enviado_para_tripulante_2_em'
     const relatorio = await buscarRelatorioViagemComNomes(c, id)
@@ -3495,10 +3494,15 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     if (statusRelatorioViagem(relatorio.status) === 'rascunho') return c.json({ error: 'relatorio_precisa_ser_finalizado' }, 409)
     const tripulanteId = pos === 1 ? relatorio.tripulacao_id : relatorio.tripulante_id_2
     if (!tripulanteId) return c.json({ error: 'tripulante_nao_informado' }, 400)
-    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = ?, ${sentColumn} = CURRENT_TIMESTAMP, status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, '')) IN ('finalizado', 'aguardando_aprovacao', 'ajuste_necessario')`).bind(token, id).run()
+    const tokenAtual = String(relatorio[tokenColumn] || '').trim()
+    const novoToken = tokenAtual || crypto.randomUUID()
+    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = COALESCE(NULLIF(trim(${tokenColumn}), ''), ?), ${sentColumn} = COALESCE(NULLIF(trim(${sentColumn}), ''), CURRENT_TIMESTAMP), status = CASE WHEN status = 'finalizado' THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, '')) IN ('finalizado', 'aguardando_aprovacao', 'ajuste_necessario')`).bind(novoToken, id).run()
     if (!envio.meta.changes) return c.json({ error: 'relatorio_nao_pode_ser_enviado_para_aprovacao' }, 409)
-    const frontendOrigin = c.req.header('origin') || new URL(c.req.url).origin
-    const link = `${frontendOrigin}/aprovar-relatorio?token=${encodeURIComponent(token)}`
+    const dadosEnvio = await c.env.SHARE_DB.prepare(`SELECT numero_relatorio, ${tokenColumn} AS token FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<{ numero_relatorio: string; token: string }>()
+    if (!dadosEnvio?.token) return c.json({ error: 'token_de_aprovacao_nao_persistido' }, 500)
+    const token = dadosEnvio.token
+    const numeroRelatorio = encodeURI(String(dadosEnvio.numero_relatorio || ''))
+    const link = `https://gestao.share-brasil.com/aprovar-relatorio?${numeroRelatorio}#${encodeURIComponent(token)}`
     const mensagem = `Olá tripulante, segue a sua despesa de viagem para aprovação\n\n${link}`
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id), token, link, mensagem })
   } catch (error: any) {
