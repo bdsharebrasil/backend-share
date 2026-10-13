@@ -48,12 +48,16 @@ export async function usuarioTemPapel(
 }
 
 async function usuarioAtivo(db: FinanceiroAuthDb, userId: string): Promise<boolean> {
-  const row = await db.prepare(`
-    SELECT 1 FROM user_profiles
-     WHERE id = ? AND (status IS NULL OR lower(status) IN ('ativo', 'active'))
+  const profile = await db.prepare(`
+    SELECT status FROM user_profiles WHERE id = ? LIMIT 1
+  `).bind(userId).first<{ status?: string | null }>()
+  if (profile) return profile.status == null || ['ativo', 'active'].includes(profile.status.toLowerCase())
+  const crew = await db.prepare(`
+    SELECT 1 FROM tripulacao
+     WHERE user_id = ? AND lower(COALESCE(status, 'ativo')) IN ('ativo', 'active')
      LIMIT 1
   `).bind(userId).first()
-  return Boolean(row)
+  return Boolean(crew)
 }
 
 async function validarUsuarioSupabase(c: FinanceiroAuthContext): Promise<string | null> {

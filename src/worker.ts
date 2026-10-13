@@ -32,6 +32,7 @@ import {
   authenticatedColaboradorToken,
   checkInternalAuth,
   extractSupabaseUserId,
+  getAuthenticatedUserId,
   isColaboradorManager,
   isTaskManager,
   requireAuthenticatedUser,
@@ -3256,8 +3257,8 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
 })
 
 app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
-  const user = await authenticatedColaborador(c)
-  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const userId = await getAuthenticatedUserId(c)
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const rows = await c.env.SHARE_DB.prepare(`SELECT r.*,
@@ -3283,7 +3284,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
       LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
       LEFT JOIN aeronave a ON a.id = r.aeronave_id
       WHERE t1.user_id = ?1 OR t2.user_id = ?1
-      ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(user.id).all<Record<string, any>>()
+      ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(userId).all<Record<string, any>>()
     return c.json({ relatorios: (rows.results || []).map((row) => ({
       ...row,
       status: statusRelatorioViagem(row.status),
@@ -3668,8 +3669,8 @@ app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token/comprovantes/:an
   }
 })
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
-  const colaborador = await authenticatedColaborador(c)
-  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const userId = await getAuthenticatedUserId(c)
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
@@ -3677,7 +3678,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     const pos = body.tripulante_pos === 2 ? 2 : 1
     const report = await c.env.SHARE_DB.prepare(`SELECT r.*, t1.user_id AS user1_id, t2.user_id AS user2_id FROM relatorio_despesa_viagem r LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2 WHERE r.id = ?1`).bind(id).first<any>()
     if (!report) return c.notFound()
-    if ((pos === 1 ? report.user1_id : report.user2_id) !== colaborador.id) return c.json({ error: 'tripulante_nao_autorizado_para_este_relatorio' }, 403)
+    if ((pos === 1 ? report.user1_id : report.user2_id) !== userId) return c.json({ error: 'tripulante_nao_autorizado_para_este_relatorio' }, 403)
     const approvalStatus = String(pos === 1 ? report.status_aprovacao_tripulante || '' : report.status_aprovacao_tripulante_2 || '').toLowerCase()
     if (statusRelatorioViagem(report.status) !== 'aguardando_aprovacao' || ['aprovado', 'reprovado'].includes(approvalStatus)) {
       return c.json({ error: 'relatorio_nao_esta_pendente_de_aprovacao' }, 409)
@@ -3702,14 +3703,14 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     if (!updated) return c.notFound()
     if (body.aprovado && updated.status === 'aprovado') {
       try {
-        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, colaborador.id)
-        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, colaborador.id)
+        await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, updated, userId)
+        await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, userId)
       } catch (error: any) {
         log.error('[relatorio-despesa-viagem:aprovacao-direta-financeiro]', error?.message || error)
         return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'A aprovação foi registrada, mas a conta a pagar não pôde ser gerada. Reenvie a aprovação para tentar novamente.' }, 500)
       }
     }
-    if (!body.aprovado) await notifyReportRejection(c, updated, String(body.observacoes || '').trim(), colaborador.id)
+    if (!body.aprovado) await notifyReportRejection(c, updated, String(body.observacoes || '').trim(), userId)
     return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:aprovacao-direta]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_decidir_aprovacao' }, 400) }
 })
