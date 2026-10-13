@@ -2575,8 +2575,14 @@ app.post('/api/sharebrasil/tarefas/:id/comentarios', async c => {
 app.get('/api/sharebrasil/notificacoes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await c.env.SHARE_DB.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem
+  const result = await c.env.SHARE_DB.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem,
+      r.id AS relatorio_id, r.anexos_rejeicao
     FROM tarefas_notificacoes n LEFT JOIN tarefas t ON t.id = n.id_da_tarefa
+    LEFT JOIN relatorio_despesa_viagem r ON r.id = CASE
+      WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
+        instr(t.titulo, '[RELATORIO:') + 11,
+        instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
+      ELSE NULL END
     WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all()
   return c.json({ notificacoes: result.results || [] })
 })
@@ -3029,7 +3035,7 @@ app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 
 async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [
     { table: 'relatorio_despesa_viagem_anexos', columns: ['id'] },
-    { table: 'relatorio_despesa_viagem', columns: ['id'] },
+    { table: 'relatorio_despesa_viagem', columns: ['id', 'anexos_rejeicao'] },
     { table: 'sequencia_relatorios_despesa_viagem', columns: ['codigo_cotista', 'aeronave_id', 'ano', 'ultimo_numero'] },
   ])
 }
@@ -3785,12 +3791,30 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const token = c.req.param('token')
-    const body = await c.req.json<{ aprovado?: boolean; motivo?: string }>().catch(() => ({} as { aprovado?: boolean; motivo?: string }))
+    const contentType = c.req.header('content-type') || ''
+    let body: { aprovado?: boolean; motivo?: string; anexo_rejeicao?: File | null }
+    if (contentType.includes('multipart/form-data')) {
+      const form = await c.req.formData()
+      const rawAprovado = form.get('aprovado')
+      const arquivo: unknown = form.get('anexo_rejeicao')
+      body = {
+        aprovado: rawAprovado === 'true' ? true : rawAprovado === 'false' ? false : undefined,
+        motivo: String(form.get('motivo') || ''),
+        anexo_rejeicao: arquivo instanceof File && arquivo.size > 0 ? arquivo : null,
+      }
+    } else {
+      body = await c.req.json<{ aprovado?: boolean; motivo?: string }>().catch(() => ({} as { aprovado?: boolean; motivo?: string }))
+    }
     if (body.aprovado === undefined) return c.json({ error: 'decisao_obrigatoria' }, 400)
     if (!body.aprovado && !String(body.motivo || '').trim()) return c.json({ error: 'motivo_obrigatorio_para_rejeicao' }, 400)
+    if (body.aprovado && body.anexo_rejeicao) return c.json({ error: 'anexo_rejeicao_apenas_para_recusa' }, 400)
+    if (body.anexo_rejeicao && (!['image/jpeg', 'image/png', 'image/webp'].includes(body.anexo_rejeicao.type) || body.anexo_rejeicao.size > 5 * 1024 * 1024)) {
+      return c.json({ error: 'imagem_invalida_limite_5mb_jpg_png_webp' }, 415)
+    }
     const row = await c.env.SHARE_DB.prepare(`SELECT r.*, t1.user_id AS user1_id, t2.user_id AS user2_id FROM relatorio_despesa_viagem r LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2 WHERE r.token_aprovacao_tripulante_1 = ?1 OR r.token_aprovacao_tripulante_2 = ?1 LIMIT 1`).bind(token).first<any>()
     if (!row) return c.json({ error: 'link_invalido_ou_expirado' }, 404)
     const pos = row.token_aprovacao_tripulante_1 === token ? 1 : 2
+    const decidedBy = pos === 1 ? row.user1_id : row.user2_id || ''
     const statusColumn = pos === 1 ? 'status_aprovacao_tripulante' : 'status_aprovacao_tripulante_2'
     const dateColumn = pos === 1 ? 'aprovado_tripulante_1_em' : 'aprovado_tripulante_2_em'
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
@@ -3803,8 +3827,17 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
       : nextTripulante1Status === 'aprovado' && (!requiredSecond || nextTripulante2Status === 'aprovado')
         ? 'aprovado'
         : 'aguardando_aprovacao'
-    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, row.id).run()
-    const decidedBy = pos === 1 ? row.user1_id : row.user2_id || ''
+    let anexosRejeicaoJson: string | null = null
+    if (!body.aprovado && body.anexo_rejeicao) {
+      const arquivo = body.anexo_rejeicao
+      const anexosExistentes = Array.isArray(row.anexos_rejeicao) ? row.anexos_rejeicao : (() => {
+        try { const parsed = JSON.parse(String(row.anexos_rejeicao || '[]')); return Array.isArray(parsed) ? parsed : [] } catch { return [] }
+      })()
+      const anexoId = uuid()
+      const caminho = await salvarArquivoShareBrasil(c, decidedBy || 'tripulante', arquivo, `share/relatorio_despesa_viagem/anexos_rejeicao/${row.id}/${anexoId}`)
+      anexosRejeicaoJson = JSON.stringify([...anexosExistentes, { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), caminho_arquivo: caminho, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() }])
+    }
+    await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, row.id).run()
     const updatedForNotification = await buscarRelatorioViagemComNomes(c, row.id)
     if (updatedForNotification) {
       try {
@@ -3899,6 +3932,24 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/anexos/:anexoId/arquivo',
   }
 })
 
+app.get('/api/financeiro/relatorios-despesa-viagem/:id/anexos-rejeicao/:anexoId/arquivo', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    const row = await c.env.SHARE_DB.prepare('SELECT anexos_rejeicao FROM relatorio_despesa_viagem WHERE id = ?1').bind(c.req.param('id')).first<{ anexos_rejeicao: string | null }>()
+    if (!row) return c.notFound()
+    let anexos: any[] = []
+    try { const parsed = JSON.parse(String(row.anexos_rejeicao || '[]')); if (Array.isArray(parsed)) anexos = parsed } catch { return c.json({ error: 'anexo_invalido' }, 500) }
+    const anexo = anexos.find((item) => item?.id === c.req.param('anexoId'))
+    if (!anexo?.caminho_arquivo) return c.notFound()
+    const object = await shareBrasilBucket(c).get(anexo.caminho_arquivo)
+    if (!object) return c.notFound()
+    return new Response(object.body, { headers: { 'Content-Type': anexo.tipo_arquivo || 'application/octet-stream', 'Content-Disposition': `inline; filename="${shareBrasilFileName(anexo.nome_arquivo || 'anexo-rejeicao')}"`, 'Cache-Control': 'private, no-store' } })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:anexo-rejeicao]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_anexo_rejeicao' }, 500)
+  }
+})
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
@@ -3947,6 +3998,12 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   }
 })
 
+function latestRejectionAttachmentId(report: any): string | null {
+  try {
+    const anexos = Array.isArray(report?.anexos_rejeicao) ? report.anexos_rejeicao : JSON.parse(String(report?.anexos_rejeicao || '[]'))
+    return Array.isArray(anexos) ? anexos[anexos.length - 1]?.id || null : null
+  } catch { return null }
+}
 async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report: any, reason: string, rejectedBy: string): Promise<void> {
   const db = c.env.SHARE_DB
   const recipients = await db.prepare(`SELECT id FROM user_profiles
@@ -3962,7 +4019,8 @@ async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report:
   const taskId = uuid()
   const numero = String(report.numero_relatorio || report.id)
   const mensagem = `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
-  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero} [RELATORIO:${report.id}]`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
+  const anexoMarker = latestRejectionAttachmentId(report) ? ` [ANEXO:${latestRejectionAttachmentId(report)}]` : ''
+  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero} [RELATORIO:${report.id}]${anexoMarker}`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
   for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, 'ajuste_necessario').run()
 }
 
@@ -3982,7 +4040,8 @@ async function notifyReportDecision(c: Context<{ Bindings: Bindings }>, report: 
   const mensagem = aprovado
     ? `O tripulante ${report.nome_tripulante || 'não identificado'} aprovou o relatório ${numero}. O pagamento foi lançado para programação.`
     : `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
-  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem ${aprovado ? 'aprovado' : 'rejeitado'}: ${numero}${aprovado ? '' : ` [RELATORIO:${report.id}]`}`, mensagem, decidedBy || null, JSON.stringify(uniqueRecipients)).run()
+  const anexoMarker = !aprovado && latestRejectionAttachmentId(report) ? ` [ANEXO:${latestRejectionAttachmentId(report)}]` : ''
+  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem ${aprovado ? 'aprovado' : 'rejeitado'}: ${numero}${aprovado ? '' : ` [RELATORIO:${report.id}]${anexoMarker}`}`, mensagem, decidedBy || null, JSON.stringify(uniqueRecipients)).run()
   for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, decision).run()
 }
 
