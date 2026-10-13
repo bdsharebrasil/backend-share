@@ -23,3 +23,14 @@ test("atualização rejeita campos obrigatórios vazios e preserva valores não 
   assert.match(rotaAtualizacao, /rota = \?7/);
   assert.match(rotaAtualizacao, /tripulacaoId \|\| null, nomeTripulante \|\| null/);
 });
+
+test("aprovação já gravada pode repetir a sincronização financeira sem duplicar decisão", () => {
+  const inicioPublica = worker.indexOf("app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token'");
+  const fimPublica = worker.indexOf("app.delete('/api/financeiro/relatorios-despesa-viagem/:id'", inicioPublica);
+  const rotaPublica = worker.slice(inicioPublica, fimPublica);
+
+  assert.match(rotaPublica, /retryApprovedSync = body\.aprovado === true && currentApprovalStatus === 'aprovado' && statusRelatorioViagem\(row\.status\) === 'aprovado'/);
+  assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*await c\.env\.SHARE_DB\.prepare\(`UPDATE relatorio_despesa_viagem/);
+  assert.match(rotaPublica, /if \(!retryApprovedSync\) \{\s*try \{\s*await notifyReportDecision/);
+  assert.match(rotaPublica, /await sincronizarRelatorioViagemFinanceiro\(c\.env\.SHARE_DB, updated/);
+});
