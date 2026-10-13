@@ -3306,6 +3306,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
       ...row,
       status: statusRelatorioViagem(row.status),
       despesas: despesasRelatorioViagem(row.despesas),
+      anexos_rejeicao: rejectionAttachments(row.anexos_rejeicao, row.id),
       anexos: anexosPorRelatorio.get(row.id) || [],
       pagamento_status: Number(row.pagamentos_total || 0) > 0
         ? Number(row.pagamentos_concluidos || 0) === Number(row.pagamentos_total) ? 'PAGO' : 'PENDENTE'
@@ -3692,7 +3693,20 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
-    const body = await c.req.json<{ tripulante_pos?: 1 | 2; aprovado?: boolean; observacoes?: string }>().catch(() => ({} as any))
+    let body: { tripulante_pos?: 1 | 2; aprovado?: boolean; observacoes?: string; anexo_rejeicao?: File | null }
+    if ((c.req.header('content-type') || '').includes('multipart/form-data')) {
+      const form = await c.req.formData()
+      const arquivo: unknown = form.get('anexo_rejeicao')
+      const rawAprovado = form.get('aprovado')
+      body = {
+        tripulante_pos: form.get('tripulante_pos') === '2' ? 2 : 1,
+        aprovado: rawAprovado === 'true' ? true : rawAprovado === 'false' ? false : undefined,
+        observacoes: String(form.get('observacoes') || ''),
+        anexo_rejeicao: arquivo instanceof File && arquivo.size > 0 ? arquivo : null,
+      }
+    } else {
+      body = await c.req.json().catch(() => ({} as any))
+    }
     const pos = body.tripulante_pos === 2 ? 2 : 1
     const report = await c.env.SHARE_DB.prepare(`SELECT r.*, t1.user_id AS user1_id, t2.user_id AS user2_id FROM relatorio_despesa_viagem r LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2 WHERE r.id = ?1`).bind(id).first<any>()
     if (!report) return c.notFound()
@@ -3704,6 +3718,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     }
     if (body.aprovado === undefined) return c.json({ error: 'decisao_obrigatoria' }, 400)
     if (!body.aprovado && !String(body.observacoes || '').trim()) return c.json({ error: 'motivo_obrigatorio_para_rejeicao' }, 400)
+    if (body.aprovado && body.anexo_rejeicao) return c.json({ error: 'anexo_rejeicao_apenas_para_recusa' }, 400)
+    if (body.anexo_rejeicao && (!['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'].includes(body.anexo_rejeicao.type.toLowerCase()) || body.anexo_rejeicao.size > 5 * 1024 * 1024)) {
+      return c.json({ error: 'imagem_invalida_limite_5mb_jpg_png_webp_heic' }, 415)
+    }
     const statusColumn = pos === 1 ? 'status_aprovacao_tripulante' : 'status_aprovacao_tripulante_2'
     const dateColumn = pos === 1 ? 'aprovado_tripulante_1_em' : 'aprovado_tripulante_2_em'
     const reasonColumn = pos === 1 ? 'motivo_reprovacao_tripulante_1' : 'motivo_reprovacao_tripulante_2'
@@ -3717,8 +3735,18 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
         ? 'aprovado'
         : 'aguardando_aprovacao'
     const segundoAplicavel = requerAprovacaoTripulanteRelatorio(report.despesas, 2)
+    let anexosRejeicaoJson: string | null = null
+    if (!body.aprovado && body.anexo_rejeicao) {
+      const arquivo = body.anexo_rejeicao
+      const anexoId = uuid()
+      const caminho = await salvarArquivoShareBrasil(c, userId, arquivo, `relatorio_despesa_viagem/anexos_notas/${id}`)
+      anexosRejeicaoJson = JSON.stringify([
+        ...parseRejectionAttachments(report.anexos_rejeicao),
+        { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), caminho_arquivo: caminho, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() },
+      ])
+    }
     if (!retryApprovedSync) {
-      await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, id).run()
+      await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = ?, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, id).run()
     }
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
@@ -3915,7 +3943,7 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
         try { const parsed = JSON.parse(String(row.anexos_rejeicao || '[]')); return Array.isArray(parsed) ? parsed : [] } catch { return [] }
       })()
       const anexoId = uuid()
-      const caminho = await salvarArquivoShareBrasil(c, decidedBy || 'tripulante', arquivo, `share/relatorio_despesa_viagem/anexos_rejeicao/${row.id}/${anexoId}`)
+      const caminho = await salvarArquivoShareBrasil(c, decidedBy || 'tripulante', arquivo, `relatorio_despesa_viagem/anexos_notas/${row.id}`)
       anexosRejeicaoJson = JSON.stringify([...anexosExistentes, { id: anexoId, nome_arquivo: shareBrasilFileName(arquivo.name), caminho_arquivo: caminho, tipo_arquivo: arquivo.type, tamanho_arquivo: arquivo.size, criado_em: new Date().toISOString() }])
     }
     if (!retryApprovedSync) {
@@ -4085,11 +4113,21 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   }
 })
 
-function latestRejectionAttachmentId(report: any): string | null {
+function parseRejectionAttachments(value: unknown): any[] {
   try {
-    const anexos = Array.isArray(report?.anexos_rejeicao) ? report.anexos_rejeicao : JSON.parse(String(report?.anexos_rejeicao || '[]'))
-    return Array.isArray(anexos) ? anexos[anexos.length - 1]?.id || null : null
-  } catch { return null }
+    const parsed = Array.isArray(value) ? value : JSON.parse(String(value || '[]'))
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.id === 'string') : []
+  } catch { return [] }
+}
+function rejectionAttachments(value: unknown, reportId: string): any[] {
+  return parseRejectionAttachments(value).map(({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }) => ({
+    id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em,
+    url_arquivo: `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(reportId)}/anexos-rejeicao/${encodeURIComponent(id)}/arquivo`,
+  }))
+}
+function latestRejectionAttachmentId(report: any): string | null {
+  const anexos = parseRejectionAttachments(report?.anexos_rejeicao)
+  return anexos[anexos.length - 1]?.id || null
 }
 async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report: any, reason: string, rejectedBy: string): Promise<void> {
   const db = c.env.SHARE_DB

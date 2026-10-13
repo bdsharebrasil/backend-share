@@ -14,6 +14,9 @@ const rotaAtualizacao = worker.slice(inicioPatch, fimPatch);
 const inicioMinhas = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem/minhas'");
 const fimMinhas = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem',", inicioMinhas);
 const rotaMinhas = worker.slice(inicioMinhas, fimMinhas);
+const inicioAprovacaoAutenticada = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao'");
+const fimAprovacaoAutenticada = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso'", inicioAprovacaoAutenticada);
+const rotaAprovacaoAutenticada = worker.slice(inicioAprovacaoAutenticada, fimAprovacaoAutenticada);
 
 test("criação de relatório exige trecho e tripulante", () => {
   const inicioCriacao = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem'");
@@ -70,4 +73,16 @@ test("listagem autenticada inclui comprovantes por despesa sem expor o caminho d
   assert.match(rotaMinhas, /url_arquivo: `\/api\/financeiro\/relatorios-despesa-viagem/);
   assert.match(rotaMinhas, /anexos: anexosPorRelatorio\.get\(row\.id\) \|\| \[\]/);
   assert.doesNotMatch(rotaMinhas, /caminho_arquivo/);
+});
+
+test("rejeição autenticada aceita imagem multipart e persiste o anexo no diretório R2 de comprovantes", () => {
+  assert.match(rotaAprovacaoAutenticada, /content-type.*multipart\/form-data/s);
+  assert.match(rotaAprovacaoAutenticada, /form\.get\('anexo_rejeicao'\)/);
+  assert.match(rotaAprovacaoAutenticada, /image\/heic/);
+  assert.match(rotaAprovacaoAutenticada, /5 \* 1024 \* 1024/);
+  assert.match(rotaAprovacaoAutenticada, /relatorio_despesa_viagem\/anexos_notas\/\$\{id\}/);
+  assert.match(rotaAprovacaoAutenticada, /anexos_rejeicao = COALESCE\(\?, anexos_rejeicao\)/);
+  assert.match(rotaAprovacaoAutenticada, /notifyReportRejection\(c, updated/);
+  assert.match(rotaMinhas, /anexos_rejeicao: rejectionAttachments\(row\.anexos_rejeicao, row\.id\)/);
+  assert.match(worker, /anexos-rejeicao\/\$\{encodeURIComponent\(id\)\}\/arquivo/);
 });
