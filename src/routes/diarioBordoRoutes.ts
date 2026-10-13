@@ -321,7 +321,6 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
       COALESCE(dm.fechado, 0) AS fechado
     FROM aeronave a
     LEFT JOIN diario_mes dm ON dm.id = (SELECT dm2.id FROM diario_mes dm2 WHERE dm2.aeronave_id = a.id AND dm2.ano = ?1 ORDER BY dm2.mes DESC LIMIT 1)
-    WHERE lower(COALESCE(a.status, 'ativa')) LIKE 'ativ%'
     ORDER BY a.matricula_registro`).bind(String(ano)).all<any>()
   return c.json({ ano, aeronaves: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), celula_disponivel_ttotal: Number(row.celula_disponivel_ttotal || 0), celula_atual_tvoo: Number(row.celula_atual_tvoo || 0), celula_prox_revisao_tvoo: Number(row.celula_prox_revisao_tvoo || 0), celula_disponivel_tvoo: Number(row.celula_disponivel_tvoo || 0), fechado: Number(row.fechado || 0) })) })
 })
