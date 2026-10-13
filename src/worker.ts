@@ -2504,6 +2504,12 @@ async function notifyTask(c: Context<{ Bindings: Bindings }>, taskId: string, re
     await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, status || null).run()
   }
 }
+async function notifyUsers(db: D1Database, recipients: string[], idFrom: string, mensagem: string): Promise<void> {
+  const uniqueRecipients = [...new Set(recipients.filter(Boolean))]
+  for (const recipient of uniqueRecipients) {
+    await db.prepare('INSERT INTO notificacoes (id, user_id, id_from, mensagem) VALUES (?, ?, ?, ?)').bind(uuid(), recipient, idFrom, mensagem || null).run()
+  }
+}
 
 app.get('/api/sharebrasil/tarefas/usuarios', async c => {
   const user = await shareBrasilUser(c)
@@ -2576,35 +2582,56 @@ app.post('/api/sharebrasil/tarefas/:id/comentarios', async c => {
 app.get('/api/sharebrasil/notificacoes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await c.env.SHARE_DB.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem,
-      r.id AS relatorio_id, r.anexos_rejeicao
-    FROM tarefas_notificacoes n LEFT JOIN tarefas t ON t.id = n.id_da_tarefa
-    LEFT JOIN relatorio_despesa_viagem r ON r.id = CASE
-      WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
-        instr(t.titulo, '[RELATORIO:') + 11,
-        instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
-      ELSE NULL END
-    WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all()
-  return c.json({ notificacoes: result.results || [] })
+  const db = c.env.SHARE_DB
+  const [taskResult, generalResult] = await Promise.all([
+    db.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem,
+        CASE WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
+          instr(t.titulo, '[RELATORIO:') + 11,
+          instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
+          ELSE NULL END AS relatorio_id,
+        r.anexos_rejeicao, 'tarefa' AS origem_notificacao
+      FROM tarefas_notificacoes n LEFT JOIN tarefas t ON t.id = n.id_da_tarefa
+      LEFT JOIN relatorio_despesa_viagem r ON r.id = CASE
+        WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
+          instr(t.titulo, '[RELATORIO:') + 11,
+          instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
+        ELSE NULL END
+      WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all<any>(),
+    db.prepare(`SELECT n.*, NULL AS id_da_tarefa, NULL AS status_alterado_para,
+        NULL AS tarefa_titulo, NULL AS tarefa_origem, r.id AS relatorio_id,
+        r.anexos_rejeicao, 'geral' AS origem_notificacao
+      FROM notificacoes n
+      LEFT JOIN relatorio_despesa_viagem r ON n.id_from = 'relatorio_despesa_viagem/' || r.id
+      WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all<any>(),
+  ])
+  const notificacoes = [...(taskResult.results || []), ...(generalResult.results || [])]
+    .sort((a, b) => Date.parse(b.criado_em) - Date.parse(a.criado_em))
+    .slice(0, 100)
+  return c.json({ notificacoes })
 })
 app.patch('/api/sharebrasil/notificacoes/:id/lida', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await c.env.SHARE_DB.prepare('UPDATE tarefas_notificacoes SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
+  const table = c.req.query('origem') === 'geral' ? 'notificacoes' : 'tarefas_notificacoes'
+  const result = await c.env.SHARE_DB.prepare(`UPDATE ${table} SET lido = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?1 AND user_id = ?2`).bind(c.req.param('id'), user.id).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/notificacoes/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await c.env.SHARE_DB.prepare('DELETE FROM tarefas_notificacoes WHERE id = ?1 AND user_id = ?2').bind(c.req.param('id'), user.id).run()
+  const table = c.req.query('origem') === 'geral' ? 'notificacoes' : 'tarefas_notificacoes'
+  const result = await c.env.SHARE_DB.prepare(`DELETE FROM ${table} WHERE id = ?1 AND user_id = ?2`).bind(c.req.param('id'), user.id).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/notificacoes', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  await c.env.SHARE_DB.prepare('DELETE FROM tarefas_notificacoes WHERE user_id = ?1').bind(user.id).run()
+  await c.env.SHARE_DB.batch([
+    c.env.SHARE_DB.prepare('DELETE FROM tarefas_notificacoes WHERE user_id = ?1').bind(user.id),
+    c.env.SHARE_DB.prepare('DELETE FROM notificacoes WHERE user_id = ?1').bind(user.id),
+  ])
   return c.json({ success: true })
 })
 
@@ -4125,10 +4152,6 @@ function rejectionAttachments(value: unknown, reportId: string): any[] {
     url_arquivo: `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(reportId)}/anexos-rejeicao/${encodeURIComponent(id)}/arquivo`,
   }))
 }
-function latestRejectionAttachmentId(report: any): string | null {
-  const anexos = parseRejectionAttachments(report?.anexos_rejeicao)
-  return anexos[anexos.length - 1]?.id || null
-}
 async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report: any, reason: string, rejectedBy: string): Promise<void> {
   const db = c.env.SHARE_DB
   const recipients = await db.prepare(`SELECT id FROM user_profiles
@@ -4141,12 +4164,9 @@ async function notifyReportRejection(c: Context<{ Bindings: Bindings }>, report:
       )`).bind(rejectedBy || '').all<{ id: string }>()
   const uniqueRecipients = [...new Set((recipients.results || []).map((item) => item.id).filter(Boolean))]
   if (!uniqueRecipients.length) return
-  const taskId = uuid()
   const numero = String(report.numero_relatorio || report.id)
   const mensagem = `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
-  const anexoMarker = latestRejectionAttachmentId(report) ? ` [ANEXO:${latestRejectionAttachmentId(report)}]` : ''
-  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem rejeitado: ${numero} [RELATORIO:${report.id}]${anexoMarker}`, mensagem, rejectedBy, JSON.stringify(uniqueRecipients)).run()
-  for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, 'ajuste_necessario').run()
+  await notifyUsers(db, uniqueRecipients, `relatorio_despesa_viagem/${report.id}`, mensagem)
 }
 
 async function notifyReportDecision(c: Context<{ Bindings: Bindings }>, report: any, decision: string, reason: string, decidedBy: string): Promise<void> {
@@ -4159,15 +4179,12 @@ async function notifyReportDecision(c: Context<{ Bindings: Bindings }>, report: 
     )`).bind(decidedBy || '').all<{ id: string }>()
   const uniqueRecipients = [...new Set((recipients.results || []).map((item) => item.id).filter(Boolean))]
   if (!uniqueRecipients.length) return
-  const taskId = uuid()
   const numero = String(report.numero_relatorio || report.id)
   const aprovado = decision === 'aprovado'
   const mensagem = aprovado
     ? `O tripulante ${report.nome_tripulante || 'não identificado'} aprovou o relatório ${numero}. O pagamento foi lançado para programação.`
     : `O tripulante ${report.nome_tripulante || 'não identificado'} rejeitou o relatório ${numero}. Motivo: ${reason}`
-  const anexoMarker = !aprovado && latestRejectionAttachmentId(report) ? ` [ANEXO:${latestRejectionAttachmentId(report)}]` : ''
-  await db.prepare(`INSERT INTO tarefas (id, titulo, descricao, status, prioridade, criado_por, publico, origem, atribuido_para, progresso) VALUES (?, ?, ?, 'ABERTO', 'ALTA', ?, 0, 'RELATORIO_VIAGEM', ?, 0)`).bind(taskId, `Relatório de viagem ${aprovado ? 'aprovado' : 'rejeitado'}: ${numero}${aprovado ? '' : ` [RELATORIO:${report.id}]${anexoMarker}`}`, mensagem, decidedBy || null, JSON.stringify(uniqueRecipients)).run()
-  for (const recipient of uniqueRecipients) await db.prepare('INSERT INTO tarefas_notificacoes (id, id_da_tarefa, user_id, mensagem, status_alterado_para) VALUES (?, ?, ?, ?, ?)').bind(uuid(), taskId, recipient, mensagem, decision).run()
+  await notifyUsers(db, uniqueRecipients, `relatorio_despesa_viagem/${report.id}`, mensagem)
 }
 
 
