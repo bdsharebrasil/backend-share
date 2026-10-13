@@ -76,6 +76,38 @@ tripulacaoRoutes.get('/api/interno/tripulacao/gestao', async c => {
   return c.json({ tripulantes: tripulantes.results, habilitacoes: habilitacoes.results, freelancers: freelancers.results, aeronaves: aeronave.results })
 })
 
+tripulacaoRoutes.patch('/api/interno/tripulacao/:id/fs-rh', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (!body || typeof body !== 'object' || !Object.prototype.hasOwnProperty.call(body, 'fs_rh')) return c.json({ error: 'fs_rh_obrigatorio' }, 400)
+  const rawFsRh = (body as { fs_rh?: unknown }).fs_rh
+  if (rawFsRh !== null && typeof rawFsRh !== 'string') return c.json({ error: 'fs_rh_invalido' }, 400)
+  const fsRh = typeof rawFsRh === 'string' ? rawFsRh.trim().toUpperCase() || null : null
+  if (fsRh && !/^(AB|A|B|O)[+-]$/.test(fsRh)) return c.json({ error: 'fs_rh_invalido' }, 400)
+
+  const tripulanteId = c.req.param('id')
+  const tripulante = await c.env.SHARE_DB.prepare('SELECT id FROM tripulacao WHERE id = ?1').bind(tripulanteId).first()
+  if (!tripulante) return c.notFound()
+
+  const registros = await c.env.SHARE_DB.prepare('SELECT id, tipo_habilitacao FROM habilitacoes_tripulante WHERE tripulacao_id = ?1').bind(tripulanteId).all<{ id: string; tipo_habilitacao: string }>()
+  const registrosReais = (registros.results || []).filter((item) => item.tipo_habilitacao.trim().toUpperCase() !== 'FS/RH')
+  if (registrosReais.length) {
+    await c.env.SHARE_DB.prepare('UPDATE habilitacoes_tripulante SET fs_rh = CASE WHEN id = ?1 THEN ?2 ELSE NULL END WHERE tripulacao_id = ?3').bind(registrosReais[0].id, fsRh, tripulanteId).run()
+    await c.env.SHARE_DB.prepare("DELETE FROM habilitacoes_tripulante WHERE tripulacao_id = ?1 AND upper(trim(tipo_habilitacao)) = 'FS/RH'").bind(tripulanteId).run()
+  } else if (fsRh) {
+    const marker = registros.results?.[0]
+    if (marker) {
+      await c.env.SHARE_DB.prepare('UPDATE habilitacoes_tripulante SET fs_rh = ?1 WHERE id = ?2').bind(fsRh, marker.id).run()
+    } else {
+      await c.env.SHARE_DB.prepare('INSERT INTO habilitacoes_tripulante (id, tripulacao_id, tipo_habilitacao, data_validade, classe_cma, validade_cma, fs_rh) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(uuid(), tripulanteId, 'FS/RH', null, null, null, fsRh).run()
+    }
+  } else {
+    await c.env.SHARE_DB.prepare("DELETE FROM habilitacoes_tripulante WHERE tripulacao_id = ?1 AND upper(trim(tipo_habilitacao)) = 'FS/RH'").bind(tripulanteId).run()
+  }
+
+  return c.json({ success: true, fs_rh: fsRh })
+})
+
 tripulacaoRoutes.get('/api/interno/tripulacao-freelancer/:id/foto', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const row = await c.env.SHARE_DB.prepare('SELECT url_avatar FROM tripulacao_freelancer WHERE id = ?1').bind(c.req.param('id')).first<{ url_avatar: string | null }>()
