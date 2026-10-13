@@ -505,7 +505,7 @@ emailRoutes.post('/api/interno/emails', async c => {
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
   const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
   if (!erroAnexo) {
-    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: emailFrom, reply_to: user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
+    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: emailFrom, reply_to: emailFromDepartamento || user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
