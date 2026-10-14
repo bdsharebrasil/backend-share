@@ -41,13 +41,24 @@ class FakeD1 {
         ? { ...this.usuario, cliente_id: this.cotista.cliente_id, socio_id: this.cotista.socio_id }
         : null
     }
-    if (sql.includes('SELECT id FROM user_cliente WHERE lower(login)')) return null
+    if (sql.includes('SELECT id FROM user_cliente') && sql.includes('lower(login)')) {
+      return this.usuario?.login.toLowerCase() === String(values[0]).toLowerCase() && this.usuario.cotista_id !== values[1]
+        ? { id: this.usuario.id }
+        : null
+    }
     throw new Error(`Consulta first não simulada: ${sql}`)
   }
   async run(sql, values) {
     if (sql.includes('INSERT INTO user_cliente')) {
       const [id, login, senha, nome_exibicao, cotista_id] = values
       this.usuario = { id, login, senha, nome_exibicao, url_avatar: null, cotista_id }
+      return { success: true, meta: { changes: 1 } }
+    }
+    if (sql.includes('SET login = ?1, senha = ?2')) {
+      const [login, senha, cotistaId, id] = values
+      if (!this.usuario || this.usuario.id !== id || this.usuario.cotista_id !== cotistaId) return { success: true, meta: { changes: 0 } }
+      this.usuario.login = login
+      this.usuario.senha = senha
       return { success: true, meta: { changes: 1 } }
     }
     if (sql.includes('UPDATE user_cliente SET senha')) {
@@ -114,6 +125,31 @@ test('login do portal resolve cliente pelo cotista_id da conta criada', async ()
   const body = await resposta.json()
   assert.equal(body.user.cliente_id, 'cliente-1')
   assert.equal(body.user.socio_id, null)
+})
+
+test('atualiza login e senha e permite autenticação apenas com as novas credenciais', async () => {
+  const db = new FakeD1()
+  const criacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST' })
+  const antigas = await criacao.json()
+  const senhaNova = 'Senha-portal-2026!'
+  const atualizacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login: 'Novo.Login', senha: senhaNova }),
+  })
+  assert.equal(atualizacao.status, 200)
+  assert.deepEqual(await atualizacao.json(), { success: true, login: 'novo.login' })
+  assert.equal(db.usuario.login, 'novo.login')
+  assert.match(db.usuario.senha, /^pbkdf2_sha256\$100000\$/)
+  assert.notEqual(db.usuario.senha, senhaNova)
+
+  const autenticar = (login, senha) => portalRoutes.request('/api/portal/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login, senha }),
+  }, portalEnv(db))
+  assert.equal((await autenticar('novo.login', senhaNova)).status, 200)
+  assert.equal((await autenticar(antigas.login, antigas.senha_temporaria)).status, 401)
 })
 
 test('restaura a senha anterior quando o provedor de e-mail rejeita a mensagem', async () => {

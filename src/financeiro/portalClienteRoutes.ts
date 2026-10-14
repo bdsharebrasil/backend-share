@@ -132,6 +132,45 @@ portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/credenciais', async
   }
 })
 
+portalClienteRoutes.put('/cotista/portal-cliente/:cotistaId/credenciais', async c => {
+  try {
+    await validarSchema(c.env.SHARE_DB)
+    const cotista = await buscarCotista(c, c.req.param('cotistaId'))
+    if (!cotista) return c.json({ error: 'cotista_nao_encontrado' }, 404)
+    if (!cotistaComVinculoValido(cotista)) return c.json({ error: 'vinculo_cotista_invalido' }, 409)
+    const usuario = await buscarUsuario(c, cotista.id)
+    if (!usuario) return c.json({ error: 'portal_usuario_nao_encontrado' }, 404)
+
+    const body = await c.req.json<{ login?: unknown; senha?: unknown }>().catch(() => null)
+    if (!body || typeof body.login !== 'string' || typeof body.senha !== 'string') {
+      return c.json({ error: 'login_e_nova_senha_obrigatorios' }, 400)
+    }
+    const login = body.login.trim().toLowerCase()
+    const senha = body.senha
+    if (!/^[a-z0-9._-]{3,80}$/.test(login)) return c.json({ error: 'login_invalido' }, 400)
+    if (senha.length < 12 || senha.length > 128) return c.json({ error: 'senha_deve_ter_entre_12_e_128_caracteres' }, 400)
+
+    const loginOcupado = await c.env.SHARE_DB.prepare(`
+      SELECT id FROM user_cliente
+      WHERE lower(login) = lower(?1) AND cotista_id != ?2
+      LIMIT 1
+    `).bind(login, cotista.id).first()
+    if (loginOcupado) return c.json({ error: 'login_ja_em_uso' }, 409)
+
+    const hash = await portalCreatePasswordHash(senha)
+    const atualizado = await c.env.SHARE_DB.prepare(`
+      UPDATE user_cliente
+      SET login = ?1, senha = ?2, atualizado_em = CURRENT_TIMESTAMP
+      WHERE cotista_id = ?3 AND id = ?4
+    `).bind(login, hash, cotista.id, usuario.id).run()
+    if (!atualizado.meta?.changes) return c.json({ error: 'portal_usuario_alterado_tente_novamente' }, 409)
+    return c.json({ success: true, login })
+  } catch (error) {
+    console.error('[financeiro/portal-cliente] falha ao atualizar credenciais', error instanceof Error ? error.message : 'erro_desconhecido')
+    return c.json({ error: 'nao_foi_possivel_atualizar_credenciais' }, 500)
+  }
+})
+
 portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/enviar-acesso', async c => {
   try {
     await validarSchema(c.env.SHARE_DB)
