@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { issueRevenue, settleReceivable } from "./FinanceiroKernel"
+import { holdingMovementColumn, issueRevenue, loadSchema, settleReceivable } from "./FinanceiroKernel"
 import { errorResponse } from "./errorResponse"
 import { requireCaixaShareAccess } from "./access"
 import { listar } from "./repositories/d1"
@@ -26,8 +26,8 @@ notasSaidaRoutes.get('/notas-saida', async (c) => {
   try {
     const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
-    const notas = await listar(db, `SELECT n.id, 'nf_saida' AS origem, n.numero, n.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, cl.email_principal AS cliente_email, n.aeronave_id, a.matricula_registro AS aeronave_matricula, n.data_emissao AS data_criacao, n.data_vencimento, n.valor_total, n.nome_categoria AS categoria, n.descricao_servico AS descricao, n.status, n.arquivo_pdf_url, n.criado_em, n.atualizado_em, cr.id AS contas_areceber_id FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id = n.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = n.aeronave_id LEFT JOIN contas_areceber cr ON cr.nf_saida_id = n.id ORDER BY date(n.data_emissao) DESC, n.criado_em DESC`)
-    const recibos = await listar(db, `SELECT r.id, 'recibo_saida' AS origem, r.numero_recibo, r.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, cl.email_principal AS cliente_email, r.aeronave_id, a.matricula_registro AS aeronave_matricula, r.data_emissao, r.data_vencimento, r.valor_total, r.nome_categoria, r.descricao_servico, r.status, r.pdf_url, r.contas_areceber_id, r.criado_em, r.atualizado_em FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = r.aeronave_id ORDER BY date(r.data_emissao) DESC, r.criado_em DESC`)
+    const notas = await listar(db, `SELECT n.id, 'nf_saida' AS origem, n.numero, n.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, hs.holding_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, COALESCE(cl.email_principal, hs.email_principal) AS cliente_email, n.aeronave_id, a.matricula_registro AS aeronave_matricula, n.data_emissao AS data_criacao, n.data_vencimento, n.valor_total, n.nome_categoria AS categoria, n.descricao_servico AS descricao, n.status, n.arquivo_pdf_url, n.criado_em, n.atualizado_em, cr.id AS contas_areceber_id FROM notas_fiscais_saida n LEFT JOIN cotista_aeronave ca ON ca.id = n.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = n.aeronave_id LEFT JOIN contas_areceber cr ON cr.nf_saida_id = n.id ORDER BY date(n.data_emissao) DESC, n.criado_em DESC`)
+    const recibos = await listar(db, `SELECT r.id, 'recibo_saida' AS origem, r.numero_recibo, r.cotista_id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, hs.holding_id, COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS cliente_nome, COALESCE(cl.cnpj, hs.cpf) AS cliente_cnpj, COALESCE(cl.endereco, hs.endereco) AS cliente_endereco, COALESCE(cl.cidade, hs.cidade) AS cliente_cidade, COALESCE(cl.uf, hs.uf) AS cliente_uf, COALESCE(cl.email_principal, hs.email_principal) AS cliente_email, r.aeronave_id, a.matricula_registro AS aeronave_matricula, r.data_emissao, r.data_vencimento, r.valor_total, r.nome_categoria, r.descricao_servico, r.status, r.pdf_url, r.contas_areceber_id, r.criado_em, r.atualizado_em FROM recibos_saida r LEFT JOIN cotista_aeronave ca ON ca.id = r.cotista_id LEFT JOIN cliente cl ON cl.id = ca.cliente_id LEFT JOIN hold_socios hs ON hs.id = ca.socio_id LEFT JOIN aeronave a ON a.id = r.aeronave_id ORDER BY date(r.data_emissao) DESC, r.criado_em DESC`)
     return c.json({ notas, recibos })
   } catch (error) { return errorResponse(c, error) }
 })
@@ -133,6 +133,8 @@ notasSaidaRoutes.post('/notas-saida', async (c) => {
       categoria_cliente_id: categoriaCliente.id,
       categoria_cliente_nome: categoriaCliente.nome,
       categoria_despesa_subcategoria: categoriaCliente.subcategoria,
+      numero_nf: numero,
+      url_nf: dadosNota.arquivoPdfUrl,
       origem_tipo: 'NF_SAIDA',
       origem_id: id,
       periodicidade: 'MENSAL',
@@ -173,7 +175,8 @@ notasSaidaRoutes.patch('/notas-saida/:id', async (c) => {
     const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const db = c.env.SHARE_DB
     const id = c.req.param('id')
-    if (!(await documentoSaidaRow(db, id))) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
+    const nota = await documentoSaidaRow(db, id)
+    if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const fields: Array<[string, unknown]> = []
     const add = (column: string, value: unknown) => { if (value !== undefined) fields.push([column, value === '' ? null : value]) }
@@ -183,7 +186,36 @@ notasSaidaRoutes.patch('/notas-saida/:id', async (c) => {
     add('arquivo_pdf_url', body.arquivo_pdf_url)
     if (!fields.length) return c.json({ error: 'nenhum_campo_atualizavel' }, 400)
     const assignments = fields.map(([column]) => `${column} = ?`).join(', ')
-    await db.prepare(`UPDATE notas_fiscais_saida SET ${assignments}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...fields.map(([, value]) => value), id).run()
+    const statements: D1PreparedStatement[] = [db.prepare(`UPDATE notas_fiscais_saida SET ${assignments}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(...fields.map(([, value]) => value), id)]
+    const documentosFinanceiros: Array<[string, unknown]> = []
+    if (body.numero !== undefined) documentosFinanceiros.push(['numero_nf', body.numero === '' ? null : body.numero])
+    if (body.arquivo_pdf_url !== undefined) documentosFinanceiros.push(['url_nf', body.arquivo_pdf_url === '' ? null : body.arquivo_pdf_url])
+    if (documentosFinanceiros.length) {
+      const lancamentoId = String(nota.lancamentos_id ?? '').trim()
+      const lancamentoIds = new Set([lancamentoId].filter(Boolean))
+      if (lancamentoId) {
+        const espelhos = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE'").bind(lancamentoId).all<{ id: string }>()
+        for (const espelho of espelhos.results || []) lancamentoIds.add(espelho.id)
+      }
+      if (lancamentoIds.size) {
+        const ids = [...lancamentoIds]
+        const placeholders = ids.map(() => '?').join(', ')
+        const setClause = documentosFinanceiros.map(([column]) => `${column} = ?`).join(', ')
+        const values = documentosFinanceiros.map(([, value]) => value)
+        statements.push(db.prepare(`UPDATE lancamentos SET ${setClause} WHERE id IN (${placeholders})`).bind(...values, ...ids))
+        statements.push(db.prepare(`UPDATE rateio_despesas SET ${setClause} WHERE lancamento_id IN (${placeholders})`).bind(...values, ...ids))
+      }
+      const conta = await db.prepare('SELECT movimentos_id FROM contas_areceber WHERE nf_saida_id = ? LIMIT 1').bind(id).first<{ movimentos_id: string | null }>()
+      const movimentoId = String(conta?.movimentos_id ?? '').trim()
+      if (movimentoId) {
+        const setClause = documentosFinanceiros.map(([column]) => `${column} = ?`).join(', ')
+        const values = documentosFinanceiros.map(([, value]) => value)
+        statements.push(db.prepare(`UPDATE movimentos_holding SET ${setClause} WHERE id = ?`).bind(...values, movimentoId))
+        const holdingColumn = holdingMovementColumn(await loadSchema(db))
+        statements.push(db.prepare(`UPDATE rateio_hold SET ${setClause} WHERE ${holdingColumn} = ?`).bind(...values, movimentoId))
+      }
+    }
+    await db.batch(statements)
     return c.json({ nota: await documentoSaidaRow(db, id) })
   } catch (error) { return errorResponse(c, error) }
 })
@@ -197,11 +229,23 @@ notasSaidaRoutes.delete('/notas-saida/:id', async (c) => {
     if (!nota) return c.json({ error: 'nota_saida_nao_encontrada' }, 404)
     const contaId = String(nota.contas_areceber_id ?? '').trim()
     const lancamentoId = String(nota.lancamentos_id ?? '').trim()
-    const conta = contaId ? await db.prepare('SELECT lancamentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null }>() : null
+    const conta = contaId ? await db.prepare('SELECT lancamentos_id, movimentos_id FROM contas_areceber WHERE id = ?').bind(contaId).first<{ lancamentos_id: string | null; movimentos_id: string | null }>() : null
     const lancamentos = [...new Set([lancamentoId, conta?.lancamentos_id ?? ''].filter(Boolean))]
     const espelhos = lancamentos.length ? await listar(db, `SELECT id FROM lancamentos WHERE origem_id IN (${lancamentos.map(() => '?').join(', ')})`, ...lancamentos) : []
     lancamentos.push(...espelhos.map((row) => String(row.id)).filter(Boolean))
     const ids = [...new Set(lancamentos)]
+    const schema = await loadSchema(db)
+    const movimentos = new Set([String(conta?.movimentos_id ?? '').trim()].filter(Boolean))
+    if (!movimentos.size) {
+      const movimentoVinculado = await db.prepare("SELECT destino_id AS id FROM financeiro_vinculos WHERE origem_tipo = 'NF_SAIDA' AND origem_id = ? AND destino_tipo = 'MOVIMENTO_HOLDING' AND tipo_vinculo = 'NF_SAIDA_MOVIMENTO' LIMIT 1").bind(id).first<{ id: string }>()
+      const movimentoOrigem = movimentoVinculado?.id
+        ? movimentoVinculado
+        : schema.get('movimentos_holding')?.has('origem_tipo') && schema.get('movimentos_holding')?.has('origem_id')
+          ? await db.prepare("SELECT id FROM movimentos_holding WHERE origem_tipo = 'NF_SAIDA' AND origem_id = ? LIMIT 1").bind(id).first<{ id: string }>()
+          : null
+      if (movimentoOrigem?.id) movimentos.add(movimentoOrigem.id)
+    }
+    const holdingColumn = holdingMovementColumn(schema)
     const statements: D1PreparedStatement[] = []
     if (ids.length) {
       const placeholders = ids.map(() => '?').join(', ')
@@ -209,12 +253,21 @@ notasSaidaRoutes.delete('/notas-saida/:id', async (c) => {
       const rateioIds = rateios.map((row) => String(row.id)).filter(Boolean)
       if (rateioIds.length) statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioIds.map(() => '?').join(', ')})`).bind(...rateioIds))
       statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
-      statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE origem_id IN (${placeholders}) OR destino_id IN (${placeholders}) OR origem_id = ? OR destino_id = ?`).bind(...ids, ...ids, id, id))
       statements.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
-    } else {
-      statements.push(db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ? OR destino_id = ?').bind(id, id))
+    }
+    for (const movimentoId of movimentos) {
+      const rateiosHold = await listar(db, `SELECT id FROM rateio_hold WHERE ${holdingColumn} = ?`, movimentoId)
+      const rateioHoldIds = rateiosHold.map((row) => String(row.id)).filter(Boolean)
+      if (rateioHoldIds.length) statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioHoldIds.map(() => '?').join(', ')})`).bind(...rateioHoldIds))
+      statements.push(db.prepare(`DELETE FROM rateio_hold WHERE ${holdingColumn} = ?`).bind(movimentoId))
+    }
+    const vinculoIds = [...new Set([...ids, ...movimentos, id])]
+    if (vinculoIds.length) {
+      const placeholders = vinculoIds.map(() => '?').join(', ')
+      statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE origem_id IN (${placeholders}) OR destino_id IN (${placeholders})`).bind(...vinculoIds, ...vinculoIds))
     }
     if (contaId) statements.push(db.prepare('DELETE FROM contas_areceber WHERE id = ?').bind(contaId))
+    for (const movimentoId of movimentos) statements.push(db.prepare('DELETE FROM movimentos_holding WHERE id = ?').bind(movimentoId))
     statements.push(db.prepare('DELETE FROM notas_fiscais_saida WHERE id = ?').bind(id))
     await db.batch(statements)
     return c.json({ ok: true, id })

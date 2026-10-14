@@ -338,7 +338,7 @@ const FRONTEND_CONTRACT_FIELDS = new Set([
   'forma_pagamento', 'conta_bancaria_id', 'data_pagamento', 'comprovante_url', 'observacoes', 'numero_recibo', 'url_recibo', 'pago_diretamente', 'pagoDiretamente',
   'pago_por', 'rateio_linhas', 'rateios', 'tipo_rateio', 'reembolsavel', 'colaborador_id',
   'lancamento_id', 'lancamento_origem_id', 'motivo', 'valor', 'operacao', 'payload', 'criar_lancamento_cliente',
-  'modo_lancamento', 'tipo_movimento_hold', 'grupo_categoria', 'subcategoria_1',
+  'modo_lancamento', 'tipo_movimento_hold', 'grupo_categoria', 'numero_nf', 'url_nf', 'subcategoria_1',
   'subcategoria_2', 'subcategoria_3', 'subcategoria_4', 'data_competencia_demonstrativo',
   // Regra de reembolso/rateio: total da despesa e cotista que pagou/devolve.
   'valor_total_despesa_centavos', 'cotista_pagador_id', 'origem_tipo_conta',
@@ -980,42 +980,56 @@ function holdingAllocationStatements(
       )
     }
 
+    const values: Row = {
+      id: id(),
+      [holdingMovementColumn(schema)]: movimentoId,
+      aeronave_id: command.aeronave_id,
+      socio_id: line.socioId,
+      data_emissao: dateValue(command.data_emissao ?? command.data),
+      data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
+      periodicidade: nullableText(command.periodicidade),
+      // rateio_hold.categoria_id referencia categoria_movimentacao_cliente.
+      categoria_id: nullableText(command.categoria_cliente_id),
+      categoria_nome: nullableText(
+        command.categoria_nome ?? command.categoria,
+      ),
+      tipo_rateio: normalizeRateioType(command.tipo_rateio),
+      percentual_sociedade: line.percentualSociedade,
+      percentual_uso: line.percentual,
+      valor_total_centavos: totalDespesa,
+      valor_rateado_centavos: line.valorCentavos,
+      valor_pago_real_centavos:
+        line.valorPagoRealCentavos ?? (line.pagoDiretamente ? line.valorCentavos : 0),
+      pago_por: line.pagoPor,
+      pago_diretamente: line.pagoDiretamente ? 1 : 0,
+      status: line.pagoDiretamente ? 'PAGO' : 'EM_ABERTO',
+      data_pagamento: line.pagoDiretamente ? dateValue(command.data_pagamento ?? command.data) : null,
+      descricao_despesa: command.descricao,
+      observacoes: nullableText(command.observacoes),
+      origem_id: nullableText(command.origem_id ?? command.recibo_id),
+      origem_tipo: nullableText(command.origem_tipo) || (nullableText(command.recibo_id) ? 'RECIBO' : null),
+      documento_numero: nullableText(command.numero_nf) ?? nullableText(command.numero_recibo),
+      documento_url: nullableText(command.url_nf) ?? nullableText(command.url_recibo),
+      numero_nf: nullableText(command.numero_nf),
+      url_nf: nullableText(command.url_nf),
+      email_enviado_em: null,
+      criado_por: userId,
+    }
+    const available = schema.get('rateio_hold')
+    if (available && !available.has('numero_nf') && nullableText(command.numero_nf) && available.has('documento_numero')) {
+      values.documento_numero = nullableText(command.numero_nf)
+    }
+    if (available && !available.has('url_nf') && nullableText(command.url_nf) && available.has('documento_url')) {
+      values.documento_url = nullableText(command.url_nf)
+    }
+    const compatibleValues = Object.fromEntries(
+      Object.entries(values).filter(([column]) => available?.has(column)),
+    )
     return insertStatement(
       db,
       schema,
       'rateio_hold',
-      {
-        id: id(),
-        [holdingMovementColumn(schema)]: movimentoId,
-        aeronave_id: command.aeronave_id,
-        socio_id: line.socioId,
-        data_emissao: dateValue(command.data_emissao ?? command.data),
-        data_vencimento: nullableText(command.data_vencimento ?? command.vencimento),
-        periodicidade: nullableText(command.periodicidade),
-        // rateio_hold.categoria_id referencia categoria_movimentacao_cliente.
-        categoria_id: nullableText(command.categoria_cliente_id),
-        categoria_nome: nullableText(
-          command.categoria_nome ?? command.categoria,
-        ),
-        tipo_rateio: normalizeRateioType(command.tipo_rateio),
-        percentual_sociedade: line.percentualSociedade,
-        percentual_uso: line.percentual,
-        valor_total_centavos: totalDespesa,
-        valor_rateado_centavos: line.valorCentavos,
-        valor_pago_real_centavos:
-          line.valorPagoRealCentavos ?? (line.pagoDiretamente ? line.valorCentavos : 0),
-        pago_por: line.pagoPor,
-        pago_diretamente: line.pagoDiretamente ? 1 : 0,
-        status: line.pagoDiretamente ? 'PAGO' : 'EM_ABERTO',
-        data_pagamento: line.pagoDiretamente ? dateValue(command.data_pagamento ?? command.data) : null,
-        descricao_despesa: command.descricao,
-        observacoes: nullableText(command.observacoes),
-        origem_id: nullableText(command.origem_id ?? command.recibo_id),
-        origem_tipo: nullableText(command.origem_tipo) || (nullableText(command.recibo_id) ? 'RECIBO' : null),
-        documento_numero: nullableText(command.numero_recibo),
-        documento_url: nullableText(command.url_recibo),
-        criado_por: userId,
-      },
+      compatibleValues,
       ['id', holdingMovementColumn(schema), 'aeronave_id', 'socio_id'],
     )
   })
@@ -1396,6 +1410,7 @@ export async function issueRevenue(
     lancamentoId: string
     contaReceberId: string
     lancamentoClienteId: string | null
+    movimentoHoldingId: string | null
   }) => D1PreparedStatement[],
 ): Promise<Row> {
   const schema = await loadSchema(db)
@@ -1425,6 +1440,11 @@ export async function issueRevenue(
       : null
 
   const documentoSaida = ['RECIBO_SAIDA', 'NF_SAIDA'].includes(upper(command.origem_tipo))
+  const notaFiscalSaida = upper(command.origem_tipo) === 'NF_SAIDA'
+  if (notaFiscalSaida && context?.kind === 'HOLDING' && (!context.holdingId || !context.socioId)) {
+    throw new FinanceError('Cotista Holding sem sócio ou holding vinculado', 'holding_cotista_incompleto')
+  }
+  const movimentoHoldingId = notaFiscalSaida && context?.kind === 'HOLDING' ? id() : null
 
   const statements: D1PreparedStatement[] = [
     insertStatement(
@@ -1438,9 +1458,9 @@ export async function issueRevenue(
         cotista_aeronave_id:
           context?.cotistaAeronaveId || command.cotista_aeronave_id,
         descricao: command.descricao,
-        fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+        fornecedor_nome: notaFiscalSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-        fluxo: 'ENTRADA',
+        fluxo: notaFiscalSaida ? 'RECEITA' : 'ENTRADA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
         categoria_share_id: nullableText(command.categoria_id),
@@ -1448,6 +1468,8 @@ export async function issueRevenue(
           command.categoria_nome ?? 'RECEITAS OPERACIONAIS',
         ),
         grupo_categoria: 'RECEITAS OPERACIONAIS',
+        numero_nf: nullableText(command.numero_nf),
+        url_nf: nullableText(command.url_nf),
         periodicidade: nullableText(command.periodicidade ?? (upper(command.origem_tipo) === 'RECIBO_SAIDA' ? 'MENSAL' : null)),
         data_emissao: command.data,
         data_vencimento: command.data_vencimento || command.data,
@@ -1475,6 +1497,7 @@ export async function issueRevenue(
         aeronave_id: context?.aeronaveId || command.aeronave_id,
         cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
         lancamentos_id: lancamentoId,
+        ...(movimentoHoldingId ? { movimentos_id: movimentoHoldingId } : {}),
         origem_tipo: nullableText(command.origem_tipo) || 'RECEITA',
         idempotency_key: command.idempotency_key,
         criado_por: userId,
@@ -1494,7 +1517,7 @@ export async function issueRevenue(
         'lancamentos',
         {
           id: clientLancamentoId,
-          escopo_financeiro: escopo,
+          escopo_financeiro: notaFiscalSaida ? 'FINANCEIRO' : escopo,
           aeronave_id: context?.aeronaveId || command.aeronave_id,
           cotista_aeronave_id: context?.cotistaAeronaveId,
           cliente_id: clienteLancamento?.id ?? null,
@@ -1509,7 +1532,7 @@ export async function issueRevenue(
           categoria_nome: nullableText(
             command.categoria_cliente_nome ?? command.categoria_nome,
           ),
-          fornecedor_nome: nullableText(command.fornecedor_nome ?? context?.nome),
+          fornecedor_nome: notaFiscalSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
           fornecedores_favoritos_id: nullableText(command.fornecedor_id),
           grupo_categoria:
             nullableText(command.grupo_categoria_cliente) ||
@@ -1519,6 +1542,8 @@ export async function issueRevenue(
           periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
           numero_recibo: nullableText(command.numero_recibo),
           url_recibo: nullableText(command.url_recibo),
+          numero_nf: nullableText(command.numero_nf),
+          url_nf: nullableText(command.url_nf),
           origem_tipo: documentoSaida ? upper(command.origem_tipo) : 'RECEITA',
           origem_id: lancamentoId,
           status: 'EM_ABERTO',
@@ -1546,14 +1571,17 @@ export async function issueRevenue(
           descricao_despesa: command.descricao,
           pago_por: reciboSaida ? null : (context?.cotistaAeronaveId || command.cotista_aeronave_id),
           pago_diretamente: reciboSaida ? 0 : 1,
-          percentual_sociedade: 100,
+          percentual_sociedade: notaFiscalSaida ? (context?.percentualSociedade ?? 100) : 100,
           percentual_uso: 100,
           valor_total_centavos: amount,
           valor_rateado_centavos: amount,
           valor_pago_real_centavos: reciboSaida ? 0 : amount,
-          status: reciboSaida ? 'AGUARDANDO_REEMBOLSO' : 'PAGO_DIRETAMENTE',
+          status: notaFiscalSaida ? 'EM_ABERTO' : reciboSaida ? 'AGUARDANDO_REEMBOLSO' : 'PAGO_DIRETAMENTE',
           numero_recibo: nullableText(command.numero_recibo),
           url_recibo: nullableText(command.url_recibo),
+          numero_nf: nullableText(command.numero_nf),
+          url_nf: nullableText(command.url_nf),
+          email_enviado_em: null,
           origem_tipo: documentoSaida ? upper(command.origem_tipo) : 'RECEITA',
         },
         ['id', 'lancamento_id'],
@@ -1590,6 +1618,59 @@ export async function issueRevenue(
     }
   }
 
+  if (movimentoHoldingId && context?.holdingId && context.socioId) {
+    if (!schema.get('contas_areceber')?.has('movimentos_id')) {
+      throw new FinanceError('Coluna contas_areceber.movimentos_id ausente para nota de saída de holding', 'schema_coluna_ausente', 500)
+    }
+    const movementValues: Row = {
+      id: movimentoHoldingId,
+      escopo_financeiro: 'FINANCEIRO',
+      holding_id: context.holdingId,
+      socio_id: context.socioId,
+      aeronave_id: context.aeronaveId || command.aeronave_id,
+      data_emissao: command.data,
+      data_vencimento: command.data_vencimento || command.data,
+      descricao: command.descricao,
+      categoria_id: nullableText(command.categoria_cliente_id),
+      categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+      grupo_categoria: nullableText(command.grupo_categoria_cliente) || 'ADM SHARE BRASIL',
+      fornecedor_nome: 'SHARE BRASIL',
+      fluxo: 'SAIDA',
+      tipo_caixa: 'HOLD',
+      valor_centavos: amount,
+      status: 'EM_ABERTO',
+      numero_nf: nullableText(command.numero_nf),
+      url_nf: nullableText(command.url_nf),
+      email_enviado_em: null,
+      criado_por: userId,
+    }
+    const movementColumns = schema.get('movimentos_holding')
+    const compatibleMovementValues = Object.fromEntries(
+      Object.entries(movementValues).filter(([column]) => movementColumns?.has(column)),
+    )
+    statements.push(insertStatement(db, schema, 'movimentos_holding', compatibleMovementValues, ['id', 'holding_id', 'socio_id', 'aeronave_id']))
+    const holdingRateio: AllocationLine[] = [{
+      cotistaId: context.cotistaAeronaveId,
+      socioId: context.socioId,
+      holdingId: context.holdingId,
+      percentual: 100,
+      percentualSociedade: context.percentualSociedade ?? 100,
+      valorCentavos: amount,
+      pagoPor: null,
+      pagoDiretamente: false,
+      valorPagoRealCentavos: 0,
+    }]
+    statements.push(...holdingAllocationStatements(db, schema, {
+      ...command,
+      aeronave_id: context.aeronaveId || command.aeronave_id,
+      categoria_nome: command.categoria_cliente_nome ?? command.categoria_nome,
+      numero_nf: command.numero_nf,
+      url_nf: command.url_nf,
+      origem_tipo: 'NF_SAIDA',
+    }, movimentoHoldingId, holdingRateio, userId))
+    statements.push(linkStatement(db, schema, 'NF_SAIDA', text(command.origem_id), 'MOVIMENTO_HOLDING', movimentoHoldingId, 'NF_SAIDA_MOVIMENTO', userId))
+  }
+
   statements.push(
     auditStatement(
       db,
@@ -1610,6 +1691,7 @@ export async function issueRevenue(
       lancamentoId,
       contaReceberId,
       lancamentoClienteId: clientLancamentoId,
+      movimentoHoldingId,
     }))
   }
 
@@ -1619,6 +1701,7 @@ export async function issueRevenue(
     lancamento_id: lancamentoId,
     contaReceberId,
     lancamentoClienteId: clientLancamentoId,
+    movimentoHoldingId,
     lancamento_cliente_id: clientLancamentoId,
     valor_centavos: amount,
     status: 'EM_ABERTO',
@@ -1971,11 +2054,14 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   if (!payments.length) throw new FinanceError('Informe pelo menos um pagador real', 'pagadores_obrigatorios')
   const total = asPositiveCents(row.valor_centavos)
   const shareId = nullableText(row.lancamentos_id ?? row.lancamento_id)
+  const movimentoHoldingId = nullableText(row.movimentos_id)
   const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id = ? LIMIT 1').bind(receivableId).first<Row>()
   const rateioLancamentoId = reimbursement
     ? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id)
-    : shareId
-  let rateios = rateioLancamentoId
+    : movimentoHoldingId ? null : shareId
+  let rateios = movimentoHoldingId
+    ? await db.prepare(`SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_hold WHERE ${holdingMovementColumn(schema)} = ? AND status <> 'CANCELADO'`).bind(movimentoHoldingId).all<Row>()
+    : rateioLancamentoId
     ? await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
     : { results: [] as Row[] }
   const statements: D1PreparedStatement[] = []
@@ -1995,12 +2081,23 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const allowed = new Map((rateios.results || []).map(r => [String(r.id), Number(r.valor_rateado_centavos)]))
   const rateioPadraoId = (rateios.results || []).length === 1 ? String(rateios.results![0].id) : null
   const existingByRateio = new Map<string, number>()
+  const paidByPayments = new Map<string, number>()
   const existingKeys = new Set<string>()
   const existing = await db.prepare("SELECT rateio_id, valor_centavos, idempotency_key FROM rateio_pagamentos WHERE conta_receber_id = ? AND status = 'CONFIRMADO'").bind(receivableId).all<Row>()
+  if (movimentoHoldingId) {
+    for (const rateio of rateios.results || []) {
+      const paid = Number(rateio.valor_pago_real_centavos || 0)
+      if (paid > 0) existingByRateio.set(String(rateio.id), paid)
+    }
+  }
   for (const payment of existing.results || []) {
     const rid = String(payment.rateio_id)
-    existingByRateio.set(rid, (existingByRateio.get(rid) || 0) + Number(payment.valor_centavos || 0))
+    const paidFromPayments = Number(payment.valor_centavos || 0)
+    paidByPayments.set(rid, (paidByPayments.get(rid) || 0) + paidFromPayments)
     if (payment.idempotency_key) existingKeys.add(String(payment.idempotency_key).replace(/:[^:]+$/, ''))
+  }
+  for (const [rid, paid] of paidByPayments) {
+    existingByRateio.set(rid, Math.max(existingByRateio.get(rid) || 0, paid))
   }
   const confirmadoAnterior = [...existingByRateio.values()].reduce((sum, value) => sum + value, 0)
   const acceptedPayments: RealPayment[] = []
@@ -2048,8 +2145,10 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const rid = String(r.id)
     const paid = (existingByRateio.get(rid) || 0) + (distributed.get(rid) || 0)
     const expected = Number(r.valor_rateado_centavos)
-    const status = paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
-    statements.push(updateStatement(db, schema, 'rateio_despesas', {
+    const status = movimentoHoldingId
+      ? paid >= expected ? 'PAGO' : 'EM_ABERTO'
+      : paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
+    statements.push(updateStatement(db, schema, movimentoHoldingId ? 'rateio_hold' : 'rateio_despesas', {
       valor_pago_real_centavos: paid,
       status,
       data_pagamento: paid ? lastDate : null,
@@ -2060,8 +2159,18 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
     if (novoStatusConta === 'RECEBIDO') statements.push(updateStatement(db, schema, 'lancamentos', { status: reimbursement ? 'REEMBOLSADO' : 'RECEBIDO', data_pagamento: lastDate, conta_bancaria_id: lastBank, comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
     const origem = await db.prepare('SELECT origem_id FROM lancamentos WHERE id = ?').bind(shareId).first<Row>()
-    const client = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(origem?.origem_id ?? null).first<Row>()
+    const client = await db.prepare("SELECT id FROM lancamentos WHERE (origem_id = ? OR origem_id = ?) AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(origem?.origem_id ?? null, shareId).first<Row>()
     if (client && allPaid) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: lastDate, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
+  }
+  if (movimentoHoldingId) {
+    const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
+    statements.push(updateStatement(db, schema, 'movimentos_holding', {
+      status: allPaid ? 'PAGO' : 'EM_ABERTO',
+      data_pagamento: allPaid ? lastDate : null,
+      comprovante_url: allPaid ? nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl) : null,
+      forma_pagamento: allPaid ? nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento) : null,
+      atualizado_em: new Date().toISOString(),
+    }, 'id = ?', [movimentoHoldingId]))
   }
   statements.push(auditStatement(db, schema, 'contas_areceber', receivableId, 'BAIXA', userId, newTotal, finalTotal, nullableText(body.motivo), nullableText(body.idempotency_key)))
   if (reimbursement && novoStatusConta === 'RECEBIDO') {
@@ -2069,7 +2178,9 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   }
   await db.batch(statements)
   const updated = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
-  const updatedRateios = rateioLancamentoId
+  const updatedRateios = movimentoHoldingId
+    ? await db.prepare(`SELECT id, socio_id AS cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_hold WHERE ${holdingMovementColumn(schema)} = ? ORDER BY rowid`).bind(movimentoHoldingId).all<Row>()
+    : rateioLancamentoId
     ? await db.prepare('SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(rateioLancamentoId).all<Row>()
     : { results: [] as Row[] }
   return { ...updated, idempotent: false, pagamentos: acceptedPayments, rateios: updatedRateios.results || [] }

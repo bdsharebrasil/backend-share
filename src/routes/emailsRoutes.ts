@@ -5,6 +5,7 @@ import { MAX_ATTACHMENT_TOTAL_SIZE, arrayBufferToBase64, uuid } from '../lib/str
 import { validateWorkerSchema } from '../lib/schema'
 import { authenticatedColaborador, checkInternalAuth, extractSupabaseUserId, requireAuthenticatedUser, shareBrasilUser } from '../lib/auth'
 import { chaveStorageDeUrl, shareBrasilBucket, shareBrasilFileName } from '../lib/storage'
+import { holdingMovementColumn, loadSchema } from '../financeiro/FinanceiroKernel'
 
 type Bindings = { SHARE_DB: D1Database; FILES: R2Bucket; SHARE_FILES?: R2Bucket; RESEND_API_KEY?: string; INTERNAL_TOKEN?: string; SUPABASE_URL?: string; SUPABASE_ANON_KEY?: string; SUPABASE_SERVICE_ROLE_KEY?: string; VITE_SUPABASE_PUBLISHABLE_KEY?: string; EMAIL_FROM?: string; R2_PUBLIC_URL?: string }
 type Variables = Record<string, never>
@@ -170,7 +171,11 @@ async function marcarEmailEnviadoParaOrigens(
       if (row?.lancamentos_id) lancamentoIds.push(row.lancamentos_id)
     } else if (prefix === 'nf_saida') {
       const conta = await db.prepare('SELECT lancamentos_id, movimentos_id FROM contas_areceber WHERE nf_saida_id = ?1 LIMIT 1').bind(rawId).first<{ lancamentos_id: string | null; movimentos_id: string | null }>()
-      if (conta?.lancamentos_id) lancamentoIds.push(conta.lancamentos_id)
+      if (conta?.lancamentos_id) {
+        lancamentoIds.push(conta.lancamentos_id)
+        const espelhos = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ?1 AND tipo_caixa = 'CLIENTE'").bind(conta.lancamentos_id).all<{ id: string }>()
+        lancamentoIds.push(...(espelhos.results || []).map((row) => row.id))
+      }
       if (conta?.movimentos_id) movimentoIds.push(conta.movimentos_id)
     } else if (prefix === 'relatorio') {
       const anexo = await db.prepare('SELECT relatorio_despesa_viagem_id FROM relatorio_despesa_viagem_anexos WHERE id = ?1').bind(rawId).first<{ relatorio_despesa_viagem_id: string | null }>()
@@ -218,7 +223,8 @@ async function marcarEmailEnviadoParaOrigens(
     }
     for (const mid of movimentoIds) {
       await db.prepare(`UPDATE movimentos_holding SET email_enviado_em = COALESCE(email_enviado_em, ?), email_enviado_id = COALESCE(email_enviado_id, ?) WHERE id = ?`).bind(agora, emailId, mid).run()
-      await db.prepare('UPDATE rateio_hold SET email_enviado_em = COALESCE(email_enviado_em, ?) WHERE movimento_id = ?').bind(agora, mid).run()
+      const holdingColumn = holdingMovementColumn(await loadSchema(db))
+      await db.prepare(`UPDATE rateio_hold SET email_enviado_em = COALESCE(email_enviado_em, ?) WHERE ${holdingColumn} = ?`).bind(agora, mid).run()
       await db.prepare(
         `INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
          VALUES (?, 'EMAIL', ?, 'MOVIMENTO_HOLDING', ?, 'EMAIL_ENVIADO')`
