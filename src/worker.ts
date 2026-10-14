@@ -1713,6 +1713,7 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
     return c.json({ error: 'abastecimento_incompleto', detail: 'Para concluir o checklist, preencha data, tipo de combustível, local, litros e valor unitário do abastecimento.' }, 400)
   }
   let abastecimentoId = precisaAbastecer ? existente?.abastecimento_id || null : null
+  let abastecimentoCriado = false
   if (precisaAbastecer && a.data && localIcao && Number(a.litros) > 0) {
     let pagador = { cliente_id: a.cliente_id || agendamento.cliente_id || null, socio_id: a.socio_id || agendamento.socio_id || null }
     if (a.lancamento_diario_id) {
@@ -1727,6 +1728,7 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
     } else {
       abastecimentoId = uuid()
       await c.env.SHARE_DB.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, desconto, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo, prazo_envio_cliente) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(abastecimentoId, ...valoresInsert).run()
+      abastecimentoCriado = true
     }
   } else if (status === 'concluido' && precisaAbastecer) {
     return c.json({ error: 'abastecimento_incompleto', detail: 'Salve os dados do abastecimento antes de concluir o checklist.' }, 400)
@@ -1741,12 +1743,15 @@ app.post('/api/interno/agendamento/:id/checklist', async c => {
   }
   const precisaValor = precisaAbastecer ? 1 : 0
   const concluidoEm = status === 'concluido' ? new Date().toISOString() : null
+  const checklistId = existente?.id || uuid()
   if (existente) {
     await c.env.SHARE_DB.prepare('UPDATE checklists_pre_voo SET executado_por=?, executado_por_nome=?, respostas=?, observacoes=?, abastecimento_id=?, precisa_abastecer=?, nivel_oleo=?, alerta_id=?, status=?, concluido_em=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, existente.id).run()
-    return c.json({ id: existente.id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId })
+  } else {
+    if (alertaId) await c.env.SHARE_DB.prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(checklistId, alertaId).run()
+    await c.env.SHARE_DB.prepare('INSERT INTO checklists_pre_voo (id, solicitacao_id, aeronave_id, executado_por, executado_por_nome, respostas, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em, numero_voo, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(checklistId, idAgendamento, agendamento.aeronave_id || null, userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, agendamento.numero_voo || null, userId).run()
   }
-  const id = uuid(); if (alertaId) await c.env.SHARE_DB.prepare('UPDATE alerta_checklist SET checklists_pre_voo_id=? WHERE id=?').bind(id, alertaId).run(); await c.env.SHARE_DB.prepare('INSERT INTO checklists_pre_voo (id, solicitacao_id, aeronave_id, executado_por, executado_por_nome, respostas, observacoes, abastecimento_id, precisa_abastecer, nivel_oleo, alerta_id, status, concluido_em, numero_voo, criado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, idAgendamento, agendamento.aeronave_id || null, userId, userName, JSON.stringify(body.itens || {}), body.observacoes || null, abastecimentoId, precisaValor, nivelOleo, alertaId, status, concluidoEm, agendamento.numero_voo || null, userId).run()
-  return c.json({ id, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, 201)
+  if (abastecimentoCriado && abastecimentoId) await notifyChecklistAbastecimento(c.env.SHARE_DB, abastecimentoId, userId, agendamento.numero_voo, localIcao).catch((error) => console.error('[checklist] falha ao notificar abastecimento criado', error))
+  return c.json({ id: checklistId, solicitacao_id: idAgendamento, abastecimento_id: abastecimentoId }, existente ? 200 : 201)
 })
 
 // ─── Share Brasil: ponto, documentos, senhas e contatos ─────────────────────
@@ -2525,6 +2530,19 @@ async function notifyUsers(db: D1Database, recipients: string[], idFrom: string,
   for (const recipient of uniqueRecipients) {
     await db.prepare("INSERT INTO notificacoes (id, id_from, departamento_destinatario, status, mensagem) VALUES (?, ?, ?, 'nao_lida', ?)").bind(uuid(), idFrom, recipient, mensagem || null).run()
   }
+}
+async function notifyChecklistAbastecimento(db: D1Database, abastecimentoId: string, criadoPor: string | null, numeroVoo: string | null, local: string | null): Promise<void> {
+  const recipients = await db.prepare(`SELECT id FROM user_profiles
+    WHERE id <> ?1 AND (status IS NULL OR lower(status) IN ('ativo', 'active')) AND (
+      lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiroadmin', 'financeiro_master', 'financeiromaster', 'admin', 'administrador')
+      OR lower(replace(replace(trim(COALESCE(departamento, '')), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiroadmin', 'financeiro_master', 'financeiromaster', 'admin', 'administrador', 'administrativo')
+      OR id IN (SELECT user_id FROM usuarios_funcoes WHERE lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiroadmin', 'financeiro_master', 'financeiromaster', 'admin', 'administrador'))
+    )`).bind(criadoPor || '').all<{ id: string }>()
+  const uniqueRecipients = [...new Set((recipients.results || []).map((recipient) => recipient.id).filter(Boolean))]
+  if (!uniqueRecipients.length) return
+  const voo = numeroVoo ? ` do voo ${numeroVoo}` : ''
+  const aeroporto = local ? ` em ${local}` : ''
+  await notifyUsers(db, uniqueRecipients, `abastecimento/${abastecimentoId}`, `Novo abastecimento${voo}${aeroporto} criado pelo checklist pré-voo. É necessário completar os dados fiscais e finalizar o registro no financeiro.`)
 }
 function notificationDestinations(user: Colaborador): string[] {
   return [...new Set([user.id, user.departamento, ...(user.departamentos_email || '').split(',')]
