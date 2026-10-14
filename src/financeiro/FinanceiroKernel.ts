@@ -2055,10 +2055,14 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const total = asPositiveCents(row.valor_centavos)
   const shareId = nullableText(row.lancamentos_id ?? row.lancamento_id)
   const movimentoHoldingId = nullableText(row.movimentos_id)
+  const documentoSaida = ['NF_SAIDA', 'RECIBO_SAIDA'].includes(upper(row.origem_tipo))
   const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id = ? LIMIT 1').bind(receivableId).first<Row>()
+  const lancamentoClienteSaida = documentoSaida && shareId && !movimentoHoldingId
+    ? await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(shareId).first<Row>()
+    : null
   const rateioLancamentoId = reimbursement
     ? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id)
-    : movimentoHoldingId ? null : shareId
+    : movimentoHoldingId ? null : nullableText(lancamentoClienteSaida?.id) ?? shareId
   let rateios = movimentoHoldingId
     ? await db.prepare(`SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_hold WHERE ${holdingMovementColumn(schema)} = ? AND status <> 'CANCELADO'`).bind(movimentoHoldingId).all<Row>()
     : rateioLancamentoId
@@ -2145,13 +2149,22 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     const rid = String(r.id)
     const paid = (existingByRateio.get(rid) || 0) + (distributed.get(rid) || 0)
     const expected = Number(r.valor_rateado_centavos)
-    const status = movimentoHoldingId
+    const status = documentoSaida
+      ? paid >= expected ? 'PAGO' : 'EM_ABERTO'
+      : movimentoHoldingId
       ? paid >= expected ? 'PAGO' : 'EM_ABERTO'
       : paid >= expected ? 'REEMBOLSADO' : paid > 0 ? 'EM_ABERTO' : 'AGUARDANDO_REEMBOLSO'
-    statements.push(updateStatement(db, schema, movimentoHoldingId ? 'rateio_hold' : 'rateio_despesas', {
+    const rateioTable = movimentoHoldingId ? 'rateio_hold' : 'rateio_despesas'
+    const rateioColumns = schema.get(rateioTable)
+    statements.push(updateStatement(db, schema, rateioTable, {
       valor_pago_real_centavos: paid,
       status,
       data_pagamento: paid ? lastDate : null,
+      ...(documentoSaida ? {
+        ...(rateioColumns?.has('pago_por') ? { pago_por: lastPayment.pagador_cotista_id ?? lastPayment.pagador_holding_id ?? null } : {}),
+        ...(rateioColumns?.has('pago_diretamente') ? { pago_diretamente: 1 } : {}),
+        ...(rateioColumns?.has('url_doc') ? { url_doc: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl) } : {}),
+      } : {}),
       atualizado_em: new Date().toISOString(),
     }, 'id = ?', [rid]))
   }
@@ -2160,15 +2173,31 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     if (novoStatusConta === 'RECEBIDO') statements.push(updateStatement(db, schema, 'lancamentos', { status: reimbursement ? 'REEMBOLSADO' : 'RECEBIDO', data_pagamento: lastDate, conta_bancaria_id: lastBank, comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
     const origem = await db.prepare('SELECT origem_id FROM lancamentos WHERE id = ?').bind(shareId).first<Row>()
     const client = await db.prepare("SELECT id FROM lancamentos WHERE (origem_id = ? OR origem_id = ?) AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(origem?.origem_id ?? null, shareId).first<Row>()
-    if (client && allPaid) statements.push(updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: lastDate, atualizado_em: new Date().toISOString() }, 'id = ?', [client.id]))
+    if (client && allPaid) {
+      const clientColumns = schema.get('lancamentos')
+      statements.push(updateStatement(db, schema, 'lancamentos', {
+        status: 'PAGO',
+        data_pagamento: lastDate,
+        ...(clientColumns?.has('conta_bancaria_id') ? { conta_bancaria_id: lastBank } : {}),
+        ...(clientColumns?.has('comprovante_url') ? { comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl) } : {}),
+        ...(clientColumns?.has('forma_pagamento') ? { forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento) } : {}),
+        ...(clientColumns?.has('pago_por') ? { pago_por: lastPayment.pagador_cotista_id ?? lastPayment.pagador_holding_id ?? null } : {}),
+        ...(clientColumns?.has('pago_diretamente') ? { pago_diretamente: 1 } : {}),
+        atualizado_em: new Date().toISOString(),
+      }, 'id = ?', [client.id]))
+    }
   }
   if (movimentoHoldingId) {
     const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
+    const movementColumns = schema.get('movimentos_holding')
     statements.push(updateStatement(db, schema, 'movimentos_holding', {
       status: allPaid ? 'PAGO' : 'EM_ABERTO',
       data_pagamento: allPaid ? lastDate : null,
+      ...(movementColumns?.has('conta_bancaria_id') ? { conta_bancaria_id: allPaid ? lastBank : null } : {}),
       comprovante_url: allPaid ? nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl) : null,
       forma_pagamento: allPaid ? nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento) : null,
+      ...(movementColumns?.has('pago_por') ? { pago_por: allPaid ? lastPayment.pagador_cotista_id ?? lastPayment.pagador_holding_id ?? null : null } : {}),
+      ...(movementColumns?.has('pago_diretamente') ? { pago_diretamente: allPaid ? 1 : 0 } : {}),
       atualizado_em: new Date().toISOString(),
     }, 'id = ?', [movimentoHoldingId]))
   }

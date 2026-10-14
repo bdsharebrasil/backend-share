@@ -42,10 +42,21 @@ test("nota de cotista Holding cria movimento e rateio vinculados à NF e à cont
 
 test("baixa da conta a receber atualiza rateio_hold e movimento Holding", () => {
   assert.match(settleReceivable, /FROM rateio_hold WHERE \$\{holdingMovementColumn\(schema\)\}/);
-  assert.match(settleReceivable, /updateStatement\(db, schema, movimentoHoldingId \? 'rateio_hold' : 'rateio_despesas'/);
+  assert.match(settleReceivable, /const rateioTable = movimentoHoldingId \? 'rateio_hold' : 'rateio_despesas'/);
+  assert.match(settleReceivable, /updateStatement\(db, schema, rateioTable/);
   assert.match(settleReceivable, /updateStatement\(db, schema, 'movimentos_holding'/);
   assert.match(settleReceivable, /status: allPaid \? 'PAGO' : 'EM_ABERTO'/);
   assert.match(settleReceivable, /origem_id = \?\) AND tipo_caixa = 'CLIENTE'/);
+});
+
+test("baixa de NF/recibo encontra rateio CLIENTE e grava pagamento direto", () => {
+  assert.match(settleReceivable, /const documentoSaida = \['NF_SAIDA', 'RECIBO_SAIDA'\]/);
+  assert.match(settleReceivable, /SELECT id FROM lancamentos WHERE origem_id = \? AND tipo_caixa = 'CLIENTE'/);
+  assert.match(settleReceivable, /nullableText\(lancamentoClienteSaida\?\.id\) \?\? shareId/);
+  assert.match(settleReceivable, /pago_diretamente: 1/);
+  assert.match(settleReceivable, /url_doc: nullableText\(lastPayment\.comprovante_url/);
+  assert.match(settleReceivable, /status: 'PAGO'/);
+  assert.match(settleReceivable, /status: 'PAGO',\s*data_pagamento: lastDate/);
 });
 
 test("e-mail da NF atualiza os espelhos, rateio Holding e exclusão remove seus vínculos", () => {
