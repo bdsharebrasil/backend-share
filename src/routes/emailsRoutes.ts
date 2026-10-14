@@ -193,6 +193,11 @@ async function marcarEmailEnviadoParaOrigens(
         if (v.destino_tipo === 'LANCAMENTO') lancamentoIds.push(v.destino_id)
         if (v.destino_tipo === 'MOVIMENTO_HOLDING') movimentoIds.push(v.destino_id)
       }
+      const lancamentosRelatorio = await db.prepare(
+        `SELECT id FROM lancamentos
+         WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1`
+      ).bind(rawId).all<{ id: string }>()
+      lancamentoIds.push(...(lancamentosRelatorio.results || []).map((row) => row.id))
     } else if (prefix === 'envio_despesa') {
       const row = await db.prepare('SELECT id, lancamento_id, movimentos_holding_id FROM envio_despesas WHERE id = ?1').bind(rawId).first<any>()
       if (row) {

@@ -4155,7 +4155,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     if (!body.data_vencimento) return c.json({ error: 'data_vencimento_obrigatoria' }, 400)
     const report = await c.env.SHARE_DB.prepare('SELECT * FROM relatorio_despesa_viagem WHERE id = ?').bind(id).first<any>()
     if (!report) return c.notFound()
-    if (statusRelatorioViagem(report.status) !== 'aprovado') return c.json({ error: 'aguarde_aprovacao_de_todos_os_tripulantes' }, 409)
+    if (!['aprovado', 'enviado_cliente'].includes(statusRelatorioViagem(report.status))) return c.json({ error: 'aguarde_aprovacao_de_todos_os_tripulantes' }, 409)
     if (!report.pdf_path) return c.json({ error: 'pdf_obrigatorio_antes_do_envio' }, 409)
     const db = c.env.SHARE_DB
     const cotista = await db.prepare(`SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1
@@ -4197,6 +4197,11 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
           .bind(movimentoId, socio.holding_id, report.socio_id, report.aeronave_id, periodicidade, hoje, body.data_vencimento, descricao, categoriaId, valorCentavos, report.pdf_path || null, `Origem: relatório ${report.numero_relatorio}`, user.id))
         statements.push(db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
           VALUES (?, 'RELATORIO_DESPESA_VIAGEM', ?, 'MOVIMENTO_HOLDING', ?, 'RELATORIO_MOVIMENTO_HOLDING')`).bind(crypto.randomUUID(), id, movimentoId))
+      }
+      if (body.email_enviado_id) {
+        statements.push(db.prepare(`UPDATE movimentos_holding
+          SET email_enviado_id = ?, email_enviado_em = COALESCE(email_enviado_em, CURRENT_TIMESTAMP)
+          WHERE id = ?`).bind(body.email_enviado_id, movimentoId))
       }
       const contaIdHolding = existingHolding?.id || contaId
       statements.push(existingHolding
