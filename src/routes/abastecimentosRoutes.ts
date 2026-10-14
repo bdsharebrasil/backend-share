@@ -53,7 +53,17 @@ abastecimentosRoutes.get('/api/interno/abastecimentos/opcoes', async c => {
     db.prepare('SELECT id, nome, designativo_icao FROM aerodromo ORDER BY designativo_icao').all(),
     db.prepare(`SELECT id, aeronave_id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal FROM diario_mes WHERE (?1 IS NULL OR aeronave_id = ?1) ORDER BY ano DESC, mes DESC`).bind(aeronaveId).all(),
   ])
-  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, aerodromos: aerodromos.results, diarios: diarios.results })
+  const ultimoTrecho = aeronaveId
+    ? await db.prepare(`SELECT l.id, l.aeronave_id, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada,
+        l.cliente_id, l.socio_id, c.razao_social AS cliente_nome, s.nome AS socio_nome
+      FROM lancamentos_diario_bordo l
+      LEFT JOIN cliente c ON c.id = l.cliente_id
+      LEFT JOIN hold_socios s ON s.id = l.socio_id
+      WHERE l.aeronave_id = ?1
+      ORDER BY date(l.data_registro) DESC, l.id DESC
+      LIMIT 1`).bind(aeronaveId).first()
+    : null
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, aerodromos: aerodromos.results, diarios: diarios.results, ultimo_trecho: ultimoTrecho })
 })
 
 abastecimentosRoutes.get('/api/interno/abastecimentos', async c => {
