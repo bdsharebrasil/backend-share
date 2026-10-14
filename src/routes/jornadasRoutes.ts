@@ -378,6 +378,34 @@ jornadasRoutes.patch('/api/interno/jornadas/:id', async c => {
   return c.json({ ...jornada, limites: await avaliarLimitesJornada(c, jornada) })
 })
 
+jornadasRoutes.delete('/api/interno/jornadas/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaJornadas(c)
+  const db = c.env.SHARE_DB
+  const jornada = await db.prepare('SELECT id, jornada_principal_id, solicitacao_id FROM jornadas_voo WHERE id = ?1').bind(c.req.param('id')).first<any>()
+  if (!jornada) return c.notFound()
+  const raizId = jornada.jornada_principal_id || jornada.id
+  const vinculada = await db.prepare(`SELECT id FROM pernas_jornada_voo WHERE jornada_id = ?1 AND lancamento_diario_id IS NOT NULL LIMIT 1`).bind(raizId).first<any>()
+  if (vinculada) return c.json({ error: 'jornada_com_diario_vinculado', detail: 'Não é possível excluir uma jornada que possui perna lançada no Diário de Bordo.' }, 409)
+  await db.batch([
+    db.prepare('DELETE FROM pernas_jornada_voo WHERE jornada_id = ?1').bind(raizId),
+    db.prepare('DELETE FROM jornadas_voo WHERE id = ?1 OR jornada_principal_id = ?1').bind(raizId),
+  ])
+  return c.json({ success: true, id: raizId, solicitacao_id: jornada.solicitacao_id })
+})
+
+jornadasRoutes.delete('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  await garantirTabelaJornadas(c)
+  const db = c.env.SHARE_DB
+  const perna = await db.prepare('SELECT id, jornada_id, lancamento_diario_id FROM pernas_jornada_voo WHERE id = ?1 AND jornada_id = ?2').bind(c.req.param('pernaId'), c.req.param('jornadaId')).first<any>()
+  if (!perna) return c.notFound()
+  if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario', detail: 'Não é possível excluir uma perna que possui lançamento no Diário de Bordo.' }, 409)
+  await db.prepare('DELETE FROM pernas_jornada_voo WHERE id = ?1').bind(perna.id).run()
+  await sincronizarResumoJornada(db, perna.jornada_id)
+  return c.json({ success: true, id: perna.id, jornada_id: perna.jornada_id })
+})
+
 jornadasRoutes.post('/api/interno/agendamento/:id/finalizar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
@@ -445,7 +473,6 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
   if (!perna) return c.notFound()
   if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
-  if (jornada?.status === 'encerrada') return c.json({ error: 'jornada_encerrada' }, 409)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const alias: Record<string, string> = { tempo_ac: 'horario_ac', tempo_dep: 'horario_dep', tempo_pou: 'horario_pouso', tempo_cor: 'horario_corte' }
   for (const [de, para] of Object.entries(alias)) if (body[de] !== undefined && body[para] === undefined) body[para] = body[de]
@@ -468,8 +495,13 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
     }
     referencia = iso || referencia
   }
+  valores.status = statusPerna({
+    horario_ac: valores.horario_ac !== undefined ? valores.horario_ac as string | null : perna.horario_ac,
+    horario_dep: valores.horario_dep !== undefined ? valores.horario_dep as string | null : perna.horario_dep,
+    horario_pouso: valores.horario_pouso !== undefined ? valores.horario_pouso as string | null : perna.horario_pouso,
+    horario_corte: valores.horario_corte !== undefined ? valores.horario_corte as string | null : perna.horario_corte,
+  })
   const campos = Object.keys(valores)
-  if (!campos.length) return c.json({ id: perna.id, status: perna.status })
   await db.prepare(`UPDATE pernas_jornada_voo SET ${campos.map((campo, i) => `${campo} = ?${i + 1}`).join(', ')} WHERE id = ?${campos.length + 1}`)
     .bind(...campos.map((campo) => valores[campo] ?? null), perna.id).run()
   const pernas = await sincronizarResumoJornada(db, perna.jornada_id)
