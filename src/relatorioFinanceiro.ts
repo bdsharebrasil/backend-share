@@ -469,10 +469,11 @@ export async function sincronizarRelatorioViagemFinanceiro(
         ? await findTripulanteUserId(db, report.tripulante_id_2)
         : null
 
-    if (payer !== 'cliente' && kind === 'CLIENTE') {
+    // Despesas pagas pela Share já foram registradas no caixa quando pagas;
+    // o relatório só gera nova saída no caixa Share para reembolsar tripulantes.
+    if ((payer === 'tripulante_1' || payer === 'tripulante_2') && kind === 'CLIENTE') {
       lancamentoId = uuid()
       const dataEmissao = await dataEmissaoRelatorio(db, report, null)
-      const reembolsavel = payer === 'tripulante_1' || payer === 'tripulante_2'
       statements.push(await prepareInsert(db, 'lancamentos', {
         id: lancamentoId,
         aeronave_id: text(report.aeronave_id),
@@ -488,15 +489,15 @@ export async function sincronizarRelatorioViagemFinanceiro(
         url_doc: text(report.pdf_path) || null,
         cotista_aeronave_id: allocations[0]?.id || null,
         cliente_id: kind === 'CLIENTE' ? clienteLancamentoId : null,
-        categoria_nome: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
-        grupo_categoria: reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA',
+        categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
+        grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
         status: 'EM_ABERTO',
         fluxo: 'SAIDA',
         tipo_caixa: 'SHARE',
         valor_centavos: amountCentavos,
         pago_por: null,
         pago_diretamente: 0,
-        reembolsavel: reembolsavel ? 1 : 0,
+        reembolsavel: 1,
         reembolso_quitado: 0,
         forma_pagamento: null,
         observacoes: `Origem: relatório ${text(report.numero_relatorio) || reportId}`,
