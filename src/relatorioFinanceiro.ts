@@ -245,23 +245,20 @@ async function addRateiosCliente(
   report: ReportRow,
   allocations: Allocation[],
   amountCentavos: number,
-  lancamentoId: string | null,
-  payer: Payer,
   description: string,
-  userId: string | null,
 ) {
   const status = 'EM_ABERTO'
   for (const allocation of allocations) {
     const rateioId = uuid()
     statements.push(await prepareInsert(db, 'rateio_despesas', {
       id: rateioId,
-      lancamento_id: lancamentoId,
+      lancamento_id: null,
       aeronave_id: text(report.aeronave_id),
       cotista_id: allocation.id,
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
       data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
       data_pagamento: null,
-      categoria_nome: payer === 'cliente' ? 'DESPESAS PAGAS DIRETAMENTE PELO CLIENTE' : payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : 'DESPESAS REEMBOLSÁVEIS',
+      categoria_nome: 'DESPESAS DE VIAGEM',
       tipo_rateio: 'VARIAVEL_POR_VOO',
       periodicidade: 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
@@ -284,11 +281,9 @@ async function addRateiosHolding(
   report: ReportRow,
   allocations: Allocation[],
   amountCentavos: number,
-  payer: Payer,
   description: string,
   userId: string | null,
 ) {
-  const direct = false
   const movimentoStatus = 'EM_ABERTO'
   const rateioStatus = 'EM_ABERTO'
   const movimentoId = uuid()
@@ -302,13 +297,13 @@ async function addRateiosHolding(
     data_vencimento: dateValue(report.data_vencimento_reembolso, dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))),
     data_pagamento: null,
     descricao: description,
-    categoria_nome: direct && payer === 'cliente' ? 'DESPESAS PAGAS DIRETAMENTE PELO CLIENTE' : payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : 'DESPESAS REEMBOLSÁVEIS',
-    grupo_categoria: payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : 'DESPESAS REEMBOLSÁVEIS',
+    categoria_nome: 'DESPESAS DE VIAGEM',
+    grupo_categoria: 'DESPESAS DE VIAGEM',
     fluxo: 'SAIDA',
     valor_centavos: amountCentavos,
     status: movimentoStatus,
-    pago_diretamente: direct ? 1 : 0,
-    colaborador_id: payer === 'tripulante_1' || payer === 'tripulante_2' ? await findTripulanteUserId(db, payer === 'tripulante_1' ? report.tripulacao_id : report.tripulante_id_2) : null,
+    pago_diretamente: 0,
+    colaborador_id: null,
     criado_por: userId,
     observacoes: `Origem: relatório ${text(report.numero_relatorio) || text(report.id)}`,
   }))
@@ -323,8 +318,8 @@ async function addRateiosHolding(
       socio_id: allocation.socio_id,
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
       data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
-      data_pagamento: direct ? dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))) : null,
-      categoria_nome: payer === 'sharebrasil' ? 'DESPESAS EMPRESA' : payer === 'cliente' ? 'DESPESAS PAGAS DIRETAMENTE PELO CLIENTE' : 'DESPESAS REEMBOLSÁVEIS',
+      data_pagamento: null,
+      categoria_nome: 'DESPESAS DE VIAGEM',
       tipo_rateio: 'VARIAVEL_POR_VOO',
       periodicidade: 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
@@ -332,7 +327,7 @@ async function addRateiosHolding(
       valor_total_centavos: amountCentavos,
       valor_rateado_centavos: allocation.valor_rateado_centavos,
       pago_por: null,
-      pago_diretamente: direct ? 1 : 0,
+      pago_diretamente: 0,
       status: rateioStatus,
       descricao_despesa: description,
       observacoes: `Origem: relatório ${text(report.numero_relatorio) || text(report.id)}`,
@@ -354,6 +349,8 @@ export async function sincronizarRelatorioViagemFinanceiro(
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
   const expenses = expensesFromReport(report)
   if (!expenses.length) throw new Error('relatorio_sem_despesas')
+  const reportTotalCentavos = Math.round(expenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
+  const reportDescription = payerDescription(report, 'cliente')
   const clienteLancamentoId = await findLancamentoClientId(db, report.cliente_id)
   const grouped = new Map<Payer, Array<Record<string, any>>>()
   for (const expense of expenses) {
@@ -368,22 +365,39 @@ export async function sincronizarRelatorioViagemFinanceiro(
   if ((existing.results || []).length) {
     const existingDueDate = dateValue(report.data_vencimento_reembolso, dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))))
     const statements: D1PreparedStatement[] = []
+    const consolidatedMovement = kind === 'HOLDING'
+      ? await db.prepare(`SELECT fv.destino_id AS id FROM financeiro_vinculos fv
+          INNER JOIN movimentos_holding mh ON mh.id = fv.destino_id
+          WHERE fv.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND fv.origem_id = ?1
+            AND fv.destino_tipo = 'MOVIMENTO_HOLDING' AND mh.descricao = ?2 LIMIT 1`)
+        .bind(reportId, reportDescription).first<{ id: string }>()
+      : null
+    const consolidatedMovementId = text(consolidatedMovement?.id) || null
+    if (consolidatedMovementId) {
+      await db.prepare(`UPDATE movimentos_holding SET fornecedor_nome = ?, numero_doc = ?, url_doc = ?, data_vencimento = ?
+        WHERE id = ?`).bind(
+        FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), text(report.pdf_path) || null,
+        existingDueDate, consolidatedMovementId,
+      ).run()
+    }
     for (const [payer, payerExpenses] of grouped.entries()) {
       const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
       if (amountCentavos <= 0) continue
       if (payer === 'tripulante_2' && !text(report.tripulante_id_2)) throw new Error('tripulante_2_obrigatorio_para_despesa')
       const description = payerDescription(report, payer)
       let lancamentoId: string | null = null
-      let movimentoHoldingId: string | null = null
+      let movimentoHoldingId: string | null = consolidatedMovementId
       if (kind === 'HOLDING') {
-        const movimento = await db.prepare(`SELECT destino_id AS id FROM financeiro_vinculos fv
-          INNER JOIN movimentos_holding mh ON mh.id = fv.destino_id
-          WHERE fv.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND fv.origem_id = ?1
-            AND fv.destino_tipo = 'MOVIMENTO_HOLDING' AND mh.descricao = ?2 LIMIT 1`).bind(reportId, description).first<{ id: string }>()
-        movimentoHoldingId = text(movimento?.id) || null
-        await db.prepare(`UPDATE movimentos_holding SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, url_doc = ?, data_vencimento = ?
-          WHERE id IN (SELECT destino_id FROM financeiro_vinculos WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND destino_tipo = 'MOVIMENTO_HOLDING')
-            AND descricao = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), text(report.pdf_path) || null, existingDueDate, reportId, description).run()
+        if (!consolidatedMovementId) {
+          const movimento = await db.prepare(`SELECT destino_id AS id FROM financeiro_vinculos fv
+            INNER JOIN movimentos_holding mh ON mh.id = fv.destino_id
+            WHERE fv.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND fv.origem_id = ?1
+              AND fv.destino_tipo = 'MOVIMENTO_HOLDING' AND mh.descricao = ?2 LIMIT 1`).bind(reportId, description).first<{ id: string }>()
+          movimentoHoldingId = text(movimento?.id) || null
+          await db.prepare(`UPDATE movimentos_holding SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, url_doc = ?, data_vencimento = ?
+            WHERE id IN (SELECT destino_id FROM financeiro_vinculos WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND destino_tipo = 'MOVIMENTO_HOLDING')
+              AND descricao = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), text(report.pdf_path) || null, existingDueDate, reportId, description).run()
+        }
       } else {
         const lancamentoExistente = await db.prepare(`SELECT id FROM lancamentos
           WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1 AND idempotency_key = ?2
@@ -429,7 +443,6 @@ export async function sincronizarRelatorioViagemFinanceiro(
             idempotency_key: `RELATORIO_DESPESA_VIAGEM:${reportId}:${payer}`,
           }))
           await addLinkStatements(db, statements, reportId, 'LANCAMENTO', lancamentoId, 'RELATORIO_LANCAMENTO')
-          await addRateiosCliente(db, statements, report, allocate(amountCentavos, rows), amountCentavos, lancamentoId, payer, description, userId)
         }
       }
       if ((kind === 'CLIENTE' || kind === 'HOLDING') && (payer === 'tripulante_1' || payer === 'tripulante_2')) {
@@ -452,6 +465,19 @@ export async function sincronizarRelatorioViagemFinanceiro(
   const valorAReceberCentavos = [...grouped.entries()]
     .filter(([payer]) => payer !== 'cliente')
     .reduce((total, [, payerExpenses]) => total + Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100), 0)
+  const rateioAllocations = allocate(reportTotalCentavos, rows, kind === 'HOLDING')
+  let reportMovementHoldingId: string | null = null
+
+  if (reportTotalCentavos > 0 && rateioAllocations.length) {
+    if (kind === 'CLIENTE') {
+      await addRateiosCliente(db, statements, report, rateioAllocations, reportTotalCentavos, reportDescription)
+    } else {
+      reportMovementHoldingId = await addRateiosHolding(
+        db, statements, report, rateioAllocations, reportTotalCentavos, reportDescription, userId,
+      )
+      destinos.push({ tipo: 'MOVIMENTO_HOLDING', id: reportMovementHoldingId })
+    }
+  }
 
   for (const [payer, payerExpenses] of grouped.entries()) {
     if (payer === 'tripulante_2' && !text(report.tripulante_id_2)) throw new Error('tripulante_2_obrigatorio_para_despesa')
@@ -462,7 +488,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     if (!allocations.length && kind === 'HOLDING') continue
 
     let lancamentoId: string | null = null
-    let movimentoHoldingId: string | null = null
+    const movimentoHoldingId = reportMovementHoldingId
     const tripulanteUserId = payer === 'tripulante_1'
       ? await findTripulanteUserId(db, report.tripulacao_id)
       : payer === 'tripulante_2'
@@ -509,14 +535,6 @@ export async function sincronizarRelatorioViagemFinanceiro(
       await addLinkStatements(db, statements, reportId, 'LANCAMENTO', lancamentoId, 'RELATORIO_LANCAMENTO')
       destinos.push({ tipo: 'LANCAMENTO', id: lancamentoId })
 
-    }
-
-    if (kind === 'CLIENTE') {
-      await addRateiosCliente(db, statements, report, allocations, amountCentavos, lancamentoId, payer, description, userId)
-    } else {
-      const movimentoId = await addRateiosHolding(db, statements, report, allocations, amountCentavos, payer, description, userId)
-      destinos.push({ tipo: 'MOVIMENTO_HOLDING', id: movimentoId })
-      movimentoHoldingId = movimentoId
     }
 
     if ((kind === 'CLIENTE' || kind === 'HOLDING') && (payer === 'tripulante_1' || payer === 'tripulante_2')) {
