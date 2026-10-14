@@ -193,7 +193,7 @@ ctmRoutes.get('/api/interno/agendamento/:id/peso-balanceamento', async c => {
   const [piloto, copiloto, config, ficha] = await Promise.all([
     reserva.piloto_id ? buscarTripulante(c, reserva.piloto_id) : null,
     reserva.copiloto_id ? buscarTripulante(c, reserva.copiloto_id) : null,
-    db.prepare('SELECT * FROM ctm_peso_balanceamento WHERE aeronave_id = ?1').bind(reserva.aeronave_id).first<any>().catch(() => null),
+    db.prepare('SELECT * FROM ctm_peso_balanceamento WHERE aeronave_id = ?1 ORDER BY atualizado_em DESC LIMIT 1').bind(reserva.aeronave_id).first<any>().catch(() => null),
     db.prepare('SELECT * FROM ctm_ficha_peso_balanceamento WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(id).first<any>(),
   ])
   return c.json({

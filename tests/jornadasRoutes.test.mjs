@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
+import { agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo, pesoBalanceamentoConcluido } from '../src/routes/jornadasRoutes.ts'
 
 test('preserva cada jornada legada sem jornada principal como registro independente', () => {
   const registros = [
@@ -45,4 +45,10 @@ test('somente checklist pré-voo concluído libera o início da jornada', () => 
   assert.equal(checklistPreVooConcluido(null), false)
   assert.equal(checklistPreVooConcluido('rascunho'), false)
   assert.equal(checklistPreVooConcluido(' CONCLUIDO '), true)
+})
+
+test('somente ficha de peso finalizada libera o início da jornada', () => {
+  assert.equal(pesoBalanceamentoConcluido(null), false)
+  assert.equal(pesoBalanceamentoConcluido('RASCUNHO'), false)
+  assert.equal(pesoBalanceamentoConcluido(' finalizada '), true)
 })
