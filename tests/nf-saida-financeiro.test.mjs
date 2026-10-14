@@ -57,3 +57,9 @@ test("e-mail da NF atualiza os espelhos, rateio Holding e exclusão remove seus 
   assert.match(notas, /DELETE FROM movimentos_holding WHERE id = \?/);
   assert.match(notas, /DELETE FROM rateio_pagamentos WHERE rateio_id IN/);
 });
+
+test("listagem da NF expõe valor_total e recupera e-mail enviado do lançamento ou histórico", () => {
+  assert.match(notas, /n\.valor_total, COALESCE\(NULLIF\(l\.email_enviado_em, ''\)/);
+  assert.match(notas, /MAX\(ee\.email_enviado_em\).*ee\.referencia_id = n\.id.*lower\(ee\.status\) = 'enviado'/);
+  assert.match(notas, /LEFT JOIN lancamentos l ON l\.id = n\.lancamentos_id/);
+});
