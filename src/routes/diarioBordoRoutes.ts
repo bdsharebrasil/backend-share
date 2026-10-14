@@ -40,6 +40,18 @@ function diarioText(value: unknown): string | null {
   return text || null
 }
 
+type ReferenciaDiario = { tabela: string; valor: unknown; campo: string }
+
+async function validarReferenciasDiario(db: D1Database, referencias: ReferenciaDiario[]): Promise<{ campo: string; valor: string } | null> {
+  for (const referencia of referencias) {
+    const valor = diarioText(referencia.valor)
+    if (!valor) continue
+    const encontrada = await db.prepare(`SELECT id FROM ${referencia.tabela} WHERE id = ?1 LIMIT 1`).bind(valor).first<{ id: string }>()
+    if (!encontrada) return { campo: referencia.campo, valor }
+  }
+  return null
+}
+
 async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings; Variables: Variables }>) {
   await validateWorkerSchema(c, [{
     table: 'abastecimentos',
@@ -480,6 +492,15 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     if (pernaVinculada.aeronave_id !== aeronaveId || (body.jornada_id && String(body.jornada_id) !== String(pernaVinculada.jornada_id))) return c.json({ error: 'perna_nao_corresponde_a_jornada_ou_aeronave' }, 409)
     if (pernaVinculada.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   }
+  const referenciaInvalida = await validarReferenciasDiario(db, [
+    { tabela: 'jornadas_voo', valor: pernaVinculada ? null : body.jornada_id, campo: 'jornada_id' },
+    { tabela: 'cliente', valor: body.cliente_id, campo: 'cliente_id' },
+    { tabela: 'holdings', valor: body.holding_id, campo: 'holding_id' },
+    { tabela: 'hold_socios', valor: body.socio_id, campo: 'socio_id' },
+    { tabela: 'cliente', valor: body.cliente_tomador_emprestimo_id, campo: 'cliente_tomador_emprestimo_id' },
+    { tabela: 'hold_socios', valor: body.socio_tomador_emprestimo_id, campo: 'socio_tomador_emprestimo_id' },
+  ])
+  if (referenciaInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaInvalida.campo, valor: referenciaInvalida.valor }, 400)
   const last = await db.prepare('SELECT COALESCE(MAX(numero_sequencial), 0) AS sequencial FROM lancamentos_diario_bordo WHERE diario_mes_id = ?1').bind(diarioMesId).first<{ sequencial: number }>()
   const id = uuid()
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
@@ -488,6 +509,11 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   let abastecimentoStmt: D1PreparedStatement | null = null
   if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
     await garantirTabelaAbastecimentos(c)
+    const referenciaAbastecimentoInvalida = await validarReferenciasDiario(db, [
+      { tabela: 'cliente', valor: diarioBoolean(body.voo_emprestado) ? (body.cliente_tomador_emprestimo_id || abastecimento.cliente_id) : abastecimento.cliente_id, campo: 'abastecimento.cliente_id' },
+      { tabela: 'hold_socios', valor: diarioBoolean(body.voo_emprestado) ? (body.socio_tomador_emprestimo_id || abastecimento.socio_id) : abastecimento.socio_id, campo: 'abastecimento.socio_id' },
+    ])
+    if (referenciaAbastecimentoInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaAbastecimentoInvalida.campo, valor: referenciaAbastecimentoInvalida.valor }, 400)
     const titularAbastecimentoCliente = diarioBoolean(body.voo_emprestado) ? (body.cliente_tomador_emprestimo_id || abastecimento.cliente_id || null) : (abastecimento.cliente_id || null)
     const titularAbastecimentoSocio = diarioBoolean(body.voo_emprestado) ? (body.socio_tomador_emprestimo_id || abastecimento.socio_id || null) : (abastecimento.socio_id || null)
     const abastecimentoLocal = await normalizarLocalAbastecimento(db, abastecimento.local || body.local_combustivel || String(body.aerodromo_partida || ''))
@@ -578,6 +604,15 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
     if (pernaDesejada.aeronave_id !== current.aeronave_id || pernaDesejada.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
     if (body.jornada_id && String(body.jornada_id) !== String(pernaDesejada.jornada_id)) return c.json({ error: 'perna_nao_corresponde_a_jornada_ou_aeronave' }, 409)
   }
+  const referenciaInvalida = await validarReferenciasDiario(db, [
+    { tabela: 'jornadas_voo', valor: pernaAtualId || pernaDesejadaId ? null : merged.jornada_id, campo: 'jornada_id' },
+    { tabela: 'cliente', valor: merged.cliente_id, campo: 'cliente_id' },
+    { tabela: 'holdings', valor: merged.holding_id, campo: 'holding_id' },
+    { tabela: 'hold_socios', valor: merged.socio_id, campo: 'socio_id' },
+    { tabela: 'cliente', valor: merged.cliente_tomador_emprestimo_id, campo: 'cliente_tomador_emprestimo_id' },
+    { tabela: 'hold_socios', valor: merged.socio_tomador_emprestimo_id, campo: 'socio_tomador_emprestimo_id' },
+  ])
+  if (referenciaInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaInvalida.campo, valor: referenciaInvalida.valor }, 400)
   const assignments = updates.filter(([field], index, list) => list.findIndex(([candidate]) => candidate === field) === index)
   await db.prepare(`UPDATE lancamentos_diario_bordo SET ${assignments.map(([field]) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...assignments.map(([, value]) => value), id).run()
   if (body.abastecido === false || (body.abastecimento && diarioNumber(body.abastecimento.litros) <= 0)) {
