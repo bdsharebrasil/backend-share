@@ -1028,7 +1028,10 @@ app.get('/api/colaborador/perfil', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const db = c.env.SHARE_DB
-  const [pagamentos, documentos, funcoes, ferias, aprovacoesRelatorios] = await Promise.all([
+  const [tripulante, pagamentos, documentos, funcoes, ferias, aprovacoesRelatorios] = await Promise.all([
+    db.prepare(`SELECT id, user_id, canac, nome_completo, status, tipo_licenca FROM tripulacao
+      WHERE user_id = ?1 OR (NULLIF(trim(?2), '') IS NOT NULL AND lower(trim(canac)) = lower(trim(?2)))
+      ORDER BY CASE WHEN user_id = ?1 THEN 0 ELSE 1 END LIMIT 1`).bind(colaborador.id, colaborador.canac).first(),
     db.prepare("SELECT id, descricao, NULL AS competencia, data_vencimento, data_pagamento, ROUND(valor_centavos / 100.0, 2) AS valor, status, observacoes FROM lancamentos WHERE colaborador_id = ?1 AND lower(status) <> 'cancelado' ORDER BY date(COALESCE(data_vencimento, data_emissao, criado_em)) DESC, criado_em DESC").bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] pagamentos indisponíveis', error); return { results: [] } }),
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] documentos indisponíveis', error); return { results: [] } }),
     db.prepare('SELECT id, funcao, criado_em FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY funcao').bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] funções indisponíveis', error); return { results: [] } }),
@@ -1051,6 +1054,7 @@ app.get('/api/colaborador/perfil', async c => {
     .reduce((total, item) => total + item.quantidade_dias, 0)
   return c.json({
     perfil: { ...colaborador, foto_url: colaborador.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 },
+    tripulante,
     pagamentos: pagamentos.results,
     documentos: documentos.results.map(row => documentoColaborador(row as Record<string, unknown>)),
     funcoes: funcoes.results,
@@ -1075,14 +1079,22 @@ app.patch('/api/colaborador/perfil', async c => {
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<Record<string, unknown>>().catch(() => null)
   if (!body) return c.json({ error: 'corpo_invalido' }, 400)
-  const fields = ['nome_completo', 'cpf', 'telefone'] as const
+  const fields = ['nome_completo', 'nome_exibicao', 'cpf', 'telefone', 'endereco', 'cidade', 'uf', 'data_nascimento', 'rg', 'canac', 'url_avatar'] as const
   const updates = fields.filter(field => body[field] !== undefined).map(field => ({ field, value: body[field] === null ? null : String(body[field]).trim() }))
-  if (updates.length === 0) return c.json({ perfil: colaborador })
-  const assignments = updates.map(({ field }) => `${field} = ?`).join(', ')
-  await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
+  if (updates.length === 0 && body.tipo_licenca === undefined) return c.json({ perfil: colaborador, tripulante: null })
+  if (updates.length > 0) {
+    const assignments = updates.map(({ field }) => `${field} = ?`).join(', ')
+    await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
+  }
   const updated = await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(colaborador.id).first<Colaborador>()
-  await sincronizarTripulacaoColaborador(c, colaborador.id, updated || {}).catch(error => log.warn('[colaborador/perfil] tripulação não sincronizada', error?.message || error))
-  return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 } })
+  if (updates.some(({ field }) => field === 'nome_completo' || field === 'canac')) {
+    await sincronizarTripulacaoColaborador(c, colaborador.id, updated || {}).catch(error => log.warn('[colaborador/perfil] tripulação não sincronizada', error?.message || error))
+  }
+  if (body.tipo_licenca !== undefined) {
+    await c.env.SHARE_DB.prepare('UPDATE tripulacao SET tipo_licenca = ?1 WHERE user_id = ?2').bind(body.tipo_licenca === null ? null : String(body.tipo_licenca).trim() || null, colaborador.id).run()
+  }
+  const tripulante = await c.env.SHARE_DB.prepare('SELECT id, user_id, canac, nome_completo, status, tipo_licenca FROM tripulacao WHERE user_id = ?1 LIMIT 1').bind(colaborador.id).first()
+  return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 }, tripulante })
 })
 
 app.get('/api/colaborador/foto', async c => {
@@ -2316,8 +2328,8 @@ async function sincronizarTripulacaoColaborador(c: Context<{ Bindings: Bindings 
   const funcao = String(body.funcao || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
   const departamento = String(body.departamento || body.departamentos_email || perfil.departamento || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
   const funcaoAtual = await db.prepare("SELECT funcao FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY criado_em DESC LIMIT 1").bind(userId).first<{ funcao: string }>().catch(() => null)
-  const ehTripulante = [funcao, departamento, String(funcaoAtual?.funcao || '').trim().toLowerCase().replace(/[\s-]+/g, '_')].includes('tripulante')
   const existente = await db.prepare('SELECT id FROM tripulacao WHERE user_id = ?1').bind(userId).first<{ id: string }>()
+  const ehTripulante = Boolean(existente) || [funcao, departamento, String(funcaoAtual?.funcao || '').trim().toLowerCase().replace(/[\s-]+/g, '_')].includes('tripulante')
   if (!ehTripulante) {
     if (existente) await db.prepare("UPDATE tripulacao SET status = 'inativo' WHERE id = ?1").bind(existente.id).run()
     return
