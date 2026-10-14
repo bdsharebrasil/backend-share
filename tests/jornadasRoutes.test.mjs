@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { agruparJornadasVoo } from '../src/routes/jornadasRoutes.ts'
+import { agruparJornadasVoo, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
 
 test('preserva cada jornada legada sem jornada principal como registro independente', () => {
   const registros = [
@@ -27,4 +27,16 @@ test('agrupa PIC e SIC vinculados à mesma jornada-raiz sem duplicar o históric
   assert.equal(grupos[0].raizId, 'jornada-pic')
   assert.equal(grupos[0].representante.id, 'jornada-pic')
   assert.equal(grupos[0].registros.length, 2)
+})
+
+test('mantém EM VOO somente enquanto houver perna sem pouso registrado', () => {
+  assert.equal(determinarStatusAgendamentoVoo('aprovada', 1, 0), 'em_voo')
+  assert.equal(determinarStatusAgendamentoVoo('em_voo', 0, 1), 'em_solo')
+  assert.equal(determinarStatusAgendamentoVoo('em_voo', 0, 0), 'em_solo')
+})
+
+test('encerra em EM SOLO e preserva estados finais ou solicitações ainda sem voo', () => {
+  assert.equal(determinarStatusAgendamentoVoo('aprovada', 0, 0), 'aprovada')
+  assert.equal(determinarStatusAgendamentoVoo('aprovada', 0, 0, true), 'em_solo')
+  assert.equal(determinarStatusAgendamentoVoo('encerrada', 0, 1, true), 'encerrada')
 })

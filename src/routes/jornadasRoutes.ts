@@ -141,6 +141,34 @@ function statusPerna(p: { horario_ac?: string | null; horario_corte?: string | n
   return 'programada'
 }
 
+export function determinarStatusAgendamentoVoo(statusAtual: string, pernasEmVoo: number, pousosRegistrados: number, jornadaEncerrada = false) {
+  const status = String(statusAtual || '').trim().toLowerCase()
+  if (['encerrada', 'concluida', 'cancelada', 'reprovada', 'pendente'].includes(status)) return status
+  if (pernasEmVoo > 0) return 'em_voo'
+  if (jornadaEncerrada || pousosRegistrados > 0 || status === 'em_voo' || status === 'em_rota') return 'em_solo'
+  return status
+}
+
+async function sincronizarStatusAgendamentoVoo(db: D1Database, solicitacaoId: string, jornadaEncerrada = false) {
+  const [agendamento, pernas, pousosJornada, pernasAbertasLegadas] = await Promise.all([
+    db.prepare('SELECT status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<{ status: string }>(),
+    db.prepare(`SELECT SUM(CASE WHEN p.status = 'em_voo' THEN 1 ELSE 0 END) AS em_voo,
+        SUM(CASE WHEN p.horario_pouso IS NOT NULL THEN 1 ELSE 0 END) AS pousadas
+      FROM pernas_jornada_voo p
+      JOIN jornadas_voo j ON j.id = p.jornada_id
+      WHERE j.solicitacao_id = ?1`).bind(solicitacaoId).first<{ em_voo: number; pousadas: number }>(),
+    db.prepare('SELECT COUNT(*) AS total FROM jornadas_voo WHERE solicitacao_id = ?1 AND horario_pouso IS NOT NULL').bind(solicitacaoId).first<{ total: number }>(),
+    db.prepare("SELECT COUNT(*) AS total FROM jornadas_voo WHERE solicitacao_id = ?1 AND status IN ('em_rota', 'em voo', 'em_voo') AND horario_pouso IS NULL").bind(solicitacaoId).first<{ total: number }>(),
+  ])
+  if (!agendamento) return
+  const pousosRegistrados = Number(pernas?.pousadas || 0) + Number(pousosJornada?.total || 0)
+  const emVoo = Number(pernas?.em_voo || 0) + Number(pernasAbertasLegadas?.total || 0)
+  const status = determinarStatusAgendamentoVoo(agendamento.status, emVoo, pousosRegistrados, jornadaEncerrada)
+  await db.prepare('UPDATE solicitacoes_reserva_voo SET status = ?1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2')
+    .bind(status, solicitacaoId).run()
+  return status
+}
+
 export function agruparJornadasVoo(registros: any[]) {
   const grupos = new Map<string, { raizId: string; registros: any[]; representante: any }>()
   for (const registro of registros) {
@@ -286,7 +314,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
          horario_apresentacao, horario_acionamento, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(jornadaId, idSolicitacao, voo.aeronave_id, item.tripulante_id, item.funcao, principalId, numeroJornada, data,
-        apresentacao, acionamento, corteInicio, LIMITES_JORNADA.posCorte, horarioDep ? 'em_rota' : 'em_solo',
+        apresentacao, acionamento, corteInicio, LIMITES_JORNADA.posCorte, horarioDep && !corteInicio ? 'em_rota' : 'em_solo',
         body.observacoes || null, extractSupabaseUserId(c)).run()
     if (!principalId) {
       principalId = jornadaId
@@ -297,9 +325,13 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   }
   await db.prepare(`UPDATE solicitacoes_reserva_voo
     SET horario_previsto_agendamento = ?1,
-        status = CASE WHEN ?2 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'em_rota', 'em rota', 'em_voo', 'em voo') THEN 'em_voo' ELSE status END,
+        status = CASE
+          WHEN ?2 IS NOT NULL AND ?3 IS NULL AND lower(trim(status)) IN ('aprovada', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo') THEN 'em_voo'
+          WHEN ?3 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo') THEN 'em_solo'
+          ELSE status
+        END,
         atualizado_em = CURRENT_TIMESTAMP
-    WHERE id = ?3`).bind(acionamento, horarioDep, idSolicitacao).run()
+    WHERE id = ?4`).bind(acionamento, horarioDep, corteInicio, idSolicitacao).run()
   const pernas = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(principalId).all<any>()
   const principal = criadas[0]
   return c.json({
@@ -360,10 +392,11 @@ jornadasRoutes.patch('/api/interno/jornadas/:id', async c => {
       SET horario_previsto_agendamento = ?1,
           atualizado_em = CURRENT_TIMESTAMP
       WHERE id = ?2`).bind(acionamento, atual.solicitacao_id).run()
+    const statusAgendamento = await sincronizarStatusAgendamentoVoo(db, atual.solicitacao_id, true)
     // Encerrar uma jornada não finaliza o agendamento. A solicitação permanece
     // aprovada para permitir outra jornada no mesmo número de voo.
     const atualizada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(atual.id).first<any>()
-    return c.json({ ...atualizada, limites: await avaliarLimitesJornada(c, atualizada),
+    return c.json({ ...atualizada, status_agendamento: statusAgendamento, limites: await avaliarLimitesJornada(c, atualizada),
       tripulantes: avaliacoes.map(({ item, limites }) => ({ id: item.id, tripulante_id: item.tripulante_id, funcao: item.funcao_tripulante, limites })) })
   }
   await db.prepare(`UPDATE jornadas_voo SET horario_apresentacao = ?1, horario_acionamento = ?2, horario_pouso = ?3,
@@ -374,8 +407,9 @@ jornadasRoutes.patch('/api/interno/jornadas/:id', async c => {
     SET horario_previsto_agendamento = ?1,
         atualizado_em = CURRENT_TIMESTAMP
     WHERE id = ?2`).bind(acionamento, atual.solicitacao_id).run()
+  const statusAgendamento = await sincronizarStatusAgendamentoVoo(db, atual.solicitacao_id)
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(atual.id).first<any>()
-  return c.json({ ...jornada, limites: await avaliarLimitesJornada(c, jornada) })
+  return c.json({ ...jornada, status_agendamento: statusAgendamento, limites: await avaliarLimitesJornada(c, jornada) })
 })
 
 jornadasRoutes.delete('/api/interno/jornadas/:id', async c => {
@@ -462,7 +496,8 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
     .bind(pernaId, jornada.id, numero, origem, destino, numeroPassageiros, horarioAc, horarioDep, horarioPouso, horarioCorte, status).run()
   const pernas = await sincronizarResumoJornada(db, jornada.id)
   if (horarioDep && jornada.status === 'em_solo') await db.prepare("UPDATE jornadas_voo SET status = 'em_rota' WHERE id = ?1").bind(jornada.id).run()
-  return c.json({ id: pernaId, jornada_id: jornada.id, numero, origem, destino, numero_passageiros: numeroPassageiros, horario_ac: horarioAc, horario_dep: horarioDep, horario_pouso: horarioPouso, horario_corte: horarioCorte, status, limites: await avaliarLimitesJornada(c, { ...jornada, pernas }) }, 201)
+  const statusAgendamento = await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id)
+  return c.json({ id: pernaId, jornada_id: jornada.id, numero, origem, destino, numero_passageiros: numeroPassageiros, horario_ac: horarioAc, horario_dep: horarioDep, horario_pouso: horarioPouso, horario_corte: horarioCorte, status, status_agendamento: statusAgendamento, limites: await avaliarLimitesJornada(c, { ...jornada, pernas }) }, 201)
 })
 
 jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
@@ -506,5 +541,6 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
     .bind(...campos.map((campo) => valores[campo] ?? null), perna.id).run()
   const pernas = await sincronizarResumoJornada(db, perna.jornada_id)
   const atualizada = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(perna.id).first<any>()
-  return c.json({ ...normalizarPernaJornada(atualizada), limites: jornada ? await avaliarLimitesJornada(c, { ...jornada, pernas }) : null })
+  const statusAgendamento = jornada ? await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id) : undefined
+  return c.json({ ...normalizarPernaJornada(atualizada), status_agendamento: statusAgendamento, limites: jornada ? await avaliarLimitesJornada(c, { ...jornada, pernas }) : null })
 })
