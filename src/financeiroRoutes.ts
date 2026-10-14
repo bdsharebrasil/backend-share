@@ -28,9 +28,12 @@ import { recibosRoutes } from './financeiro/recibosRoutes'
 import { enviosPagamentoRoutes } from './financeiro/enviosPagamentoRoutes'
 import { STATUS_LANCAMENTO } from './financeiro/statuses'
 import { requireCaixaShareAccess } from './financeiro/access'
+import { portalClienteRoutes } from './financeiro/portalClienteRoutes'
 
 type Bindings = {
   SHARE_DB: D1Database
+  RESEND_API_KEY?: string
+  EMAIL_FROM?: string
   GEMINI_API_KEY?: string
   SUPABASE_URL?: string
   SUPABASE_ANON_KEY?: string
@@ -60,6 +63,7 @@ financeiroRoutes.route('/', movimentosHoldingRoutes)
 financeiroRoutes.route('/', demonstrativoIARoutes)
 financeiroRoutes.route('/', recibosRoutes)
 financeiroRoutes.route('/', enviosPagamentoRoutes)
+financeiroRoutes.route('/', portalClienteRoutes)
 
 /*
  * Esta rota somente valida o schema. Ela não cria, altera ou exclui tabelas.
