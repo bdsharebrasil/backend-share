@@ -312,7 +312,7 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/opcoes', async c => {
     db.prepare('SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome').all(),
     db.prepare("SELECT id, canac, nome_completo, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare("SELECT id, canac, nome_completo, status, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
-    db.prepare('SELECT id, designativo_icao AS designativo, nome FROM aerodromo ORDER BY designativo_icao').all(),
+    db.prepare('SELECT id, designativo_icao AS designativo, nome, coordenadas FROM aerodromo ORDER BY designativo_icao').all(),
   ])
   return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, tripulantes: [...tripulacao.results, ...freelancers.results], aerodromos: aerodromos.results })
 })
@@ -321,7 +321,7 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const ano = Number(c.req.query('ano') || new Date().getFullYear())
   if (!Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'ano_invalido' }, 400)
-  const rows = await c.env.SHARE_DB.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.consumo_combustivel,
+  const rows = await c.env.SHARE_DB.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.url_imagem AS image_url, a.status, a.consumo_combustivel,
       COALESCE((SELECT SUM(l.tempo_total) FROM lancamentos_diario_bordo l WHERE l.aeronave_id = a.id AND strftime('%Y', l.data_registro) = ?1), 0) AS horas_ano,
       COALESCE(dm.celula_atual_ttotal, 0) AS celula_atual_ttotal,
       COALESCE(dm.celula_prox_revisao_ttotal, 0) AS celula_prox_revisao_ttotal,
