@@ -70,7 +70,7 @@ class FakeD1 {
     if (sql.includes('SELECT l.diario_mes_id, dm.fechado')) {
       return this.launches.has(values[0]) ? { diario_mes_id: 'month-1', fechado: 0 } : null
     }
-    if (sql.includes('FROM user_profiles')) return null
+    if (sql.includes('FROM user_profiles')) return { nome_completo: 'Piloto de Teste', id: 'user-diario-test' }
     if (sql.includes('FROM tripulacao_freelancer')) return null
     if (sql.includes('FROM tripulacao WHERE')) return null
     if (sql.includes('SELECT nome FROM aerodromo')) return { nome: values[0] }

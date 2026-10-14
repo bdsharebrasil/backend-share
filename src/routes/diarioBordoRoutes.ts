@@ -472,6 +472,7 @@ const DIARIO_LANCAMENTO_FIELDS = [
 diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const criadoPor = extractSupabaseUserId(c)
   const aeronaveId = String(body.aeronave_id || '').trim()
   const diarioMesId = String(body.diario_mes_id || '').trim()
   const data = diarioDate(body.data_registro)
@@ -494,6 +495,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   }
   const referenciaInvalida = await validarReferenciasDiario(db, [
     { tabela: 'jornadas_voo', valor: pernaVinculada ? null : body.jornada_id, campo: 'jornada_id' },
+    { tabela: 'user_profiles', valor: criadoPor, campo: 'criado_por' },
     { tabela: 'cliente', valor: body.cliente_id, campo: 'cliente_id' },
     { tabela: 'holdings', valor: body.holding_id, campo: 'holding_id' },
     { tabela: 'hold_socios', valor: body.socio_id, campo: 'socio_id' },
@@ -544,7 +546,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     horas_noturnas: dadosOperacionais.horas_noturnas,
     pousos_total: body.pousos_total ?? (pernaVinculada.horario_pouso ? 1 : 0),
   } : body
-  const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(diario.celula_atual_ttotal) + dadosOperacionais.tempo_total, celulaTvoo: diarioNumber(diario.celula_atual_tvoo) + dadosOperacionais.tempo_voo, criadoPor: extractSupabaseUserId(c) })
+  const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(diario.celula_atual_ttotal) + dadosOperacionais.tempo_total, celulaTvoo: diarioNumber(diario.celula_atual_tvoo) + dadosOperacionais.tempo_voo, criadoPor })
   const fkNormalizadaInvalida = await validarReferenciasDiario(db, [
     { tabela: 'holdings', valor: row.holding_id, campo: 'holding_id' },
     { tabela: 'hold_socios', valor: row.socio_id, campo: 'socio_id' },
@@ -572,13 +574,24 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     }
     if (error instanceof Error && error.message === 'perna_ja_lancada_no_diario') return c.json({ error: error.message }, 409)
     if (String(error).includes('FOREIGN KEY')) {
-      log.error('FK inválida ao persistir lançamento do diário', { id, aeronave_id: row.aeronave_id, diario_mes_id: row.diario_mes_id, holding_id: row.holding_id, socio_id: row.socio_id })
+      log.error('FK inválida ao persistir lançamento do diário', { id, aeronave_id: row.aeronave_id, diario_mes_id: row.diario_mes_id, criado_por: row.criado_por, holding_id: row.holding_id, socio_id: row.socio_id })
       return c.json({ error: 'referencia_invalida', campo: 'lancamento_diario_bordo' }, 400)
     }
     throw error
   }
-  await recalcularCelulasLancamentos(c, diarioMesId)
-  await recalcularDiarioMes(c, diarioMesId)
+  try {
+    await recalcularCelulasLancamentos(c, diarioMesId)
+    await recalcularDiarioMes(c, diarioMesId)
+  } catch (error) {
+    const rollback = [
+      ...(pernaId ? [db.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = NULL WHERE id = ?1 AND lancamento_diario_id = ?2').bind(pernaId, id)] : []),
+      db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
+      db.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id),
+    ]
+    await db.batch(rollback)
+    log.error('Falha ao recalcular o diário após inserir lançamento; alterações revertidas', { id, error })
+    throw error
+  }
   const inserted = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
   return c.json({ ...inserted, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status }, 201)
 })
