@@ -4,6 +4,15 @@ export type PernaRotaRelatorio = {
   jornada_numero: number;
 };
 
+export function lotesIcaoRelatorio(icaos: string[]): string[][] {
+  const unicos = [...new Set(icaos.map((icao) => icao.trim().toUpperCase()).filter(Boolean))];
+  const lotes: string[][] = [];
+  for (let inicio = 0; inicio < unicos.length; inicio += 100) {
+    lotes.push(unicos.slice(inicio, inicio + 100));
+  }
+  return lotes;
+}
+
 export function sequenciaRotaRelatorio(
   origem: string | null | undefined,
   destino: string | null | undefined,
@@ -30,5 +39,5 @@ export function nomearRotaRelatorio(
   icaos: string[],
   nomesPorIcao: ReadonlyMap<string, string>,
 ): string {
-  return icaos.map((icao) => nomesPorIcao.get(icao) || icao).join(' - ');
+  return icaos.map((icao) => nomesPorIcao.get(icao) || icao).join(' → ');
 }

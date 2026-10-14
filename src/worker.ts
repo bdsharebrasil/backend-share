@@ -18,7 +18,7 @@ import { ctmRoutes } from './routes/ctmRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
-import { nomearRotaRelatorio, sequenciaRotaRelatorio, type PernaRotaRelatorio } from './relatorioViagemRota'
+import { lotesIcaoRelatorio, nomearRotaRelatorio, sequenciaRotaRelatorio, type PernaRotaRelatorio } from './relatorioViagemRota'
 import { validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
 import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from './lib/schedule'
@@ -3196,16 +3196,28 @@ async function montarRotaRelatorioViagem(
     WHERE j.solicitacao_id = ?1 AND j.jornada_principal_id IS NULL
   `).bind(solicitacaoId).all<PernaRotaRelatorio>()
   const icaos = sequenciaRotaRelatorio(origem, destino, pernas || [])
-  const aerodromos = icaos.length
-    ? await db.prepare('SELECT designativo_icao, nome FROM aerodromo').all<{ designativo_icao: string; nome: string }>()
-    : { results: [] as Array<{ designativo_icao: string; nome: string }> }
-  const nomes = new Map((aerodromos.results || []).map((aerodromo) => [aerodromo.designativo_icao.toUpperCase(), aerodromo.nome]))
+  const nomes = await buscarNomesAerodromos(db, icaos)
 
   return {
     icaos,
     rota_icao: icaos.join(' - '),
     rota_nome: nomearRotaRelatorio(icaos, nomes),
   }
+}
+
+async function buscarNomesAerodromos(db: D1Database, icaos: string[]): Promise<Map<string, string>> {
+  const lotes = lotesIcaoRelatorio(icaos)
+  const resultados = await Promise.all(lotes.map((lote) => db.prepare(`
+    SELECT designativo_icao, nome FROM aerodromo
+    WHERE upper(designativo_icao) IN (${lote.map(() => '?').join(', ')})
+  `).bind(...lote).all<{ designativo_icao: string; nome: string }>()))
+  const nomes = new Map<string, string>()
+  for (const resultado of resultados) {
+    for (const aerodromo of resultado.results || []) {
+      nomes.set(aerodromo.designativo_icao.toUpperCase(), aerodromo.nome)
+    }
+  }
+  return nomes
 }
 
 async function gerarNumeroRelatorioViagem(
@@ -3363,10 +3375,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
       return { voo: dadosVoo, icaos }
     })
     const icaos = [...new Set(voosComSequencia.flatMap(({ icaos: rota }) => rota))]
-    const aerodromos = icaos.length
-      ? await db.prepare('SELECT designativo_icao, nome FROM aerodromo').all<{ designativo_icao: string; nome: string }>()
-      : { results: [] as Array<{ designativo_icao: string; nome: string }> }
-    const nomesPorIcao = new Map((aerodromos.results || []).map((aerodromo) => [aerodromo.designativo_icao.toUpperCase(), aerodromo.nome]))
+    const nomesPorIcao = await buscarNomesAerodromos(db, icaos)
     const voosComRota = voosComSequencia.map(({ voo, icaos: rota }) => ({
       ...voo,
       rota_icao: rota.join(' - '),
