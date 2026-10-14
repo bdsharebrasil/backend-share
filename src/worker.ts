@@ -14,6 +14,7 @@ import { portalRoutes } from './routes/portalRoutes'
 import { emailRoutes } from './routes/emailsRoutes'
 import { mensagensRoutes } from './routes/mensagensRoutes'
 import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
+import { colaboradorVoosRoutes } from './routes/colaboradorVoosRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
@@ -118,6 +119,7 @@ app.route('/', portalRoutes)
 app.route('/', emailRoutes)
 app.route('/', mensagensRoutes)
 app.route('/', tripulacaoRoutes)
+app.route('/', colaboradorVoosRoutes)
 app.route('/', ctmRoutes)
 app.route('/api/sharebrasil/ponto', shareBrasilPontoRoutes)
 // ─── Financeiro: único ponto de entrada para comandos financeiros ────────────
@@ -2747,21 +2749,7 @@ app.get('/api/sharebrasil/notificacoes', async c => {
   const db = c.env.SHARE_DB
   const destinations = notificationDestinations(user)
   const destinationPlaceholders = destinations.map((_, index) => `?${index + 1}`).join(', ')
-  const [taskResult, generalResult] = await Promise.all([
-    db.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem,
-        CASE WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
-          instr(t.titulo, '[RELATORIO:') + 11,
-          instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
-          ELSE NULL END AS relatorio_id,
-        r.anexos_rejeicao, 'tarefa' AS origem_notificacao
-      FROM tarefas_notificacoes n LEFT JOIN tarefas t ON t.id = n.id_da_tarefa
-      LEFT JOIN relatorio_despesa_viagem r ON r.id = CASE
-        WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
-          instr(t.titulo, '[RELATORIO:') + 11,
-          instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
-        ELSE NULL END
-      WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all<any>(),
-    db.prepare(`SELECT n.id, n.id_from, n.departamento_destinatario, n.status, n.mensagem,
+  const generalResult = await db.prepare(`SELECT n.id, n.id_from, n.departamento_destinatario, n.status, n.mensagem,
         n.criado_em, NULL AS atualizado_em,
         CASE WHEN lower(COALESCE(n.status, '')) IN ('lida', 'lido', 'read') THEN 1 ELSE 0 END AS lido,
         NULL AS id_da_tarefa, NULL AS status_alterado_para,
@@ -2770,8 +2758,21 @@ app.get('/api/sharebrasil/notificacoes', async c => {
       FROM notificacoes n
       LEFT JOIN relatorio_despesa_viagem r ON n.id_from = 'relatorio_despesa_viagem/' || r.id
       WHERE lower(trim(COALESCE(n.departamento_destinatario, ''))) IN (${destinationPlaceholders})
-      ORDER BY n.criado_em DESC LIMIT 100`).bind(...destinations).all<any>(),
-  ])
+      ORDER BY n.criado_em DESC LIMIT 100`).bind(...destinations).all<any>()
+  if (c.req.query('origem') === 'geral') return c.json({ notificacoes: generalResult.results || [] })
+  const taskResult = await db.prepare(`SELECT n.*, t.titulo AS tarefa_titulo, t.origem AS tarefa_origem,
+      CASE WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
+        instr(t.titulo, '[RELATORIO:') + 11,
+        instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
+        ELSE NULL END AS relatorio_id,
+      r.anexos_rejeicao, 'tarefa' AS origem_notificacao
+    FROM tarefas_notificacoes n LEFT JOIN tarefas t ON t.id = n.id_da_tarefa
+    LEFT JOIN relatorio_despesa_viagem r ON r.id = CASE
+      WHEN instr(COALESCE(t.titulo, ''), '[RELATORIO:') > 0 THEN substr(t.titulo,
+        instr(t.titulo, '[RELATORIO:') + 11,
+        instr(substr(t.titulo, instr(t.titulo, '[RELATORIO:') + 11), ']') - 1)
+      ELSE NULL END
+    WHERE n.user_id = ?1 ORDER BY n.criado_em DESC LIMIT 100`).bind(user.id).all<any>()
   const notificacoes = [...(taskResult.results || []), ...(generalResult.results || [])]
     .sort((a, b) => Date.parse(b.criado_em) - Date.parse(a.criado_em))
     .slice(0, 100)

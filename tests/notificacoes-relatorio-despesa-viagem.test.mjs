@@ -35,3 +35,12 @@ test("API filtra por user/departamento e converte status para estado lido", () =
   assert.match(notificationRoutes, /CASE WHEN lower\(COALESCE\(n\.status, ''\)\) IN \('lida', 'lido', 'read'\) THEN 1 ELSE 0 END AS lido/);
   assert.match(notificationRoutes, /DELETE FROM notificacoes WHERE lower\(trim\(COALESCE\(departamento_destinatario/);
 });
+
+test("variante geral devolve apenas notificacoes D1 destinadas ao usuário", () => {
+  const filtroPessoal = notificationRoutes.indexOf("if (c.req.query('origem') === 'geral')");
+  const consultaTarefas = notificationRoutes.indexOf("FROM tarefas_notificacoes", filtroPessoal);
+  assert.ok(filtroPessoal >= 0);
+  assert.ok(consultaTarefas > filtroPessoal);
+  assert.match(notificationRoutes.slice(0, consultaTarefas), /return c\.json\(\{ notificacoes: generalResult\.results \|\| \[\] \}\)/);
+  assert.match(notificationRoutes, /WHERE lower\(trim\(COALESCE\(n\.departamento_destinatario, ''\)\)\) IN \(\$\{destinationPlaceholders\}\)/);
+});
