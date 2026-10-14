@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo, pesoBalanceamentoConcluido } from '../src/routes/jornadasRoutes.ts'
+import { readFile } from 'node:fs/promises'
+import { agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
 
 test('preserva cada jornada legada sem jornada principal como registro independente', () => {
   const registros = [
@@ -47,8 +48,13 @@ test('somente checklist pré-voo concluído libera o início da jornada', () => 
   assert.equal(checklistPreVooConcluido(' CONCLUIDO '), true)
 })
 
-test('somente ficha de peso finalizada libera o início da jornada', () => {
-  assert.equal(pesoBalanceamentoConcluido(null), false)
-  assert.equal(pesoBalanceamentoConcluido('RASCUNHO'), false)
-  assert.equal(pesoBalanceamentoConcluido(' finalizada '), true)
+test('iniciar jornada não exige ficha de peso e balanceamento concluída', async () => {
+  const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
+  const inicio = source.indexOf("jornadasRoutes.post('/api/interno/agendamento/:id/jornada'")
+  const proximaRota = source.indexOf('\njornadasRoutes.', inicio + 1)
+  const endpoint = source.slice(inicio, proximaRota === -1 ? undefined : proximaRota)
+
+  assert.notEqual(inicio, -1)
+  assert.match(endpoint, /checklist_pre_voo_obrigatorio/)
+  assert.doesNotMatch(endpoint, /ctm_ficha_peso_balanceamento|peso_balanceamento_obrigatorio|pesoBalanceamentoConcluido/)
 })

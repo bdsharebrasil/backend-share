@@ -153,10 +153,6 @@ export function checklistPreVooConcluido(status: unknown) {
   return String(status || '').trim().toLowerCase() === 'concluido'
 }
 
-export function pesoBalanceamentoConcluido(status: unknown) {
-  return String(status || '').trim().toUpperCase() === 'FINALIZADA'
-}
-
 async function sincronizarStatusAgendamentoVoo(db: D1Database, solicitacaoId: string, jornadaEncerrada = false) {
   const [agendamento, pernas, pousosJornada, pernasAbertasLegadas] = await Promise.all([
     db.prepare('SELECT status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<{ status: string }>(),
@@ -273,8 +269,6 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   if (statusVoo !== 'aprovada') return c.json({ error: 'agendamento_nao_aprovado', detail: 'A jornada só pode ser iniciada para um agendamento aprovado.' }, 409)
   const checklist = await db.prepare('SELECT status FROM checklists_pre_voo WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(idSolicitacao).first<{ status: string | null }>()
   if (!checklistPreVooConcluido(checklist?.status)) return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo antes de iniciar a jornada.' }, 409)
-  const fichaPeso = await db.prepare('SELECT status FROM ctm_ficha_peso_balanceamento WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(idSolicitacao).first<{ status: string | null }>()
-  if (!pesoBalanceamentoConcluido(fichaPeso?.status)) return c.json({ error: 'peso_balanceamento_obrigatorio', detail: 'Finalize a ficha de peso e balanceamento antes de iniciar a jornada.' }, 409)
   const tripulantes = (Array.isArray(body.tripulantes) && body.tripulantes.length
     ? body.tripulantes
     : [{ tripulante_id: voo.piloto_id, funcao: 'PIC' }, { tripulante_id: voo.copiloto_id, funcao: 'SIC' }]
