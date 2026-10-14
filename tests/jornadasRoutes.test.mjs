@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
-import { agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
+import { agendamentoPermiteIniciarJornada, agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
 
 test('preserva cada jornada legada sem jornada principal como registro independente', () => {
   const registros = [
@@ -46,6 +46,15 @@ test('somente checklist pré-voo concluído libera o início da jornada', () => 
   assert.equal(checklistPreVooConcluido(null), false)
   assert.equal(checklistPreVooConcluido('rascunho'), false)
   assert.equal(checklistPreVooConcluido(' CONCLUIDO '), true)
+})
+
+test('permite nova jornada em agendamentos aprovados, em voo ou em solo', () => {
+  for (const status of ['aprovada', 'em_voo', 'em voo', 'em_solo', 'em_rota']) {
+    assert.equal(agendamentoPermiteIniciarJornada(status), true, `status ${status}`)
+  }
+  for (const status of ['pendente', 'encerrada', 'cancelada', 'reprovada']) {
+    assert.equal(agendamentoPermiteIniciarJornada(status), false, `status ${status}`)
+  }
 })
 
 test('iniciar jornada não exige ficha de peso e balanceamento concluída', async () => {
