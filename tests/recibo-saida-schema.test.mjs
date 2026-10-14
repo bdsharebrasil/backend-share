@@ -32,8 +32,9 @@ test("rateio de recibo de saída usa colunas D1 e vínculo por lancamento_id", (
   assert.doesNotMatch(insertRateio, /\borigem_id\s*:/);
 });
 
-test("lancamento de receita só grava cliente_id que existe no destino da FK do D1", () => {
-  assert.match(issueRevenue, /SELECT id FROM clientes WHERE id = \? LIMIT 1/);
+test("lancamento de receita valida cliente_id na tabela singular do D1", () => {
+  assert.match(issueRevenue, /SELECT id FROM cliente WHERE id = \? LIMIT 1/);
+  assert.doesNotMatch(issueRevenue, /FROM clientes\b/);
   assert.match(issueRevenue, /cliente_id: clienteLancamento\?\.id \?\? null/);
   assert.doesNotMatch(issueRevenue, /cliente_id: context\?\.clienteId/);
 });

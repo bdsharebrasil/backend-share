@@ -1409,12 +1409,11 @@ export async function issueRevenue(
   if (existing) return existing
 
   const context = await resolveCotista(db, command)
-  // D1 declara lancamentos.cliente_id -> clientes(id), enquanto o cliente_id
-  // vindo de cotista_aeronave é obtido da tabela legada `cliente`. Grave o
-  // vínculo direto somente quando o identificador também existir no destino
-  // da FK; cotista_aeronave_id continua preservando o vínculo de negócio.
+  // O cliente_id de cotista_aeronave referencia a tabela D1 `cliente`.
+  // Valide contra essa tabela antes de gravar o vínculo direto em lancamentos;
+  // cotista_aeronave_id continua preservando o vínculo de negócio.
   const clienteLancamento = context?.clienteId
-    ? await db.prepare('SELECT id FROM clientes WHERE id = ? LIMIT 1')
+    ? await db.prepare('SELECT id FROM cliente WHERE id = ? LIMIT 1')
       .bind(context.clienteId).first<{ id: string }>()
     : null
   const amount = asPositiveCents(command.valor_centavos)
