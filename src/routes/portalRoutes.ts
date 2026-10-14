@@ -326,13 +326,13 @@ portalRoutes.get('/api/portal/solicitacoes', async c => {
       LEFT JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
       WHERE j.solicitacao_id = s.id AND COALESCE(p.horario_pouso, j.horario_pouso) IS NOT NULL),
       (SELECT MAX(j.horario_pouso) FROM jornadas_voo j WHERE j.solicitacao_id = s.id)) AS horario_pouso_real,
-    COALESCE((SELECT CAST(ROUND(SUM(l.tempo_voo) * 60) AS INTEGER) FROM pernas_jornada_voo p
+    COALESCE((SELECT CAST(ROUND(SUM(l.tempo_total) * 60) AS INTEGER) FROM pernas_jornada_voo p
       JOIN jornadas_voo j ON j.id = p.jornada_id JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
-      WHERE j.solicitacao_id = s.id AND l.tempo_voo IS NOT NULL),
+      WHERE j.solicitacao_id = s.id AND l.tempo_total IS NOT NULL),
     (SELECT CAST(ROUND(SUM((julianday(voo.horario_pouso) - julianday(voo.horario_dep)) * 1440)) AS INTEGER)
       FROM (SELECT DISTINCT p.id, p.horario_dep, p.horario_pouso FROM jornadas_voo j
         JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
-        WHERE j.solicitacao_id = s.id AND p.horario_dep IS NOT NULL AND p.horario_pouso IS NOT NULL) voo)) AS tempo_voo_minutos
+        WHERE j.solicitacao_id = s.id AND p.horario_dep IS NOT NULL AND p.horario_pouso IS NOT NULL) voo)) AS tempo_total_minutos
     FROM solicitacoes_reserva_voo s
     LEFT JOIN aeronave a ON a.id = s.aeronave_id LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN hold_socios hs ON hs.id = s.socio_id LEFT JOIN tripulacao t ON t.id = s.piloto_id
