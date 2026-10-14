@@ -233,9 +233,13 @@ portalRoutes.post('/api/portal/login', async c => {
   try {
     if (!(await checkRateLimit(c, `portal-login:${clientIp(c)}`, 12))) return c.json({ error: 'muitas_tentativas' }, 429)
     const body = await c.req.json<{ login?: string; senha?: string }>().catch(() => null)
-    const login = body?.login?.trim().toLowerCase()
-    const senha = body?.senha || ''
+    if (typeof body?.login !== 'string' || typeof body.senha !== 'string') {
+      return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
+    }
+    const login = body.login.trim().toLowerCase()
+    const senha = body.senha
     if (!login || !senha) return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
+    if (login.length > 80 || senha.length > 128) return c.json({ error: 'credenciais_invalidas' }, 401)
 
     const row = await portalUserForLogin(c.env.SHARE_DB, login)
     const verification = row ? await portalVerifyPassword(senha, row.senha) : null

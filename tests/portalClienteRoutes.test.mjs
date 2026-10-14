@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { portalClienteRoutes } from '../src/financeiro/portalClienteRoutes.ts'
-import { portalRoutes } from '../src/routes/portalRoutes.ts'
+import { portalCreatePasswordHash, portalRoutes } from '../src/routes/portalRoutes.ts'
 
 const COLUNAS_PORTAL = ['id', 'login', 'senha', 'nome_exibicao', 'url_avatar', 'cotista_id', 'criado_em', 'atualizado_em']
 
@@ -125,6 +125,32 @@ test('login do portal resolve cliente pelo cotista_id da conta criada', async ()
   const body = await resposta.json()
   assert.equal(body.user.cliente_id, 'cliente-1')
   assert.equal(body.user.socio_id, null)
+})
+
+test('login consulta user_cliente no D1 e rejeita senha incorreta sem emitir sessão', async () => {
+  const db = new FakeD1({ usuario: {
+    id: 'user-1', login: 'cotista.teste', senha: await portalCreatePasswordHash('Senha-correta-2026!'), cotista_id: 'cotista-aeronave-1',
+  } })
+  const resposta = await portalRoutes.request('/api/portal/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login: '  COTISTA.TESTE ', senha: 'Senha-incorreta-2026!' }),
+  }, portalEnv(db))
+  assert.equal(resposta.status, 401)
+  assert.deepEqual(await resposta.json(), { error: 'credenciais_invalidas' })
+})
+
+test('login rejeita credenciais com tipos inválidos ou além dos limites aceitos', async () => {
+  const db = new FakeD1()
+  const enviar = (body) => portalRoutes.request('/api/portal/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, portalEnv(db))
+
+  assert.equal((await enviar({ login: 123, senha: 'senha' })).status, 400)
+  assert.equal((await enviar({ login: 'a'.repeat(81), senha: 'senha' })).status, 401)
+  assert.equal((await enviar({ login: 'cotista', senha: 's'.repeat(129) })).status, 401)
 })
 
 test('atualiza login e senha e permite autenticação apenas com as novas credenciais', async () => {
