@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
-import { agendamentoPermiteIniciarJornada, agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
+import { agendamentoPermiteCompletarHorarios, agendamentoPermiteIniciarJornada, agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
 
 test('preserva cada jornada legada sem jornada principal como registro independente', () => {
   const registros = [
@@ -66,4 +66,25 @@ test('iniciar jornada não exige ficha de peso e balanceamento concluída', asyn
   assert.notEqual(inicio, -1)
   assert.match(endpoint, /checklist_pre_voo_obrigatorio/)
   assert.doesNotMatch(endpoint, /ctm_ficha_peso_balanceamento|peso_balanceamento_obrigatorio|pesoBalanceamentoConcluido/)
+})
+
+test('permite completar horários da perna em voo ou em solo, mas não antes ou depois do agendamento', async () => {
+  for (const status of ['em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo', 'pousado']) {
+    assert.equal(agendamentoPermiteCompletarHorarios(status), true, `status ${status}`)
+  }
+  for (const status of ['aprovada', 'encerrada', 'concluida', 'cancelada', 'reprovada']) {
+    assert.equal(agendamentoPermiteCompletarHorarios(status), false, `status ${status}`)
+  }
+
+  const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
+  const inicio = source.indexOf("jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId'")
+  const proximaRota = source.indexOf('\njornadasRoutes.', inicio + 1)
+  const endpoint = source.slice(inicio, proximaRota === -1 ? undefined : proximaRota)
+  assert.notEqual(inicio, -1)
+  assert.match(endpoint, /requireFlightOperationAccess\(c, jornadaAcesso\.solicitacao_id\)/)
+  assert.match(endpoint, /agendamentoPermiteCompletarHorarios\(jornadaAcesso\.status_agendamento\)/)
+  assert.match(endpoint, /!body \|\| typeof body !== 'object' \|\| Array\.isArray\(body\)/)
+  assert.match(endpoint, /!isInternalRequest && Object\.keys\(body\)\.some/)
+  assert.match(endpoint, /const camposDeHorario = \['horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte'\]/)
+  assert.match(endpoint, /perna\.lancamento_diario_id/)
 })

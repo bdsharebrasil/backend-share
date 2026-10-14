@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono'
-import { requireFlightOperationAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
+import { checkInternalAuth, requireFlightOperationAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
 import type { Env } from '../types/env'
@@ -156,6 +156,10 @@ export function checklistPreVooConcluido(status: unknown) {
 export function agendamentoPermiteIniciarJornada(status: unknown) {
   const normalizado = String(status || '').trim().toLowerCase().replace(/\s+/g, '_')
   return ['aprovada', 'em_rota', 'em_voo', 'em_solo'].includes(normalizado)
+}
+export function agendamentoPermiteCompletarHorarios(status: unknown) {
+  const normalizado = String(status || '').trim().toLowerCase().replace(/\s+/g, '_')
+  return ['em_rota', 'em_voo', 'em_solo', 'pousado'].includes(normalizado)
 }
 
 async function sincronizarStatusAgendamentoVoo(db: D1Database, solicitacaoId: string, jornadaEncerrada = false) {
@@ -514,16 +518,23 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
 })
 
 jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const isInternalRequest = await checkInternalAuth(c)
+  if (!isInternalRequest && !(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
   const db = c.env.SHARE_DB
   const perna = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1 AND jornada_id = ?2').bind(c.req.param('pernaId'), c.req.param('jornadaId')).first<any>()
   if (!perna) return c.notFound()
-  const jornadaAcesso = await db.prepare('SELECT solicitacao_id FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<{ solicitacao_id: string }>()
+  const jornadaAcesso = await db.prepare(`SELECT j.solicitacao_id, s.status AS status_agendamento
+    FROM jornadas_voo j LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id
+    WHERE j.id = ?1`).bind(perna.jornada_id).first<{ solicitacao_id: string; status_agendamento: string | null }>()
   if (!jornadaAcesso || !(await requireFlightOperationAccess(c, jornadaAcesso.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
+  if (!agendamentoPermiteCompletarHorarios(jornadaAcesso.status_agendamento)) return c.json({ error: 'agendamento_fora_da_operacao', detail: 'Os horários da perna podem ser completados somente enquanto o agendamento estiver em voo ou em solo.' }, 409)
   if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return c.json({ error: 'payload_invalido' }, 400)
+  const camposDeHorario = ['horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte']
+  if (!isInternalRequest && Object.keys(body).some((campo) => !camposDeHorario.includes(campo))) return c.json({ error: 'campos_restritos', detail: 'O tripulante pode atualizar somente os horários da perna.' }, 403)
   const alias: Record<string, string> = { tempo_ac: 'horario_ac', tempo_dep: 'horario_dep', tempo_pou: 'horario_pouso', tempo_cor: 'horario_corte' }
   for (const [de, para] of Object.entries(alias)) if (body[de] !== undefined && body[para] === undefined) body[para] = body[de]
   const valores: Record<string, unknown> = {}
