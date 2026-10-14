@@ -364,6 +364,46 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
   const custoCentavos = Number(rateioResumo?.total_centavos || 0)
   return c.json({ aeronave: vinculo, ano, estatisticas: { voos: Number(voos?.voos || 0), pousos: Number(voos?.pousos || 0), horas: Number(horas.toFixed(2)), destinoMaisVisitado: destinos?.destino || 'Não informado', custoHoraCentavos: horas > 0 ? Math.round(custoCentavos / horas) : 0, custoTotalCentavos: custoCentavos }, mensal: meses.results.map(row => ({ mes: row.mes, valorCentavos: Number(row.valor_centavos || 0) })), categorias: categorias.results.map(row => ({ categoria: row.categoria, valorCentavos: Number(row.valor_centavos || 0) })) })
 })
+portalRoutes.get('/api/portal/overview', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
+  const today = new Date().toISOString().slice(0, 10)
+  const inicioMes = `${today.slice(0, 8)}01`
+  const rateioTable = user.cliente_id ? 'rateio_despesas' : 'rateio_hold'
+  const rateioJoin = user.cliente_id
+    ? 'JOIN cotista_aeronave ca ON ca.id = r.cotista_id'
+    : 'JOIN cotista_aeronave ca ON ca.socio_id = r.socio_id AND ca.aeronave_id = r.aeronave_id'
+  const rateioOwner = user.cliente_id ? '(ca.cliente_id = ?1 OR ca.socio_id = ?2)' : '(ca.socio_id = ?1 OR ca.socio_id = ?2)'
+  const recenteRateioJoin = user.cliente_id ? 'JOIN cotista_aeronave rca ON rca.id = r.cotista_id' : 'JOIN cotista_aeronave rca ON rca.socio_id = r.socio_id AND rca.aeronave_id = r.aeronave_id'
+  const recenteRateioOwner = user.cliente_id ? '(rca.cliente_id = ?1 OR rca.socio_id = ?2)' : '(rca.socio_id = ?1 OR rca.socio_id = ?2)'
+  const [proximoVoo, voosRecentes, rateios] = await Promise.all([
+    c.env.SHARE_DB.prepare(`SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.status, a.matricula_registro
+      FROM solicitacoes_reserva_voo s JOIN cotista_aeronave ca ON ca.aeronave_id = s.aeronave_id LEFT JOIN aeronave a ON a.id = s.aeronave_id
+     WHERE (ca.cliente_id = ?1 OR ca.socio_id = ?2) AND date(s.data_agendada) >= date(?3)
+       AND lower(trim(COALESCE(s.status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo')
+     ORDER BY date(s.data_agendada), s.horario_previsto_agendamento LIMIT 1`).bind(user.cliente_id, user.socio_id, today).first<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT DISTINCT l.id, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada, l.tempo_total, l.tempo_voo, a.matricula_registro,
+        COALESCE((SELECT SUM(r.valor_rateado_centavos) FROM ${rateioTable} r ${recenteRateioJoin}
+          WHERE r.aeronave_id = l.aeronave_id AND date(r.data_emissao) = date(l.data_registro) AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+            AND ${recenteRateioOwner}), 0) AS custo_centavos
+      FROM lancamentos_diario_bordo l JOIN cotista_aeronave ca ON ca.aeronave_id = l.aeronave_id LEFT JOIN aeronave a ON a.id = l.aeronave_id
+     WHERE (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 3`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT r.valor_rateado_centavos, r.valor_pago_real_centavos, r.status, r.data_emissao
+      FROM ${rateioTable} r ${rateioJoin}
+     WHERE ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>()
+  ])
+  const resumo = (rateios.results || []).reduce<{ totalCentavos: number; pagoCentavos: number; mesCentavos: number; abertas: number; pagas: number }>((acc, row) => {
+    const esperado = Number(row.valor_rateado_centavos || 0)
+    const pago = Math.min(Number(row.valor_pago_real_centavos || 0), esperado)
+    acc.totalCentavos += esperado
+    acc.pagoCentavos += pago
+    if (pago >= esperado || ['PAGO', 'REEMBOLSADO'].includes(String(row.status || '').toUpperCase())) acc.pagas += 1
+    else acc.abertas += 1
+    if (String(row.data_emissao || '').slice(0, 7) === inicioMes.slice(0, 7)) acc.mesCentavos += esperado
+    return acc
+  }, { totalCentavos: 0, pagoCentavos: 0, mesCentavos: 0, abertas: 0, pagas: 0 })
+  return c.json({ proximoVoo, voosRecentes: voosRecentes.results || [], resumo: { ...resumo, abertoCentavos: resumo.totalCentavos - resumo.pagoCentavos }, manutencao: { mensagem: 'Consulte a área de Manutenções para ver os registros disponíveis.' } })
+})
 portalRoutes.get('/api/portal/aerodromos', async c => {
   const query = (c.req.query('q') || '').trim().toLowerCase()
   const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
