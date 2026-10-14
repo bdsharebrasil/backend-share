@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { portalClienteRoutes } from '../src/financeiro/portalClienteRoutes.ts'
+import { portalRoutes } from '../src/routes/portalRoutes.ts'
 
-const COLUNAS_PORTAL = ['id', 'login', 'senha', 'nome_exibicao', 'url_avatar', 'cliente_id', 'socio_id', 'criado_em', 'atualizado_em']
+const COLUNAS_PORTAL = ['id', 'login', 'senha', 'nome_exibicao', 'url_avatar', 'cotista_id', 'criado_em', 'atualizado_em']
 
 class FakeStatement {
   constructor(db, sql) { this.db = db; this.sql = sql; this.values = [] }
@@ -24,7 +25,7 @@ class FakeD1 {
   prepare(sql) { return new FakeStatement(this, sql) }
   async all(sql) {
     if (sql.includes('pragma_table_info')) return { results: COLUNAS_PORTAL.map((name) => ({ name })) }
-    if (sql.includes('EXISTS (') && sql.includes('FROM cotista_aeronave ca')) {
+    if (sql.includes('EXISTS (SELECT 1 FROM user_cliente u WHERE u.cotista_id = ca.id)')) {
       return { results: [{ cotista_aeronave_id: this.cotista.id, cliente_id: this.cotista.cliente_id, socio_id: null, codigo_cliente: 'CLI-01', percentual_sociedade: 50, nome: this.cotista.nome, email: this.cotista.email, matricula_registro: 'PT-ABC', possui_acesso: this.usuario ? 1 : 0, login: this.usuario?.login || null }] }
     }
     throw new Error(`Consulta all não simulada: ${sql}`)
@@ -33,16 +34,20 @@ class FakeD1 {
     if (sql.includes('SELECT id FROM aeronave')) return values[0] === 'aircraft-1' ? { id: values[0] } : null
     if (sql.includes('FROM cotista_aeronave ca')) return values[0] === this.cotista.id ? this.cotista : null
     if (sql.includes('SELECT id, login, senha FROM user_cliente')) {
-      const [clienteId, socioId] = values
-      return this.usuario && ((clienteId && this.usuario.cliente_id === clienteId) || (socioId && this.usuario.socio_id === socioId)) ? { ...this.usuario } : null
+      return this.usuario?.cotista_id === values[0] ? { ...this.usuario } : null
+    }
+    if (sql.includes('FROM user_cliente u') && sql.includes('LEFT JOIN cotista_aeronave ca')) {
+      return this.usuario?.login.toLowerCase() === values[0]
+        ? { ...this.usuario, cliente_id: this.cotista.cliente_id, socio_id: this.cotista.socio_id }
+        : null
     }
     if (sql.includes('SELECT id FROM user_cliente WHERE lower(login)')) return null
     throw new Error(`Consulta first não simulada: ${sql}`)
   }
   async run(sql, values) {
     if (sql.includes('INSERT INTO user_cliente')) {
-      const [id, login, senha, nome_exibicao, cliente_id, socio_id] = values
-      this.usuario = { id, login, senha, nome_exibicao, cliente_id, socio_id }
+      const [id, login, senha, nome_exibicao, cotista_id] = values
+      this.usuario = { id, login, senha, nome_exibicao, url_avatar: null, cotista_id }
       return { success: true, meta: { changes: 1 } }
     }
     if (sql.includes('UPDATE user_cliente SET senha')) {
@@ -62,8 +67,18 @@ const chamar = (db, path, init = {}, extraEnv = {}) => portalClienteRoutes.reque
   ...extraEnv,
 })
 
-test('lista os acessos por aeronave sem retornar senha nem hash', async () => {
-  const db = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: 'pbkdf2_sha256$hash', cliente_id: 'cliente-1', socio_id: null } })
+const portalEnv = (db) => ({
+  SHARE_DB: db,
+  CACHE_KV: {},
+  RATE_LIMITER: {
+    idFromName: (name) => name,
+    get: () => ({ fetch: async () => new Response(JSON.stringify({ allowed: true }), { status: 200 }) }),
+  },
+  CLIENT_SESSION_SECRET: 'test-session-secret',
+})
+
+test('lista os acessos por aeronave usando cotista_id sem retornar senha nem hash', async () => {
+  const db = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: 'pbkdf2_sha256$hash', cotista_id: 'cotista-aeronave-1' } })
   const response = await chamar(db, '/cotista/portal-cliente?aeronave_id=aircraft-1')
   assert.equal(response.status, 200)
   const body = await response.json()
@@ -72,7 +87,7 @@ test('lista os acessos por aeronave sem retornar senha nem hash', async () => {
   assert.equal('senha' in body.cotistas[0], false)
 })
 
-test('cria usuário vinculado ao cliente e armazena somente hash PBKDF2', async () => {
+test('cria usuário vinculado exclusivamente por cotista_id e armazena hash PBKDF2', async () => {
   const db = new FakeD1()
   const response = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST' })
   assert.equal(response.status, 201)
@@ -81,13 +96,29 @@ test('cria usuário vinculado ao cliente e armazena somente hash PBKDF2', async 
   assert.equal(typeof body.senha_temporaria, 'string')
   assert.match(db.usuario.senha, /^pbkdf2_sha256\$100000\$/)
   assert.notEqual(db.usuario.senha, body.senha_temporaria)
-  assert.equal(db.usuario.cliente_id, 'cliente-1')
-  assert.equal(db.usuario.socio_id, null)
+  assert.equal(db.usuario.cotista_id, 'cotista-aeronave-1')
+  assert.equal('cliente_id' in db.usuario, false)
+  assert.equal('socio_id' in db.usuario, false)
+})
+
+test('login do portal resolve cliente pelo cotista_id da conta criada', async () => {
+  const db = new FakeD1()
+  const criacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST' })
+  const credenciais = await criacao.json()
+  const resposta = await portalRoutes.request('/api/portal/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login: credenciais.login, senha: credenciais.senha_temporaria }),
+  }, portalEnv(db))
+  assert.equal(resposta.status, 200)
+  const body = await resposta.json()
+  assert.equal(body.user.cliente_id, 'cliente-1')
+  assert.equal(body.user.socio_id, null)
 })
 
 test('restaura a senha anterior quando o provedor de e-mail rejeita a mensagem', async () => {
   const senhaAnterior = 'pbkdf2_sha256$100000$salt$hash'
-  const db = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: senhaAnterior, cliente_id: 'cliente-1', socio_id: null } })
+  const db = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: senhaAnterior, cotista_id: 'cotista-aeronave-1' } })
   const fetchOriginal = globalThis.fetch
   globalThis.fetch = async () => new Response(JSON.stringify({ message: 'rejeitado' }), { status: 500 })
   try {

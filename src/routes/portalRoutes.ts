@@ -17,6 +17,20 @@ type PortalUser = {
   socio_id: string | null
 }
 
+async function portalUserForLogin(db: D1Database, login: string): Promise<(PortalUser & { senha: string }) | null> {
+  const schema = await db.prepare('SELECT name FROM pragma_table_info(?1)').bind('user_cliente').all<{ name: string }>()
+  const columns = new Set((schema.results || []).map(column => String(column.name)))
+  if (!columns.has('cotista_id')) throw new Error('user_cliente sem coluna cotista_id')
+  return db.prepare(`
+    SELECT u.id, u.login, u.senha, u.nome_exibicao, u.url_avatar,
+      ca.cliente_id AS cliente_id, ca.socio_id AS socio_id
+    FROM user_cliente u
+    LEFT JOIN cotista_aeronave ca ON ca.id = u.cotista_id
+    WHERE lower(u.login) = ?1
+    LIMIT 1
+  `).bind(login).first<PortalUser & { senha: string }>()
+}
+
 type PortalCliente = {
   id: string
   razao_social: string | null
@@ -223,7 +237,7 @@ portalRoutes.post('/api/portal/login', async c => {
     const senha = body?.senha || ''
     if (!login || !senha) return c.json({ error: 'login_e_senha_obrigatorios' }, 400)
 
-    const row = await c.env.SHARE_DB.prepare('SELECT id, login, senha, nome_exibicao, url_avatar, cliente_id, socio_id FROM user_cliente WHERE lower(login) = ?1 LIMIT 1').bind(login).first<PortalUser & { senha: string }>()
+    const row = await portalUserForLogin(c.env.SHARE_DB, login)
     const verification = row ? await portalVerifyPassword(senha, row.senha) : null
     if (!row || !verification?.valid) return c.json({ error: 'credenciais_invalidas' }, 401)
     if (Boolean(row.cliente_id) === Boolean(row.socio_id)) return c.json({ error: 'vinculo_usuario_invalido' }, 409)

@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { escapeHtml } from '../lib/format'
-import { validateWorkerSchema } from '../lib/schema'
 import { portalCreatePasswordHash } from '../routes/portalRoutes'
 
 type Bindings = {
@@ -24,13 +23,12 @@ type UsuarioCliente = { id: string; login: string; senha: string }
 
 export const portalClienteRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
-const PORTAL_SCHEMA = [{
-  table: 'user_cliente',
-  columns: ['id', 'login', 'senha', 'nome_exibicao', 'url_avatar', 'cliente_id', 'socio_id', 'criado_em', 'atualizado_em'],
-}]
-
-async function validarSchema(c: Parameters<typeof validateWorkerSchema>[0]): Promise<void> {
-  await validateWorkerSchema(c, PORTAL_SCHEMA)
+async function validarSchema(db: D1Database): Promise<void> {
+  const result = await db.prepare('SELECT name FROM pragma_table_info(?1)').bind('user_cliente').all<{ name: string }>()
+  const columns = new Set((result.results || []).map(column => String(column.name)))
+  const required = ['id', 'login', 'senha', 'nome_exibicao', 'url_avatar', 'cotista_id', 'criado_em', 'atualizado_em']
+  const missing = required.filter(column => !columns.has(column))
+  if (missing.length) throw new Error(`user_cliente sem colunas necessárias: ${missing.join(', ')}`)
 }
 
 async function buscarCotista(c: { env: Bindings }, id: string): Promise<Cotista | null> {
@@ -48,13 +46,12 @@ async function buscarCotista(c: { env: Bindings }, id: string): Promise<Cotista 
   `).bind(id).first<Cotista>()
 }
 
-async function buscarUsuario(c: { env: Bindings }, cotista: Cotista): Promise<UsuarioCliente | null> {
+async function buscarUsuario(c: { env: Bindings }, cotistaId: string): Promise<UsuarioCliente | null> {
   return c.env.SHARE_DB.prepare(`
     SELECT id, login, senha FROM user_cliente
-    WHERE (?1 IS NOT NULL AND cliente_id = ?1)
-       OR (?2 IS NOT NULL AND socio_id = ?2)
+    WHERE cotista_id = ?1
     ORDER BY criado_em DESC LIMIT 1
-  `).bind(cotista.cliente_id, cotista.socio_id).first<UsuarioCliente>()
+  `).bind(cotistaId).first<UsuarioCliente>()
 }
 
 function gerarSenhaTemporaria(): string {
@@ -86,7 +83,7 @@ function cotistaComVinculoValido(cotista: Cotista): boolean {
 
 portalClienteRoutes.get('/cotista/portal-cliente', async c => {
   try {
-    await validarSchema(c)
+    await validarSchema(c.env.SHARE_DB)
     const aeronaveId = c.req.query('aeronave_id')?.trim()
     if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
     const aeronave = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
@@ -97,15 +94,8 @@ portalClienteRoutes.get('/cotista/portal-cliente', async c => {
         COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), ca.codigo_cliente, 'Cotista') AS nome,
         COALESCE(NULLIF(TRIM(cl.email_principal), ''), NULLIF(TRIM(hs.email_principal), '')) AS email,
         a.matricula_registro,
-        EXISTS (
-          SELECT 1 FROM user_cliente u
-          WHERE (ca.cliente_id IS NOT NULL AND u.cliente_id = ca.cliente_id)
-             OR (ca.socio_id IS NOT NULL AND u.socio_id = ca.socio_id)
-        ) AS possui_acesso,
-        (SELECT u.login FROM user_cliente u
-          WHERE (ca.cliente_id IS NOT NULL AND u.cliente_id = ca.cliente_id)
-             OR (ca.socio_id IS NOT NULL AND u.socio_id = ca.socio_id)
-          ORDER BY u.criado_em DESC LIMIT 1) AS login
+        EXISTS (SELECT 1 FROM user_cliente u WHERE u.cotista_id = ca.id) AS possui_acesso,
+        (SELECT u.login FROM user_cliente u WHERE u.cotista_id = ca.id ORDER BY u.criado_em DESC LIMIT 1) AS login
       FROM cotista_aeronave ca
       LEFT JOIN cliente cl ON cl.id = ca.cliente_id
       LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
@@ -114,40 +104,42 @@ portalClienteRoutes.get('/cotista/portal-cliente', async c => {
       ORDER BY nome, ca.id
     `).bind(aeronaveId).all()
     return c.json({ cotistas: result.results })
-  } catch {
+  } catch (error) {
+    console.error('[financeiro/portal-cliente] falha ao listar acessos', error instanceof Error ? error.message : 'erro_desconhecido')
     return c.json({ error: 'portal_cliente_indisponivel' }, 500)
   }
 })
 
 portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/credenciais', async c => {
   try {
-    await validarSchema(c)
+    await validarSchema(c.env.SHARE_DB)
     const cotista = await buscarCotista(c, c.req.param('cotistaId'))
     if (!cotista) return c.json({ error: 'cotista_nao_encontrado' }, 404)
     if (!cotistaComVinculoValido(cotista)) return c.json({ error: 'vinculo_cotista_invalido' }, 409)
-    if (await buscarUsuario(c, cotista)) return c.json({ error: 'portal_usuario_ja_existe' }, 409)
+    if (await buscarUsuario(c, cotista.id)) return c.json({ error: 'portal_usuario_ja_existe' }, 409)
 
     const login = await gerarLogin(c.env.SHARE_DB, cotista)
     const senhaTemporaria = gerarSenhaTemporaria()
     const hash = await portalCreatePasswordHash(senhaTemporaria)
     await c.env.SHARE_DB.prepare(`
-      INSERT INTO user_cliente (id, login, senha, nome_exibicao, url_avatar, cliente_id, socio_id, criado_em, atualizado_em)
-      VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `).bind(crypto.randomUUID(), login, hash, cotista.nome, cotista.cliente_id, cotista.socio_id).run()
+      INSERT INTO user_cliente (id, login, senha, nome_exibicao, url_avatar, cotista_id, criado_em, atualizado_em)
+      VALUES (?1, ?2, ?3, ?4, NULL, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).bind(crypto.randomUUID(), login, hash, cotista.nome, cotista.id).run()
     return c.json({ success: true, login, senha_temporaria: senhaTemporaria }, 201)
-  } catch {
+  } catch (error) {
+    console.error('[financeiro/portal-cliente] falha ao criar acesso', error instanceof Error ? error.message : 'erro_desconhecido')
     return c.json({ error: 'nao_foi_possivel_criar_acesso' }, 500)
   }
 })
 
 portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/enviar-acesso', async c => {
   try {
-    await validarSchema(c)
+    await validarSchema(c.env.SHARE_DB)
     if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
     const cotista = await buscarCotista(c, c.req.param('cotistaId'))
     if (!cotista) return c.json({ error: 'cotista_nao_encontrado' }, 404)
     if (!cotista.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cotista.email)) return c.json({ error: 'email_cotista_nao_cadastrado' }, 422)
-    const usuario = await buscarUsuario(c, cotista)
+    const usuario = await buscarUsuario(c, cotista.id)
     if (!usuario) return c.json({ error: 'portal_usuario_nao_encontrado' }, 409)
 
     const senhaTemporaria = gerarSenhaTemporaria()
@@ -178,7 +170,8 @@ portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/enviar-acesso', asy
       return c.json({ error: restaurado.meta?.changes ? 'falha_envio_email' : 'falha_envio_email_verifique_acesso' }, 502)
     }
     return c.json({ success: true, destinatario: cotista.email })
-  } catch {
+  } catch (error) {
+    console.error('[financeiro/portal-cliente] falha ao enviar acesso', error instanceof Error ? error.message : 'erro_desconhecido')
     return c.json({ error: 'nao_foi_possivel_enviar_acesso' }, 500)
   }
 })
