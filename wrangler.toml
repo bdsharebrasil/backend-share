@@ -12,7 +12,7 @@ fallthrough = true
 EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 SUPABASE_URL = "https://jilmlmdgeyzubylncpjy.supabase.co"
 R2_PUBLIC_URL = "https://share-brasil.com"
-ALLOWED_ORIGINS = "https://gestao.share-brasil.com,https://tripulacao.share-brasil.com"
+ALLOWED_ORIGINS = "https://gestao.share-brasil.com,https://tripulacao.share-brasil.com,https://portalcliente-2.pages.dev"
 
 # ============= KV NAMESPACE =============
 [[kv_namespaces]]
