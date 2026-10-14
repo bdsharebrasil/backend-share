@@ -5,6 +5,7 @@ import { calcularVencimentoReembolsoTripulante, findLancamentoClientId } from ".
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
 const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
+const frontendRelatorio = await readFile(new URL("../../Share-Brasil-Financeiro/src/pages/RelatorioDespesaViagem.tsx", import.meta.url), "utf8");
 const migrationHistorico = await readFile(new URL("../migrations/20261013_relatorio_despesa_viagem_historico_ajustes.sql", import.meta.url), "utf8");
 const inicioEnvioCliente = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente'");
 const fimEnvioCliente = worker.indexOf("app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token'", inicioEnvioCliente);
@@ -137,6 +138,16 @@ test("envio ao cliente só grava cliente_id se existir na tabela de cadastro", (
   assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
   assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);
   assert.match(rotaEnvioCliente, /\.bind\(cotista\.id, clienteIdLancamentoFk, 'SHARE BRASIL'/);
+});
+
+test("programação de reembolso pré-preenche vencimento, periodicidade e tipo de rateio", () => {
+  assert.match(worker, /r\.data_vencimento_reembolso/);
+  assert.match(worker, /data_vencimento_reembolso: row\.data_vencimento_reembolso \|\| null/);
+  assert.match(worker, /periodicidade: 'EVENTUAL', tipo_rateio: 'VARIAVEL POR VOO'/);
+  assert.match(rotaEnvioCliente, /const periodicidade = 'EVENTUAL'; const tipoRateio = body\.tipo_rateio \|\| 'VARIAVEL POR VOO'/);
+  assert.match(frontendRelatorio, /vencimento: prefill\.data_vencimento_reembolso \|\| new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
+  assert.match(frontendRelatorio, /periodicidade: prefill\.periodicidade \|\| PERIODICIDADE_REEMBOLSO_PADRAO/);
+  assert.match(frontendRelatorio, /tipoRateio: prefill\.tipo_rateio \|\| TIPO_RATEIO_REEMBOLSO_PADRAO/);
 });
 
 test("listagem autenticada inclui comprovantes por despesa sem expor o caminho de armazenamento", () => {

@@ -3956,7 +3956,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', a
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const row = await c.env.SHARE_DB.prepare(`SELECT r.id, r.numero_relatorio, r.total_valor, r.total_cliente, r.despesas, r.aeronave_id,
-    a.matricula_registro AS aeronave_matricula, r.cliente_id, r.socio_id, r.pdf_url, r.pdf_path, r.status
+    a.matricula_registro AS aeronave_matricula, r.cliente_id, r.socio_id, r.data_vencimento_reembolso, r.pdf_url, r.pdf_path, r.status
     FROM relatorio_despesa_viagem r LEFT JOIN aeronave a ON a.id = r.aeronave_id WHERE r.id = ?`).bind(c.req.param('id')).first<any>()
   if (!row) return c.notFound()
   const statusAtual = statusRelatorioViagem(row.status)
@@ -3979,7 +3979,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', a
     log.error('[relatorio-despesa-viagem:programacao-financeira]', error?.message || error)
     return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'O relatório está aprovado, mas a conta a pagar não pôde ser gerada. Tente novamente.' }, 500)
   }
-  return c.json({ descricao: `Relatório Despesa de Viagem - ${row.numero_relatorio}`, valor: Math.max(0, Number(row.total_valor || 0) - Number(row.total_cliente || 0)), fornecedor: 'Share Brasil', grupo_categoria_id: 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', subcategoria: 'RELATORIO DE VIAGEM', aeronave_id: row.aeronave_id, aeronave_matricula: row.aeronave_matricula, cliente_id: row.cliente_id, socio_id: row.socio_id, periodicidade: '', tipo_rateio: '', pdf_url: row.pdf_url, pdf_path: row.pdf_path })
+  return c.json({ descricao: `Relatório Despesa de Viagem - ${row.numero_relatorio}`, valor: Math.max(0, Number(row.total_valor || 0) - Number(row.total_cliente || 0)), fornecedor: 'Share Brasil', grupo_categoria_id: 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', subcategoria: 'RELATORIO DE VIAGEM', aeronave_id: row.aeronave_id, aeronave_matricula: row.aeronave_matricula, cliente_id: row.cliente_id, socio_id: row.socio_id, data_vencimento_reembolso: row.data_vencimento_reembolso || null, periodicidade: 'EVENTUAL', tipo_rateio: 'VARIAVEL POR VOO', pdf_url: row.pdf_url, pdf_path: row.pdf_path })
 })
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c => {
   const user = await authenticatedColaborador(c)
@@ -4010,7 +4010,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     const descricao = `Relatório Despesa de Viagem - ${report.numero_relatorio}`
     const categoriaId = categoria.id
     const shareLancamentoId = crypto.randomUUID(); const clienteLancamentoId = crypto.randomUUID(); const contaId = crypto.randomUUID()
-    const periodicidade = 'EVENTUAL'; const tipoRateio = body.tipo_rateio || 'FIXO'
+    const periodicidade = 'EVENTUAL'; const tipoRateio = body.tipo_rateio || 'VARIAVEL POR VOO'
     const idempotencyBase = `RELATORIO_DESPESA_VIAGEM:${id}:REEMBOLSO_CLIENTE`
     if (report.socio_id) {
       const socio = await db.prepare('SELECT holding_id FROM hold_socios WHERE id = ?1 LIMIT 1').bind(report.socio_id).first<{ holding_id: string | null }>()
