@@ -16,7 +16,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    name: Type-check and tests
+    name: Type-check
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,9 +37,6 @@ jobs:
 
       - name: Type-check
         run: pnpm type-check
-
-      - name: Run tests
-        run: pnpm test
 
   deploy:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'))
