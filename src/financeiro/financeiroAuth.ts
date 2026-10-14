@@ -72,6 +72,12 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
     || path === '/envios-pagamento/despesas-origem'
     || /^\/envios-pagamento\/aeronave\/[^/]+\/cotistas$/.test(path)
 }
+function usuarioPodeConsultarDashboard(path: string, method: string): boolean {
+  return method === 'GET' && (
+    path === '/dashboard/financeiro'
+    || path === '/dashboard/financeiro/movimentacoes'
+  )
+}
 
 export async function autorizarRequisicaoFinanceira(
   c: FinanceiroAuthContext,
@@ -83,6 +89,9 @@ export async function autorizarRequisicaoFinanceira(
 
   const path = pathname.replace(/^\/api\/financeiro/, '') || '/'
   if (path === '/pagamentos-folha' || path.startsWith('/pagamentos-folha/')) {
+    return { autorizado: true, userId }
+  }
+  if (usuarioPodeConsultarDashboard(path, method)) {
     return { autorizado: true, userId }
   }
 
