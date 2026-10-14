@@ -46,6 +46,15 @@ test("rateio usa apenas colunas presentes e leva os documentos do recibo", () =>
   assert.match(kernel, /url_recibo: receipt\.url_recibo/);
 });
 
+test("reembolso de recibo grava as datas nas colunas do schema D1", () => {
+  const inicio = kernel.indexOf("async function createReimbursementFinance(");
+  const fim = kernel.indexOf("type ReceiptFinanceBuilder", inicio);
+  const caminho = kernel.slice(inicio, fim);
+  assert.match(caminho, /data_emissao: input\.data_emissao/);
+  assert.match(caminho, /data_vencimento: input\.data_vencimento \|\| input\.data_emissao/);
+  assert.doesNotMatch(caminho, /data_lancamento/);
+});
+
 test("histórico reconhece rateio de recibo sem depender de um lançamento espelho", () => {
   assert.match(routes, /INNER JOIN lancamentos l ON l\.id = rd\.lancamento_id/);
   assert.doesNotMatch(routes, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id/);
