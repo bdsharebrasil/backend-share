@@ -74,3 +74,9 @@ test("listagem da NF expõe valor_total e recupera e-mail enviado do lançamento
   assert.match(notas, /MAX\(ee\.email_enviado_em\).*ee\.referencia_id = n\.id.*lower\(ee\.status\) = 'enviado'/);
   assert.match(notas, /LEFT JOIN lancamentos l ON l\.id = n\.lancamentos_id/);
 });
+
+test("listagem de NF e recibo usa o status atual da conta a receber", () => {
+  assert.match(notas, /COALESCE\(cr\.status, n\.status\) AS status/);
+  assert.match(notas, /COALESCE\(cr\.status, r\.status\) AS status/);
+  assert.match(notas, /LEFT JOIN contas_areceber cr ON cr\.id = r\.contas_areceber_id/);
+});
