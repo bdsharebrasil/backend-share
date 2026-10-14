@@ -278,6 +278,57 @@ portalRoutes.get('/api/portal/contexto', async c => {
   return c.json(await portalContext(c, user))
 })
 
+portalRoutes.get('/api/portal/financeiro', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
+  const participantId = user.cliente_id || user.socio_id
+  const ownedAircraftFilter = user.cliente_id ? 'ca.cliente_id = ?1' : 'ca.socio_id = ?1'
+  const paymentTotals = `LEFT JOIN (
+    SELECT rateio_id, SUM(valor_centavos) AS valor_pago_centavos
+      FROM rateio_pagamentos
+     WHERE UPPER(COALESCE(status, '')) = 'CONFIRMADO'
+     GROUP BY rateio_id
+  ) pagamentos ON pagamentos.rateio_id = r.id`
+  const query = user.cliente_id
+    ? `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
+          r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
+          COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) AS valor_pago_real_centavos,
+          CASE WHEN COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
+                 OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO') THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
+          'CLIENTE' AS tipo, a.matricula_registro
+       FROM rateio_despesas r
+       INNER JOIN cotista_aeronave ca ON ca.id = r.cotista_id
+       LEFT JOIN aeronave a ON a.id = r.aeronave_id
+       ${paymentTotals}
+      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+      ORDER BY date(r.data_emissao) DESC, r.id DESC`
+    : `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
+          r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
+          COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) AS valor_pago_real_centavos,
+          CASE WHEN COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
+                 OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO') THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
+          'HOLDING' AS tipo, a.matricula_registro
+       FROM rateio_hold r
+       INNER JOIN hold_socios hs ON hs.id = r.socio_id
+       INNER JOIN cotista_aeronave ca ON ca.socio_id = hs.id AND ca.aeronave_id = r.aeronave_id
+       LEFT JOIN aeronave a ON a.id = r.aeronave_id
+       ${paymentTotals}
+      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+      ORDER BY date(r.data_emissao) DESC, r.id DESC`
+  const result = await c.env.SHARE_DB.prepare(query).bind(participantId).all<Record<string, unknown>>()
+  const despesas = result.results || []
+  const resumo = despesas.reduce<{ totalCentavos: number; pagoCentavos: number; abertas: number; pagas: number }>((acc, row) => {
+    const esperado = Number(row.valor_rateado_centavos || 0)
+    const pago = Number(row.valor_pago_real_centavos || 0)
+    acc.totalCentavos += esperado
+    acc.pagoCentavos += Math.min(pago, esperado)
+    if (String(row.status).toUpperCase() === 'PAGO') acc.pagas += 1
+    else acc.abertas += 1
+    return acc
+  }, { totalCentavos: 0, pagoCentavos: 0, abertas: 0, pagas: 0 })
+  return c.json({ tipo: user.cliente_id ? 'CLIENTE' : 'HOLDING', despesas, resumo: { ...resumo, abertoCentavos: resumo.totalCentavos - resumo.pagoCentavos } })
+})
+
 portalRoutes.get('/api/portal/aerodromos', async c => {
   const query = (c.req.query('q') || '').trim().toLowerCase()
   const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
