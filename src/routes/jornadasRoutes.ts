@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono'
-import { requireShareInternal, extractSupabaseUserId } from '../lib/auth'
+import { requireFlightOperationAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
 import type { Env } from '../types/env'
@@ -192,7 +192,7 @@ export function agruparJornadasVoo(registros: any[]) {
 }
 
 jornadasRoutes.get('/api/interno/agendamento/:id/jornada', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   try {
     await garantirTabelaJornadas(c)
   } catch (error) {
@@ -257,7 +257,7 @@ jornadasRoutes.get('/api/interno/jornadas/:id/limites', async c => {
 })
 
 jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   await garantirTabelaJornadas(c)
   const db = c.env.SHARE_DB
   const idSolicitacao = c.req.param('id')
@@ -471,6 +471,7 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
     jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(raiz).first<any>()
     if (!jornada) return c.notFound()
   }
+  if (!(await requireFlightOperationAccess(c, jornada.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   if (jornada.status === 'encerrada') return c.json({ error: 'jornada_encerrada' }, 409)
   const emVoo = await db.prepare("SELECT id FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo' LIMIT 1").bind(jornada.id).first()
   if (emVoo) return c.json({ error: 'perna_anterior_em_voo', detail: 'Registre o pouso da perna anterior antes de abrir uma nova.' }, 409)
@@ -512,6 +513,8 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
   const db = c.env.SHARE_DB
   const perna = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1 AND jornada_id = ?2').bind(c.req.param('pernaId'), c.req.param('jornadaId')).first<any>()
   if (!perna) return c.notFound()
+  const jornadaAcesso = await db.prepare('SELECT solicitacao_id FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<{ solicitacao_id: string }>()
+  if (!jornadaAcesso || !(await requireFlightOperationAccess(c, jornadaAcesso.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))

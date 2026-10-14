@@ -4,11 +4,14 @@ import { readFile } from "node:fs/promises";
 
 const route = await readFile(new URL("../src/routes/colaboradorVoosRoutes.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+const auth = await readFile(new URL("../src/lib/auth.ts", import.meta.url), "utf8");
+const ctm = await readFile(new URL("../src/routes/ctmRoutes.ts", import.meta.url), "utf8");
+const jornadas = await readFile(new URL("../src/routes/jornadasRoutes.ts", import.meta.url), "utf8");
 
 test("Meus Voos lista somente reservas designadas ao tripulante autenticado", () => {
   assert.match(route, /authenticatedColaborador\(c\)/);
   assert.match(route, /s\.piloto_id = \?1 OR s\.copiloto_id = \?1/);
-  assert.match(route, /'aprovada', 'encerrada', 'concluida'/);
+  assert.match(route, /'aprovada', 'em_voo'.*'em_solo'.*'encerrada', 'concluida'/);
   assert.match(route, /FROM solicitacoes_reserva_voo s/);
   assert.match(worker, /app\.route\('\/', colaboradorVoosRoutes\)/);
 });
@@ -24,4 +27,16 @@ test("detalhe reúne hospedagem no período do voo e mensagens recebidas que men
   assert.match(route, /date\(r\.data_checkin\) <= date\(\?3\)/);
   assert.match(route, /m\.destinatario_id = \?1/);
   assert.match(route, /instr\(lower\(COALESCE\(m\.assunto/);
+});
+
+test("operações do voo exigem tripulação designada, gestor ou autenticação interna", () => {
+  assert.match(auth, /export async function requireFlightOperationAccess/);
+  assert.match(auth, /if \(await checkInternalAuth\(c\)\) return true/);
+  assert.match(auth, /authenticatedColaborador\(c\)/);
+  assert.match(auth, /isTaskManager\(user\) \|\| await isColaboradorManager\(c, user\)/);
+  assert.match(auth, /solicitacaoId, tripulante\.id/);
+  assert.match(worker, /requireFlightOperationAccess\(c, c\.req\.param\('id'\)\)/);
+  assert.match(ctm, /requireFlightOperationAccess\(c, c\.req\.param\('id'\)\)/);
+  assert.match(jornadas, /requireFlightOperationAccess\(c, c\.req\.param\('id'\)\)/);
+  assert.match(jornadas, /requireFlightOperationAccess\(c, jornada\.solicitacao_id\)/);
 });

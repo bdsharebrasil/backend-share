@@ -1,5 +1,5 @@
 import { Context, Hono } from 'hono'
-import { extractSupabaseUserId, requireShareInternal, shareBrasilUser } from '../lib/auth'
+import { extractSupabaseUserId, requireFlightOperationAccess, requireShareInternal, shareBrasilUser } from '../lib/auth'
 import { validateWorkerSchema } from '../lib/schema'
 import { shareBrasilFileName } from '../lib/storage'
 import { uuid } from '../lib/strings'
@@ -182,7 +182,7 @@ ctmRoutes.get('/api/ctm/fichas-peso-balanceamento', async c => {
 })
 
 ctmRoutes.get('/api/interno/agendamento/:id/peso-balanceamento', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   await garantirTabelaFichaPeso(c)
   const db = c.env.SHARE_DB
   const id = c.req.param('id')
@@ -206,14 +206,15 @@ ctmRoutes.get('/api/interno/agendamento/:id/peso-balanceamento', async c => {
 })
 
 ctmRoutes.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   await garantirTabelaFichaPeso(c)
   const db = c.env.SHARE_DB
   const solicitacaoId = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => null)
   if (!body) return c.json({ error: 'payload_invalido' }, 400)
-  const reserva = await db.prepare('SELECT id, aeronave_id, numero_voo, data_agendada FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<any>()
+  const reserva = await db.prepare('SELECT id, aeronave_id, numero_voo, data_agendada, status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<any>()
   if (!reserva) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  if (String(reserva.status || '').trim().toLowerCase() !== 'aprovada') return c.json({ error: 'ficha_fora_da_preparacao', detail: 'A ficha só pode ser alterada durante a preparação do voo.' }, 409)
   const piloto = String(body.piloto_responsavel || '').trim()
   if (!piloto) return c.json({ error: 'piloto_responsavel_obrigatorio' }, 400)
   const itens = Array.isArray(body.itens_carregamento) ? body.itens_carregamento : []
@@ -221,13 +222,50 @@ ctmRoutes.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
   const status = body.status === 'FINALIZADA' ? 'FINALIZADA' : 'RASCUNHO'
   const existente = await db.prepare('SELECT id, status FROM ctm_ficha_peso_balanceamento WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(solicitacaoId).first<any>()
   if (existente?.status === 'FINALIZADA') return c.json({ error: 'ficha_ja_finalizada', id: existente.id }, 409)
+  let finalizacao: { configuracao: any; pesoVazio: number; momentoVazio: number; fuelKg: number; fuelArm: number; fuelMomento: number; pesoTotal: number; momentoTotal: number; cg: number; pousoPrevisto: number; cgPouso: number } | null = null
+  let loadItemsForSave: any[] = []
+  if (status === 'FINALIZADA') {
+    const configuracao = await db.prepare('SELECT * FROM ctm_peso_balanceamento WHERE aeronave_id = ?1 ORDER BY atualizado_em DESC LIMIT 1').bind(reserva.aeronave_id).first<any>()
+    if (!configuracao || !(configuracao.validado === true || Number(configuracao.validado) === 1)) return c.json({ error: 'configuracao_peso_nao_validada', detail: 'A aeronave precisa ter uma configuração técnica de peso e balanceamento validada.' }, 409)
+    if (body.peso_balanceamento_id && body.peso_balanceamento_id !== configuracao.id) return c.json({ error: 'configuracao_aeronave_invalida' }, 400)
+    const loadItems = itens.filter((item: any) => String(item?.categoria || '').toLowerCase() !== 'combustivel' && String(item?.descricao || '').trim().toLowerCase() !== 'combustível')
+    if (!loadItems.length || loadItems.some((item: any) => !String(item?.descricao || '').trim() || !Number.isFinite(Number(item?.peso_kg ?? item?.peso)) || Number(item?.peso_kg ?? item?.peso) <= 0 || !Number.isFinite(Number(item?.braco)) || Number(item?.braco) === 0)) return c.json({ error: 'itens_carregamento_invalidos', detail: 'Informe descrição, peso positivo e braço válido para cada passageiro ou item carregado.' }, 400)
+    const pesoVazio = Number(configuracao.peso_vazio_padrao)
+    const momentoVazio = Number(configuracao.momento_padrao) || pesoVazio * Number(configuracao.braco_cg_padrao)
+    const fuelKg = Number(body.fuel_kg)
+    const fuelLitros = Number(body.fuel_litros)
+    const fuelArm = Number(body.fuel_braco)
+    const rawPlannedFuelBurn = body.snapshot_limites?.consumo_estimado_combustivel_kg
+    if (rawPlannedFuelBurn === null || rawPlannedFuelBurn === undefined || String(rawPlannedFuelBurn).trim() === '') return c.json({ error: 'consumo_previsto_obrigatorio', detail: 'Informe o consumo estimado de combustível até o pouso.' }, 400)
+    const plannedFuelBurn = Number(rawPlannedFuelBurn)
+    if (![pesoVazio, momentoVazio, fuelKg, fuelLitros, fuelArm, plannedFuelBurn].every(Number.isFinite) || pesoVazio <= 0 || fuelKg <= 0 || fuelLitros <= 0 || fuelArm === 0 || plannedFuelBurn < 0 || plannedFuelBurn > fuelKg) return c.json({ error: 'dados_peso_combustivel_invalidos', detail: 'Revise peso vazio, combustível, braço e consumo previsto até o pouso.' }, 400)
+    const cargaPeso = loadItems.reduce((total: number, item: any) => total + Number(item.peso_kg ?? item.peso), 0)
+    const cargaMomento = loadItems.reduce((total: number, item: any) => total + Number(item.peso_kg ?? item.peso) * Number(item.braco), 0)
+    const fuelMomento = fuelKg * fuelArm
+    const pesoTotal = pesoVazio + cargaPeso + fuelKg
+    const momentoTotal = momentoVazio + cargaMomento + fuelMomento
+    const mac = Number(configuracao.mac_comprimento)
+    const cg = mac > 0 ? ((momentoTotal / pesoTotal - Number(configuracao.lemac_distancia)) / mac) * 100 : Number.NaN
+    const pousoPrevisto = pesoTotal - plannedFuelBurn
+    const cgPouso = pousoPrevisto > 0 && mac > 0 ? (((momentoTotal - plannedFuelBurn * fuelArm) / pousoPrevisto - Number(configuracao.lemac_distancia)) / mac) * 100 : Number.NaN
+    const limitesValidos = [configuracao.peso_maximo_decolagem, configuracao.peso_maximo_pouso, configuracao.peso_maximo_sem_combustivel, configuracao.cg_limite_dianteiro, configuracao.cg_limite_traseiro, mac, configuracao.lemac_distancia].every((value) => Number.isFinite(Number(value))) && Number(configuracao.peso_maximo_decolagem) > 0 && Number(configuracao.peso_maximo_pouso) > 0 && Number(configuracao.peso_maximo_sem_combustivel) > 0 && mac > 0 && Number(configuracao.cg_limite_traseiro) > Number(configuracao.cg_limite_dianteiro)
+    if (!limitesValidos) return c.json({ error: 'limites_peso_nao_configurados', detail: 'A configuração aprovada não contém todos os limites necessários para finalizar a ficha.' }, 409)
+    const cgDentroDosLimites = cg >= Number(configuracao.cg_limite_dianteiro) && cg <= Number(configuracao.cg_limite_traseiro) && cgPouso >= Number(configuracao.cg_limite_dianteiro) && cgPouso <= Number(configuracao.cg_limite_traseiro)
+    const dentroDosLimites = pesoTotal <= Number(configuracao.peso_maximo_decolagem) && pousoPrevisto <= Number(configuracao.peso_maximo_pouso) && pousoPrevisto >= 0 && pesoTotal - fuelKg <= Number(configuracao.peso_maximo_sem_combustivel) && cgDentroDosLimites
+    if (!Number.isFinite(cg) || !Number.isFinite(cgPouso) || !dentroDosLimites) return c.json({ error: 'ficha_fora_dos_limites', detail: 'O peso de decolagem/pouso, peso sem combustível ou CG previsto na decolagem/pouso excede os limites técnicos aprovados.' }, 422)
+    loadItemsForSave = loadItems
+    finalizacao = { configuracao, pesoVazio, momentoVazio, fuelKg, fuelArm, fuelMomento, pesoTotal, momentoTotal, cg, pousoPrevisto, cgPouso }
+  }
   const id = existente?.id || crypto.randomUUID()
+  const config = finalizacao?.configuracao
+  const snapshotLimites = finalizacao ? { ...body.snapshot_limites, pouso_previsto_kg: finalizacao.pousoPrevisto, cg_previsto_pouso: finalizacao.cgPouso, consumo_estimado_combustivel_kg: Number(body.snapshot_limites?.consumo_estimado_combustivel_kg ?? 0), peso_maximo_decolagem: config.peso_maximo_decolagem, peso_maximo_pouso: config.peso_maximo_pouso, peso_maximo_sem_combustivel: config.peso_maximo_sem_combustivel, cg_limite_dianteiro: config.cg_limite_dianteiro, cg_limite_traseiro: config.cg_limite_traseiro } : body.snapshot_limites || {}
+  const itensPersistidos = finalizacao ? [...loadItemsForSave, { descricao: 'Combustível', categoria: 'combustivel', peso_kg: finalizacao.fuelKg, braco: finalizacao.fuelArm, momento: finalizacao.fuelMomento, litros: Number(body.fuel_litros) }] : itens
   const valores = [
-    reserva.aeronave_id, String(body.peso_balanceamento_id || ''), String(body.data_voo || reserva.data_agendada),
-    body.numero_voo ?? reserva.numero_voo ?? null, piloto, Number(body.peso_vazio_kg || 0), num(body.braco_vazio), num(body.momento_vazio),
-    JSON.stringify(itens), num(body.fuel_litros), num(body.fuel_kg), num(body.fuel_braco), num(body.fuel_momento), num(body.peso_total_kg), num(body.momento_total), num(body.cg_calculado),
-    num(body.peso_maximo_decolagem), num(body.peso_maximo_pouso), num(body.peso_maximo_sem_combustivel), num(body.cg_limite_dianteiro), num(body.cg_limite_traseiro),
-    body.dentro_dos_limites ? 1 : 0, status, JSON.stringify(body.snapshot_limites || {}), body.observacoes?.toString().trim() || null,
+    reserva.aeronave_id, String(config?.id || body.peso_balanceamento_id || ''), String(body.data_voo || reserva.data_agendada),
+    body.numero_voo ?? reserva.numero_voo ?? null, piloto, finalizacao?.pesoVazio ?? Number(body.peso_vazio_kg || 0), finalizacao ? Number(config.braco_cg_padrao) : num(body.braco_vazio), finalizacao?.momentoVazio ?? num(body.momento_vazio),
+    JSON.stringify(itensPersistidos), num(body.fuel_litros), finalizacao?.fuelKg ?? num(body.fuel_kg), finalizacao?.fuelArm ?? num(body.fuel_braco), finalizacao?.fuelMomento ?? num(body.fuel_momento), finalizacao?.pesoTotal ?? num(body.peso_total_kg), finalizacao?.momentoTotal ?? num(body.momento_total), finalizacao?.cg ?? num(body.cg_calculado),
+    finalizacao ? config.peso_maximo_decolagem : num(body.peso_maximo_decolagem), finalizacao ? config.peso_maximo_pouso : num(body.peso_maximo_pouso), finalizacao ? config.peso_maximo_sem_combustivel : num(body.peso_maximo_sem_combustivel), finalizacao ? config.cg_limite_dianteiro : num(body.cg_limite_dianteiro), finalizacao ? config.cg_limite_traseiro : num(body.cg_limite_traseiro),
+    finalizacao ? 1 : body.dentro_dos_limites ? 1 : 0, status, JSON.stringify(snapshotLimites), body.observacoes?.toString().trim() || null,
     solicitacaoId, body.assinatura_nome?.toString().trim() || piloto, status === 'FINALIZADA' ? new Date().toISOString() : null,
   ]
   if (existente) {

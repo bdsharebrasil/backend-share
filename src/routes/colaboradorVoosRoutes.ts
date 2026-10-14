@@ -23,7 +23,7 @@ const VOOS_COLABORADOR_SQL = `
   FROM solicitacoes_reserva_voo s
   LEFT JOIN aeronave a ON a.id = s.aeronave_id
   WHERE (s.piloto_id = ?1 OR s.copiloto_id = ?1)
-    AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'encerrada', 'concluida')
+    AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
   ORDER BY date(s.data_agendada) DESC, s.horario_previsto_agendamento DESC, s.criado_em DESC
 `
 
@@ -58,7 +58,7 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
     LEFT JOIN tripulacao cp ON cp.id = s.copiloto_id
     LEFT JOIN tripulacao_freelancer cpf ON cpf.id = s.copiloto_id
     WHERE s.id = ?1 AND (s.piloto_id = ?2 OR s.copiloto_id = ?2)
-      AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'encerrada', 'concluida')
+      AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
     LIMIT 1
   `).bind(c.req.param('id'), tripulante.id).first<Record<string, any>>()
   if (!voo) return c.notFound()

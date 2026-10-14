@@ -38,6 +38,7 @@ import {
   isColaboradorManager,
   isTaskManager,
   requireAuthenticatedUser,
+  requireFlightOperationAccess,
   requireShareInternal,
   shareBrasilUser,
   type Colaborador,
@@ -1801,31 +1802,39 @@ async function normalizarLocalAbastecimento(db: D1Database, valor: unknown): Pro
 }
 
 app.get('/api/interno/agendamento/:id/checklist', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   await garantirTabelaChecklist(c)
-  const row = await c.env.SHARE_DB.prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
+  const row = await c.env.SHARE_DB.prepare('SELECT id, solicitacao_id, respostas AS itens, observacoes, abastecimento_id, precisa_abastecer, status, executado_por AS usuario_id, executado_por_nome, nivel_oleo, alerta_id, concluido_em, atualizado_em FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(c.req.param('id')).first<any>()
   if (!row) return c.json(null)
   const alertas = row.alerta_id ? await c.env.SHARE_DB.prepare('SELECT alerta1, alerta2, alerta3, alerta4, alerta5, alerta6, alerta7, alerta8, alerta9, alerta10 FROM alerta_checklist WHERE id = ?').bind(row.alerta_id).first<any>() : null
   const alertasMap = Object.fromEntries(Object.entries(alertas || {}).filter(([key, value]) => key.startsWith('alerta') && String(value || '').trim()).map(([key, value]) => [key.replace(/^alerta/, ''), String(value).trim()]))
+  const abastecimento = row.abastecimento_id ? await c.env.SHARE_DB.prepare('SELECT id, data, tipo_combustivel, local, litros, valor_unitario, desconto, numero_comanda, numero_nf, trecho FROM abastecimentos WHERE id = ?1').bind(row.abastecimento_id).first<any>().catch(() => null) : null
   return c.json({
     ...row,
     itens: JSON.parse(row.itens || '{}'),
     alertas: alertasMap,
+    abastecimento,
   })
 })
 app.post('/api/interno/agendamento/:id/checklist', async c => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   await garantirTabelaChecklist(c); await garantirTabelaAbastecimentos(c)
   const idAgendamento = c.req.param('id')
   const agendamento = await c.env.SHARE_DB.prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?').bind(idAgendamento).first<any>()
   if (!agendamento) return c.notFound()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as any))
+  const status = body.status || 'concluido'
+  if (!['rascunho', 'concluido'].includes(status)) return c.json({ error: 'status_checklist_invalido' }, 400)
+  if (String(agendamento.status || '').trim().toLowerCase() !== 'aprovada') return c.json({ error: 'checklist_fora_da_preparacao', detail: 'A execução do checklist só pode ser alterada durante a preparação do voo.' }, 409)
   const userId = extractSupabaseUserId(c)
   const executor = userId ? await c.env.SHARE_DB.prepare('SELECT COALESCE(nome_exibicao, nome_completo, email) AS nome FROM user_profiles WHERE id=?').bind(userId).first<{ nome: string }>() : null
   const userName = executor?.nome || userId || 'Usuário não identificado'
-  const existente = await c.env.SHARE_DB.prepare('SELECT id, abastecimento_id, alerta_id FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null; alerta_id: string | null }>()
-  const status = body.status || 'concluido'
+  const existente = await c.env.SHARE_DB.prepare('SELECT id, abastecimento_id, alerta_id, status FROM checklists_pre_voo WHERE solicitacao_id = ? ORDER BY criado_em DESC LIMIT 1').bind(idAgendamento).first<{ id: string; abastecimento_id: string | null; alerta_id: string | null; status: string | null }>()
+  if (existente?.id) {
+    if (String(existente.status || '').trim().toLowerCase() === 'concluido') return c.json({ error: 'checklist_ja_concluido', detail: 'O checklist finalizado é somente para consulta.' }, 409)
+  }
   const precisaAbastecer = body.abastecimento?.necessita_abastecer === true || body.abastecimento?.necessita_abastecer === 'sim'
+  if (existente?.abastecimento_id && !precisaAbastecer) return c.json({ error: 'abastecimento_ja_vinculado', detail: 'O abastecimento vinculado permanece no fluxo financeiro; revise os dados sem desvinculá-lo do checklist.' }, 409)
   const alertas = Object.entries(body.alertas || {}).filter(([, texto]) => String(texto || '').trim()).map(([item, texto]) => `${item}: ${String(texto).trim()}`).slice(0, 10)
   if (status === 'concluido' && alertas.length < Object.values(body.respostas || body.itens || {}).filter((resposta: any) => resposta?.status === 'alerta').length) return c.json({ error: 'justificativa_alerta_obrigatoria', detail: 'Todo item marcado como alerta precisa de uma justificativa.' }, 400)
   const a = body.abastecimento || {}
