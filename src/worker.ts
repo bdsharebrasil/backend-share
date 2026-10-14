@@ -1635,6 +1635,46 @@ app.post('/api/interno/agendamento', async c => {
   return c.json({ id, status: 'pendente', numero_voo: null }, 201)
 })
 
+app.patch('/api/interno/agendamento/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const id = c.req.param('id').trim()
+  if (!id) return c.json({ error: 'agendamento_id_obrigatorio' }, 400)
+  const db = c.env.SHARE_DB
+  const atual = await db.prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<any>()
+  if (!atual) return c.notFound()
+  const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const origem = body.origem === undefined ? String(atual.origem || '').trim().toUpperCase() : String(body.origem || '').trim().toUpperCase()
+  const destino = body.destino === undefined ? String(atual.destino || '').trim().toUpperCase() : String(body.destino || '').trim().toUpperCase()
+  const dataAgendada = body.data_agendada === undefined ? String(atual.data_agendada || '').slice(0, 10) : String(body.data_agendada || '').trim()
+  if (!origem || !destino || !/^\d{4}-\d{2}-\d{2}$/.test(dataAgendada)) return c.json({ error: 'rota_e_periodo_invalidos' }, 400)
+  const dataFimAtual = new Date(Date.parse(`${dataAgendada}T00:00:00Z`) + (Math.max(1, Number(atual.dias_duracao) || 1) - 1) * 86_400_000).toISOString().slice(0, 10)
+  const dataFim = body.data_fim === undefined ? dataFimAtual : String(body.data_fim || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataFim) || dataFim < dataAgendada) return c.json({ error: 'rota_e_periodo_invalidos' }, 400)
+  const aeronaveId = body.aeronave_id === undefined ? atual.aeronave_id : String(body.aeronave_id || '').trim()
+  const aeronave = await db.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ id: string }>()
+  if (!aeronave) return c.json({ error: 'aeronave_nao_disponivel' }, 409)
+  const horarioEnviado = body.horario_previsto_agendamento === undefined ? atual.horario_previsto_agendamento : body.horario_previsto_agendamento
+  const horarioPrevisto = horarioEnviado ? normalizarHorarioAgendamento(dataAgendada, horarioEnviado) : null
+  if (horarioEnviado && !horarioPrevisto) return c.json({ error: 'horario_previsto_invalido' }, 400)
+  const numeroPassageiros = body.numero_passageiros === undefined ? Number(atual.numero_passageiros || 1) : Number(body.numero_passageiros)
+  if (!Number.isInteger(numeroPassageiros) || numeroPassageiros < 1) return c.json({ error: 'numero_passageiros_invalido' }, 400)
+  const pilotoId = body.piloto_id === undefined ? atual.piloto_id : String(body.piloto_id || '').trim() || null
+  const copilotoId = body.copiloto_id === undefined ? atual.copiloto_id : String(body.copiloto_id || '').trim() || null
+  if (pilotoId && copilotoId && pilotoId === copilotoId) return c.json({ error: 'tripulantes_iguais' }, 400)
+  for (const assigned of [pilotoId, copilotoId].filter((value): value is string => Boolean(value))) {
+    if (!(await buscarTripulante(c, assigned))) return c.json({ error: 'tripulante_nao_encontrado', tripulante_id: assigned }, 400)
+    const eligibility = await validarElegibilidadeTripulante(c, assigned, aeronaveId)
+    if (eligibility) return c.json({ error: eligibility, tripulante_id: assigned }, 409)
+  }
+  const diasDuracao = calcularDiasPeriodoAgendamento(dataAgendada, dataFim)
+  if (!diasDuracao) return c.json({ error: 'periodo_invalido' }, 400)
+  await db.prepare(`UPDATE solicitacoes_reserva_voo SET aeronave_id = ?, origem = ?, destino = ?, data_agendada = ?, horario_previsto_agendamento = ?, dias_duracao = ?, numero_passageiros = ?, piloto_id = ?, copiloto_id = ?, observacoes = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(
+    aeronaveId, origem, destino, dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, pilotoId, copilotoId,
+    body.observacoes === undefined ? atual.observacoes : String(body.observacoes || '').trim() || null, id,
+  ).run()
+  return c.json({ success: true, id, data_agendada: dataAgendada, data_fim: dataFim, dias_duracao: diasDuracao, horario_previsto_agendamento: horarioPrevisto, numero_passageiros: numeroPassageiros, aeronave_id: aeronaveId, piloto_id: pilotoId, copiloto_id: copilotoId })
+})
+
 app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaDisponibilidadeTripulacao(c)
