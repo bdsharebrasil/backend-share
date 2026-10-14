@@ -19,3 +19,14 @@ test("fila de reembolso colaborador exige colaborador_id e não expõe seu UUID 
   assert.match(rota, /COALESCE\(NULLIF\(TRIM\(u\.nome_exibicao\), ''\), NULLIF\(TRIM\(u\.nome_completo\), ''\), NULLIF\(TRIM\(u\.email\), ''\)\) AS solicitante_nome/);
   assert.doesNotMatch(rota, /COALESCE\([^\n]*cp\.colaborador_id\) AS solicitante_nome/);
 });
+
+test("reembolsos incluem campos do lançamento e resolvem categoria, cotista e número do voo", () => {
+  assert.match(rota, /l\.data_emissao AS lancamento_data_emissao/);
+  assert.match(rota, /l\.url_doc/);
+  assert.match(rota, /l\.numero_demonstrativo/);
+  assert.match(rota, /categoria_movimentacao_share cat ON cat\.id = l\.categoria_share_id/);
+  assert.match(rota, /AS lancamento_categoria_nome/);
+  assert.match(rota, /cotista_aeronave ca ON ca\.id = l\.cotista_aeronave_id/);
+  assert.match(rota, /AS cotista_nome/);
+  assert.match(rota, /solicitacoes_reserva_voo voo ON voo\.id = l\.numero_voo/);
+});

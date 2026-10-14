@@ -97,12 +97,21 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
         LEFT JOIN fornecedores_combustivel fc ON fc.id = e.fornecedor_id
         LEFT JOIN user_profiles u ON u.id = e.criado_por
         WHERE e.tipo IN ('cliente', 'reembolso') ORDER BY e.criado_em DESC LIMIT 500`),
-      listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.aeronave_id,
-          a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
+      listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.numero_recibo, l.numero_demonstrativo,
+          l.data_emissao AS lancamento_data_emissao, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
+          COALESCE(NULLIF(TRIM(voo.numero_voo), ''), NULLIF(TRIM(l.numero_voo), '')) AS numero_voo,
+          l.aeronave_id, a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
+          COALESCE(NULLIF(TRIM(cat.nome), ''), NULLIF(TRIM(l.categoria_nome), ''), NULLIF(TRIM(cp.categoria_nome), '')) AS lancamento_categoria_nome,
+          COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), NULLIF(TRIM(ca.codigo_cliente), '')) AS cotista_nome,
           mh.holding_id, CASE WHEN cp.movimentos_id IS NOT NULL THEN 'HOLDING' ELSE COALESCE(l.tipo_caixa, 'SHARE') END AS tipo_caixa,
           COALESCE(NULLIF(TRIM(u.nome_exibicao), ''), NULLIF(TRIM(u.nome_completo), ''), NULLIF(TRIM(u.email), '')) AS solicitante_nome
         FROM contas_apagar cp
         LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id
+        LEFT JOIN categoria_movimentacao_share cat ON cat.id = l.categoria_share_id
+        LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id
+        LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+        LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+        LEFT JOIN solicitacoes_reserva_voo voo ON voo.id = l.numero_voo
         LEFT JOIN movimentos_holding mh ON mh.id = cp.movimentos_id
         LEFT JOIN aeronave a ON a.id = cp.aeronave_id
         LEFT JOIN user_profiles u ON u.id = cp.colaborador_id

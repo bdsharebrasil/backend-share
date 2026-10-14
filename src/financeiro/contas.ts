@@ -1,5 +1,5 @@
 export function mapConta(row: Record<string, unknown>): Record<string, unknown> {
-  const documento = row.numero_nf ?? row.numero_recibo ?? row.numero_doc ?? row.numero_demonstrativo ?? null
+  const documento = row.numero_doc ?? row.numero_demonstrativo ?? row.numero_nf ?? row.numero_recibo ?? null
   const documentoUrl = row.url_demonstrativo ?? row.url_nf ?? row.url_recibo ?? row.url_boleto ?? row.url_doc ?? row.lancamento_boleto_url ?? row.lancamento_nf_url ?? row.boleto_url ?? row.nf_url ?? null
   return {
     id: row.id,
@@ -7,12 +7,13 @@ export function mapConta(row: Record<string, unknown>): Record<string, unknown> 
     dataVencimento: row.data_vencimento,
     valor: Number(row.valor ?? Number(row.valor_centavos ?? 0) / 100),
     categoriaId: row.categoria_id ?? null,
-    categoriaNome: row.categoria_nome ?? null,
+    categoriaNome: row.lancamento_categoria_nome ?? row.categoria_nome ?? null,
     descricao: row.descricao ?? null,
     criadoPor: row.criado_por ?? null,
     aeronaveId: row.aeronave_id ?? null,
     fornecedorId: row.fornecedor_id ?? row.fornecedores_favoritos_id ?? null,
     fornecedor: row.fornecedor_nome ?? row.fornecedor ?? null,
+    numeroVoo: row.numero_voo ?? null,
     cotistaId: row.cotista_id ?? null,
     cotistaNome: row.cotista_nome ?? null,
     tipoCaixa: row.tipo_caixa ?? (row.movimentos_id ? 'HOLDING' : 'SHARE'),
