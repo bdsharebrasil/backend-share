@@ -149,6 +149,10 @@ export function determinarStatusAgendamentoVoo(statusAtual: string, pernasEmVoo:
   return status
 }
 
+export function checklistPreVooConcluido(status: unknown) {
+  return String(status || '').trim().toLowerCase() === 'concluido'
+}
+
 async function sincronizarStatusAgendamentoVoo(db: D1Database, solicitacaoId: string, jornadaEncerrada = false) {
   const [agendamento, pernas, pousosJornada, pernasAbertasLegadas] = await Promise.all([
     db.prepare('SELECT status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<{ status: string }>(),
@@ -262,6 +266,8 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   if (!voo) return c.notFound()
   const statusVoo = String(voo.status || '').trim().toLowerCase()
   if (statusVoo === 'encerrada' || statusVoo === 'concluida') return c.json({ error: 'agendamento_encerrado', detail: 'Operações encerradas são somente leitura e não podem receber nova jornada.' }, 409)
+  const checklist = await db.prepare('SELECT status FROM checklists_pre_voo WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(idSolicitacao).first<{ status: string | null }>()
+  if (!checklistPreVooConcluido(checklist?.status)) return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo antes de iniciar a jornada.' }, 409)
   const tripulantes = (Array.isArray(body.tripulantes) && body.tripulantes.length
     ? body.tripulantes
     : [{ tripulante_id: voo.piloto_id, funcao: 'PIC' }, { tripulante_id: voo.copiloto_id, funcao: 'SIC' }]
