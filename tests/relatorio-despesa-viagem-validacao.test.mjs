@@ -29,11 +29,27 @@ test("criação de relatório exige trecho e tripulante", () => {
 });
 
 test("atualização rejeita campos obrigatórios vazios e preserva valores não enviados", () => {
-  assert.match(rotaAtualizacao, /const rota = body\.rota === undefined \? String\(atual\.rota \|\| ''\)\.trim\(\)/);
+  assert.match(rotaAtualizacao, /let rota = body\.rota === undefined \? String\(atual\.rota \|\| ''\)\.trim\(\)/);
   assert.match(rotaAtualizacao, /if \(!rota\) return c\.json\(\{ error: 'trecho_obrigatorio' \}, 400\)/);
   assert.match(rotaAtualizacao, /if \(!tripulacaoId && !nomeTripulante\) return c\.json\(\{ error: 'tripulante_obrigatorio' \}, 400\)/);
   assert.match(rotaAtualizacao, /rota = \?7/);
   assert.match(rotaAtualizacao, /tripulacaoId \|\| null, nomeTripulante \|\| null/);
+});
+
+test("rota do voo é calculada no servidor e as opções incluem pernas e rota legível", () => {
+  const inicioOpcoes = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem/opcoes'");
+  const fimOpcoes = worker.indexOf("app.get('/api/financeiro/relatorios-despesa-viagem/minhas'", inicioOpcoes);
+  const rotaOpcoes = worker.slice(inicioOpcoes, fimOpcoes);
+  const inicioCriacao = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem'");
+  const fimCriacao = worker.indexOf("app.patch('/api/financeiro/relatorios-despesa-viagem/:id'", inicioCriacao);
+  const rotaCriacao = worker.slice(inicioCriacao, fimCriacao);
+
+  assert.match(worker, /sequenciaRotaRelatorio\(/);
+  assert.match(rotaOpcoes, /FROM pernas_jornada_voo p[\s\S]*j\.jornada_principal_id IS NULL/);
+  assert.match(rotaOpcoes, /rota_nome: nomearRotaRelatorio/);
+  assert.match(rotaCriacao, /const rotaCalculada = await montarRotaRelatorioViagem/);
+  assert.match(rotaCriacao, /rota = rotaCalculada\.rota_nome/);
+  assert.match(rotaAtualizacao, /if \(numeroVoo !== numeroVooAnterior\)[\s\S]*montarRotaRelatorioViagem/);
 });
 
 test("finalização de relatório rejeitado conclui o ajuste e reabre a aprovação", () => {

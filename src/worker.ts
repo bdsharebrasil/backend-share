@@ -18,6 +18,7 @@ import { ctmRoutes } from './routes/ctmRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
+import { nomearRotaRelatorio, sequenciaRotaRelatorio, type PernaRotaRelatorio } from './relatorioViagemRota'
 import { validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
 import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from './lib/schedule'
@@ -3170,7 +3171,7 @@ function normalizarMatriculaRelatorio(value: unknown): string {
 }
 
 async function buscarVooRelatorio(db: D1Database, numeroVoo: string, clienteId: string, socioId: string | null, aeronaveId: string) {
-  const voo = await db.prepare(`SELECT id, numero_voo, cliente_id, socio_id, aeronave_id
+  const voo = await db.prepare(`SELECT id, numero_voo, cliente_id, socio_id, aeronave_id, origem, destino
     FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 LIMIT 1`).bind(numeroVoo).first<any>()
   if (!voo) return { error: 'voo_nao_encontrado', numero_voo: numeroVoo }
   const cotistaCompativel = socioId
@@ -3180,6 +3181,31 @@ async function buscarVooRelatorio(db: D1Database, numeroVoo: string, clienteId: 
     return { error: 'voo_incompativel_com_cotista_ou_aeronave', numero_voo: numeroVoo, solicitacao_id: voo.id, cliente_id: voo.cliente_id, socio_id: voo.socio_id, aeronave_id: voo.aeronave_id }
   }
   return { voo }
+}
+
+async function montarRotaRelatorioViagem(
+  db: D1Database,
+  solicitacaoId: string,
+  origem: string | null,
+  destino: string | null,
+) {
+  const { results: pernas } = await db.prepare(`
+    SELECT p.numero, p.destino, j.numero_jornada AS jornada_numero
+    FROM pernas_jornada_voo p
+    JOIN jornadas_voo j ON j.id = p.jornada_id
+    WHERE j.solicitacao_id = ?1 AND j.jornada_principal_id IS NULL
+  `).bind(solicitacaoId).all<PernaRotaRelatorio>()
+  const icaos = sequenciaRotaRelatorio(origem, destino, pernas || [])
+  const aerodromos = icaos.length
+    ? await db.prepare('SELECT designativo_icao, nome FROM aerodromo').all<{ designativo_icao: string; nome: string }>()
+    : { results: [] as Array<{ designativo_icao: string; nome: string }> }
+  const nomes = new Map((aerodromos.results || []).map((aerodromo) => [aerodromo.designativo_icao.toUpperCase(), aerodromo.nome]))
+
+  return {
+    icaos,
+    rota_icao: icaos.join(' - '),
+    rota_nome: nomearRotaRelatorio(icaos, nomes),
+  }
 }
 
 async function gerarNumeroRelatorioViagem(
@@ -3284,7 +3310,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
         ORDER BY nome_completo`).all().catch(() => ({ results: [] })),
       db.prepare('SELECT id, nome FROM categoria_movimentacao_share ORDER BY nome').all(),
       db.prepare('SELECT id, nome, holding_id FROM hold_socios ORDER BY nome').all().catch(() => ({ results: [] })),
-      db.prepare(`SELECT s.numero_voo, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino,
+      db.prepare(`SELECT s.id AS solicitacao_id, s.numero_voo, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino,
           s.data_agendada, s.dias_duracao, s.piloto_id, s.copiloto_id,
           COALESCE(c.razao_social, h.nome, hs.nome) AS cotista_nome,
           hs.nome AS socio_nome,
@@ -3303,11 +3329,50 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
         WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
           AND (?1 IS NULL OR s.aeronave_id = ?1)
           AND (?2 IS NULL OR (s.cliente_id = ?2 AND (?3 IS NULL AND (s.socio_id IS NULL OR trim(s.socio_id) = '') OR s.socio_id = ?3)))
-        ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC LIMIT 200`).bind(
+        ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC, s.id LIMIT 200`).bind(
         c.req.query('aeronave_id') || null, c.req.query('cliente_id') || null, c.req.query('socio_id') || null,
       ).all().catch(() => ({ results: [] })),
     ])
-    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results, socios: socios.results, voos: voos.results })
+    const voosDisponiveis = voos.results || []
+    const aeronaveFiltro = c.req.query('aeronave_id') || null
+    const clienteFiltro = c.req.query('cliente_id') || null
+    const socioFiltro = c.req.query('socio_id') || null
+    const pernas = voosDisponiveis.length
+      ? await db.prepare(`SELECT j.solicitacao_id, p.numero, p.destino, j.numero_jornada AS jornada_numero
+          FROM pernas_jornada_voo p
+          JOIN jornadas_voo j ON j.id = p.jornada_id
+          WHERE j.solicitacao_id IN (
+            SELECT s.id FROM solicitacoes_reserva_voo s
+            WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
+              AND (?1 IS NULL OR s.aeronave_id = ?1)
+              AND (?2 IS NULL OR (s.cliente_id = ?2 AND (?3 IS NULL AND (s.socio_id IS NULL OR trim(s.socio_id) = '') OR s.socio_id = ?3)))
+            ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC, s.id LIMIT 200
+          ) AND j.jornada_principal_id IS NULL`)
+        .bind(aeronaveFiltro, clienteFiltro, socioFiltro).all<PernaRotaRelatorio & { solicitacao_id: string }>()
+      : { results: [] as Array<PernaRotaRelatorio & { solicitacao_id: string }> }
+    const pernasPorSolicitacao = new Map<string, PernaRotaRelatorio[]>()
+    for (const perna of pernas.results || []) {
+      const agrupadas = pernasPorSolicitacao.get(perna.solicitacao_id) || []
+      agrupadas.push(perna)
+      pernasPorSolicitacao.set(perna.solicitacao_id, agrupadas)
+    }
+    const voosComSequencia = voosDisponiveis.map((voo: any) => {
+      const icaos = sequenciaRotaRelatorio(voo.origem, voo.destino, pernasPorSolicitacao.get(voo.solicitacao_id) || [])
+      const dadosVoo = { ...voo }
+      delete dadosVoo.solicitacao_id
+      return { voo: dadosVoo, icaos }
+    })
+    const icaos = [...new Set(voosComSequencia.flatMap(({ icaos: rota }) => rota))]
+    const aerodromos = icaos.length
+      ? await db.prepare('SELECT designativo_icao, nome FROM aerodromo').all<{ designativo_icao: string; nome: string }>()
+      : { results: [] as Array<{ designativo_icao: string; nome: string }> }
+    const nomesPorIcao = new Map((aerodromos.results || []).map((aerodromo) => [aerodromo.designativo_icao.toUpperCase(), aerodromo.nome]))
+    const voosComRota = voosComSequencia.map(({ voo, icaos: rota }) => ({
+      ...voo,
+      rota_icao: rota.join(' - '),
+      rota_nome: nomearRotaRelatorio(rota, nomesPorIcao),
+    }))
+    return c.json({ clientes: clientes.results, aeronaves: aeronaves.results, tripulantes: tripulantes.results, categorias: categorias.results, socios: socios.results, voos: voosComRota })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:opcoes]', error?.message || error)
     return c.json({ error: error?.message || 'falha_ao_carregar_opcoes' }, 500)
@@ -3470,14 +3535,13 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
     if (!body) return c.json({ error: 'payload_invalido' }, 400)
     const clienteId = String(body.cliente_id || '').trim()
     const aeronaveId = String(body.aeronave_id || '').trim()
-    const rota = String(body.rota || '').trim()
+    let rota = String(body.rota || '').trim()
     const tripulacaoId = String(body.tripulacao_id || '').trim()
     const nomeTripulante = String(body.nome_tripulante || '').trim()
     const dataInicio = String(body.data_inicio || '').trim()
     const dataFim = String(body.data_fim || '').trim()
     if (!clienteId) return c.json({ error: 'cliente_obrigatorio' }, 400)
     if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
-    if (!rota) return c.json({ error: 'trecho_obrigatorio' }, 400)
     if (!tripulacaoId && !nomeTripulante) return c.json({ error: 'tripulante_obrigatorio' }, 400)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) return c.json({ error: 'datas_obrigatorias' }, 400)
     if (dataFim < dataInicio) return c.json({ error: 'data_fim_antes_da_data_inicio' }, 400)
@@ -3491,7 +3555,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
     if (numeroVoo) {
       const validacaoVoo = await buscarVooRelatorio(db, numeroVoo, clienteId, socioId, aeronaveId)
       if ('error' in validacaoVoo) return c.json(validacaoVoo, validacaoVoo.error === 'voo_nao_encontrado' ? 400 : 409)
+      const rotaCalculada = await montarRotaRelatorioViagem(db, validacaoVoo.voo.id, validacaoVoo.voo.origem, validacaoVoo.voo.destino)
+      rota = rotaCalculada.rota_nome
     }
+    if (!rota) return c.json({ error: 'trecho_obrigatorio' }, 400)
     const numero = await gerarNumeroRelatorioViagem(db, clienteId, socioId, aeronaveId, dataInicio)
     const status = statusRelatorioViagem(body.status || 'rascunho')
     await db.prepare(`
@@ -3561,19 +3628,24 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     const socioId = body.socio_id === undefined ? (atual.socio_id ? String(atual.socio_id).trim() : null) : (String(body.socio_id || '').trim() || null)
     const aeronaveId = body.aeronave_id === undefined ? String(atual.aeronave_id || '').trim() : String(body.aeronave_id || '').trim()
     const numeroVoo = body.numero_voo === undefined ? (atual.numero_voo ? String(atual.numero_voo).trim() : null) : (String(body.numero_voo || '').trim() || null)
-    const rota = body.rota === undefined ? String(atual.rota || '').trim() : String(body.rota || '').trim()
+    let rota = body.rota === undefined ? String(atual.rota || '').trim() : String(body.rota || '').trim()
     const tripulacaoId = body.tripulacao_id === undefined ? String(atual.tripulacao_id || '').trim() : String(body.tripulacao_id || '').trim()
     const nomeTripulante = body.nome_tripulante === undefined ? String(atual.nome_tripulante || '').trim() : String(body.nome_tripulante || '').trim()
     if (!clienteId) return c.json({ error: 'cliente_obrigatorio' }, 400)
     if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria' }, 400)
-    if (!rota) return c.json({ error: 'trecho_obrigatorio' }, 400)
     if (!tripulacaoId && !nomeTripulante) return c.json({ error: 'tripulante_obrigatorio' }, 400)
     const aeronave = await db.prepare('SELECT matricula_registro FROM aeronave WHERE id = ?1').bind(aeronaveId).first<{ matricula_registro: string | null }>()
     if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada', aeronave_id: aeronaveId }, 400)
     if (numeroVoo) {
       const validacaoVoo = await buscarVooRelatorio(db, numeroVoo, clienteId, socioId, aeronaveId)
       if ('error' in validacaoVoo) return c.json(validacaoVoo, validacaoVoo.error === 'voo_nao_encontrado' ? 400 : 409)
+      const numeroVooAnterior = atual.numero_voo ? String(atual.numero_voo).trim() : null
+      if (numeroVoo !== numeroVooAnterior) {
+        const rotaCalculada = await montarRotaRelatorioViagem(db, validacaoVoo.voo.id, validacaoVoo.voo.origem, validacaoVoo.voo.destino)
+        rota = rotaCalculada.rota_nome
+      }
     }
+    if (!rota) return c.json({ error: 'trecho_obrigatorio' }, 400)
     const dataInicio = body.data_inicio === undefined ? String(atual.data_inicio || '') : String(body.data_inicio || '').trim()
     const dataFim = body.data_fim === undefined ? String(atual.data_fim || '') : String(body.data_fim || '').trim()
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) return c.json({ error: 'datas_obrigatorias' }, 400)
