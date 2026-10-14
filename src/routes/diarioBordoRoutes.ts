@@ -545,17 +545,37 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     pousos_total: body.pousos_total ?? (pernaVinculada.horario_pouso ? 1 : 0),
   } : body
   const row = normalizarLancamentoDiario({ ...dadosDaPerna, ...dadosOperacionais, tempo_ac: horario(dadosOperacionais.acionamento_utc), tempo_dep: horario(dadosOperacionais.decolagem_utc), tempo_pou: horario(dadosOperacionais.pouso_utc), tempo_cor: horario(dadosOperacionais.corte_utc), cliente_id: String(body.cliente_id || '').trim() || null, socio_id: String(body.socio_id || '').trim() || null, pic_nome: nomePic || body.pic_nome || perfilPic?.nome_completo || null, sic_nome: nomeSic || body.sic_nome || null, trecho, aeronave_id: aeronaveId, diario_mes_id: diarioMesId }, aeronave, { diarioMesId, sequencial: Number(last?.sequencial || 0) + 1, celula: diarioNumber(diario.celula_atual_ttotal) + dadosOperacionais.tempo_total, celulaTvoo: diarioNumber(diario.celula_atual_tvoo) + dadosOperacionais.tempo_voo, criadoPor: extractSupabaseUserId(c) })
+  const fkNormalizadaInvalida = await validarReferenciasDiario(db, [
+    { tabela: 'holdings', valor: row.holding_id, campo: 'holding_id' },
+    { tabela: 'hold_socios', valor: row.socio_id, campo: 'socio_id' },
+  ])
+  if (fkNormalizadaInvalida) return c.json({ error: 'referencia_invalida', campo: fkNormalizadaInvalida.campo, valor: fkNormalizadaInvalida.valor }, 400)
   const columns = ['id', ...Object.keys(row)]
   const statements = [db.prepare(`INSERT INTO lancamentos_diario_bordo (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).bind(id, ...columns.slice(1).map(column => row[column]))]
   if (abastecimentoStmt) statements.push(abastecimentoStmt)
   if (pernaId) statements.push(db.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = ?1 WHERE id = ?2 AND lancamento_diario_id IS NULL').bind(id, pernaId))
-  const results = await db.batch(statements)
-  if (pernaId && Number(results[results.length - 1]?.meta?.changes || 0) !== 1) {
-    await db.batch([
-      db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
-      db.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id),
-    ])
-    return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
+  let lancamentoInserido = false
+  try {
+    await statements[0].run()
+    lancamentoInserido = true
+    if (abastecimentoStmt) await abastecimentoStmt.run()
+    if (pernaId) {
+      const pernaAtualizada = await statements[statements.length - 1].run()
+      if (Number(pernaAtualizada.meta?.changes || 0) !== 1) throw new Error('perna_ja_lancada_no_diario')
+    }
+  } catch (error) {
+    if (lancamentoInserido) {
+      await db.batch([
+        db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
+        db.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id),
+      ])
+    }
+    if (error instanceof Error && error.message === 'perna_ja_lancada_no_diario') return c.json({ error: error.message }, 409)
+    if (String(error).includes('FOREIGN KEY')) {
+      log.error('FK inválida ao persistir lançamento do diário', { id, aeronave_id: row.aeronave_id, diario_mes_id: row.diario_mes_id, holding_id: row.holding_id, socio_id: row.socio_id })
+      return c.json({ error: 'referencia_invalida', campo: 'lancamento_diario_bordo' }, 400)
+    }
+    throw error
   }
   await recalcularCelulasLancamentos(c, diarioMesId)
   await recalcularDiarioMes(c, diarioMesId)
