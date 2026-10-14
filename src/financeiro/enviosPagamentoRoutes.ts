@@ -37,11 +37,59 @@ enviosPagamentoRoutes.get('/envios-pagamento/opcoes', async (c) => {
     read('SELECT id, COALESCE(apelido, nome_completo) AS label FROM fornecedores_favoritos ORDER BY label'),
     read('SELECT * FROM fornecedores_combustivel ORDER BY nome_cidade, nome_fornecedor'),
     read('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro'),
-    read("SELECT numero_voo, MAX(data_agendada) AS ultima_data, aeronave_id FROM solicitacoes_reserva_voo WHERE NULLIF(TRIM(numero_voo), '') IS NOT NULL GROUP BY numero_voo, aeronave_id ORDER BY ultima_data DESC, numero_voo"),
+    read("SELECT s.numero_voo, s.data_agendada AS ultima_data, s.aeronave_id, s.origem, s.destino FROM solicitacoes_reserva_voo s WHERE NULLIF(TRIM(s.numero_voo), '') IS NOT NULL AND s.id = (SELECT s2.id FROM solicitacoes_reserva_voo s2 WHERE s2.numero_voo = s.numero_voo AND s2.aeronave_id = s.aeronave_id ORDER BY date(s2.data_agendada) DESC, s2.id DESC LIMIT 1) ORDER BY date(s.data_agendada) DESC, s.numero_voo"),
     read('SELECT id, nome, grupo_categoria, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_share ORDER BY nome'),
     read('SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
   ])
   return c.json({ fornecedores, fornecedores_combustivel: fornecedoresCombustivel, aeronaves, voos, categorias, categorias_cliente: categoriasCliente })
+})
+
+enviosPagamentoRoutes.get('/envios-pagamento/despesas-origem', async (c) => {
+  const db = c.env.SHARE_DB
+  const aeronaveId = c.req.query('aeronave_id')?.trim()
+  const numeroVoo = c.req.query('numero_voo')?.trim()
+  const origem = c.req.query('origem')?.trim().toUpperCase()
+  if (!aeronaveId || !numeroVoo || !['ABASTECIMENTO', 'RECIBOS', 'RELATORIOS DE VIAGEM'].includes(origem || '')) {
+    return c.json({ error: 'aeronave_id, numero_voo e origem são obrigatórios' }, 400)
+  }
+  try {
+    let registros: Record<string, unknown>[] = []
+    if (origem === 'ABASTECIMENTO') {
+      const result = await db.prepare(`SELECT a.id, a.numero_voo, a.aeronave_id, a.data AS data_despesa,
+        a.valor_total AS valor, COALESCE(f.nome_fornecedor, '') AS fornecedor,
+        a.comanda_url, a.nota_url, a.boleto_url, a.numero_comanda, a.numero_nf,
+        a.trecho, a.local, a.tipo_combustivel AS descricao
+        FROM abastecimentos a LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id
+        WHERE a.aeronave_id = ? AND TRIM(a.numero_voo) = ? ORDER BY date(a.data) DESC, a.id DESC LIMIT 100`).bind(aeronaveId, numeroVoo).all<Record<string, unknown>>()
+      registros = result.results ?? []
+    } else if (origem === 'RECIBOS') {
+      const result = await db.prepare(`SELECT r.id, r.numero_voo, r.aeronave_id, r.data_emissao AS data_despesa,
+        r.valor / 100.0 AS valor, '' AS fornecedor,
+        r.descricao, r.categoria_nome, r.grupo_categoria, r.numero_recibo, r.url_recibo,
+        NULL AS url_nf, NULL AS url_boleto, NULL AS url_demonstrativo, NULL AS url_doc
+        FROM recibos r WHERE r.aeronave_id = ? AND TRIM(r.numero_voo) = ?
+        ORDER BY date(r.data_emissao) DESC, r.criado_em DESC LIMIT 100`).bind(aeronaveId, numeroVoo).all<Record<string, unknown>>()
+      registros = result.results ?? []
+    } else {
+      await db.prepare('SELECT id FROM relatorio_despesa_viagem LIMIT 0').all()
+      const result = await db.prepare(`SELECT r.id, r.numero_voo, r.aeronave_id, r.data_inicio AS data_despesa,
+        r.numero_relatorio, r.rota, r.pdf_url, r.despesas, r.cliente_id, r.socio_id
+        FROM relatorio_despesa_viagem r WHERE r.aeronave_id = ? AND TRIM(r.numero_voo) = ?
+        ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 100`).bind(aeronaveId, numeroVoo).all<Record<string, unknown>>()
+      registros = (result.results ?? []).flatMap((row) => {
+        let despesas: unknown[] = []
+        try { const parsed = typeof row.despesas === 'string' ? JSON.parse(row.despesas) : row.despesas; if (Array.isArray(parsed)) despesas = parsed } catch { /* relatório legado sem despesas válidas */ }
+        return despesas.map((despesa: any, index) => ({ id: `${row.id}:${index}`, relatorio_id: row.id, numero_voo: row.numero_voo,
+          aeronave_id: row.aeronave_id, data_despesa: despesa.data || row.data_despesa, descricao: despesa.descricao || despesa.categoria || row.numero_relatorio,
+          valor: Number(despesa.valor ?? despesa.amount ?? 0), fornecedor: despesa.fornecedor || '', categoria_nome: despesa.categoria || '',
+          grupo_categoria: despesa.grupo_categoria || '', url_demonstrativo: row.pdf_url || null, url_doc: row.pdf_url || null }))
+      })
+    }
+    return c.json({ registros })
+  } catch (error) {
+    console.warn('[financeiro/envios] falha ao buscar despesas da origem selecionada', error)
+    return c.json({ error: 'falha_ao_buscar_despesas_da_origem' }, 500)
+  }
 })
 
 enviosPagamentoRoutes.get('/envios-pagamento/anexos-opcoes', async (c) => {

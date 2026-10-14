@@ -69,6 +69,7 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
   if (method === 'POST' && /^\/relatorios-despesa-viagem\/[^/]+\/aprovacao$/.test(path)) return true
   if (method !== 'GET') return false
   return path === '/envios-pagamento/opcoes'
+    || path === '/envios-pagamento/despesas-origem'
     || /^\/envios-pagamento\/aeronave\/[^/]+\/cotistas$/.test(path)
 }
 
