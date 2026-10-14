@@ -329,6 +329,41 @@ portalRoutes.get('/api/portal/financeiro', async c => {
   return c.json({ tipo: user.cliente_id ? 'CLIENTE' : 'HOLDING', despesas, resumo: { ...resumo, abertoCentavos: resumo.totalCentavos - resumo.pagoCentavos } })
 })
 
+portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
+  const aeronaveId = c.req.param('aeronaveId')
+  const ano = Number(c.req.query('ano') || new Date().getFullYear())
+  if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'parametros_invalidos' }, 400)
+  const inicio = `${ano}-01-01`
+  const fim = `${ano}-12-31`
+  const vinculo = await c.env.SHARE_DB.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.ano, a.base, a.status, a.url_imagem
+    FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id
+   WHERE a.id = ?1 AND (ca.cliente_id = ?2 OR ca.socio_id = ?3) LIMIT 1`).bind(aeronaveId, user.cliente_id, user.socio_id).first<Record<string, unknown>>()
+  if (!vinculo) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
+  const [voos, destinos, rateioResumo, meses, categorias] = await Promise.all([
+    c.env.SHARE_DB.prepare(`SELECT COUNT(*) AS voos, COALESCE(SUM(COALESCE(tempo_total, tempo_voo, 0)), 0) AS horas, COALESCE(SUM(COALESCE(pousos_total, 0)), 0) AS pousos
+      FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(aerodromo_chegada), ''), NULLIF(TRIM(trecho), ''), 'Não informado') AS destino, COUNT(*) AS quantidade
+      FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)
+      GROUP BY destino ORDER BY quantidade DESC LIMIT 1`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos
+      FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
+     WHERE r.aeronave_id = ?1 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+       AND date(r.data_emissao) BETWEEN date(?4) AND date(?5)`).bind(aeronaveId, user.cliente_id, user.socio_id, inicio, fim).first<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT substr(r.data_emissao, 1, 7) AS mes, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
+      FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
+     WHERE r.aeronave_id = ?1 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+       AND date(r.data_emissao) BETWEEN date(?4) AND date(?5) GROUP BY mes ORDER BY mes`).bind(aeronaveId, user.cliente_id, user.socio_id, inicio, fim).all<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(r.categoria_nome), ''), 'Sem categoria') AS categoria, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
+      FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
+     WHERE r.aeronave_id = ?1 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+       AND date(r.data_emissao) BETWEEN date(?4) AND date(?5) GROUP BY categoria ORDER BY valor_centavos DESC LIMIT 5`).bind(aeronaveId, user.cliente_id, user.socio_id, inicio, fim).all<Record<string, unknown>>()
+  ])
+  const horas = Number(voos?.horas || 0)
+  const custoCentavos = Number(rateioResumo?.total_centavos || 0)
+  return c.json({ aeronave: vinculo, ano, estatisticas: { voos: Number(voos?.voos || 0), pousos: Number(voos?.pousos || 0), horas: Number(horas.toFixed(2)), destinoMaisVisitado: destinos?.destino || 'Não informado', custoHoraCentavos: horas > 0 ? Math.round(custoCentavos / horas) : 0, custoTotalCentavos: custoCentavos }, mensal: meses.results.map(row => ({ mes: row.mes, valorCentavos: Number(row.valor_centavos || 0) })), categorias: categorias.results.map(row => ({ categoria: row.categoria, valorCentavos: Number(row.valor_centavos || 0) })) })
+})
 portalRoutes.get('/api/portal/aerodromos', async c => {
   const query = (c.req.query('q') || '').trim().toLowerCase()
   const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
