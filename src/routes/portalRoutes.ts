@@ -306,20 +306,33 @@ portalRoutes.get('/api/portal/solicitacoes', async c => {
       AND EXISTS (SELECT 1 FROM jornadas_voo j WHERE j.solicitacao_id = s.id)
       AND NOT EXISTS (SELECT 1 FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND lower(trim(COALESCE(j.status, ''))) <> 'encerrada')
       THEN 'encerrada' ELSE s.status END AS status,
-    s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo,
+    s.motivo_rejeicao, COALESCE(NULLIF(TRIM(s.numero_voo), ''),
+      (SELECT NULLIF(TRIM(l.numero_voo), '') FROM pernas_jornada_voo p
+        JOIN jornadas_voo j ON j.id = p.jornada_id JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
+        WHERE j.solicitacao_id = s.id AND NULLIF(TRIM(l.numero_voo), '') IS NOT NULL ORDER BY p.numero LIMIT 1)) AS numero_voo,
+    s.criado_em, a.matricula_registro, a.modelo,
     COALESCE(c.razao_social, hs.nome, 'Cotista') AS cotista_nome, COALESCE(t.nome_completo, tf.nome_completo) AS piloto_nome,
-    COALESCE((SELECT MIN(COALESCE(p.horario_dep, j.horario_acionamento)) FROM jornadas_voo j
+    COALESCE((SELECT MIN(l.data_registro || 'T' || l.tempo_dep || ':00Z') FROM pernas_jornada_voo p
+      JOIN jornadas_voo j ON j.id = p.jornada_id JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
+      WHERE j.solicitacao_id = s.id AND NULLIF(TRIM(l.tempo_dep), '') IS NOT NULL),
+      (SELECT MIN(COALESCE(p.horario_dep, j.horario_acionamento)) FROM jornadas_voo j
       LEFT JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
       WHERE j.solicitacao_id = s.id AND COALESCE(p.horario_dep, j.horario_acionamento) IS NOT NULL),
       (SELECT MIN(j.horario_acionamento) FROM jornadas_voo j WHERE j.solicitacao_id = s.id)) AS horario_decolagem_real,
-    COALESCE((SELECT MAX(COALESCE(p.horario_pouso, j.horario_pouso)) FROM jornadas_voo j
+    COALESCE((SELECT MAX(l.data_registro || 'T' || l.tempo_pou || ':00Z') FROM pernas_jornada_voo p
+      JOIN jornadas_voo j ON j.id = p.jornada_id JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
+      WHERE j.solicitacao_id = s.id AND NULLIF(TRIM(l.tempo_pou), '') IS NOT NULL),
+      (SELECT MAX(COALESCE(p.horario_pouso, j.horario_pouso)) FROM jornadas_voo j
       LEFT JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
       WHERE j.solicitacao_id = s.id AND COALESCE(p.horario_pouso, j.horario_pouso) IS NOT NULL),
       (SELECT MAX(j.horario_pouso) FROM jornadas_voo j WHERE j.solicitacao_id = s.id)) AS horario_pouso_real,
+    COALESCE((SELECT CAST(ROUND(SUM(l.tempo_voo) * 60) AS INTEGER) FROM pernas_jornada_voo p
+      JOIN jornadas_voo j ON j.id = p.jornada_id JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
+      WHERE j.solicitacao_id = s.id AND l.tempo_voo IS NOT NULL),
     (SELECT CAST(ROUND(SUM((julianday(voo.horario_pouso) - julianday(voo.horario_dep)) * 1440)) AS INTEGER)
       FROM (SELECT DISTINCT p.id, p.horario_dep, p.horario_pouso FROM jornadas_voo j
         JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
-        WHERE j.solicitacao_id = s.id AND p.horario_dep IS NOT NULL AND p.horario_pouso IS NOT NULL) voo) AS tempo_voo_minutos
+        WHERE j.solicitacao_id = s.id AND p.horario_dep IS NOT NULL AND p.horario_pouso IS NOT NULL) voo)) AS tempo_voo_minutos
     FROM solicitacoes_reserva_voo s
     LEFT JOIN aeronave a ON a.id = s.aeronave_id LEFT JOIN cliente c ON c.id = s.cliente_id
     LEFT JOIN hold_socios hs ON hs.id = s.socio_id LEFT JOIN tripulacao t ON t.id = s.piloto_id
