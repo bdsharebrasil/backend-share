@@ -300,7 +300,31 @@ portalRoutes.get('/api/portal/disponibilidade', async c => {
 portalRoutes.get('/api/portal/solicitacoes', async c => {
   const user = await portalSession(c)
   if (!user?.cliente_id && !user?.socio_id) return c.json([])
-  const result = await c.env.SHARE_DB.prepare("SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo, COALESCE(c.razao_social, hs.nome, 'Cotista') AS cotista_nome, COALESCE(t.nome_completo, tf.nome_completo) AS piloto_nome FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN hold_socios hs ON hs.id = s.socio_id LEFT JOIN tripulacao t ON t.id = s.piloto_id LEFT JOIN tripulacao_freelancer tf ON tf.id = s.piloto_id WHERE s.cliente_id = ?1 OR s.socio_id = ?2 ORDER BY s.criado_em DESC").bind(user?.cliente_id, user?.socio_id).all<Record<string, unknown>>()
+  const result = await c.env.SHARE_DB.prepare(`SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento,
+    s.dias_duracao, s.numero_passageiros, s.voo_emprestado,
+    CASE WHEN lower(trim(COALESCE(s.status, ''))) = 'pendente'
+      AND EXISTS (SELECT 1 FROM jornadas_voo j WHERE j.solicitacao_id = s.id)
+      AND NOT EXISTS (SELECT 1 FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND lower(trim(COALESCE(j.status, ''))) <> 'encerrada')
+      THEN 'encerrada' ELSE s.status END AS status,
+    s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo,
+    COALESCE(c.razao_social, hs.nome, 'Cotista') AS cotista_nome, COALESCE(t.nome_completo, tf.nome_completo) AS piloto_nome,
+    COALESCE((SELECT MIN(COALESCE(p.horario_dep, j.horario_acionamento)) FROM jornadas_voo j
+      LEFT JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
+      WHERE j.solicitacao_id = s.id AND COALESCE(p.horario_dep, j.horario_acionamento) IS NOT NULL),
+      (SELECT MIN(j.horario_acionamento) FROM jornadas_voo j WHERE j.solicitacao_id = s.id)) AS horario_decolagem_real,
+    COALESCE((SELECT MAX(COALESCE(p.horario_pouso, j.horario_pouso)) FROM jornadas_voo j
+      LEFT JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
+      WHERE j.solicitacao_id = s.id AND COALESCE(p.horario_pouso, j.horario_pouso) IS NOT NULL),
+      (SELECT MAX(j.horario_pouso) FROM jornadas_voo j WHERE j.solicitacao_id = s.id)) AS horario_pouso_real,
+    (SELECT CAST(ROUND(SUM((julianday(voo.horario_pouso) - julianday(voo.horario_dep)) * 1440)) AS INTEGER)
+      FROM (SELECT DISTINCT p.id, p.horario_dep, p.horario_pouso FROM jornadas_voo j
+        JOIN pernas_jornada_voo p ON p.jornada_id = COALESCE(j.jornada_principal_id, j.id)
+        WHERE j.solicitacao_id = s.id AND p.horario_dep IS NOT NULL AND p.horario_pouso IS NOT NULL) voo) AS tempo_voo_minutos
+    FROM solicitacoes_reserva_voo s
+    LEFT JOIN aeronave a ON a.id = s.aeronave_id LEFT JOIN cliente c ON c.id = s.cliente_id
+    LEFT JOIN hold_socios hs ON hs.id = s.socio_id LEFT JOIN tripulacao t ON t.id = s.piloto_id
+    LEFT JOIN tripulacao_freelancer tf ON tf.id = s.piloto_id
+    WHERE s.cliente_id = ?1 OR s.socio_id = ?2 ORDER BY s.criado_em DESC`).bind(user?.cliente_id, user?.socio_id).all<Record<string, unknown>>()
   return c.json(result.results.map(row => ({ ...row, mensagem_confirmacao: portalConfirmationMessage(row) })))
 })
 

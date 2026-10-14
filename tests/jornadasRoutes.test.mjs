@@ -36,9 +36,10 @@ test('mantém EM VOO somente enquanto houver perna sem pouso registrado', () => 
   assert.equal(determinarStatusAgendamentoVoo('em_voo', 0, 0), 'em_solo')
 })
 
-test('encerra em EM SOLO e preserva estados finais ou solicitações ainda sem voo', () => {
+test('mantém agendamento em solo ao encerrar jornada individual e preserva solicitações ainda sem voo', () => {
   assert.equal(determinarStatusAgendamentoVoo('aprovada', 0, 0), 'aprovada')
   assert.equal(determinarStatusAgendamentoVoo('aprovada', 0, 0, true), 'em_solo')
+  assert.equal(determinarStatusAgendamentoVoo('pendente', 0, 1, true), 'pendente')
   assert.equal(determinarStatusAgendamentoVoo('encerrada', 0, 1, true), 'encerrada')
 })
 
