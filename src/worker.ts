@@ -1028,14 +1028,66 @@ function diasDoPeriodo(dataInicio: string, dataFim: string): number {
   return Math.floor((fim.getTime() - inicio.getTime()) / 86_400_000) + 1
 }
 
+type ColaboradorPerfilMetricas = { horas_totais: number; voos_escalados: number; ctm_abertos: number }
+
+async function buscarTripulanteColaborador(db: D1Database, colaborador: Colaborador) {
+  return db.prepare(`SELECT id, user_id, canac, nome_completo, status, tipo_licenca FROM tripulacao
+    WHERE user_id = ?1 OR (NULLIF(trim(?2), '') IS NOT NULL AND lower(trim(canac)) = lower(trim(?2)))
+    ORDER BY CASE WHEN user_id = ?1 THEN 0 ELSE 1 END LIMIT 1`).bind(colaborador.id, colaborador.canac).first<any>()
+}
+
+async function carregarMetricasColaborador(db: D1Database, colaborador: Colaborador, tripulante: any): Promise<ColaboradorPerfilMetricas> {
+  const canac = String(tripulante?.canac || colaborador.canac || '').trim()
+  const identities = [...new Set([tripulante?.id, tripulante?.canac, colaborador.canac, ...(canac ? [] : [tripulante?.nome_completo, colaborador.nome_completo])]
+    .map(value => String(value || '').trim().toLowerCase()).filter(Boolean))]
+  const [horas, voos, ctm] = await Promise.all([
+    identities.length
+      ? db.prepare(`SELECT COALESCE(SUM(COALESCE(NULLIF(tempo_total, 0), tempo_voo, 0)), 0) AS total
+          FROM lancamentos_diario_bordo
+          WHERE lower(trim(COALESCE(pic_canac, ''))) IN (${identities.map(() => '?').join(', ')})
+             OR lower(trim(COALESCE(sic_canac, ''))) IN (${identities.map(() => '?').join(', ')})`)
+        .bind(...identities, ...identities).first<{ total: number }>()
+        .catch(error => { log.error('[colaborador/perfil] horas de voo indisponíveis', error); return null })
+      : Promise.resolve(null),
+    tripulante?.id
+      ? db.prepare(`SELECT COUNT(*) AS total FROM solicitacoes_reserva_voo
+          WHERE lower(trim(COALESCE(status, ''))) = 'aprovada' AND (piloto_id = ?1 OR copiloto_id = ?1)`)
+        .bind(tripulante.id).first<{ total: number }>()
+        .catch(error => { log.error('[colaborador/perfil] voos escalados indisponíveis', error); return null })
+      : Promise.resolve(null),
+    db.prepare("SELECT name FROM pragma_table_info('relatorios_manutencao')").all<{ name: string }>()
+      .then(async schema => {
+        const columns = new Set((schema.results || []).map(column => column.name))
+        const idAuthorColumns = ['criado_por', 'created_by', 'reported_by', 'reportado_por', 'user_id', 'usuario_id'].filter(column => columns.has(column))
+        const nameAuthorColumns = ['mecanico_responsavel', 'responsavel_tecnico'].filter(column => columns.has(column))
+        if ((!idAuthorColumns.length && (!nameAuthorColumns.length || !colaborador.nome_completo)) || !columns.has('status')) return null
+        const idIsAvailable = idAuthorColumns.length > 0
+        const authorColumns = idIsAvailable ? idAuthorColumns : nameAuthorColumns
+        const authorPredicates = authorColumns.map(column => idIsAvailable
+          ? `${column} = ?1`
+          : `lower(trim(COALESCE(${column}, ''))) = lower(trim(?1))`)
+        const authorPredicate = `(${authorPredicates.join(' OR ')})`
+        return db.prepare(`SELECT COUNT(*) AS total FROM relatorios_manutencao
+          WHERE lower(trim(COALESCE(status, ''))) IN ('open', 'aberto')
+            AND ${authorPredicate}`)
+          .bind(idIsAvailable ? colaborador.id : colaborador.nome_completo).first<{ total: number }>()
+      })
+      .catch(error => { log.error('[colaborador/perfil] reports CTM indisponíveis', error); return null }),
+  ])
+
+  return {
+    horas_totais: Number(horas?.total || 0),
+    voos_escalados: Number(voos?.total || 0),
+    ctm_abertos: Number(ctm?.total || 0),
+  }
+}
+
 app.get('/api/colaborador/perfil', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const db = c.env.SHARE_DB
   const [tripulante, pagamentos, documentos, funcoes, ferias, aprovacoesRelatorios] = await Promise.all([
-    db.prepare(`SELECT id, user_id, canac, nome_completo, status, tipo_licenca FROM tripulacao
-      WHERE user_id = ?1 OR (NULLIF(trim(?2), '') IS NOT NULL AND lower(trim(canac)) = lower(trim(?2)))
-      ORDER BY CASE WHEN user_id = ?1 THEN 0 ELSE 1 END LIMIT 1`).bind(colaborador.id, colaborador.canac).first(),
+    buscarTripulanteColaborador(db, colaborador),
     db.prepare("SELECT id, descricao, NULL AS competencia, data_vencimento, data_pagamento, ROUND(valor_centavos / 100.0, 2) AS valor, status, observacoes FROM lancamentos WHERE colaborador_id = ?1 AND lower(status) <> 'cancelado' ORDER BY date(COALESCE(data_vencimento, data_emissao, criado_em)) DESC, criado_em DESC").bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] pagamentos indisponíveis', error); return { results: [] } }),
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] documentos indisponíveis', error); return { results: [] } }),
     db.prepare('SELECT id, funcao, criado_em FROM usuarios_funcoes WHERE user_id = ?1 ORDER BY funcao').bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] funções indisponíveis', error); return { results: [] } }),
@@ -1053,12 +1105,14 @@ app.get('/api/colaborador/perfil', async c => {
       ORDER BY r.atualizado_em DESC`).bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] aprovações de relatório indisponíveis', error); return { results: [] } }),
   ])
 
+  const metricas = await carregarMetricasColaborador(db, colaborador, tripulante)
   const diasUtilizados = (ferias.results as Array<{ quantidade_dias: number; status: string }>)
     .filter(item => item.status === 'aprovada')
     .reduce((total, item) => total + item.quantidade_dias, 0)
   return c.json({
     perfil: { ...colaborador, foto_url: colaborador.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 },
     tripulante,
+    metricas,
     pagamentos: pagamentos.results,
     documentos: documentos.results.map(row => documentoColaborador(row as Record<string, unknown>)),
     funcoes: funcoes.results,
@@ -1085,7 +1139,10 @@ app.patch('/api/colaborador/perfil', async c => {
   if (!body) return c.json({ error: 'corpo_invalido' }, 400)
   const fields = ['nome_completo', 'nome_exibicao', 'cpf', 'telefone', 'endereco', 'cidade', 'uf', 'data_nascimento', 'rg', 'canac', 'url_avatar'] as const
   const updates = fields.filter(field => body[field] !== undefined).map(field => ({ field, value: body[field] === null ? null : String(body[field]).trim() }))
-  if (updates.length === 0 && body.tipo_licenca === undefined) return c.json({ perfil: colaborador, tripulante: null })
+  if (updates.length === 0 && body.tipo_licenca === undefined) {
+    const tripulante = await buscarTripulanteColaborador(c.env.SHARE_DB, colaborador)
+    return c.json({ perfil: colaborador, tripulante, metricas: await carregarMetricasColaborador(c.env.SHARE_DB, colaborador, tripulante) })
+  }
   if (updates.length > 0) {
     const assignments = updates.map(({ field }) => `${field} = ?`).join(', ')
     await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${assignments}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(({ value }) => value), colaborador.id).run()
@@ -1097,8 +1154,8 @@ app.patch('/api/colaborador/perfil', async c => {
   if (body.tipo_licenca !== undefined) {
     await c.env.SHARE_DB.prepare('UPDATE tripulacao SET tipo_licenca = ?1 WHERE user_id = ?2').bind(body.tipo_licenca === null ? null : String(body.tipo_licenca).trim() || null, colaborador.id).run()
   }
-  const tripulante = await c.env.SHARE_DB.prepare('SELECT id, user_id, canac, nome_completo, status, tipo_licenca FROM tripulacao WHERE user_id = ?1 LIMIT 1').bind(colaborador.id).first()
-  return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 }, tripulante })
+  const tripulante = await buscarTripulanteColaborador(c.env.SHARE_DB, updated || colaborador)
+  return c.json({ perfil: { ...updated, foto_url: updated?.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 }, tripulante, metricas: await carregarMetricasColaborador(c.env.SHARE_DB, updated || colaborador, tripulante) })
 })
 
 app.get('/api/colaborador/foto', async c => {
