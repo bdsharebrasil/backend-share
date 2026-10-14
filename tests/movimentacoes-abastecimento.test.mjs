@@ -9,8 +9,17 @@ test("movimentações financeiras preservam abastecimentos sem voo", () => {
   const fim = source.indexOf("financeiroRoutes.post('/lancamentos/despesa'", inicio);
   const route = source.slice(inicio, fim);
 
-  assert.match(route, /String\(row\.numero_voo \|\| 'Sem número de voo'\)/);
+  assert.match(route, /const numeroVooInformado = String\(row\.numero_voo \|\| ''\)/);
+  assert.match(route, /const vooKey = numeroVooInformado \? `voo:\$\{numeroVooInformado\}` : `sem-voo:\$\{periodo\}`/);
   assert.doesNotMatch(route, /if \(!numeroVoo\) continue/);
+});
+
+test("movimentações de abastecimento expõem descrição e fornecedor", () => {
+  const inicio = source.indexOf("financeiroRoutes.get('/dashboard/financeiro/movimentacoes'");
+  const fim = source.indexOf("financeiroRoutes.post('/lancamentos/despesa'", inicio);
+  const route = source.slice(inicio, fim);
+  assert.match(route, /COALESCE\(NULLIF\(TRIM\(a\.observacao\), ''\), 'Abastecimento'\) AS descricao/);
+  assert.match(route, /f\.nome_fornecedor AS fornecedor_nome/);
 });
 
 test("movimentações expõem abastecimentos pré-voo que ainda precisam de dados fiscais", () => {
