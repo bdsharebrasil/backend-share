@@ -23,4 +23,6 @@ test("movimentações expõem abastecimentos pré-voo que ainda precisam de dado
   assert.match(route, /a\.nota_url/);
   assert.match(route, /abastecimentos_pendentes: abastecimentosPendentes/);
   assert.match(route, /NULLIF\(trim\(COALESCE\(a\.numero_nf, ''\)\), ''\) IS NULL OR NULLIF\(trim\(COALESCE\(a\.nota_url, ''\)\), ''\) IS NULL/);
+  assert.match(route, /c\.req\.query\('somente'\) === 'abastecimentos_pendentes'/);
+  assert.match(route, /return c\.json\(\{ abastecimentos_pendentes: abastecimentosPendentes \}\)/);
 });
