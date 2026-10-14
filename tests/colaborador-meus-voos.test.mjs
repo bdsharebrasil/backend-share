@@ -29,12 +29,12 @@ test("detalhe reúne hospedagem no período do voo e mensagens recebidas que men
   assert.match(route, /instr\(lower\(COALESCE\(m\.assunto/);
 });
 
-test("operações do voo exigem tripulação designada, gestor ou autenticação interna", () => {
+test("operações compartilhadas do voo exigem colaborador autenticado ou autenticação interna", () => {
   assert.match(auth, /export async function requireFlightOperationAccess/);
   assert.match(auth, /if \(await checkInternalAuth\(c\)\) return true/);
   assert.match(auth, /authenticatedColaborador\(c\)/);
-  assert.match(auth, /isTaskManager\(user\) \|\| await isColaboradorManager\(c, user\)/);
-  assert.match(auth, /solicitacaoId, tripulante\.id/);
+  assert.match(auth, /return Boolean\(user\)/);
+  assert.doesNotMatch(auth, /solicitacaoId, tripulante\.id/);
   assert.match(worker, /requireFlightOperationAccess\(c, c\.req\.param\('id'\)\)/);
   assert.match(ctm, /requireFlightOperationAccess\(c, c\.req\.param\('id'\)\)/);
   assert.match(jornadas, /requireFlightOperationAccess\(c, c\.req\.param\('id'\)\)/);

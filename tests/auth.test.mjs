@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getAuthenticatedUserId } from "../src/lib/auth.ts";
+import { getAuthenticatedUserId, requireFlightOperationAccess } from "../src/lib/auth.ts";
 
 function context({ authorization, apikey, env = {} } = {}) {
   const headers = new Map([
@@ -59,6 +59,23 @@ test("falha fechada quando não há token Bearer ou chave de API pública", asyn
   assert.equal(await getAuthenticatedUserId(context({ authorization: "Basic credentials" })), null);
   assert.equal(await getAuthenticatedUserId(context({ authorization: "Bearer token-without-key" })), null);
   assert.equal(calls, 0);
+});
+
+test("permite operação de voo a qualquer colaborador autenticado, sem exigir vínculo de tripulação", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => Response.json({ id: "colaborador-autenticado" });
+  const request = context({
+    authorization: "Bearer authenticated-flight-user-token",
+    apikey: "sb_publishable_flight-access-key",
+    env: {
+      SHARE_DB: {
+        prepare: () => ({ bind: () => ({ first: async () => ({ id: "colaborador-autenticado", tipo_user: "operador" }) }) }),
+      },
+    },
+  });
+
+  assert.equal(await requireFlightOperationAccess(request, "agendamento-de-outro-tripulante"), true);
 });
 
 test("compartilha validação concorrente e reutiliza identidade em cache limitado pela expiração", async (t) => {

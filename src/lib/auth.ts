@@ -133,21 +133,10 @@ export async function authenticatedColaborador(c: AuthContext): Promise<Colabora
 export async function requireFlightOperationAccess(c: AuthContext, solicitacaoId: string): Promise<boolean> {
   if (await checkInternalAuth(c)) return true
   const user = await authenticatedColaborador(c)
-  if (!user) return false
-  if (isTaskManager(user) || await isColaboradorManager(c, user)) return true
-  const tripulante = await c.env.SHARE_DB.prepare(`
-    SELECT id FROM tripulacao
-    WHERE user_id = ?1
-      OR (user_id IS NULL AND NULLIF(trim(?2), '') IS NOT NULL AND lower(trim(canac)) = lower(trim(?2)))
-    ORDER BY CASE WHEN user_id = ?1 THEN 0 ELSE 1 END LIMIT 1
-  `).bind(user.id, user.canac).first<{ id: string }>()
-  if (!tripulante) return false
-  const vinculo = await c.env.SHARE_DB.prepare(`
-    SELECT id FROM solicitacoes_reserva_voo
-    WHERE id = ?1 AND (piloto_id = ?2 OR copiloto_id = ?2)
-    LIMIT 1
-  `).bind(solicitacaoId, tripulante.id).first<{ id: string }>()
-  return Boolean(vinculo)
+  // Agendamentos e seus dados operacionais (jornadas, pernas e CTM) são
+  // compartilhados entre os colaboradores autenticados da operação; não
+  // devem depender do usuário estar escalado como piloto/copiloto.
+  return Boolean(user)
 }
 export async function authenticatedColaboradorToken(c: AuthContext, token: string): Promise<Colaborador | null> {
   const userId = await getAuthenticatedUserId(c, token)
