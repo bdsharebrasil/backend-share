@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { statusPermiteEdicaoFichaPeso } from "../src/routes/ctmRoutes.ts";
 
 const route = await readFile(new URL("../src/routes/colaboradorVoosRoutes.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
@@ -21,12 +22,26 @@ test("detalhe do voo exige vínculo do usuário como piloto ou copiloto", () => 
   assert.match(route, /if \(!voo\) return c\.notFound\(\)/);
 });
 
-test("detalhe reúne hospedagem no período do voo e mensagens recebidas que mencionam o voo", () => {
+test("detalhe reúne hospedagem, exibe cliente/cotista em um único campo e usa observações da solicitação como mensagem", () => {
   assert.match(route, /FROM reservas_hoteis r/);
   assert.match(route, /r\.criado_por = \?1/);
   assert.match(route, /date\(r\.data_checkin\) <= date\(\?3\)/);
-  assert.match(route, /m\.destinatario_id = \?1/);
-  assert.match(route, /instr\(lower\(COALESCE\(m\.assunto/);
+  assert.match(route, /AS cliente_tipo/);
+  assert.match(route, /AS cliente_razao_social/);
+  assert.match(route, /const \{ observacoes, \.\.\.vooSemObservacoes \} = voo/);
+  assert.match(route, /mensagem: observacoes \?\? null/);
+  assert.doesNotMatch(route, /FROM mensagens/);
+});
+
+test("ficha pendente pode ser salva em voo aprovado, em operação ou encerrado", () => {
+  for (const status of ["aprovada", "em_voo", "em_rota", "em_solo", "pousado", "encerrada", "concluida"]) {
+    assert.equal(statusPermiteEdicaoFichaPeso(status), true, `status ${status}`);
+  }
+  for (const status of ["pendente", "cancelada", "reprovada", "desconhecida"]) {
+    assert.equal(statusPermiteEdicaoFichaPeso(status), false, `status ${status}`);
+  }
+  assert.match(ctm, /if \(!statusPermiteEdicaoFichaPeso\(reserva\.status\)\)/);
+  assert.match(ctm, /if \(existente\?\.status === 'FINALIZADA'\)/);
 });
 
 test("operações compartilhadas do voo exigem colaborador autenticado ou autenticação interna", () => {

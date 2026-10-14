@@ -46,7 +46,11 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
   const voo = await db.prepare(`
     SELECT s.*, date(s.data_agendada, '+' || (MAX(COALESCE(s.dias_duracao, 1), 1) - 1) || ' days') AS data_fim,
       a.matricula_registro, a.modelo, a.fabricante,
-      c.razao_social AS cliente_razao_social, hs.nome AS socio_nome,
+      CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL THEN 'Cotista' ELSE 'Cliente' END AS cliente_tipo,
+      CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL
+        THEN COALESCE(NULLIF(trim(hs.nome), ''), NULLIF(trim(c.razao_social), ''))
+        ELSE COALESCE(NULLIF(trim(c.razao_social), ''), NULLIF(trim(hs.nome), ''))
+      END AS cliente_razao_social,
       COALESCE(p.nome_completo, pf.nome_completo) AS piloto_nome,
       COALESCE(cp.nome_completo, cpf.nome_completo) AS copiloto_nome
     FROM solicitacoes_reserva_voo s
@@ -63,7 +67,7 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
   `).bind(c.req.param('id'), tripulante.id).first<Record<string, any>>()
   if (!voo) return c.notFound()
 
-  const [jornadas, hospedagens, mensagens] = await Promise.all([
+  const [jornadas, hospedagens] = await Promise.all([
     db.prepare(`
       SELECT j.id, j.solicitacao_id, j.aeronave_id, j.tripulante_id, j.funcao_tripulante,
         j.jornada_principal_id, j.numero_jornada, j.data, j.horario_apresentacao,
@@ -87,18 +91,6 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
         AND date(r.data_checkout) >= date(?2)
       ORDER BY date(r.data_checkin), r.criado_em
     `).bind(user.id, voo.data_agendada, voo.data_fim).all<Record<string, any>>().catch(() => ({ results: [] })),
-    db.prepare(`
-      SELECT m.id, m.assunto, m.conteudo, m.criado_em, COALESCE(mu.lida, 0) AS lida
-      FROM mensagens m
-      LEFT JOIN mensagens_usuario mu ON mu.mensagem_id = m.id AND mu.usuario_id = ?1 AND mu.papel = 'destinatario'
-      WHERE m.destinatario_id = ?1 AND COALESCE(mu.excluida, 0) = 0
-        AND (
-          (NULLIF(?3, '') IS NOT NULL AND instr(lower(COALESCE(m.assunto, '') || ' ' || COALESCE(m.conteudo, '')), lower(?3)) > 0)
-          OR instr(lower(COALESCE(m.assunto, '') || ' ' || COALESCE(m.conteudo, '')), lower(?2)) > 0
-        )
-      ORDER BY datetime(m.criado_em) DESC
-      LIMIT 50
-    `).bind(user.id, voo.id, String(voo.numero_voo || '')).all<Record<string, any>>().catch(() => ({ results: [] })),
   ])
 
   const jornadasComPernas = await Promise.all((jornadas.results || []).map(async jornada => {
@@ -112,10 +104,10 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
     return { ...jornada, pernas: pernas.results || [] }
   }))
 
+  const { observacoes, ...vooSemObservacoes } = voo
   return c.json({
-    voo,
+    voo: { ...vooSemObservacoes, mensagem: observacoes ?? null },
     jornadas: jornadasComPernas,
     hospedagens: hospedagens.results || [],
-    mensagens: mensagens.results || [],
   })
 })

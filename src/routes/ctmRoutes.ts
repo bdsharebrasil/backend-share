@@ -19,6 +19,14 @@ type Variables = Record<string, never>
 
 export const ctmRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
+const STATUS_EDITAVEIS_FICHA_PESO = new Set([
+  'aprovada', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida',
+])
+
+export function statusPermiteEdicaoFichaPeso(status: unknown) {
+  return STATUS_EDITAVEIS_FICHA_PESO.has(String(status || '').trim().toLowerCase())
+}
+
 function bucketShareBrasil(c: Context<{ Bindings: Bindings; Variables: Variables }>): R2Bucket {
   return c.env.SHARE_FILES || c.env.FILES || ({} as R2Bucket)
 }
@@ -214,7 +222,7 @@ ctmRoutes.post('/api/interno/agendamento/:id/peso-balanceamento', async c => {
   if (!body) return c.json({ error: 'payload_invalido' }, 400)
   const reserva = await db.prepare('SELECT id, aeronave_id, numero_voo, data_agendada, status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<any>()
   if (!reserva) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
-  if (String(reserva.status || '').trim().toLowerCase() !== 'aprovada') return c.json({ error: 'ficha_fora_da_preparacao', detail: 'A ficha só pode ser alterada durante a preparação do voo.' }, 409)
+  if (!statusPermiteEdicaoFichaPeso(reserva.status)) return c.json({ error: 'ficha_fora_da_preparacao', detail: 'A ficha pode ser preenchida somente para voos aprovados, em operação ou encerrados.' }, 409)
   const piloto = String(body.piloto_responsavel || '').trim()
   if (!piloto) return c.json({ error: 'piloto_responsavel_obrigatorio' }, 400)
   const itens = Array.isArray(body.itens_carregamento) ? body.itens_carregamento : []
