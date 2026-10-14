@@ -148,9 +148,9 @@ async function findTripulanteUserId(db: D1Database, tripulacaoId: unknown): Prom
 export async function findLancamentoClientId(db: D1Database, clientId: unknown): Promise<string | null> {
   const id = text(clientId)
   if (!id) return null
-  // lancamentos.cliente_id aponta para clientes(id), mas o ID do relatório
-  // vem de cliente(id); só gravamos o vínculo direto se existir no destino da FK.
-  const row = await db.prepare('SELECT id FROM clientes WHERE id = ?1 LIMIT 1').bind(id).first<{ id: string }>()
+  // O cadastro usado pelo SHARE_DB se chama `cliente` (singular). Só associamos
+  // o lançamento quando o ID recebido existe nessa tabela.
+  const row = await db.prepare('SELECT id FROM cliente WHERE id = ?1 LIMIT 1').bind(id).first<{ id: string }>()
   return text(row?.id) || null
 }
 

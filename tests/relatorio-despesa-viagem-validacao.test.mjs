@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { calcularVencimentoReembolsoTripulante } from "../src/relatorioFinanceiro.ts";
+import { calcularVencimentoReembolsoTripulante, findLancamentoClientId } from "../src/relatorioFinanceiro.ts";
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
 const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
@@ -106,13 +106,33 @@ test("aprovação persiste vencimento e normaliza cliente/data de emissão antes
   assert.match(financeiro, /const dataEmissao = await dataEmissaoRelatorio\(db, report, lancamentoId\)/);
   assert.match(financeiro, /const dataEmissao = await dataEmissaoRelatorio\(db, report, null\)/);
   assert.match(financeiro, /cliente_id = \?, data_emissao = \?, data_vencimento = \?/);
-  assert.match(financeiro, /SELECT id FROM clientes WHERE id = \?1 LIMIT 1/);
+  assert.match(financeiro, /SELECT id FROM cliente WHERE id = \?1 LIMIT 1/);
   assert.match(financeiro, /cliente_id: kind === 'CLIENTE' \? clienteLancamentoId : null/);
   assert.match(worker, /persistirMetadadosFinanceirosRelatorio\(c\.env\.SHARE_DB, id, userId, null, false, dataVencimentoReembolso\)/);
   assert.match(financeiro, /addTripulantePayableStatements\(/);
 });
 
-test("envio ao cliente também só grava cliente_id se existir na tabela alvo da FK", () => {
+test("lookup de cliente consulta a tabela singular existente no D1", async () => {
+  const consultas = [];
+  let parametros = [];
+  const db = {
+    prepare(sql) {
+      consultas.push(sql);
+      return {
+        bind(...values) {
+          parametros = values;
+          return { first: async () => ({ id: "cliente-1" }) };
+        },
+      };
+    },
+  };
+
+  assert.equal(await findLancamentoClientId(db, " cliente-1 "), "cliente-1");
+  assert.deepEqual(consultas, ["SELECT id FROM cliente WHERE id = ?1 LIMIT 1"]);
+  assert.deepEqual(parametros, ["cliente-1"]);
+});
+
+test("envio ao cliente só grava cliente_id se existir na tabela de cadastro", () => {
   assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
   assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
   assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);
