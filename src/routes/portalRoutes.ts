@@ -229,6 +229,15 @@ function portalTelegramText(row: Record<string, unknown>, fallbackName: string):
   return `<b>Nova solicitação de reserva de voo</b>\nCliente: <b>${value('cliente_razao_social', fallbackName)}</b>\nAeronave: ${value('aeronave_label', aircraft)}\nOrigem → destino: ${value('origem')} → ${value('destino')}\nData: ${value('data_agendada')} · Horário: ${value('horario_previsto_agendamento')}\nDuração: ${value('dias_duracao')} dia(s) · Passageiros: ${value('numero_passageiros')}\nVoo de empréstimo: ${value('voo_emprestado')}\nObservações: ${value('observacoes')}\nID: <code>${value('id')}</code>\nAcesse o Sistema Interno Share Brasil para aprovar ou reprovar.`
 }
 
+function portalConfirmationMessage(row: Record<string, unknown>): string | null {
+  if (String(row.status || '').toLowerCase() !== 'aprovada' || !row.numero_voo) return null
+  const nome = String(row.cotista_nome || 'cotista').trim()
+  const data = String(row.data_agendada || '').slice(0, 10)
+  const dataFormatada = data ? new Date(`${data}T00:00:00Z`).toLocaleDateString('pt-BR', { timeZone: 'UTC' }) : data
+  const tripulante = String(row.piloto_nome || 'tripulante não informado').trim()
+  return `Olá ${nome}, seu voo ${row.numero_voo} foi confirmado para o dia ${dataFormatada} com o tripulante ${tripulante}.`
+}
+
 portalRoutes.post('/api/portal/login', async c => {
   try {
     if (!(await checkRateLimit(c, `portal-login:${clientIp(c)}`, 12))) return c.json({ error: 'muitas_tentativas' }, 429)
@@ -283,23 +292,22 @@ portalRoutes.get('/api/portal/disponibilidade', async c => {
   const to = c.req.query('ate') || from
   const [aircraft, reservations] = await Promise.all([
     c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.status FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE lower(a.status) = 'ativa' AND (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY a.matricula_registro").bind(user.cliente_id, user.socio_id).all(),
-    c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE data_agendada BETWEEN ?1 AND ?2 AND status IN ('pendente', 'aprovada') ORDER BY data_agendada").bind(from, to).all(),
+    c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?1) AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo') ORDER BY data_agendada").bind(from, to).all(),
   ])
   return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
 })
 
 portalRoutes.get('/api/portal/solicitacoes', async c => {
   const user = await portalSession(c)
-  const clientId = user ? await portalClientId(c, user) : null
-  if (!clientId) return c.json([])
-  const result = await c.env.SHARE_DB.prepare("SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.cliente_id = ?1 ORDER BY s.criado_em DESC").bind(clientId).all()
-  return c.json(result.results)
+  if (!user?.cliente_id && !user?.socio_id) return c.json([])
+  const result = await c.env.SHARE_DB.prepare("SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, a.matricula_registro, a.modelo, COALESCE(c.razao_social, hs.nome, 'Cotista') AS cotista_nome, COALESCE(t.nome_completo, tf.nome_completo) AS piloto_nome FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN hold_socios hs ON hs.id = s.socio_id LEFT JOIN tripulacao t ON t.id = s.piloto_id LEFT JOIN tripulacao_freelancer tf ON tf.id = s.piloto_id WHERE s.cliente_id = ?1 OR s.socio_id = ?2 ORDER BY s.criado_em DESC").bind(user?.cliente_id, user?.socio_id).all<Record<string, unknown>>()
+  return c.json(result.results.map(row => ({ ...row, mensagem_confirmacao: portalConfirmationMessage(row) })))
 })
 
 portalRoutes.post('/api/portal/solicitacoes', async c => {
   const user = await portalSession(c)
   const clientId = user ? await portalClientId(c, user) : null
-  if (!clientId) return c.json({ error: 'cliente_nao_vinculado' }, 409)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
   const body = await c.req.json<Record<string, unknown>>().catch(() => null)
   if (!body || !body.aeronave_id || !body.origem || !body.destino || !body.data_agendada) return c.json({ error: 'campos_obrigatorios_ausentes' }, 400)
   const dataAgendada = String(body.data_agendada).trim()
@@ -314,10 +322,10 @@ portalRoutes.post('/api/portal/solicitacoes', async c => {
   const dataFim = portalReservationEnd(dataAgendada, diasDuracao)
   const aircraft = await c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.status FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE a.id = ?1 AND lower(a.status) = 'ativa' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)").bind(String(body.aeronave_id), user?.cliente_id, user?.socio_id).first<{ id: string; status: string }>()
   if (!aircraft) return c.json({ error: 'aeronave_indisponivel' }, 409)
-  const conflict = await c.env.SHARE_DB.prepare("SELECT id FROM solicitacoes_reserva_voo WHERE aeronave_id = ?1 AND status IN ('pendente', 'aprovada') AND date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?3) LIMIT 1").bind(aircraft.id, dataFim, dataAgendada).first<{ id: string }>()
+  const conflict = await c.env.SHARE_DB.prepare("SELECT id FROM solicitacoes_reserva_voo WHERE aeronave_id = ?1 AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo') AND date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?3) LIMIT 1").bind(aircraft.id, dataFim, dataAgendada).first<{ id: string }>()
   if (conflict) return c.json({ error: 'aeronave_indisponivel_no_periodo' }, 409)
   const id = crypto.randomUUID()
-  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, body.observacoes ? String(body.observacoes) : null).run()
+  await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, user?.socio_id || null, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, body.observacoes ? String(body.observacoes) : null).run()
   const row = await c.env.SHARE_DB.prepare("SELECT s.*, c.razao_social AS cliente_razao_social, a.matricula_registro, a.fabricante, a.modelo FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN aeronave a ON a.id = s.aeronave_id WHERE s.id = ?1").bind(id).first<Record<string, unknown>>()
   let notificationSent = true
   try {

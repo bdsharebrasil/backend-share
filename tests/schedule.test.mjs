@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from '../src/lib/schedule.ts'
 
-test('normaliza horários de agendamento em UTC sem perder HH:MM', () => {
-  assert.equal(normalizarHorarioAgendamento('2026-10-13', '09:25'), '2026-10-13T09:25:00.000Z')
+test('normaliza horário de Brasília em UTC sem perder HH:MM', () => {
+	assert.equal(normalizarHorarioAgendamento('2026-10-13', '09:25'), '2026-10-13T12:25:00.000Z')
   assert.equal(normalizarHorarioAgendamento('2026-10-13', '2026-10-13T09:25:00.000Z'), '2026-10-13T09:25:00.000Z')
   assert.equal(normalizarHorarioAgendamento('2026-10-13', 'inválido'), null)
 })

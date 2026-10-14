@@ -6,7 +6,10 @@ export function normalizarHorarioAgendamento(data: string, valor: unknown): stri
     return Number.isFinite(instante.getTime()) ? instante.toISOString() : null
   }
   if (!/^\d{2}:\d{2}(?::\d{2})?$/.test(texto)) return null
-  const instante = new Date(`${data}T${texto.length === 5 ? `${texto}:00` : texto}Z`)
+  // O portal recebe o horário civil de Brasília (UTC-03:00) e a coluna
+  // armazena um instante ISO em Zulu, inclusive quando cruza a meia-noite.
+  const hora = texto.length === 5 ? `${texto}:00` : texto
+  const instante = new Date(`${data}T${hora}-03:00`)
   return Number.isFinite(instante.getTime()) ? instante.toISOString() : null
 }
 
