@@ -1417,7 +1417,7 @@ app.get('/api/interno/planos-voo', async c => {
   await validarTabelaChecklistPlano(c)
   const rows = await c.env.SHARE_DB.prepare(`SELECT p.id, p.numero_voo, p.adep, p.ades, p.data_voo, p.eobt, p.payload_json, p.criado_em AS created_at, cp.status AS checklist_status
     FROM planos_voo p LEFT JOIN checklists_planos_voo cp ON cp.plano_voo_id = p.id
-    ORDER BY p.criado_em DESC LIMIT 50`).all<any>()
+    ORDER BY p.criado_em DESC`).all<any>()
   return c.json(rows.results.map(row => ({ ...row, payload: JSON.parse(row.payload_json) })))
 })
 
