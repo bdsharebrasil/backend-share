@@ -4081,6 +4081,30 @@ app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
   } catch (error: any) { return c.json({ error: error?.message || 'falha_ao_consultar_aprovacao' }, 400) }
 })
 
+app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token/pdf', async c => {
+  try {
+    const token = c.req.param('token')
+    const row = await c.env.SHARE_DB.prepare(`SELECT r.pdf_path, r.numero_relatorio
+      FROM relatorio_despesa_viagem r
+      WHERE r.pdf_path IS NOT NULL
+        AND (r.token_aprovacao_tripulante_1 = ?1 OR r.token_aprovacao_tripulante_2 = ?1)
+      LIMIT 1`).bind(token).first<{ pdf_path: string; numero_relatorio: string | null }>()
+    if (!row?.pdf_path) return c.notFound()
+    const object = await shareBrasilBucket(c).get(row.pdf_path)
+    if (!object) return c.notFound()
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="${shareBrasilFileName(row.numero_relatorio || 'relatorio')}.pdf"`,
+        'Cache-Control': 'private, max-age=300',
+      },
+    })
+  } catch (error: any) {
+    log.error('[relatorio-despesa-viagem:pdf-publico]', error?.message || error)
+    return c.json({ error: error?.message || 'falha_ao_carregar_pdf' }, 500)
+  }
+})
+
 app.get('/api/public/relatorios-despesa-viagem/aprovacao/:token/comprovantes/:anexoId', async c => {
   try {
     const token = c.req.param('token')
