@@ -187,11 +187,16 @@ export function buildDocumentFields(value: unknown, cotistaId?: string | null): 
   }
 }
 
+async function buscarFornecedor(db: Database, fornecedorId: unknown): Promise<{ id: string; nome_completo: string | null } | null> {
+  const idFornecedor = nullableText(fornecedorId)
+  return idFornecedor
+    ? db.prepare('SELECT id, nome_completo FROM fornecedores_favoritos WHERE id = ? LIMIT 1').bind(idFornecedor).first<{ id: string; nome_completo: string | null }>()
+    : null
+}
+
 async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Row> {
   const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
-  const fornecedor = fornecedorId
-    ? await db.prepare('SELECT nome_completo FROM fornecedores_favoritos WHERE id = ? LIMIT 1').bind(fornecedorId).first<{ nome_completo: string | null }>()
-    : null
+  const fornecedor = await buscarFornecedor(db, fornecedorId)
   const tipoCaixa = upper(command.tipo_caixa)
   const categoriaId = nullableText(command.categoria_cliente_id ?? command.categoria_id)
   const categoriaTabela = tipoCaixa === 'CLIENTE' || tipoCaixa === 'HOLDING'
@@ -2368,6 +2373,8 @@ export async function processFinanceQueue(
 
 async function createReimbursementFinance(db: Database, schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
   const receiptMeta = await db.prepare('SELECT numero_recibo, url_recibo FROM recibos WHERE id = ? LIMIT 1').bind(receiptId).first<{ numero_recibo: string | null; url_recibo: string | null }>()
+  const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
+  const fornecedor = await buscarFornecedor(db, fornecedorId)
   const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
   const categoriaShare = await db.prepare(`
     SELECT id FROM categoria_movimentacao_share
@@ -2400,8 +2407,11 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       tipo_caixa: 'SHARE',
       valor_centavos: amount,
       status: 'EM_ABERTO',
+      escopo_financeiro: 'CAIXA_SHARE',
       data_emissao: input.data_emissao,
       data_vencimento: input.data_vencimento || input.data_emissao,
+      fornecedores_favoritos_id: fornecedor?.id ?? null,
+      fornecedor_nome: nullableText(fornecedor?.nome_completo),
       pago_diretamente: 0,
       reembolsavel: 1,
       reembolso_quitado: 0,
@@ -2883,7 +2893,8 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
        ORDER BY e.criado_em DESC LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id,
-      l.categoria_share_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome
+      l.categoria_share_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome,
+      l.fornecedores_favoritos_id AS share_fornecedor_id
     FROM recibos r LEFT JOIN lancamentos l ON l.id = r.lancamento_id
     WHERE r.id = ? AND r.tipo_recibo = 'recibo_reembolso' LIMIT 1`).bind(receiptId).first<Row>()
   if (!receipt || !text(receipt.share_lancamento_id)) throw new FinanceError('Recibo de reembolso não encontrado', 'recibo_reembolso_nao_encontrado', 404)
@@ -2909,6 +2920,8 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   const data = dateValue(body.data ?? receipt.data_emissao)
   const vencimento = nullableText(body.data_vencimento ?? receipt.data_vencimento) || data
   const cotistaId = text(receipt.cotista_aeronave_id)
+  const fornecedorId = nullableText(body.fornecedor_id ?? body.fornecedores_favoritos_id ?? receipt.share_fornecedor_id)
+  const fornecedor = await buscarFornecedor(db, fornecedorId)
   const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
   if (abastecimentosId) {
     const lancamentoCotistaExistente = await db.prepare(`
@@ -2937,19 +2950,24 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       abastecimentos_id: abastecimentosId,
       descricao: receipt.descricao || 'Reembolso de despesa', grupo_categoria: 'REEMBOLSO',
       fluxo: 'SAIDA', tipo_caixa: 'CLIENTE', valor_centavos: amount,
-      data_vencimento: vencimento, pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
+      data_emissao: data, data_vencimento: vencimento, status: 'EM_ABERTO',
+      escopo_financeiro: 'FINANCEIRO', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
+      fornecedores_favoritos_id: fornecedor?.id ?? null,
+      fornecedor_nome: nullableText(fornecedor?.nome_completo),
+      subcategoria_1: nullableText(body.subcategoria_1),
       categoria_cliente_id: nullableText(body.categoria_id),
       categoria_nome: nullableText(body.categoria_nome ?? 'REEMBOLSO'),
       periodicidade: nullableText(body.periodicidade),
       numero_recibo: nullableText(receipt.numero_recibo),
       url_recibo: nullableText(receipt.url_recibo),
-      origem_tipo: 'RECIBO_REEMBOLSO', origem_id: reimbursementId, criado_por: userId,
+      origem_tipo: 'RECIBO_REEMBOLSO', origem_id: reimbursementId,
+      idempotency_key: `recibo-reembolso-cliente:${receiptId}`, criado_por: userId,
     }, ['id', 'descricao', 'fluxo', 'valor_centavos']),
     insertStatement(db, schema, 'contas_areceber', {
       id: contaReceberId, data_vencimento: vencimento, valor_centavos: amount, descricao: receipt.descricao || 'Reembolso de despesa',
       categoria_nome: 'REEMBOLSO', aeronave_id: receipt.aeronave_id, cotista_id: cotistaId,
       lancamentos_id: clientLancamentoId, origem_tipo: 'RECIBO_REEMBOLSO', origem_id: receiptId,
-      status: 'EM_ABERTO', criado_por: userId,
+      status: 'EM_ABERTO', idempotency_key: `recibo-reembolso-cliente:${receiptId}:CONTA_RECEBER`, criado_por: userId,
     }, ['id', 'valor_centavos']),
     linkStatement(db, schema, 'RECIBO', receiptId, 'LANCAMENTO', clientLancamentoId, 'RECIBO_LANCAMENTO_CLIENTE', userId),
     ...(abastecimentosId ? [linkStatement(db, schema, 'LANCAMENTO', clientLancamentoId, 'ABASTECIMENTO', abastecimentosId, 'LANCAMENTO_ABASTECIMENTO', userId)] : []),
@@ -2965,7 +2983,20 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     ] : []),
     auditStatement(db, schema, 'reembolsos', reimbursementId, 'PROGRAMACAO_REEMBOLSO', userId, null, amount, nullableText(body.observacoes), `programar-recibo-reembolso:${receiptId}`),
   ]
-  await db.batch(statements)
+  try {
+    await db.batch(statements)
+  } catch (error) {
+    // Índices únicos das chaves estáveis elegem uma única execução vencedora.
+    // Se outra requisição concluiu a mesma programação, devolvemos seus IDs.
+    const concurrent = await db.prepare(`SELECT id, conta_receber_id, lancamento_origem_id, lancamento_cliente_id
+      FROM reembolsos WHERE lancamento_origem_id = ? LIMIT 1`).bind(receipt.share_lancamento_id).first<Row>().catch(() => null)
+    if (!concurrent) throw error
+    return {
+      ...concurrent,
+      lancamento_share_id: concurrent.lancamento_origem_id,
+      idempotent: true,
+    }
+  }
   return { id: reimbursementId, lancamento_share_id: receipt.share_lancamento_id, lancamento_cliente_id: clientLancamentoId, conta_receber_id: contaReceberId, status: 'AGUARDANDO_REEMBOLSO', idempotent: false }
 }
 

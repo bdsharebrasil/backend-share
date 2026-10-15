@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [kernel, routes] = await Promise.all([
+const [kernel, routes, migration] = await Promise.all([
   readFile(new URL("../src/financeiro/FinanceiroKernel.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/financeiro/recibosRoutes.ts", import.meta.url), "utf8"),
+  readFile(new URL("../migrations/20261015_recibo_reembolso_idempotencia.sql", import.meta.url), "utf8"),
 ]);
 
 test("recibo pago pela empresa materializa as linhas escolhidas no histórico", () => {
@@ -53,6 +54,49 @@ test("reembolso de recibo grava as datas nas colunas do schema D1", () => {
   assert.match(caminho, /data_emissao: input\.data_emissao/);
   assert.match(caminho, /data_vencimento: input\.data_vencimento \|\| input\.data_emissao/);
   assert.doesNotMatch(caminho, /data_lancamento/);
+});
+
+test("lançamento Share do reembolso grava fornecedor e escopo do caixa Share", () => {
+  const inicio = kernel.indexOf("async function createReimbursementFinance(");
+  const fim = kernel.indexOf("type ReceiptFinanceBuilder", inicio);
+  const caminho = kernel.slice(inicio, fim);
+  assert.match(kernel, /async function buscarFornecedor\(db: Database, fornecedorId: unknown\)[\s\S]*SELECT id, nome_completo FROM fornecedores_favoritos/);
+  assert.match(caminho, /const fornecedor = await buscarFornecedor\(db, fornecedorId\)/);
+  assert.match(caminho, /fornecedores_favoritos_id: fornecedor\?\.id/);
+  assert.match(caminho, /fornecedor_nome: nullableText\(fornecedor\?\.nome_completo\)/);
+  assert.match(caminho, /escopo_financeiro: 'CAIXA_SHARE'/);
+});
+
+test("programar reembolso grava data, status, fornecedor, subcategoria e chaves únicas estáveis", () => {
+  const inicio = kernel.indexOf("export async function programarReciboReembolso(");
+  const fim = kernel.indexOf("export async function emitirReciboColaborador(", inicio);
+  const caminho = kernel.slice(inicio, fim);
+  assert.match(caminho, /data_emissao: data, data_vencimento: vencimento, status: 'EM_ABERTO'/);
+  assert.match(caminho, /escopo_financeiro: 'FINANCEIRO'/);
+  assert.match(caminho, /const fornecedor = await buscarFornecedor\(db, fornecedorId\)/);
+  assert.match(caminho, /fornecedores_favoritos_id: fornecedor\?\.id/);
+  assert.match(caminho, /subcategoria_1: nullableText\(body\.subcategoria_1\)/);
+  assert.match(caminho, /idempotency_key: `recibo-reembolso-cliente:\$\{receiptId\}`/);
+  assert.match(caminho, /idempotency_key: `recibo-reembolso-cliente:\$\{receiptId\}:CONTA_RECEBER`/);
+  assert.match(caminho, /catch \(error\)[\s\S]*SELECT id, conta_receber_id, lancamento_origem_id, lancamento_cliente_id[\s\S]*idempotent: true/);
+  assert.match(migration, /CREATE UNIQUE INDEX idx_lancamentos_recibo_reembolso_cliente_idempotencia/);
+  assert.match(migration, /CREATE UNIQUE INDEX idx_contas_areceber_recibo_reembolso_idempotencia/);
+});
+
+test("programação de reembolso vincula rateio ao lançamento cliente e transfere rateio Share antigo", () => {
+  const inicio = routes.indexOf("recibosRoutes.post('/recibos/:id/programar-contas-apagar'");
+  const fim = routes.indexOf("recibosRoutes.post('/recibos/:id/cancelar'", inicio);
+  const caminho = routes.slice(inicio, fim);
+  assert.match(caminho, /const reembolso = await programarReciboReembolso/);
+  assert.match(caminho, /reembolso\.lancamento_share_id \?\? reembolso\.lancamento_origem_id/);
+  assert.match(caminho, /const lancamentoClienteId = String\(reembolso\.lancamento_cliente_id \?\? ''\)/);
+  assert.match(caminho, /if \(!lancamentoClienteId\) return c\.json\(\{ error: 'lancamento_cliente_do_reembolso_nao_encontrado' \}, 409\)/);
+  assert.doesNotMatch(caminho, /const lancamentoClienteRateioId = lancamentoClienteId \|\| lancamentoId/);
+  assert.match(caminho, /SELECT id, lancamento_id, numero_recibo,[\s\S]*FROM recibos/);
+  assert.match(caminho, /SET lancamento_id = \?, fornecedor_id = \?, numero_recibo = \?, url_recibo = \?/);
+  assert.match(caminho, /lancamentoClienteRateioId, aeronaveId/);
+  assert.match(caminho, /fornecedor_id, numero_recibo, url_recibo/);
+  assert.match(caminho, /escopo_financeiro\) VALUES[\s\S]*'CAIXA_SHARE'/);
 });
 
 test("histórico reconhece rateio de recibo sem depender de um lançamento espelho", () => {
