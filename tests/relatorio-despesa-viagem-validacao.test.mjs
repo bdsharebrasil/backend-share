@@ -133,8 +133,16 @@ test("lookup de cliente consulta a tabela singular existente no D1", async () =>
   assert.deepEqual(parametros, ["cliente-1"]);
 });
 
+test("envio ao cliente reconcilia o recebível sem interromper a criação dos lançamentos ausentes", () => {
+  assert.match(rotaEnvioCliente, /ensureRelatorioContaAReceber\(db, id/);
+  assert.match(financeiro, /const idempotencyKey = `RELATORIO_DESPESA_VIAGEM:\$\{reportId\}:CONTA_RECEBER`/);
+  assert.match(rotaEnvioCliente, /if \(!existingClientLancamento\) statements\.push/);
+  assert.match(rotaEnvioCliente, /if \(!existingShareLancamento\) statements\.push/);
+  assert.doesNotMatch(rotaEnvioCliente, /if \(existing\) \{[\s\S]*?return c\.json/);
+});
+
 test("envio ao cliente só grava cliente_id se existir na tabela de cadastro", () => {
-  assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
+  assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, ensureRelatorioContaAReceber, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
   assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
   assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);
   assert.match(rotaEnvioCliente, /\.bind\(cotista\.id, clienteIdLancamentoFk, 'SHARE BRASIL'/);

@@ -100,7 +100,9 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   const recebiveis = insertedRows(db, "contas_areceber");
   assert.equal(recebiveis.length, 1);
   assert.equal(recebiveis[0].valor_centavos, 7500);
-  assert.equal(recebiveis[0].lancamentos_id, lancamentos[0].id);
+  assert.equal(recebiveis[0].lancamentos_id, null);
+  assert.equal(recebiveis[0].origem_id, "relatorio-1");
+  assert.equal(recebiveis[0].idempotency_key, "RELATORIO_DESPESA_VIAGEM:relatorio-1:CONTA_RECEBER");
 
   const rateios = insertedRows(db, "rateio_despesas");
   assert.equal(rateios.length, 1);
