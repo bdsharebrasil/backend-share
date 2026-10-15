@@ -1,5 +1,5 @@
 import { dateValue, nullableText, text, uuid } from './lib/strings'
-import { ensureRelatorioContaAReceber } from './financeiro/relatorioContaReceber'
+import { ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements } from './financeiro/relatorioContaReceber'
 
 type ReportRow = Record<string, any>
 
@@ -400,12 +400,11 @@ export async function sincronizarRelatorioViagemFinanceiro(
           status: 'EM_ABERTO',
           criado_por: userId,
         },
-        legacyIdempotencyKeys: [`RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`],
       })
       if (receivable.status === 'reconciliation_required') throw new Error(`conciliacao_conta_receber_necessaria:${receivable.ids.join(',')}`)
       if (receivable.status === 'cancelled') throw new Error(`conta_receber_cancelada:${receivable.ids.join(',')}`)
       statements.push(receivable.statement)
-      await addLinkStatements(db, statements, reportId, 'CONTA_RECEBER', receivable.id, 'RELATORIO_CONTA_RECEBER')
+      statements.push(...repairRelatorioContaReceberLinkStatements(db, reportId, contaCotista.id))
     }
     for (const [payer, payerExpenses] of grouped.entries()) {
       const amountCentavos = Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
@@ -590,12 +589,11 @@ export async function sincronizarRelatorioViagemFinanceiro(
         status: 'EM_ABERTO',
         criado_por: userId,
       },
-      legacyIdempotencyKeys: [`RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`],
     })
     if (receivable.status === 'reconciliation_required') throw new Error(`conciliacao_conta_receber_necessaria:${receivable.ids.join(',')}`)
     if (receivable.status === 'cancelled') throw new Error(`conta_receber_cancelada:${receivable.ids.join(',')}`)
     statements.push(receivable.statement)
-    await addLinkStatements(db, statements, reportId, 'CONTA_RECEBER', receivable.id, 'RELATORIO_CONTA_RECEBER')
+    statements.push(...repairRelatorioContaReceberLinkStatements(db, reportId, contaCotista.id))
     destinos.push({ tipo: 'CONTA_RECEBER', id: receivable.id })
   }
 

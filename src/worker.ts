@@ -19,7 +19,7 @@ import { ctmRoutes } from './routes/ctmRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
-import { ensureRelatorioContaAReceber } from './financeiro/relatorioContaReceber'
+import { ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements } from './financeiro/relatorioContaReceber'
 import { lotesIcaoRelatorio, nomearRotaRelatorio, sequenciaRotaRelatorio, type PernaRotaRelatorio } from './relatorioViagemRota'
 import { validateWorkerSchema } from './lib/schema'
 import { escapeHtml } from './lib/format'
@@ -4308,17 +4308,21 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
           status: 'EM_ABERTO',
           criado_por: user.id,
         },
-        legacyIdempotencyKeys: [`${idempotencyBase}:CONTA_RECEBER`],
         communicated: true,
       })
       if (holdingReceivable.status === 'reconciliation_required') return c.json({ error: 'conciliacao_conta_receber_necessaria', conta_receber_ids: holdingReceivable.ids }, 409)
       if (holdingReceivable.status === 'cancelled') return c.json({ error: 'conta_receber_cancelada', conta_receber_ids: holdingReceivable.ids }, 409)
       const contaIdHolding = holdingReceivable.id
       statements.push(holdingReceivable.statement)
+      statements.push(...repairRelatorioContaReceberLinkStatements(db, id, cotista.id))
       statements.push(db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', data_vencimento_reembolso = ?, enviado_para_cliente_em = COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP), programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id))
       await db.batch(statements)
+      const contaHoldingPersistida = await db.prepare(`SELECT id FROM contas_areceber
+        WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND cotista_id = ?
+          AND UPPER(COALESCE(status, '')) <> 'CANCELADO' LIMIT 1`).bind(id, cotista.id).first<{ id: string }>()
+      const recebivelHoldingCriado = holdingReceivable.status === 'created' && contaHoldingPersistida?.id === holdingReceivable.id
       await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
-      return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaIdHolding, movimento_holding_id: movimentoId, relatorio: await buscarRelatorioViagemComNomes(c, id), message: holdingReceivable.status === 'existing' ? 'Reembolso já enviado ao cliente.' : 'Reembolso programado ao cliente.' })
+      return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaHoldingPersistida?.id || contaIdHolding, movimento_holding_id: movimentoId, relatorio: await buscarRelatorioViagemComNomes(c, id), message: recebivelHoldingCriado ? 'Reembolso programado ao cliente.' : 'Reembolso já enviado ao cliente.' })
     }
     const clienteKey = `${idempotencyBase}:LANCAMENTO_CLIENTE`
     const shareKey = `${idempotencyBase}:LANCAMENTO_SHARE`
@@ -4342,20 +4346,24 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
         status: 'EM_ABERTO',
         criado_por: user.id,
       },
-      legacyIdempotencyKeys: [`${idempotencyBase}:CONTA_RECEBER`],
       communicated: true,
     })
     if (receivable.status === 'reconciliation_required') return c.json({ error: 'conciliacao_conta_receber_necessaria', conta_receber_ids: receivable.ids }, 409)
     if (receivable.status === 'cancelled') return c.json({ error: 'conta_receber_cancelada', conta_receber_ids: receivable.ids }, 409)
     const statements: D1PreparedStatement[] = [receivable.statement]
+    statements.push(...repairRelatorioContaReceberLinkStatements(db, id, cotista.id))
     if (!existingClientLancamento) statements.push(db.prepare(`INSERT INTO lancamentos (id, aeronave_id, cotista_aeronave_id, cliente_id, data_emissao, data_vencimento, descricao, categoria_cliente_id, categoria_nome, grupo_categoria, periodicidade, status, fluxo, tipo_caixa, valor_centavos, pago_por, pago_diretamente, reembolsavel, reembolso_quitado, observacoes, criado_por, origem_tipo, origem_id, idempotency_key, url_doc, numero_doc, numero_voo, fornecedor_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 'SAIDA', 'CLIENTE', ?, NULL, 0, 0, 0, ?, ?, 'RELATORIO_DESPESA_VIAGEM', ?, ?, ?, ?, ?, ?)`).bind(clienteLancamentoFinalId, report.aeronave_id, cotista.id, clienteIdLancamentoFk, hoje, body.data_vencimento, descricao, 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', 'DESPESAS DE VIAGEM', 'DESPESAS DE VIAGEM', periodicidade, valorCentavos, `Tipo de rateio: ${tipoRateio}`, user.id, id, clienteKey, report.pdf_path || null, report.numero_relatorio, numeroVooId, 'SHARE BRASIL'))
     if (!existingShareLancamento) statements.push(db.prepare(`INSERT INTO lancamentos (id, aeronave_id, cotista_aeronave_id, cliente_id, data_emissao, data_vencimento, descricao, categoria_share_id, categoria_nome, grupo_categoria, periodicidade, status, fluxo, tipo_caixa, valor_centavos, pago_por, pago_diretamente, reembolsavel, reembolso_quitado, observacoes, criado_por, origem_tipo, origem_id, idempotency_key, url_doc, numero_doc, numero_voo, fornecedor_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 'ENTRADA', 'SHARE', ?, NULL, 0, 0, 0, ?, ?, 'RELATORIO_DESPESA_VIAGEM', ?, ?, ?, ?, ?, ?)`).bind(shareLancamentoFinalId, report.aeronave_id, cotista.id, clienteIdLancamentoFk, hoje, body.data_vencimento, descricao, 'a7555994-103d-4739-96a5-001c3bec1424', 'REEMBOLSO RELATORIO DE DESPESA DE VIAGENS recebido', 'REEMBOLSOS ENTRADAS', periodicidade, valorCentavos, `Tipo de rateio: ${tipoRateio}`, user.id, id, shareKey, report.pdf_path || null, report.numero_relatorio, numeroVooId, 'SHARE BRASIL'))
     if (body.email_enviado_id) statements.push(db.prepare(`UPDATE lancamentos SET email_enviado_id = ?, email_enviado_em = COALESCE(email_enviado_em, CURRENT_TIMESTAMP) WHERE idempotency_key IN (?, ?)`).bind(body.email_enviado_id, clienteKey, shareKey))
     statements.push(db.prepare("UPDATE lancamentos SET cotista_aeronave_id = ?, cliente_id = ?, periodicidade = 'EVENTUAL', fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, data_vencimento = ?, url_doc = ?, pago_por = NULL WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?").bind(cotista.id, clienteIdLancamentoFk, 'SHARE BRASIL', report.numero_relatorio, numeroVooId, body.data_vencimento, report.pdf_path || null, id))
     statements.push(db.prepare("UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente', data_vencimento_reembolso = ?, enviado_para_cliente_em = COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP), programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?").bind(body.data_vencimento, id))
     await db.batch(statements)
+    const contaReceberPersistida = await db.prepare(`SELECT id FROM contas_areceber
+      WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ? AND cotista_id = ?
+        AND UPPER(COALESCE(status, '')) <> 'CANCELADO' LIMIT 1`).bind(id, cotista.id).first<{ id: string }>()
+    const recebivelCriado = receivable.status === 'created' && contaReceberPersistida?.id === receivable.id
     await persistirMetadadosFinanceirosRelatorio(db, id, user.id, body.email_enviado_id || null, true, body.data_vencimento)
-    return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: receivable.id, lancamento_cliente_id: clienteLancamentoFinalId, lancamento_share_id: shareLancamentoFinalId, relatorio: await buscarRelatorioViagemComNomes(c, id), message: existingClientLancamento || existingShareLancamento || receivable.status === 'existing' ? 'Reembolso já enviado ao cliente.' : 'Reembolso programado ao cliente.' })
+    return c.json({ success: true, status: 'enviado_cliente', conta_receber_id: contaReceberPersistida?.id || receivable.id, lancamento_cliente_id: clienteLancamentoFinalId, lancamento_share_id: shareLancamentoFinalId, relatorio: await buscarRelatorioViagemComNomes(c, id), message: existingClientLancamento || existingShareLancamento || !recebivelCriado ? 'Reembolso já enviado ao cliente.' : 'Reembolso programado ao cliente.' })
   } catch (error: any) { log.error('[relatorio-despesa-viagem:enviar-cliente]', error?.message || error); return c.json({ error: error?.message || 'falha_ao_enviar_cliente' }, 400) }
 })
 app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {

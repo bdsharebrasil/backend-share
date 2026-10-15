@@ -22,7 +22,6 @@ export type EnsureRelatorioContaAReceberInput = {
   reportId: string
   cotistaId: string
   values: ContaAReceberValues
-  legacyIdempotencyKeys?: string[]
   /** Only set when the customer/holding is being formally communicated. */
   communicated?: boolean
 }
@@ -40,8 +39,8 @@ export async function ensureRelatorioContaAReceber(
   if (!reportId || !cotistaId) throw new Error('relatorio_e_devedor_obrigatorios_para_conta_receber')
 
   const canonicalKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:CONTA_RECEBER`
-  const legacyKeys = [...new Set(input.legacyIdempotencyKeys || [])]
-  const recognizedKeys = [...new Set([canonicalKey, ...legacyKeys])]
+  const legacyRouteKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`
+  const recognizedKeys = [canonicalKey, legacyRouteKey]
   const placeholders = recognizedKeys.map((_, index) => `?${index + 1}`).join(', ')
   const debtorIndex = recognizedKeys.length + 1
   const reportIndex = debtorIndex + 1
@@ -113,7 +112,39 @@ export async function ensureRelatorioContaAReceber(
   }
   const entries = Object.entries(row).filter(([column, value]) => columns.has(column) && value !== undefined)
   if (!entries.length) throw new Error('tabela_financeira_sem_colunas:contas_areceber')
-  const statement = db.prepare(`INSERT INTO contas_areceber (${entries.map(([column]) => column).join(', ')}) VALUES (${entries.map(() => '?').join(', ')})`)
+  // A cláusula sem alvo específico continua válida antes da migração; após o
+  // índice parcial, ela suprime atomicamente a inserção concorrente duplicada.
+  const statement = db.prepare(`INSERT INTO contas_areceber (${entries.map(([column]) => column).join(', ')}) VALUES (${entries.map(() => '?').join(', ')})
+    ON CONFLICT DO NOTHING`)
     .bind(...entries.map(([, value]) => value ?? null))
   return { status: 'created', id, statement }
+}
+
+export function repairRelatorioContaReceberLinkStatements(
+  db: D1Database,
+  reportId: string,
+  cotistaId: string,
+): D1PreparedStatement[] {
+  const canonicalKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:CONTA_RECEBER`
+  const legacyKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`
+  return [
+    db.prepare(`DELETE FROM financeiro_vinculos
+      WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?
+        AND destino_tipo = 'CONTA_RECEBER'
+        AND (
+          destino_id IN (SELECT cr.id FROM contas_areceber cr
+            WHERE cr.cotista_id = ? AND (
+              (cr.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND cr.origem_id = ?)
+              OR cr.idempotency_key IN (?, ?)
+            ))
+          OR NOT EXISTS (SELECT 1 FROM contas_areceber cr WHERE cr.id = financeiro_vinculos.destino_id)
+        )`).bind(reportId, cotistaId, reportId, canonicalKey, legacyKey),
+    db.prepare(`INSERT OR IGNORE INTO financeiro_vinculos
+      (id, origem_tipo, origem_id, destino_tipo, destino_id, tipo_vinculo)
+      SELECT lower(hex(randomblob(16))), 'RELATORIO_DESPESA_VIAGEM', ?, 'CONTA_RECEBER', cr.id, 'RELATORIO_CONTA_RECEBER'
+      FROM contas_areceber cr
+      WHERE cr.origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND cr.origem_id = ? AND cr.cotista_id = ?
+        AND UPPER(COALESCE(cr.status, '')) <> 'CANCELADO'
+      LIMIT 1`).bind(reportId, reportId, cotistaId),
+  ]
 }

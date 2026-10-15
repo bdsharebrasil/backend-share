@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureRelatorioContaAReceber } from "../src/financeiro/relatorioContaReceber.ts";
+import {
+  ensureRelatorioContaAReceber,
+  repairRelatorioContaReceberLinkStatements,
+} from "../src/financeiro/relatorioContaReceber.ts";
 
 const columns = [
   "id", "cotista_id", "origem_tipo", "origem_id", "idempotency_key", "valor_centavos",
@@ -16,7 +19,11 @@ function fakeDb(matches = [], hasConfirmedPayment = false) {
       const statement = {
         sql,
         values: [],
-        bind(...values) { this.values = values; if (sql.includes("SELECT * FROM contas_areceber")) queries.push({ sql, values }); return this; },
+        bind(...values) {
+          this.values = values;
+          if (sql.includes("SELECT * FROM contas_areceber")) queries.push({ sql, values });
+          return this;
+        },
         async all() {
           if (sql.includes("pragma_table_info('contas_areceber')")) return { results: columns.map((name) => ({ name })) };
           if (sql.includes("SELECT * FROM contas_areceber")) return { results: matches };
@@ -44,18 +51,25 @@ const baseInput = {
     status: "EM_ABERTO",
     lancamentos_id: "lancamento-cliente",
   },
-  legacyIdempotencyKeys: [
-    "RELATORIO_DESPESA_VIAGEM:relatorio-1:REEMBOLSO_CLIENTE:CONTA_RECEBER",
-  ],
 };
 
 test("cria recebível somente quando não encontra conta para a origem e devedor", async () => {
   const result = await ensureRelatorioContaAReceber(fakeDb(), baseInput);
   assert.equal(result.status, "created");
   assert.match(result.statement.sql, /^INSERT INTO contas_areceber/);
+  assert.match(result.statement.sql, /ON CONFLICT DO NOTHING/);
   assert.equal(result.statement.values[0], "recebivel-novo");
   assert.ok(result.statement.values.includes("cotista-1"));
   assert.equal(result.statement.values.at(-1), "RELATORIO_DESPESA_VIAGEM:relatorio-1:CONTA_RECEBER");
+});
+
+test("repara vínculo antigo para o recebível ativo sobrevivente do relatório/devedor", () => {
+  const statements = repairRelatorioContaReceberLinkStatements(fakeDb(), "relatorio-1", "cotista-1");
+  assert.equal(statements.length, 2);
+  assert.match(statements[0].sql, /^DELETE FROM financeiro_vinculos/);
+  assert.match(statements[1].sql, /^INSERT OR IGNORE INTO financeiro_vinculos/);
+  assert.match(statements[1].sql, /SELECT[\s\S]*cr\.id[\s\S]*cr\.origem_id = \?[\s\S]*cr\.cotista_id = \?/);
+  assert.deepEqual(statements[1].values, ["relatorio-1", "relatorio-1", "cotista-1"]);
 });
 
 test("retorna conciliação quando duas contas ativas compartilham origem/devedor", async () => {
@@ -106,7 +120,6 @@ test("reconhece registros legados pelo relatório, devedor e chave antiga", asyn
   ]);
   assert.equal(result.statement.values.at(-1), "conta-legada");
 });
-
 
 test("preserva pagamentos parciais confirmados mesmo com conta ainda em aberto", async () => {
   const db = fakeDb([
