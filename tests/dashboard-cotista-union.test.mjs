@@ -71,6 +71,19 @@ test("dashboard Cotista converte IDs de fornecedor em nomes antes de responder",
   assert.match(source, /fornecedoresPorId\.get\(String\(row\.fornecedor_id/);
 });
 
+test("dashboard Cotista recupera fornecedor, número e PDF do lançamento vinculado ao rateio", () => {
+  const queryStart = source.indexOf("const rows = await listar(db, `");
+  const queryEnd = source.indexOf("`, ...paramsCliente", queryStart);
+  assert.notEqual(queryStart, -1, "consulta consolidada do dashboard deve existir");
+  assert.notEqual(queryEnd, -1, "consulta consolidada do dashboard deve terminar corretamente");
+  const clienteBranch = source.slice(queryStart, queryEnd).split(/\bUNION ALL\b/i)[0];
+  assert.match(clienteBranch, /COALESCE\(r\.fornecedor_id, l\.fornecedores_favoritos_id\) AS fornecedor_id/);
+  assert.match(clienteBranch, /NULLIF\(TRIM\(l\.fornecedor_nome\), ''\) AS fornecedor_nome/);
+  assert.match(clienteBranch, /NULLIF\(TRIM\(r\.numero_nf\), ''\)[\s\S]*NULLIF\(TRIM\(l\.numero_doc\), ''\)\s*\) AS numero_doc/);
+  assert.match(clienteBranch, /COALESCE\(NULLIF\(r\.url_doc, ''\), NULLIF\(r\.documento_url, ''\), NULLIF\(l\.url_doc, ''\)\) AS url_doc/);
+  assert.equal((clienteBranch.match(/LEFT JOIN lancamentos l ON l\.id = r\.lancamento_id/g) || []).length, 1);
+});
+
 
 test("balanço usa o pagamento real e mantém IDs na matriz de compensação", () => {
   const resultado = calcularCompensacaoBalanco([

@@ -338,7 +338,7 @@ async function ensureLancamentoCustoIntegral(
     WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1 AND idempotency_key = ?2 LIMIT 1`)
     .bind(reportId, idempotencyKey).first<{ id: string }>()
   const id = text(existing?.id) || uuid()
-  const dataEmissao = await dataEmissaoRelatorio(db, report, id)
+  const dataEmissao = dateValue(report.data_inicio)
   const values = {
     id,
     aeronave_id: text(report.aeronave_id),

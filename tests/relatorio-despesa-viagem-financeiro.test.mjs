@@ -106,6 +106,7 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(lancamentoCusto?.valor_centavos, 8500);
   assert.equal(lancamentoCusto?.origem_tipo, "RELATORIO_DESPESA_VIAGEM");
   assert.equal(lancamentoCusto?.origem_id, "relatorio-1");
+  assert.equal(lancamentoCusto?.data_emissao, "2026-10-10");
   assert.notEqual(lancamentoCusto?.idempotency_key, lancamentoReembolso?.idempotency_key);
 
   const recebiveis = insertedRows(db, "contas_areceber");
@@ -125,6 +126,18 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(rateios[0].valor_pago_real_centavos, 1000);
   assert.equal(rateios[0].pago_por, "cotista-aeronave-1");
   assert.equal(rateios[0].pago_diretamente, 0, "pagamento parcial não marca o rateio todo como pago diretamente");
+});
+
+test("data de emissão do custo integral segue a data inicial do relatório, não a aprovação", async () => {
+  const db = fakeDb();
+  await sincronizarRelatorioViagemFinanceiro(db, report({
+    data_inicio: "2026-10-04",
+    aprovado_tripulante_1_em: "2026-10-13T20:00:00.000Z",
+  }), "usuario-1");
+
+  const custo = insertedRows(db, "lancamentos")
+    .find((row) => row.idempotency_key === "RELATORIO_DESPESA_VIAGEM:relatorio-1:CUSTO_INTEGRAL");
+  assert.equal(custo?.data_emissao, "2026-10-04");
 });
 
 test("relatório de R$ 147,50 registra R$ 100,00 pagos diretamente e mantém R$ 47,50 a receber", async () => {
@@ -166,6 +179,8 @@ test("repetir a sincronização atualiza custo e rateios sem trocar suas identid
     }],
   });
   await sincronizarRelatorioViagemFinanceiro(db, report({
+    data_inicio: "2026-10-04",
+    aprovado_tripulante_1_em: "2026-10-13T20:00:00.000Z",
     despesas: [{ valor: 147.5, pago_por: "cliente" }],
   }), "usuario-1");
 
@@ -173,7 +188,9 @@ test("repetir a sincronização atualiza custo e rateios sem trocar suas identid
   assert.equal(updates.length, 1);
   assert.equal(updates[0].values.at(-1), "rateio-existente");
   assert.equal(updates[0].values[0], "custo-pai-existente");
-  assert.ok(db.batched.some((statement) => statement.sql.startsWith("UPDATE lancamentos SET") && statement.values.at(-1) === "custo-pai-existente"));
+  const custoAtualizado = db.batched.find((statement) => statement.sql.includes("escopo_financeiro = 'FINANCEIRO' WHERE id = ?"));
+  assert.ok(custoAtualizado, "o lançamento de custo integral existente deve ser atualizado");
+  assert.equal(custoAtualizado.values[3], "2026-10-04");
   assert.equal(insertedRows(db, "rateio_despesas").length, 0);
   assert.equal(insertedRows(db, "lancamentos").length, 0);
 });

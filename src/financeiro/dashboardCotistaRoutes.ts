@@ -115,10 +115,21 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(db, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
-             COALESCE(r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.numero_doc, r.documento_numero) AS numero_doc,
-             r.numero_nf, r.numero_recibo, r.numero_demonstrativo, r.url_doc, r.url_demonstrativo, r.url_nf, r.url_recibo, r.url_boleto,
+             COALESCE(
+               NULLIF(TRIM(r.numero_nf), ''),
+               NULLIF(TRIM(r.numero_recibo), ''),
+               NULLIF(TRIM(r.numero_demonstrativo), ''),
+               NULLIF(TRIM(r.numero_doc), ''),
+               NULLIF(TRIM(r.documento_numero), ''),
+               NULLIF(TRIM(l.numero_doc), '')
+             ) AS numero_doc,
+             r.numero_nf, r.numero_recibo, r.numero_demonstrativo,
+             COALESCE(NULLIF(r.url_doc, ''), NULLIF(r.documento_url, ''), NULLIF(l.url_doc, '')) AS url_doc,
+             r.url_demonstrativo, r.url_nf, r.url_recibo, r.url_boleto,
              ${selecionarColunaOpcional(schema, 'rateio_despesas', 'r', ['anexos_json'], 'anexos_json')}, r.subcategoria_1, r.subcategoria_2, r.subcategoria_3, r.subcategoria_4,
-             r.fornecedor_id, NULL AS fornecedor_nome, r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.tipo_rateio, r.periodicidade,
+             COALESCE(r.fornecedor_id, l.fornecedores_favoritos_id) AS fornecedor_id,
+             NULLIF(TRIM(l.fornecedor_nome), '') AS fornecedor_nome,
+             r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.tipo_rateio, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
              r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
