@@ -321,10 +321,16 @@ export function buildLancamentoSemRateioPredicate(schema: Map<string, Set<string
   const excluirEntradaReembolso = lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('fluxo')
     ? ` AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'REEMBOLSO' AND UPPER(COALESCE(l.fluxo, '')) = 'ENTRADA')`
     : ''
+  const excluirCobrancaRelatorio = lancamentoColumns?.has('origem_tipo') && lancamentoColumns.has('idempotency_key')
+    ? ` AND NOT (UPPER(COALESCE(l.origem_tipo, '')) = 'RELATORIO_DESPESA_VIAGEM' AND l.idempotency_key LIKE '%:LANCAMENTO_CLIENTE')`
+    : ''
+  const excluirCaixaShare = lancamentoColumns?.has('escopo_financeiro')
+    ? ` AND COALESCE(l.escopo_financeiro, 'FINANCEIRO') <> 'CAIXA_SHARE'`
+    : ''
 
   return `NOT EXISTS (
         SELECT 1 FROM rateio_despesas rd
          WHERE UPPER(COALESCE(rd.status, '')) <> 'CANCELADO'
            AND (${relacionamentosRateio.join('\n             OR ')})
-      )${excluirEntradaReembolso}`
+      )${excluirEntradaReembolso}${excluirCobrancaRelatorio}${excluirCaixaShare}`
 }

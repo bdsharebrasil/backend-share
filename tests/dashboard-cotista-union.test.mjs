@@ -176,3 +176,33 @@ test("predicado de deduplicação usa vínculos de reembolso somente quando as c
   assert.match(predicate, /rd\.origem_id = l\.origem_id/);
   assert.match(predicate, /AND NOT \(UPPER\(COALESCE\(l\.origem_tipo/);
 });
+
+test("pagamento direto parcial reduz o saldo sem transformar o custo integral em pago", () => {
+  const resultado = calcularCompensacaoBalanco([
+    { participante_id: "cotista-1", participante_nome: "Cotista", valor_rateado_centavos: 14750, valor_pago_real_centavos: 10000, pago_por: "cotista-1", pago_diretamente: 0, status: "EM_ABERTO", fluxo: "SAIDA" },
+  ]);
+  assert.equal(resultado.saldos[0]?.totalDevidoCentavos, 14750);
+  assert.equal(resultado.saldos[0]?.totalPagoCentavos, 10000);
+  assert.equal(resultado.saldos[0]?.saldoCentavos, -4750);
+});
+
+test("dashboard exclui escopo CAIXA_SHARE da composição de custo", () => {
+  assert.match(source, /COALESCE\(l\.escopo_financeiro, 'FINANCEIRO'\) = 'FINANCEIRO'/);
+  assert.match(source, /COALESCE\(mh\.escopo_financeiro, 'FINANCEIRO'\) = 'FINANCEIRO'/);
+  assert.match(source, /String\(rateio\.pago_por\) === String\(rateio\.cotista_id\)/);
+  const schema = new Map([
+    ["lancamentos", new Set(["fluxo", "escopo_financeiro"])],
+    ["rateio_despesas", new Set(["lancamento_id", "status"])],
+  ]);
+  assert.match(buildLancamentoSemRateioPredicate(schema), /l\.escopo_financeiro/);
+});
+
+test("cópia de cobrança do relatório não reaparece como despesa além do custo integral", () => {
+  const schema = new Map([
+    ["lancamentos", new Set(["fluxo", "origem_tipo", "idempotency_key", "escopo_financeiro"])],
+    ["rateio_despesas", new Set(["lancamento_id", "status"])],
+  ]);
+  const predicate = buildLancamentoSemRateioPredicate(schema);
+  assert.match(predicate, /RELATORIO_DESPESA_VIAGEM/);
+  assert.match(predicate, /:LANCAMENTO_CLIENTE/);
+});

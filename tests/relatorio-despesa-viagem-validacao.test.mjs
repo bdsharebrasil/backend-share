@@ -7,6 +7,7 @@ const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf
 const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
 const moduloContaReceber = await readFile(new URL("../src/financeiro/relatorioContaReceber.ts", import.meta.url), "utf8");
 const migrationContaReceber = await readFile(new URL("../migrations/20261015_relatorio_conta_receber_unicidade.sql", import.meta.url), "utf8");
+const migrationCustoIntegral = await readFile(new URL("../migrations/20261016_relatorio_viagem_custo_integral.sql", import.meta.url), "utf8");
 const frontendRelatorio = await readFile(new URL("../../Share-Brasil-Financeiro/src/pages/RelatorioDespesaViagem.tsx", import.meta.url), "utf8");
 const migrationHistorico = await readFile(new URL("../migrations/20261013_relatorio_despesa_viagem_historico_ajustes.sql", import.meta.url), "utf8");
 const inicioEnvioCliente = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente'");
@@ -197,4 +198,19 @@ test("rejeição autenticada aceita imagem multipart e persiste o anexo no diret
   assert.match(rotaAprovacaoAutenticada, /notifyReportRejection\(c, updated/);
   assert.match(rotaMinhas, /anexos_rejeicao: rejectionAttachments\(row\.anexos_rejeicao, row\.id\)/);
   assert.match(worker, /anexos-rejeicao\/\$\{encodeURIComponent\(id\)\}\/arquivo/);
+});
+
+test("lançamento Share da rota de envio é classificado fora do custo do cotista", () => {
+  assert.match(rotaEnvioCliente, /idempotency_key, escopo_financeiro, url_doc/);
+  assert.match(rotaEnvioCliente, /'CAIXA_SHARE'/);
+  assert.match(rotaEnvioCliente, /UPDATE lancamentos SET escopo_financeiro = 'CAIXA_SHARE' WHERE id = \?/);
+});
+
+test("migração de custo integral vincula rateios e reconhece pagamentos diretos sem criar eventos de baixa", () => {
+  assert.match(migrationCustoIntegral, /:CUSTO_INTEGRAL/);
+  assert.match(migrationCustoIntegral, /UPDATE rateio_despesas AS rd[\s\S]*SET lancamento_id =/);
+  assert.match(migrationCustoIntegral, /valor_pago_real_centavos = CASE[\s\S]*MIN\(CAST\(ROUND\(COALESCE\(r\.total_cliente/);
+  assert.match(migrationCustoIntegral, /pago_diretamente = CASE[\s\S]*>= COALESCE\(rd\.valor_rateado_centavos/);
+  assert.match(migrationCustoIntegral, /SET escopo_financeiro = 'CAIXA_SHARE'/);
+  assert.doesNotMatch(migrationCustoIntegral, /INSERT INTO rateio_pagamentos|INSERT INTO auditoria_financeira/);
 });
