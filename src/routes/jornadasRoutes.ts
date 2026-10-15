@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono'
-import { checkInternalAuth, requireFlightOperationAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
+import { requireFlightOperationAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
 import type { Env } from '../types/env'
@@ -518,8 +518,7 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
 })
 
 jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
-  const isInternalRequest = await checkInternalAuth(c)
-  if (!isInternalRequest && !(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaJornadas(c)
   const db = c.env.SHARE_DB
   const perna = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1 AND jornada_id = ?2').bind(c.req.param('pernaId'), c.req.param('jornadaId')).first<any>()
@@ -533,8 +532,6 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   if (!body || typeof body !== 'object' || Array.isArray(body)) return c.json({ error: 'payload_invalido' }, 400)
-  const camposDeHorario = ['horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte']
-  if (!isInternalRequest && Object.keys(body).some((campo) => !camposDeHorario.includes(campo))) return c.json({ error: 'campos_restritos', detail: 'O tripulante pode atualizar somente os horários da perna.' }, 403)
   const alias: Record<string, string> = { tempo_ac: 'horario_ac', tempo_dep: 'horario_dep', tempo_pou: 'horario_pouso', tempo_cor: 'horario_corte' }
   for (const [de, para] of Object.entries(alias)) if (body[de] !== undefined && body[para] === undefined) body[para] = body[de]
   const valores: Record<string, unknown> = {}

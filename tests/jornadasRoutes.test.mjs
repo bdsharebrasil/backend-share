@@ -69,7 +69,7 @@ test('iniciar jornada não exige ficha de peso e balanceamento concluída', asyn
   assert.doesNotMatch(endpoint, /ctm_ficha_peso_balanceamento|peso_balanceamento_obrigatorio|pesoBalanceamentoConcluido/)
 })
 
-test('permite completar horários da perna em voo ou em solo, mas não antes ou depois do agendamento', async () => {
+test('permite editar todos os dados da perna em voo ou em solo, mas não antes ou depois do agendamento', async () => {
   for (const status of ['em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo', 'pousado']) {
     assert.equal(agendamentoPermiteCompletarHorarios(status), true, `status ${status}`)
   }
@@ -85,7 +85,7 @@ test('permite completar horários da perna em voo ou em solo, mas não antes ou 
   assert.match(endpoint, /requireFlightOperationAccess\(c, jornadaAcesso\.solicitacao_id\)/)
   assert.match(endpoint, /agendamentoPermiteCompletarHorarios\(jornadaAcesso\.status_agendamento\)/)
   assert.match(endpoint, /!body \|\| typeof body !== 'object' \|\| Array\.isArray\(body\)/)
-  assert.match(endpoint, /!isInternalRequest && Object\.keys\(body\)\.some/)
-  assert.match(endpoint, /const camposDeHorario = \['horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte'\]/)
+  assert.doesNotMatch(endpoint, /campos_restritos/)
+  assert.doesNotMatch(endpoint, /isInternalRequest/)
   assert.match(endpoint, /perna\.lancamento_diario_id/)
 })
