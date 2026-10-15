@@ -5,6 +5,7 @@ import { calcularVencimentoReembolsoTripulante, findLancamentoClientId } from ".
 
 const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
 const financeiro = await readFile(new URL("../src/relatorioFinanceiro.ts", import.meta.url), "utf8");
+const moduloContaReceber = await readFile(new URL("../src/financeiro/relatorioContaReceber.ts", import.meta.url), "utf8");
 const frontendRelatorio = await readFile(new URL("../../Share-Brasil-Financeiro/src/pages/RelatorioDespesaViagem.tsx", import.meta.url), "utf8");
 const migrationHistorico = await readFile(new URL("../migrations/20261013_relatorio_despesa_viagem_historico_ajustes.sql", import.meta.url), "utf8");
 const inicioEnvioCliente = worker.indexOf("app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente'");
@@ -134,15 +135,25 @@ test("lookup de cliente consulta a tabela singular existente no D1", async () =>
 });
 
 test("envio ao cliente reconcilia o recebível sem interromper a criação dos lançamentos ausentes", () => {
-  assert.match(rotaEnvioCliente, /ensureRelatorioContaAReceber\(db, id/);
-  assert.match(financeiro, /const idempotencyKey = `RELATORIO_DESPESA_VIAGEM:\$\{reportId\}:CONTA_RECEBER`/);
+  assert.match(rotaEnvioCliente, /ensureRelatorioContaAReceber\(db, \{/);
+  assert.match(moduloContaReceber, /const canonicalKey = `RELATORIO_DESPESA_VIAGEM:\$\{reportId\}:CONTA_RECEBER`/);
   assert.match(rotaEnvioCliente, /if \(!existingClientLancamento\) statements\.push/);
   assert.match(rotaEnvioCliente, /if \(!existingShareLancamento\) statements\.push/);
   assert.doesNotMatch(rotaEnvioCliente, /if \(existing\) \{[\s\S]*?return c\.json/);
 });
 
+test("holding compartilha reconciliação e vincula recebível ao movimento, não a lançamento", () => {
+  assert.match(rotaEnvioCliente, /if \(report\.socio_id\)/);
+  assert.match(rotaEnvioCliente, /legacyIdempotencyKeys: \[`\$\{idempotencyBase\}:CONTA_RECEBER`\]/);
+  assert.match(rotaEnvioCliente, /movimentos_id: movimentoId,[\s\S]*?lancamentos_id: null/);
+  assert.match(rotaEnvioCliente, /communicated: true/);
+  assert.match(rotaEnvioCliente, /reconciliation_required/);
+  assert.match(moduloContaReceber, /status: 'reconciliation_required'/);
+});
+
 test("envio ao cliente só grava cliente_id se existir na tabela de cadastro", () => {
-  assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, ensureRelatorioContaAReceber, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
+  assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
+  assert.match(worker, /import \{ ensureRelatorioContaAReceber \} from '\.\/financeiro\/relatorioContaReceber'/);
   assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
   assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);
   assert.match(rotaEnvioCliente, /\.bind\(cotista\.id, clienteIdLancamentoFk, 'SHARE BRASIL'/);

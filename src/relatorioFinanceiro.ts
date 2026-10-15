@@ -1,4 +1,5 @@
 import { dateValue, nullableText, text, uuid } from './lib/strings'
+import { ensureRelatorioContaAReceber } from './financeiro/relatorioContaReceber'
 
 type ReportRow = Record<string, any>
 
@@ -85,40 +86,6 @@ async function prepareInsert(db: D1Database, table: string, row: Record<string, 
   if (!entries.length) throw new Error(`tabela_financeira_sem_colunas:${table}`)
   const names = entries.map(([column]) => column)
   return db.prepare(`INSERT INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`).bind(...entries.map(([, value]) => value ?? null))
-}
-
-export async function ensureRelatorioContaAReceber(
-  db: D1Database,
-  reportId: string,
-  values: Record<string, unknown>,
-  legacyIdempotencyKeys: string[] = [],
-): Promise<{ id: string; statement: D1PreparedStatement; created: boolean }> {
-  const idempotencyKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:CONTA_RECEBER`
-  const keys = [...new Set([idempotencyKey, ...legacyIdempotencyKeys])]
-  const placeholders = keys.map((_, index) => `?${index + 1}`).join(', ')
-  const reportIdIndex = keys.length + 1
-  const existing = await db.prepare(`SELECT id FROM contas_areceber
-    WHERE idempotency_key IN (${placeholders})
-      OR (origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?${reportIdIndex})
-    ORDER BY CASE WHEN idempotency_key = ?1 THEN 0 ELSE 1 END LIMIT 1`)
-    .bind(...keys, reportId).first<{ id: string }>()
-
-  const columnsResult = await db.prepare("SELECT name FROM pragma_table_info('contas_areceber')").all<{ name: string }>()
-  const columns = new Set((columnsResult.results || []).map((item) => String(item.name)))
-  if (!columns.size) throw new Error('tabela_financeira_ausente:contas_areceber')
-  const normalized = { ...values, origem_tipo: 'RELATORIO_DESPESA_VIAGEM', origem_id: reportId, idempotency_key: idempotencyKey }
-  if (existing?.id) {
-    const entries = Object.entries(normalized).filter(([column, value]) => column !== 'id' && columns.has(column) && value !== undefined)
-    const statement = db.prepare(`UPDATE contas_areceber SET ${entries.map(([column]) => `${column} = ?`).join(', ')} WHERE id = ?`)
-      .bind(...entries.map(([, value]) => value ?? null), existing.id)
-    return { id: existing.id, statement, created: false }
-  }
-  const id = String(values.id || uuid())
-  const row = { ...normalized, id }
-  const entries = Object.entries(row).filter(([column, value]) => columns.has(column) && value !== undefined)
-  const statement = db.prepare(`INSERT INTO contas_areceber (${entries.map(([column]) => column).join(', ')}) VALUES (${entries.map(() => '?').join(', ')})`)
-    .bind(...entries.map(([, value]) => value ?? null))
-  return { id, statement, created: true }
 }
 
 async function selectCotistas(db: D1Database, report: ReportRow): Promise<{ kind: OwnerKind; rows: CotistaRow[] }> {
@@ -418,18 +385,25 @@ export async function sincronizarRelatorioViagemFinanceiro(
       .filter(([payer]) => payer !== 'cliente')
       .reduce((total, [, payerExpenses]) => total + Math.round(payerExpenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100), 0)
     if (existingReceivableAmount > 0 && rows[0]) {
-      const receivable = await ensureRelatorioContaAReceber(db, reportId, {
-        id: uuid(),
-        data_vencimento: existingDueDate,
-        valor_centavos: existingReceivableAmount,
-        categoria_nome: 'DESPESAS DE VIAGEM',
-        descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
-        aeronave_id: text(report.aeronave_id),
-        cotista_id: rows[0].id,
-        lancamentos_id: null,
-        status: 'EM_ABERTO',
-        criado_por: userId,
-      }, [`RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`])
+      const contaCotista = rows.find((row) => row.socio_id === text(report.socio_id)) || rows[0]
+      const receivable = await ensureRelatorioContaAReceber(db, {
+        reportId,
+        cotistaId: contaCotista.id,
+        values: {
+          id: uuid(),
+          data_vencimento: existingDueDate,
+          valor_centavos: existingReceivableAmount,
+          categoria_nome: 'DESPESAS DE VIAGEM',
+          descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
+          aeronave_id: text(report.aeronave_id),
+          lancamentos_id: null,
+          status: 'EM_ABERTO',
+          criado_por: userId,
+        },
+        legacyIdempotencyKeys: [`RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`],
+      })
+      if (receivable.status === 'reconciliation_required') throw new Error(`conciliacao_conta_receber_necessaria:${receivable.ids.join(',')}`)
+      if (receivable.status === 'cancelled') throw new Error(`conta_receber_cancelada:${receivable.ids.join(',')}`)
       statements.push(receivable.statement)
       await addLinkStatements(db, statements, reportId, 'CONTA_RECEBER', receivable.id, 'RELATORIO_CONTA_RECEBER')
     }
@@ -600,22 +574,29 @@ export async function sincronizarRelatorioViagemFinanceiro(
   }
 
   if (valorAReceberCentavos > 0 && rows[0]) {
-    const { id: contaReceberId, statement } = await ensureRelatorioContaAReceber(db, reportId, {
-      id: uuid(),
-      data_vencimento: fallbackDate,
-      valor_centavos: valorAReceberCentavos,
-      categoria_nome: 'DESPESAS DE VIAGEM',
-      descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
-      aeronave_id: text(report.aeronave_id),
-      cotista_id: rows[0].id,
-      // O lançamento do tripulante é o reembolso a pagar, não a cobrança do cliente.
-      lancamentos_id: null,
-      status: 'EM_ABERTO',
-      criado_por: userId,
-    }, [`RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`])
-    statements.push(statement)
-    await addLinkStatements(db, statements, reportId, 'CONTA_RECEBER', contaReceberId, 'RELATORIO_CONTA_RECEBER')
-    destinos.push({ tipo: 'CONTA_RECEBER', id: contaReceberId })
+    const contaCotista = rows.find((row) => row.socio_id === text(report.socio_id)) || rows[0]
+    const receivable = await ensureRelatorioContaAReceber(db, {
+      reportId,
+      cotistaId: contaCotista.id,
+      values: {
+        id: uuid(),
+        data_vencimento: fallbackDate,
+        valor_centavos: valorAReceberCentavos,
+        categoria_nome: 'DESPESAS DE VIAGEM',
+        descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
+        aeronave_id: text(report.aeronave_id),
+        // O lançamento do tripulante é o reembolso a pagar, não a cobrança do cliente.
+        lancamentos_id: null,
+        status: 'EM_ABERTO',
+        criado_por: userId,
+      },
+      legacyIdempotencyKeys: [`RELATORIO_DESPESA_VIAGEM:${reportId}:REEMBOLSO_CLIENTE:CONTA_RECEBER`],
+    })
+    if (receivable.status === 'reconciliation_required') throw new Error(`conciliacao_conta_receber_necessaria:${receivable.ids.join(',')}`)
+    if (receivable.status === 'cancelled') throw new Error(`conta_receber_cancelada:${receivable.ids.join(',')}`)
+    statements.push(receivable.statement)
+    await addLinkStatements(db, statements, reportId, 'CONTA_RECEBER', receivable.id, 'RELATORIO_CONTA_RECEBER')
+    destinos.push({ tipo: 'CONTA_RECEBER', id: receivable.id })
   }
 
   if (!statements.length) return { idempotent: false, destinos: [] }
