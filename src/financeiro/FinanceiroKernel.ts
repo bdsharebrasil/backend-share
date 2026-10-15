@@ -2066,14 +2066,23 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     ? await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(shareId).first<Row>()
     : null
   const rateioLancamentoId = reimbursement
-    ? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id)
+    ? nullableText(reimbursement.lancamento_cliente_id) ?? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id)
     : movimentoHoldingId ? null : nullableText(lancamentoClienteSaida?.id) ?? shareId
   let rateios = movimentoHoldingId
     ? await db.prepare(`SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_hold WHERE ${holdingMovementColumn(schema)} = ? AND status <> 'CANCELADO'`).bind(movimentoHoldingId).all<Row>()
     : rateioLancamentoId
-    ? await db.prepare("SELECT id, valor_rateado_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
+    ? await db.prepare("SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(rateioLancamentoId).all<Row>()
     : { results: [] as Row[] }
+  const rateiosLegadosShare = reimbursement && rateioLancamentoId && !(rateios.results || []).length && nullableText(reimbursement.lancamento_origem_id)
+    ? await db.prepare("SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')")
+      .bind(reimbursement.lancamento_origem_id).all<Row>()
+    : { results: [] as Row[] }
+  if (rateiosLegadosShare.results?.length) rateios = rateiosLegadosShare
   const statements: D1PreparedStatement[] = []
+  for (const rateio of rateiosLegadosShare.results || []) {
+    statements.push(db.prepare('UPDATE rateio_despesas SET lancamento_id = ? WHERE id = ? AND lancamento_id = ?')
+      .bind(rateioLancamentoId, rateio.id, reimbursement!.lancamento_origem_id))
+  }
 
   if (reimbursement && rateioLancamentoId && !(rateios.results || []).length) {
     const cotista = await db.prepare('SELECT percentual_sociedade FROM cotista_aeronave WHERE id = ?').bind(reimbursement.cotista_id).first<Row>()
@@ -2093,11 +2102,9 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const paidByPayments = new Map<string, number>()
   const existingKeys = new Set<string>()
   const existing = await db.prepare("SELECT rateio_id, valor_centavos, idempotency_key FROM rateio_pagamentos WHERE conta_receber_id = ? AND status = 'CONFIRMADO'").bind(receivableId).all<Row>()
-  if (movimentoHoldingId) {
-    for (const rateio of rateios.results || []) {
-      const paid = Number(rateio.valor_pago_real_centavos || 0)
-      if (paid > 0) existingByRateio.set(String(rateio.id), paid)
-    }
+  for (const rateio of rateios.results || []) {
+    const paid = Number(rateio.valor_pago_real_centavos || 0)
+    if (paid > 0) existingByRateio.set(String(rateio.id), paid)
   }
   for (const payment of existing.results || []) {
     const rid = String(payment.rateio_id)

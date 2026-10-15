@@ -7,6 +7,10 @@ const [kernel, routes, migration] = await Promise.all([
   readFile(new URL("../src/financeiro/recibosRoutes.ts", import.meta.url), "utf8"),
   readFile(new URL("../migrations/20261015_recibo_reembolso_idempotencia.sql", import.meta.url), "utf8"),
 ]);
+const settleReceivable = kernel.slice(
+  kernel.indexOf("export async function settleReceivable("),
+  kernel.indexOf("export async function enqueueFinance(", kernel.indexOf("export async function settleReceivable(")),
+);
 
 test("recibo pago pela empresa materializa as linhas escolhidas no histórico", () => {
   assert.match(kernel, /function linhasRateioPagasPelaEmpresa\(linhas: Row\[\]\)/);
@@ -97,6 +101,17 @@ test("programação de reembolso vincula rateio ao lançamento cliente e transfe
   assert.match(caminho, /lancamentoClienteRateioId, aeronaveId/);
   assert.match(caminho, /fornecedor_id, numero_recibo, url_recibo/);
   assert.match(caminho, /escopo_financeiro\) VALUES[\s\S]*'CAIXA_SHARE'/);
+});
+
+test("baixa de reembolso transfere rateios legados Share para o lançamento cliente sem duplicá-los", () => {
+  assert.match(settleReceivable, /nullableText\(reimbursement\.lancamento_cliente_id\) \?\? nullableText\(/);
+  assert.match(settleReceivable, /const rateiosLegadosShare = reimbursement && rateioLancamentoId && !\(rateios\.results \|\| \[\]\)\.length && nullableText\(reimbursement\.lancamento_origem_id\)/);
+  assert.match(settleReceivable, /FROM rateio_despesas WHERE lancamento_id = \? AND status NOT IN \('CANCELADO'\)[\s\S]*bind\(reimbursement\.lancamento_origem_id\)/);
+  assert.match(settleReceivable, /if \(rateiosLegadosShare\.results\?\.length\) rateios = rateiosLegadosShare/);
+  assert.match(settleReceivable, /UPDATE rateio_despesas SET lancamento_id = \? WHERE id = \? AND lancamento_id = \?/);
+  assert.ok(settleReceivable.indexOf("UPDATE rateio_despesas SET lancamento_id") < settleReceivable.indexOf("if (reimbursement && rateioLancamentoId && !(rateios.results || []).length)"));
+  assert.match(settleReceivable, /SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_despesas WHERE lancamento_id = \?/);
+  assert.match(settleReceivable, /existingByRateio\.set\(String\(rateio\.id\), paid\)/);
 });
 
 test("histórico reconhece rateio de recibo sem depender de um lançamento espelho", () => {
