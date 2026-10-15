@@ -212,7 +212,7 @@ async function addTripulantePayableStatements(
       statements.push(db.prepare(`UPDATE contas_apagar SET
         data_vencimento = ?, valor_centavos = ?, categoria_nome = 'DESPESAS REEMBOLSÁVEIS',
         descricao = ?, aeronave_id = ?, lancamentos_id = COALESCE(?, lancamentos_id), movimentos_id = COALESCE(?, movimentos_id),
-        colaborador_id = ?, tripulante_id = ?, atualizado_em = CURRENT_TIMESTAMP
+        colaborador_id = ?, tripulante_id = ?, escopo_financeiro = 'CAIXA_SHARE', atualizado_em = CURRENT_TIMESTAMP
         WHERE id = ?`).bind(
         dueDate, amountCentavos, description, text(report.aeronave_id), lancamentoId,
         movimentoHoldingId, colaboradorId, tripulanteId, payableId,
@@ -234,6 +234,7 @@ async function addTripulantePayableStatements(
       criado_por: userId,
       origem_tipo: 'RELATORIO_DESPESA_VIAGEM',
       idempotency_key: idempotencyKey,
+      escopo_financeiro: 'CAIXA_SHARE',
     }))
   }
   await addLinkStatements(db, statements, reportId, 'CONTA_PAGAR', payableId, 'RELATORIO_CONTA_PAGAR')
@@ -297,19 +298,24 @@ async function addRateiosCliente(
       status,
       descricao_despesa: description,
       observacoes: `Origem: relatório ${text(report.numero_relatorio) || text(report.id)}`,
+      numero_doc: text(report.numero_relatorio),
+      documento_numero: text(report.numero_relatorio),
+      url_doc: text(report.pdf_path) || null,
+      origem_tipo: 'RELATORIO_DESPESA_VIAGEM',
     }
     if (existing?.id) {
       statements.push(db.prepare(`UPDATE rateio_despesas SET
         lancamento_id = ?, aeronave_id = ?, cotista_id = ?, data_emissao = ?, data_vencimento = ?,
         categoria_nome = ?, tipo_rateio = ?, periodicidade = ?, percentual_sociedade = ?, percentual_uso = ?,
         valor_total_centavos = ?, valor_rateado_centavos = ?, pago_por = ?, pago_diretamente = ?,
-        valor_pago_real_centavos = ?, status = ?, descricao_despesa = ?, observacoes = ?
+        valor_pago_real_centavos = ?, status = ?, descricao_despesa = ?, observacoes = ?,
+        numero_doc = ?, documento_numero = ?, url_doc = ?, origem_tipo = ?
         WHERE id = ?`).bind(
         lancamentoCustoId, common.aeronave_id, common.cotista_id, common.data_emissao, common.data_vencimento,
         common.categoria_nome, common.tipo_rateio, common.periodicidade, common.percentual_sociedade,
         common.percentual_uso, common.valor_total_centavos, common.valor_rateado_centavos, common.pago_por,
         common.pago_diretamente, common.valor_pago_real_centavos, common.status, common.descricao_despesa,
-        common.observacoes, existing.id,
+        common.observacoes, common.numero_doc, common.documento_numero, common.url_doc, common.origem_tipo, existing.id,
       ))
       await addLinkStatements(db, statements, reportId, 'RATEIO_DESPESAS', existing.id, 'RELATORIO_RATEIO_DESPESA')
     } else {
@@ -338,7 +344,10 @@ async function ensureLancamentoCustoIntegral(
     WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1 AND idempotency_key = ?2 LIMIT 1`)
     .bind(reportId, idempotencyKey).first<{ id: string }>()
   const id = text(existing?.id) || uuid()
-  const dataEmissao = dateValue(report.data_inicio)
+  const dataEmissao = text(report.data_inicio).slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao)) {
+    throw new Error('data_inicio_obrigatoria_para_custo_integral')
+  }
   const values = {
     id,
     aeronave_id: text(report.aeronave_id),

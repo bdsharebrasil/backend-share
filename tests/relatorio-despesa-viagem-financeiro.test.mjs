@@ -9,7 +9,7 @@ const columns = [
   "pago_diretamente", "reembolsavel", "reembolso_quitado", "forma_pagamento", "observacoes", "criado_por", "origem_tipo",
   "origem_id", "idempotency_key", "lancamento_id", "lancamentos_id", "cotista_id", "movimentos_id", "movimento_id",
   "movimento_holding_id", "tripulante_id", "categoria_id", "percentual_sociedade", "percentual_uso", "valor_total_centavos",
-  "valor_rateado_centavos", "valor_pago_real_centavos", "tipo_rateio", "periodicidade", "escopo_financeiro",
+  "valor_rateado_centavos", "valor_pago_real_centavos", "tipo_rateio", "periodicidade", "escopo_financeiro", "documento_numero",
 ];
 
 function fakeDb(kind = "CLIENTE", existingData = null) {
@@ -27,6 +27,7 @@ function fakeDb(kind = "CLIENTE", existingData = null) {
           if (sql.includes("SELECT holding_id FROM hold_socios")) return { holding_id: "holding-1" };
           if (sql.includes("SELECT id FROM cliente WHERE")) return { id: "cliente-1" };
           if (sql.includes("SELECT user_id FROM tripulacao")) return { user_id: "colaborador-1" };
+          if (existingData && sql.includes("SELECT id, status FROM contas_apagar")) return existingData.payable || null;
           if (existingData && sql.includes("idempotency_key = ?2")) return { id: existingData.costId };
           if (existingData && sql.includes("SELECT data_emissao FROM lancamentos")) return { data_emissao: "2026-10-10" };
           return null;
@@ -93,7 +94,7 @@ function report(overrides = {}) {
 
 test("relatório de cotista direto cria um rateio único pelo total sem perder os reembolsos por pagador", async () => {
   const db = fakeDb();
-  await sincronizarRelatorioViagemFinanceiro(db, report(), "usuario-1");
+  await sincronizarRelatorioViagemFinanceiro(db, report({ pdf_path: "https://example.test/relatorio.pdf" }), "usuario-1");
 
   const lancamentos = insertedRows(db, "lancamentos");
   const lancamentoReembolso = lancamentos.find((row) => row.idempotency_key === "RELATORIO_DESPESA_VIAGEM:relatorio-1:tripulante_1");
@@ -115,6 +116,9 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(recebiveis[0].lancamentos_id, null);
   assert.equal(recebiveis[0].origem_id, "relatorio-1");
   assert.equal(recebiveis[0].idempotency_key, "RELATORIO_DESPESA_VIAGEM:relatorio-1:CONTA_RECEBER");
+  const contasPagar = insertedRows(db, "contas_apagar");
+  assert.equal(contasPagar.length, 1);
+  assert.equal(contasPagar[0].escopo_financeiro, "CAIXA_SHARE");
 
   const rateios = insertedRows(db, "rateio_despesas");
   assert.equal(rateios.length, 1);
@@ -126,6 +130,10 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(rateios[0].valor_pago_real_centavos, 1000);
   assert.equal(rateios[0].pago_por, "cotista-aeronave-1");
   assert.equal(rateios[0].pago_diretamente, 0, "pagamento parcial não marca o rateio todo como pago diretamente");
+  assert.equal(rateios[0].numero_doc, "REL-001/26");
+  assert.equal(rateios[0].documento_numero, "REL-001/26");
+  assert.equal(rateios[0].url_doc, "https://example.test/relatorio.pdf");
+  assert.equal(rateios[0].origem_tipo, "RELATORIO_DESPESA_VIAGEM");
 });
 
 test("data de emissão do custo integral segue a data inicial do relatório, não a aprovação", async () => {
@@ -138,6 +146,13 @@ test("data de emissão do custo integral segue a data inicial do relatório, nã
   const custo = insertedRows(db, "lancamentos")
     .find((row) => row.idempotency_key === "RELATORIO_DESPESA_VIAGEM:relatorio-1:CUSTO_INTEGRAL");
   assert.equal(custo?.data_emissao, "2026-10-04");
+});
+
+test("custo integral exige uma data_inicio com formato de data", async () => {
+  await assert.rejects(
+    () => sincronizarRelatorioViagemFinanceiro(fakeDb(), report({ data_inicio: "" }), "usuario-1"),
+    { message: "data_inicio_obrigatoria_para_custo_integral" },
+  );
 });
 
 test("relatório de R$ 147,50 registra R$ 100,00 pagos diretamente e mantém R$ 47,50 a receber", async () => {
@@ -172,7 +187,9 @@ test("repetir a sincronização atualiza custo e rateios sem trocar suas identid
     links: [
       { destino_tipo: "LANCAMENTO", destino_id: "custo-pai-existente" },
       { destino_tipo: "RATEIO_DESPESAS", destino_id: "rateio-existente" },
+      { destino_tipo: "CONTA_PAGAR", destino_id: "conta-pagar-existente" },
     ],
+    payable: { id: "conta-pagar-existente", status: "EM_ABERTO" },
     rateios: [{
       id: "rateio-existente", cotista_id: "cotista-aeronave-1", status: "EM_ABERTO",
       pago_diretamente: 0, valor_pago_real_centavos: 0, pago_por: null,
@@ -181,13 +198,19 @@ test("repetir a sincronização atualiza custo e rateios sem trocar suas identid
   await sincronizarRelatorioViagemFinanceiro(db, report({
     data_inicio: "2026-10-04",
     aprovado_tripulante_1_em: "2026-10-13T20:00:00.000Z",
-    despesas: [{ valor: 147.5, pago_por: "cliente" }],
+    pdf_path: "https://example.test/relatorio.pdf",
+    despesas: [{ valor: 147.5, pago_por: "tripulante_1" }],
   }), "usuario-1");
 
   const updates = db.batched.filter((statement) => statement.sql.startsWith("UPDATE rateio_despesas SET"));
   assert.equal(updates.length, 1);
   assert.equal(updates[0].values.at(-1), "rateio-existente");
   assert.equal(updates[0].values[0], "custo-pai-existente");
+  assert.match(updates[0].sql, /numero_doc = \?, documento_numero = \?, url_doc = \?, origem_tipo = \?/);
+  assert.deepEqual(updates[0].values.slice(-5, -1), ["REL-001/26", "REL-001/26", "https://example.test/relatorio.pdf", "RELATORIO_DESPESA_VIAGEM"]);
+  const contaPagarAtualizada = db.batched.find((statement) => statement.sql.startsWith("UPDATE contas_apagar SET"));
+  assert.ok(contaPagarAtualizada, "a conta a pagar existente deve ser atualizada");
+  assert.match(contaPagarAtualizada.sql, /escopo_financeiro = 'CAIXA_SHARE'/);
   const custoAtualizado = db.batched.find((statement) => statement.sql.includes("escopo_financeiro = 'FINANCEIRO' WHERE id = ?"));
   assert.ok(custoAtualizado, "o lançamento de custo integral existente deve ser atualizado");
   assert.equal(custoAtualizado.values[3], "2026-10-04");
