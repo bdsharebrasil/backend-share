@@ -27,4 +27,5 @@ export type Env = {
   CLOUDFLARE_TURN_API_TOKEN?: string
   MEETING_ROOMS: DurableObjectNamespace
   R2_PUBLIC_URL?: string
+  ADSB_PROVIDER?: string
 }

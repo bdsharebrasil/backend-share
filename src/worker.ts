@@ -16,6 +16,7 @@ import { mensagensRoutes } from './routes/mensagensRoutes'
 import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
 import { colaboradorVoosRoutes } from './routes/colaboradorVoosRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
+import { rastreioRoutes } from './routes/rastreioRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
@@ -47,7 +48,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Bindings = Pick<Env, 'AISWEB_API_KEY' | 'AISWEB_API_PASS' | 'CACHE_KV' | 'RATE_LIMITER' | 'FILES' | 'SHARE_FILES' | 'SHARE_DB' | 'RESEND_API_KEY' | 'INTERNAL_TOKEN' | 'EMAIL_FROM' | 'SUPABASE_URL' | 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY' | 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'WINSOCK_VALUATION_URL' | 'WINSOCK_API_KEY' | 'WINSOCK_AUTH_HEADER' | 'WINSOCK_AUTH_PREFIX' | 'ANTHROPIC_API_KEY' | 'GEMINI_API_KEY' | 'ALLOWED_ORIGINS' | 'TELEGRAM_BOT_TOKEN' | 'CLIENT_SESSION_SECRET' | 'CLIENT_SESSION_TTL_SECONDS' | 'CLOUDFLARE_TURN_KEY_ID' | 'CLOUDFLARE_TURN_API_TOKEN' | 'MEETING_ROOMS'>
+type Bindings = Pick<Env, 'AISWEB_API_KEY' | 'AISWEB_API_PASS' | 'CACHE_KV' | 'RATE_LIMITER' | 'FILES' | 'SHARE_FILES' | 'SHARE_DB' | 'RESEND_API_KEY' | 'INTERNAL_TOKEN' | 'EMAIL_FROM' | 'SUPABASE_URL' | 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY' | 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'WINSOCK_VALUATION_URL' | 'WINSOCK_API_KEY' | 'WINSOCK_AUTH_HEADER' | 'WINSOCK_AUTH_PREFIX' | 'ANTHROPIC_API_KEY' | 'GEMINI_API_KEY' | 'ALLOWED_ORIGINS' | 'TELEGRAM_BOT_TOKEN' | 'CLIENT_SESSION_SECRET' | 'CLIENT_SESSION_TTL_SECONDS' | 'CLOUDFLARE_TURN_KEY_ID' | 'CLOUDFLARE_TURN_API_TOKEN' | 'MEETING_ROOMS' | 'ADSB_PROVIDER'>
 
 interface ReservationRequest {
   hotelId: string
@@ -123,6 +124,7 @@ app.route('/', mensagensRoutes)
 app.route('/', tripulacaoRoutes)
 app.route('/', colaboradorVoosRoutes)
 app.route('/', ctmRoutes)
+app.route('/', rastreioRoutes)
 app.route('/api/sharebrasil/ponto', shareBrasilPontoRoutes)
 // ─── Financeiro: único ponto de entrada para comandos financeiros ────────────
 // As rotas legadas de escrita foram removidas abaixo para evitar dois fluxos
@@ -4703,9 +4705,11 @@ app.post('/api/sharebrasil/aeronaves', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body: Record<string, any> = await c.req.json().catch(() => ({} as Record<string, any>))
   const matricula = String(body.matricula_registro || '').trim().toUpperCase()
+  const icaoHex = String(body.icao_hex || '').trim().toUpperCase()
   const fabricante = String(body.fabricante || '').trim()
   const modelo = String(body.modelo || '').trim()
   if (!matricula || !fabricante || !modelo) return c.json({ error: 'matricula_fabricante_modelo_obrigatorios' }, 400)
+  if (icaoHex && !/^[0-9A-F]{6}$/.test(icaoHex)) return c.json({ error: 'icao_hex_invalido' }, 400)
   const db = c.env.SHARE_DB
   const existente = await db.prepare('SELECT id FROM aeronave WHERE upper(matricula_registro) = ? LIMIT 1').bind(matricula).first()
   if (existente) return c.json({ error: 'matricula_ja_cadastrada' }, 409)
@@ -4718,7 +4722,7 @@ app.post('/api/sharebrasil/aeronaves', async c => {
     const cols = ['id', ...Object.keys(performanceData), 'criado_em', 'atualizado_em']
     await db.prepare(`INSERT INTO performance_aeronave (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).bind(performanceId, ...Object.keys(performanceData).map((key) => performanceData[key]), new Date().toISOString(), new Date().toISOString()).run()
   }
-  const aircraftData: Record<string, any> = { id: aeronaveId, matricula_registro: matricula, fabricante, modelo, numero_serie: body.numero_serie || null, nome_proprietario: body.nome_proprietario || null, status: body.status === 'inativa' ? 'inativa' : 'ativa', consumo_combustivel: body.consumo_combustivel || null, ano: body.ano || null, base: body.base || null, preco_hora: body.preco_hora || null, url_imagem: body.url_imagem || null, velocidade_cruzeiro: body.velocidade_cruzeiro || null, tipo_aeronave: body.tipo_aeronave || null, numero_motores: body.numero_motores || null, performance_aeronave_id: performanceId }
+  const aircraftData: Record<string, any> = { id: aeronaveId, matricula_registro: matricula, fabricante, modelo, icao_hex: icaoHex || null, numero_serie: body.numero_serie || null, nome_proprietario: body.nome_proprietario || null, status: body.status === 'inativa' ? 'inativa' : 'ativa', consumo_combustivel: body.consumo_combustivel || null, ano: body.ano || null, base: body.base || null, preco_hora: body.preco_hora || null, url_imagem: body.url_imagem || null, velocidade_cruzeiro: body.velocidade_cruzeiro || null, tipo_aeronave: body.tipo_aeronave || null, numero_motores: body.numero_motores || null, performance_aeronave_id: performanceId }
   const schema = await db.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
   const existentes = new Set((schema.results || []).map((item) => item.name))
   const colunas = Object.keys(aircraftData).filter((key) => existentes.has(key))
