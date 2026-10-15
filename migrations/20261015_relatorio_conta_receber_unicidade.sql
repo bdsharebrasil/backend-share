@@ -8,7 +8,7 @@ SET origem_tipo = 'RELATORIO_DESPESA_VIAGEM',
     origem_id = COALESCE(
       NULLIF(trim(origem_id), ''),
       CASE
-        WHEN idempotency_key LIKE 'RELATORIO_DESPESA_VIAGEM:%:REEMBOLSO_CLIENTE:CONTA_RECEBER'
+        WHEN substr(idempotency_key, -length(':REEMBOLSO_CLIENTE:CONTA_RECEBER')) = ':REEMBOLSO_CLIENTE:CONTA_RECEBER'
           THEN substr(
             idempotency_key,
             length('RELATORIO_DESPESA_VIAGEM:') + 1,
@@ -24,7 +24,7 @@ SET origem_tipo = 'RELATORIO_DESPESA_VIAGEM',
     idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || COALESCE(
       NULLIF(trim(origem_id), ''),
       CASE
-        WHEN idempotency_key LIKE 'RELATORIO_DESPESA_VIAGEM:%:REEMBOLSO_CLIENTE:CONTA_RECEBER'
+        WHEN substr(idempotency_key, -length(':REEMBOLSO_CLIENTE:CONTA_RECEBER')) = ':REEMBOLSO_CLIENTE:CONTA_RECEBER'
           THEN substr(
             idempotency_key,
             length('RELATORIO_DESPESA_VIAGEM:') + 1,
@@ -37,7 +37,8 @@ SET origem_tipo = 'RELATORIO_DESPESA_VIAGEM',
         )
       END
     ) || ':CONTA_RECEBER'
-WHERE idempotency_key LIKE 'RELATORIO_DESPESA_VIAGEM:%:CONTA_RECEBER';
+WHERE instr(idempotency_key, 'RELATORIO_DESPESA_VIAGEM:') = 1
+  AND substr(idempotency_key, -length(':CONTA_RECEBER')) = ':CONTA_RECEBER';
 
 -- Recria somente os vínculos de recebíveis deste fluxo, apontando para os
 -- recebíveis ativos sobreviventes após a conciliação manual.
