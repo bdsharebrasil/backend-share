@@ -950,8 +950,11 @@ function clientAllocationStatements(
       valor_pago_real_centavos: line.valorPagoRealCentavos ?? (line.pagoDiretamente ? line.valorCentavos : 0),
       pago_por: line.pagoPor || (line.pagoDiretamente ? line.cotistaId : null),
       pago_diretamente: line.pagoDiretamente ? 1 : 0,
-      status: line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
+      status: command.deferir_baixa_rateio === true
+        ? 'EM_ABERTO'
+        : line.pagoDiretamente ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
       data_pagamento: line.pagoDiretamente ? dateValue(command.data_pagamento ?? command.data) : null,
+      email_enviado_em: nullableText(command.email_enviado_em),
       descricao_despesa: command.descricao,
       observacoes: nullableText(command.observacoes),
       origem_id: nullableText(command.recibo_id),
@@ -2568,6 +2571,7 @@ async function buildReceiptPagamento(
         rateio_linhas: linhasInformadas,
         pago_diretamente: true,
         reembolsavel: false,
+        deferir_baixa_rateio: true,
         idempotency_key: `recibo-pagamento:${receiptId}`,
       }, userId, { internal: true })
     }
@@ -2614,6 +2618,7 @@ async function buildReceiptPagamento(
     rateio_linhas: rateioLinhas,
     pago_diretamente: true,
     reembolsavel: false,
+    deferir_baixa_rateio: true,
     idempotency_key: `recibo-pagamento:${receiptId}`,
   }, userId, { internal: true })
 }
@@ -2709,6 +2714,16 @@ export async function enviarReciboPagamentoParaRateio(
     body.fornecedor_id ?? receipt.fornecedor_id,
     body.fornecedor_nome ?? body.fornecedor ?? receipt.fornecedor_nome ?? receipt.fornecedor,
   )
+  const emailInfo = await db.prepare(
+    `SELECT e.id, e.email_enviado_em FROM emails_enviados e
+       LEFT JOIN recibo_anexos a
+         ON a.id = e.referencia_id
+        AND e.referencia_tipo = 'recibo'
+       WHERE e.status = 'enviado'
+         AND e.referencia_tipo = 'recibo'
+         AND (e.referencia_id = ?1 OR a.recibo_id = ?1)
+       ORDER BY COALESCE(e.email_enviado_em, e.criado_em) DESC LIMIT 1`,
+  ).bind(receiptId).first<{ id: string; email_enviado_em: string | null }>().catch(() => null)
   const envioVinculado = await db.prepare(
     `SELECT destino_id AS id FROM financeiro_vinculos WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 AND destino_tipo = 'ENVIO_DESPESA' LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
@@ -2750,6 +2765,7 @@ export async function enviarReciboPagamentoParaRateio(
       tipo_rateio: body.tipo_rateio ?? receipt.tipo_rateio ?? 'FIXO',
       numero_recibo: receipt.numero_recibo,
       url_recibo: receipt.url_recibo,
+      email_enviado_em: emailInfo?.email_enviado_em ?? null,
       rateio_linhas: rateioLinhas,
       anexos_json: [],
       idempotency_key: `recibo-pagamento-envio:${receiptId}`,
@@ -2793,6 +2809,9 @@ export async function enviarReciboPagamentoParaRateio(
         anexos_json: '[]',
         periodicidade: comando.periodicidade,
         tipo_rateio: comando.tipo_rateio,
+        email_enviado: emailInfo ? 1 : 0,
+        email_enviado_em: emailInfo?.email_enviado_em ?? null,
+        email_id: emailInfo?.id ?? null,
         lancamento_id: envioId,
         numero_recibo: comando.numero_recibo,
         url_recibo: comando.url_recibo,
@@ -2856,11 +2875,49 @@ export async function enviarReciboPagamentoParaRateio(
       tipo_rateio: text(body.tipo_rateio) || receipt.tipo_rateio || undefined,
       data_vencimento: text(body.data_vencimento) || receipt.data_vencimento || null,
       observacoes: text(body.observacoes) || receipt.observacoes || null,
+      fornecedor_id: fornecedorResolvido?.id ?? null,
+      fornecedor_nome: fornecedorResolvido?.nome_completo ?? body.fornecedor_nome ?? body.fornecedor ?? null,
+      periodicidade: text(body.periodicidade) || text(receipt.periodicidade) || 'ÚNICO',
+      numero_recibo: receipt.numero_recibo,
+      url_recibo: receipt.url_recibo,
+      email_enviado_em: emailInfo?.email_enviado_em ?? null,
       subcategoria_1: body.subcategoria_1,
       subcategoria_2: body.subcategoria_2,
       subcategoria_3: body.subcategoria_3,
       subcategoria_4: body.subcategoria_4,
     })
+  }
+  if (rateioExistente && ['cotista_aeronave', 'cliente'].includes(String(receipt.pagador_tipo))) {
+    const periodicidade = text(body.periodicidade) || 'ÚNICO'
+    const subcategorias = ['subcategoria_1', 'subcategoria_2', 'subcategoria_3', 'subcategoria_4'] as const
+    const updates: D1PreparedStatement[] = []
+    const rateios = await db.prepare(
+      'SELECT id, lancamento_id FROM rateio_despesas WHERE lancamento_id = ?1',
+    ).bind(receipt.lancamento_id).all<{ id: string; lancamento_id: string | null }>()
+    for (const rateio of rateios.results ?? []) {
+      const assignments = [
+        'fornecedor_id = COALESCE(?, fornecedor_id)',
+        'periodicidade = COALESCE(periodicidade, ?)',
+        'numero_recibo = COALESCE(?, numero_recibo)',
+        'url_recibo = COALESCE(?, url_recibo)',
+        'email_enviado_em = COALESCE(?, email_enviado_em)',
+        "status = CASE WHEN status = 'PAGO_DIRETAMENTE' THEN 'EM_ABERTO' ELSE status END",
+      ]
+      const values: unknown[] = [
+        fornecedorResolvido?.id ?? null,
+        periodicidade,
+        receipt.numero_recibo ?? null,
+        receipt.url_recibo ?? null,
+        emailInfo?.email_enviado_em ?? null,
+      ]
+      for (const campo of subcategorias) {
+        assignments.splice(assignments.length - 1, 0, `${campo} = COALESCE(?, ${campo})`)
+        values.push(nullableText(body[campo]))
+      }
+      updates.push(db.prepare(`UPDATE rateio_despesas SET ${assignments.join(', ')} WHERE id = ?`)
+        .bind(...values, rateio.id))
+    }
+    if (updates.length) await db.batch(updates)
   }
   if (receipt.pagador_tipo === 'empresa' && (rateioExistente || result)) {
     await db.prepare(`
