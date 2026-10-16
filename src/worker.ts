@@ -3841,7 +3841,7 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
     const db = c.env.SHARE_DB
-    const atual = await db.prepare(`SELECT id, status, numero_relatorio, numero_voo, cliente_id, socio_id, aeronave_id, matricula_aeronave,
+    const atual = await db.prepare(`SELECT id, status, despesas, numero_relatorio, numero_voo, cliente_id, socio_id, aeronave_id, matricula_aeronave,
       rota, tripulacao_id, nome_tripulante, data_inicio, data_fim, pdf_path, enviado_para_tripulante_em, enviado_para_tripulante_2_em,
       aprovado_tripulante_1_em, aprovado_tripulante_2_em, aprovado_tripulante_em,
       status_aprovacao_tripulante, status_aprovacao_tripulante_2
@@ -3856,6 +3856,14 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
     if (!['rascunho', 'finalizado', 'ajuste_necessario'].includes(statusAtual)) return c.json({ error: 'relatorio_nao_editavel_neste_estado' }, 409)
     const body = await c.req.json<Record<string, any>>().catch(() => null)
     if (!body) return c.json({ error: 'payload_invalido' }, 400)
+    const despesasAnteriores = despesasRelatorioViagem(atual.despesas).map((despesa, index) => ({
+      ...despesa,
+      id: String(despesa.id || `${id}-despesa-${index}`),
+    }))
+    const despesasNovas = body.despesas === undefined ? null : despesasRelatorioViagem(body.despesas).map((despesa, index) => ({
+      ...despesa,
+      id: String(despesa.id || `${id}-despesa-${index}`),
+    }))
 
     const numeroAnterior = String(atual.numero_relatorio || '').trim()
     const numeroRecebido = body.numero_relatorio === undefined ? numeroAnterior : String(body.numero_relatorio ?? '').trim()
@@ -3924,6 +3932,20 @@ app.patch('/api/financeiro/relatorios-despesa-viagem/:id', async c => {
         Number(body.total_tripulante_2 || 0), Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), documentoDependenteAlterado ? 1 : 0, statusAtual, documentoDependenteAlterado ? 1 : 0, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, statusAtual, id,
         numero && numero !== numeroAnterior ? 1 : 0, numero && numero !== numeroAnterior ? 1 : 0, numero || numeroAnterior, id).run()
     if (!updateResult.meta.changes) return c.json({ error: numero && numero !== numeroAnterior ? 'numero_relatorio_ja_utilizado_ou_relatorio_alterado' : 'relatorio_alterado_concorrente' }, 409)
+    if (despesasNovas) {
+      const despesaIdPorIndiceAntigo = new Map(despesasAnteriores.map((despesa, index) => [index, String(despesa.id)]))
+      const novoIndicePorDespesaId = new Map(despesasNovas.map((despesa, index) => [String(despesa.id), index]))
+      const anexos = await db.prepare(`SELECT id, indice_despesa FROM relatorio_despesa_viagem_anexos WHERE relatorio_despesa_viagem_id = ?1`).bind(id).all<{ id: string; indice_despesa: number }>()
+      const atualizacoesAnexos = (anexos.results || []).flatMap((anexo) => {
+        const despesaId = despesaIdPorIndiceAntigo.get(Number(anexo.indice_despesa))
+        const novoIndice = despesaId === undefined ? undefined : novoIndicePorDespesaId.get(despesaId)
+        const indiceDestino = novoIndice ?? -1
+        return indiceDestino === Number(anexo.indice_despesa)
+          ? []
+          : [db.prepare('UPDATE relatorio_despesa_viagem_anexos SET indice_despesa = ?1 WHERE id = ?2 AND relatorio_despesa_viagem_id = ?3').bind(indiceDestino, anexo.id, id)]
+      })
+      if (atualizacoesAnexos.length) await db.batch(atualizacoesAnexos)
+    }
     if (numeroFoiAlterado) {
       await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, usuario_id, motivo)
         VALUES (?1, 'relatorio_despesa_viagem', ?2, 'ALTERACAO_NUMERO_RELATORIO', ?3, ?4)`).bind(
