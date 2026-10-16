@@ -19,6 +19,15 @@ type Allocation = CotistaRow & {
   valor_rateado_centavos: number
 }
 
+type CategoriaClienteRelatorio = {
+  id: string
+  nome: string
+  subcategoria_1: string | null
+  subcategoria_2: string | null
+  subcategoria_3: string | null
+  subcategoria_4: string | null
+}
+
 const FORNECEDOR_RELATORIO_VIAGEM = 'SHARE BRASIL'
 
 function addCalendarDays(value: unknown, days: number): string {
@@ -155,6 +164,36 @@ export async function findLancamentoClientId(db: D1Database, clientId: unknown):
   return text(row?.id) || null
 }
 
+async function resolveCategoriaClienteRelatorio(db: D1Database, report: ReportRow): Promise<CategoriaClienteRelatorio> {
+  const categoria = await db.prepare(`
+    SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4
+      FROM categoria_movimentacao_cliente
+     WHERE upper(trim(nome)) = upper(trim(?1))
+     LIMIT 1
+  `).bind('DESPESAS DE VIAGEM').first<CategoriaClienteRelatorio>()
+  if (!categoria?.id || !text(categoria.nome)) throw new Error('categoria_cliente_despesas_viagem_nao_encontrada')
+
+  const subcategoriaSelecionada = text(
+    report.subcategoria_despesa
+      ?? report.categoria_despesa_subcategoria
+      ?? report.subcategoria
+      ?? 'RELATORIO DE VIAGEM',
+  )
+  const camposSubcategoria = ['subcategoria_1', 'subcategoria_2', 'subcategoria_3', 'subcategoria_4'] as const
+  const correspondencias = camposSubcategoria.filter((campo) => text(categoria[campo]) === subcategoriaSelecionada)
+  if (correspondencias.length !== 1) throw new Error('subcategoria_cliente_relatorio_viagem_nao_encontrada_ou_ambigua')
+
+  const campo = correspondencias[0]
+  return {
+    id: text(categoria.id),
+    nome: text(categoria.nome),
+    subcategoria_1: campo === 'subcategoria_1' ? subcategoriaSelecionada : null,
+    subcategoria_2: campo === 'subcategoria_2' ? subcategoriaSelecionada : null,
+    subcategoria_3: campo === 'subcategoria_3' ? subcategoriaSelecionada : null,
+    subcategoria_4: campo === 'subcategoria_4' ? subcategoriaSelecionada : null,
+  }
+}
+
 async function dataEmissaoRelatorio(db: D1Database, report: ReportRow, lancamentoId: string | null): Promise<string> {
   const sibling = await db.prepare(`SELECT data_emissao FROM lancamentos
     WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
@@ -250,6 +289,7 @@ async function addRateiosCliente(
   description: string,
   lancamentoCustoId: string,
   pagamentoDiretoCentavos: number,
+  categoriaCliente: CategoriaClienteRelatorio,
 ) {
   const reportId = text(report.id)
   const existingResult = await db.prepare(`SELECT r.id, r.cotista_id, r.status, r.pago_diretamente,
@@ -285,7 +325,12 @@ async function addRateiosCliente(
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
       data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
       data_pagamento: null,
-      categoria_nome: 'DESPESAS DE VIAGEM',
+      categoria_id: categoriaCliente.id,
+      categoria_nome: categoriaCliente.nome,
+      subcategoria_1: categoriaCliente.subcategoria_1,
+      subcategoria_2: categoriaCliente.subcategoria_2,
+      subcategoria_3: categoriaCliente.subcategoria_3,
+      subcategoria_4: categoriaCliente.subcategoria_4,
       tipo_rateio: 'VARIAVEL_POR_VOO',
       periodicidade: 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
@@ -306,13 +351,15 @@ async function addRateiosCliente(
     if (existing?.id) {
       statements.push(db.prepare(`UPDATE rateio_despesas SET
         lancamento_id = ?, aeronave_id = ?, cotista_id = ?, data_emissao = ?, data_vencimento = ?,
-        categoria_nome = ?, tipo_rateio = ?, periodicidade = ?, percentual_sociedade = ?, percentual_uso = ?,
+        categoria_id = ?, categoria_nome = ?, subcategoria_1 = ?, subcategoria_2 = ?, subcategoria_3 = ?, subcategoria_4 = ?,
+        tipo_rateio = ?, periodicidade = ?, percentual_sociedade = ?, percentual_uso = ?,
         valor_total_centavos = ?, valor_rateado_centavos = ?, pago_por = ?, pago_diretamente = ?,
         valor_pago_real_centavos = ?, status = ?, descricao_despesa = ?, observacoes = ?,
         numero_doc = ?, documento_numero = ?, url_doc = ?, origem_tipo = ?
         WHERE id = ?`).bind(
         lancamentoCustoId, common.aeronave_id, common.cotista_id, common.data_emissao, common.data_vencimento,
-        common.categoria_nome, common.tipo_rateio, common.periodicidade, common.percentual_sociedade,
+        common.categoria_id, common.categoria_nome, common.subcategoria_1, common.subcategoria_2,
+        common.subcategoria_3, common.subcategoria_4, common.tipo_rateio, common.periodicidade, common.percentual_sociedade,
         common.percentual_uso, common.valor_total_centavos, common.valor_rateado_centavos, common.pago_por,
         common.pago_diretamente, common.valor_pago_real_centavos, common.status, common.descricao_despesa,
         common.observacoes, common.numero_doc, common.documento_numero, common.url_doc, common.origem_tipo, existing.id,
@@ -337,6 +384,7 @@ async function ensureLancamentoCustoIntegral(
   numeroVooId: string | null,
   clienteId: string | null,
   userId: string | null,
+  categoriaCliente: CategoriaClienteRelatorio,
 ): Promise<string> {
   const reportId = text(report.id)
   const idempotencyKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:CUSTO_INTEGRAL`
@@ -356,8 +404,13 @@ async function ensureLancamentoCustoIntegral(
     data_emissao: dataEmissao,
     data_vencimento: dueDate,
     descricao: description,
-    categoria_nome: 'DESPESAS DE VIAGEM',
-    grupo_categoria: 'DESPESAS DE VIAGEM',
+    categoria_cliente_id: categoriaCliente.id,
+    categoria_nome: categoriaCliente.nome,
+    grupo_categoria: categoriaCliente.nome,
+    subcategoria_1: categoriaCliente.subcategoria_1,
+    subcategoria_2: categoriaCliente.subcategoria_2,
+    subcategoria_3: categoriaCliente.subcategoria_3,
+    subcategoria_4: categoriaCliente.subcategoria_4,
     periodicidade: 'EVENTUAL',
     status: 'EM_ABERTO',
     fluxo: 'SAIDA',
@@ -380,11 +433,13 @@ async function ensureLancamentoCustoIntegral(
   }
   if (existing?.id) {
     statements.push(db.prepare(`UPDATE lancamentos SET aeronave_id = ?, cotista_aeronave_id = ?, cliente_id = ?,
-      data_emissao = ?, data_vencimento = ?, descricao = ?, categoria_nome = ?, grupo_categoria = ?,
+      data_emissao = ?, data_vencimento = ?, descricao = ?, categoria_cliente_id = ?, categoria_nome = ?, grupo_categoria = ?,
+      subcategoria_1 = ?, subcategoria_2 = ?, subcategoria_3 = ?, subcategoria_4 = ?,
       periodicidade = ?, fluxo = ?, tipo_caixa = ?, valor_centavos = ?, numero_doc = ?, numero_voo = ?,
       fornecedor_nome = ?, url_doc = ?, escopo_financeiro = 'FINANCEIRO' WHERE id = ?`)
       .bind(values.aeronave_id, values.cotista_aeronave_id, values.cliente_id, values.data_emissao,
-        values.data_vencimento, values.descricao, values.categoria_nome, values.grupo_categoria,
+        values.data_vencimento, values.descricao, values.categoria_cliente_id, values.categoria_nome, values.grupo_categoria,
+        values.subcategoria_1, values.subcategoria_2, values.subcategoria_3, values.subcategoria_4,
         values.periodicidade, values.fluxo, values.tipo_caixa, values.valor_centavos, values.numero_doc,
         values.numero_voo, values.fornecedor_nome, values.url_doc, id))
   } else {
@@ -478,6 +533,9 @@ export async function sincronizarRelatorioViagemFinanceiro(
   }
   const { kind, rows } = await selectCotistas(db, report)
   const rateioAllocations = allocate(reportTotalCentavos, rows, kind === 'HOLDING')
+  const categoriaCliente = kind === 'CLIENTE'
+    ? await resolveCategoriaClienteRelatorio(db, report)
+    : null
   const pagamentoDiretoCentavos = Math.round((grouped.get('cliente') || [])
     .reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
   const existing = await db.prepare(`SELECT destino_tipo, destino_id
@@ -490,10 +548,10 @@ export async function sincronizarRelatorioViagemFinanceiro(
     if (kind === 'CLIENTE' && reportTotalCentavos > 0 && rateioAllocations.length) {
       const lancamentoCustoId = await ensureLancamentoCustoIntegral(
         db, statements, report, rateioAllocations, reportTotalCentavos, reportDescription,
-        existingDueDate, numeroVooId, clienteLancamentoId, userId,
+        existingDueDate, numeroVooId, clienteLancamentoId, userId, categoriaCliente!,
       )
       await addRateiosCliente(db, statements, report, rateioAllocations, reportTotalCentavos,
-        reportDescription, lancamentoCustoId, pagamentoDiretoCentavos)
+        reportDescription, lancamentoCustoId, pagamentoDiretoCentavos, categoriaCliente!)
     }
     const consolidatedMovement = kind === 'HOLDING'
       ? await db.prepare(`SELECT fv.destino_id AS id FROM financeiro_vinculos fv
@@ -627,11 +685,11 @@ export async function sincronizarRelatorioViagemFinanceiro(
     if (kind === 'CLIENTE') {
       const lancamentoCustoId = await ensureLancamentoCustoIntegral(
         db, statements, report, rateioAllocations, reportTotalCentavos, reportDescription,
-        dueDate, numeroVooId, clienteLancamentoId, userId,
+        dueDate, numeroVooId, clienteLancamentoId, userId, categoriaCliente!,
       )
       destinos.push({ tipo: 'LANCAMENTO', id: lancamentoCustoId })
       await addRateiosCliente(db, statements, report, rateioAllocations, reportTotalCentavos,
-        reportDescription, lancamentoCustoId, pagamentoDiretoCentavos)
+        reportDescription, lancamentoCustoId, pagamentoDiretoCentavos, categoriaCliente!)
     } else {
       reportMovementHoldingId = await addRateiosHolding(
         db, statements, report, rateioAllocations, reportTotalCentavos, reportDescription, userId,

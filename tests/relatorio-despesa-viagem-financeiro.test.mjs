@@ -5,7 +5,7 @@ import { sincronizarRelatorioViagemFinanceiro } from "../src/relatorioFinanceiro
 const columns = [
   "id", "aeronave_id", "holding_id", "socio_id", "colaborador_id", "data_emissao", "data_vencimento", "data_pagamento",
   "descricao", "descricao_despesa", "fornecedor_nome", "numero_doc", "numero_voo", "url_doc", "cotista_aeronave_id",
-  "cliente_id", "categoria_nome", "grupo_categoria", "status", "fluxo", "tipo_caixa", "valor_centavos", "pago_por",
+  "cliente_id", "categoria_cliente_id", "categoria_nome", "grupo_categoria", "subcategoria_1", "subcategoria_2", "subcategoria_3", "subcategoria_4", "status", "fluxo", "tipo_caixa", "valor_centavos", "pago_por",
   "pago_diretamente", "reembolsavel", "reembolso_quitado", "forma_pagamento", "observacoes", "criado_por", "origem_tipo",
   "origem_id", "idempotency_key", "lancamento_id", "lancamentos_id", "cotista_id", "movimentos_id", "movimento_id",
   "movimento_holding_id", "tripulante_id", "categoria_id", "percentual_sociedade", "percentual_uso", "valor_total_centavos",
@@ -25,6 +25,7 @@ function fakeDb(kind = "CLIENTE", existingData = null) {
         },
         async first() {
           if (sql.includes("SELECT holding_id FROM hold_socios")) return { holding_id: "holding-1" };
+          if (sql.includes("SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4")) return { id: "categoria-cliente-1", nome: "Despesas de Viagem", subcategoria_1: null, subcategoria_2: "RELATORIO DE VIAGEM", subcategoria_3: null, subcategoria_4: null };
           if (sql.includes("SELECT id FROM cliente WHERE")) return { id: "cliente-1" };
           if (sql.includes("SELECT user_id FROM tripulacao")) return { user_id: "colaborador-1" };
           if (existingData && sql.includes("SELECT id, status FROM contas_apagar")) return existingData.payable || null;
@@ -103,7 +104,10 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(lancamentoReembolso?.categoria_nome, "DESPESAS REEMBOLSÁVEIS");
   assert.equal(lancamentoReembolso?.valor_centavos, 2500);
   assert.equal(lancamentoReembolso?.escopo_financeiro, "CAIXA_SHARE");
-  assert.equal(lancamentoCusto?.categoria_nome, "DESPESAS DE VIAGEM");
+  assert.equal(lancamentoCusto?.categoria_nome, "Despesas de Viagem");
+  assert.equal(lancamentoCusto?.categoria_cliente_id, "categoria-cliente-1");
+  assert.equal(lancamentoCusto?.subcategoria_1, null);
+  assert.equal(lancamentoCusto?.subcategoria_2, "RELATORIO DE VIAGEM");
   assert.equal(lancamentoCusto?.valor_centavos, 8500);
   assert.equal(lancamentoCusto?.origem_tipo, "RELATORIO_DESPESA_VIAGEM");
   assert.equal(lancamentoCusto?.origem_id, "relatorio-1");
@@ -126,7 +130,10 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(rateios[0].valor_rateado_centavos, 8500);
   assert.equal(rateios[0].percentual_uso, 100);
   assert.equal(rateios[0].lancamento_id, lancamentoCusto?.id);
-  assert.equal(rateios[0].categoria_nome, "DESPESAS DE VIAGEM");
+  assert.equal(rateios[0].categoria_nome, "Despesas de Viagem");
+  assert.equal(rateios[0].categoria_id, "categoria-cliente-1");
+  assert.equal(rateios[0].subcategoria_1, null);
+  assert.equal(rateios[0].subcategoria_2, "RELATORIO DE VIAGEM");
   assert.equal(rateios[0].valor_pago_real_centavos, 1000);
   assert.equal(rateios[0].pago_por, "cotista-aeronave-1");
   assert.equal(rateios[0].pago_diretamente, 0, "pagamento parcial não marca o rateio todo como pago diretamente");
