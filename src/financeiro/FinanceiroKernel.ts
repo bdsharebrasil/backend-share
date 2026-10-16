@@ -215,8 +215,8 @@ async function resolverFornecedor(
     : null
   if (favoritoExistente) return favoritoExistente
   const novoId = crypto.randomUUID()
-  await db.prepare(`INSERT INTO fornecedores_favoritos (id, nome_completo, apelido, categoria_fornecedor)
-    VALUES (?, ?, ?, 'nenhum')`).bind(novoId, nome, nome).run()
+  await db.prepare(`INSERT INTO fornecedores_favoritos (id, nome_completo, apelido)
+    VALUES (?, ?, ?)`).bind(novoId, nome, nome).run()
   return { id: novoId, nome_completo: nome }
 }
 
