@@ -2856,6 +2856,10 @@ export async function enviarReciboPagamentoParaRateio(
       tipo_rateio: text(body.tipo_rateio) || receipt.tipo_rateio || undefined,
       data_vencimento: text(body.data_vencimento) || receipt.data_vencimento || null,
       observacoes: text(body.observacoes) || receipt.observacoes || null,
+      subcategoria_1: body.subcategoria_1,
+      subcategoria_2: body.subcategoria_2,
+      subcategoria_3: body.subcategoria_3,
+      subcategoria_4: body.subcategoria_4,
     })
   }
   if (receipt.pagador_tipo === 'empresa' && (rateioExistente || result)) {
@@ -2916,7 +2920,12 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // programação após o envio, materializamos o lançamento Share e o restante
   // do fluxo financeiro.
   if (!text(receiptInicial.lancamento_id)) {
-    await finalizarRecibo(db, receiptId, userId)
+    await finalizarRecibo(db, receiptId, userId, {
+      subcategoria_1: body.subcategoria_1,
+      subcategoria_2: body.subcategoria_2,
+      subcategoria_3: body.subcategoria_3,
+      subcategoria_4: body.subcategoria_4,
+    })
   }
   // O e-mail pode ter sido enviado antes ou depois da criação dos lançamentos.
   // O histórico é opcional e não pode interromper a programação financeira.
@@ -2992,10 +3001,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       escopo_financeiro: 'FINANCEIRO', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
-      subcategoria_1: nullableText(body.subcategoria_1) ?? nullableText(receipt.subcategoria_1),
-      subcategoria_2: nullableText(body.subcategoria_2) ?? nullableText(receipt.subcategoria_2),
-      subcategoria_3: nullableText(body.subcategoria_3) ?? nullableText(receipt.subcategoria_3),
-      subcategoria_4: nullableText(body.subcategoria_4) ?? nullableText(receipt.subcategoria_4),
+      subcategoria_1: nullableText(body.subcategoria_1),
+      subcategoria_2: nullableText(body.subcategoria_2),
+      subcategoria_3: nullableText(body.subcategoria_3),
+      subcategoria_4: nullableText(body.subcategoria_4),
       categoria_cliente_id: nullableText(body.categoria_id),
       categoria_nome: nullableText(body.categoria_nome ?? 'REEMBOLSO'),
       periodicidade: nullableText(body.periodicidade),
