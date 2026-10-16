@@ -190,7 +190,10 @@ export function buildDocumentFields(value: unknown, cotistaId?: string | null): 
 async function buscarFornecedor(db: Database, fornecedorId: unknown): Promise<{ id: string; nome_completo: string | null } | null> {
   const idFornecedor = nullableText(fornecedorId)
   return idFornecedor
-    ? db.prepare('SELECT id, nome_completo FROM fornecedores_favoritos WHERE id = ? LIMIT 1').bind(idFornecedor).first<{ id: string; nome_completo: string | null }>()
+    ? db.prepare(`SELECT id, nome_completo FROM fornecedores_favoritos WHERE id = ?1
+       UNION ALL
+       SELECT id, nome_fornecedor AS nome_completo FROM fornecedores_combustivel WHERE id = ?1
+       LIMIT 1`).bind(idFornecedor).first<{ id: string; nome_completo: string | null }>()
     : null
 }
 
@@ -2961,10 +2964,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       escopo_financeiro: 'FINANCEIRO', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
-      subcategoria_1: nullableText(body.subcategoria_1),
-      subcategoria_2: nullableText(body.subcategoria_2),
-      subcategoria_3: nullableText(body.subcategoria_3),
-      subcategoria_4: nullableText(body.subcategoria_4),
+      subcategoria_1: nullableText(body.subcategoria_1) ?? nullableText(receipt.subcategoria_1),
+      subcategoria_2: nullableText(body.subcategoria_2) ?? nullableText(receipt.subcategoria_2),
+      subcategoria_3: nullableText(body.subcategoria_3) ?? nullableText(receipt.subcategoria_3),
+      subcategoria_4: nullableText(body.subcategoria_4) ?? nullableText(receipt.subcategoria_4),
       categoria_cliente_id: nullableText(body.categoria_id),
       categoria_nome: nullableText(body.categoria_nome ?? 'REEMBOLSO'),
       periodicidade: nullableText(body.periodicidade),
@@ -3085,6 +3088,10 @@ async function issueReceiptInternal(
     valor_centavos: input.valor_centavos,
     data: input.data_emissao,
     categoria_id: input.categoria_movimentacao_id,
+    subcategoria_1: input.subcategoria_1,
+    subcategoria_2: input.subcategoria_2,
+    subcategoria_3: input.subcategoria_3,
+    subcategoria_4: input.subcategoria_4,
     categoria_despesa_subcategoria: input.subcategoria_1,
     aeronave_id: input.aeronave_id,
     cotista_aeronave_id: input.pagador_tipo === 'cotista_aeronave' ? input.pagador_id : body.cotista_aeronave_id,

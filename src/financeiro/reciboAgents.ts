@@ -10,6 +10,9 @@ type ReceiptInput = {
   categoria_nome?: string | null
   numero_voo?: string | null
   subcategoria_1?: string | null
+  subcategoria_2?: string | null
+  subcategoria_3?: string | null
+  subcategoria_4?: string | null
   descricao: string
   data_emissao: string
   data_vencimento?: string | null
@@ -54,6 +57,9 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     categoria_nome: body.categoria_nome ? String(body.categoria_nome) : null,
     numero_voo: body.numero_voo ? String(body.numero_voo) : null,
     subcategoria_1: body.subcategoria_1 ? String(body.subcategoria_1) : null,
+    subcategoria_2: body.subcategoria_2 ? String(body.subcategoria_2) : null,
+    subcategoria_3: body.subcategoria_3 ? String(body.subcategoria_3) : null,
+    subcategoria_4: body.subcategoria_4 ? String(body.subcategoria_4) : null,
     descricao: String(body.descricao ?? body.descricao_servico ?? '').trim(),
     data_emissao: String(body.data_emissao ?? '').trim(),
     data_vencimento: body.data_vencimento ? String(body.data_vencimento) : null,
@@ -100,7 +106,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
       pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
       valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
-      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por, categoria_nome, numero_voo
+      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por, categoria_nome, numero_voo, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
@@ -110,7 +116,7 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
-    input.observacoes, userId, input.categoria_nome, input.numero_voo,
+    input.observacoes, userId, input.categoria_nome, input.numero_voo, input.subcategoria_1, input.subcategoria_2, input.subcategoria_3, input.subcategoria_4,
   ).run()
 }
 
