@@ -304,7 +304,7 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
     if (!lancamentoClienteId) return c.json({ error: 'lancamento_cliente_do_reembolso_nao_encontrado' }, 409)
     const lancamentoClienteRateioId = lancamentoClienteId
-    const fornecedorId = String(body.fornecedor_id ?? body.fornecedores_favoritos_id ?? lancamento.fornecedores_favoritos_id ?? '').trim() || null
+    const fornecedorId = String(lancamento.fornecedores_favoritos_id ?? body.fornecedor_id ?? body.fornecedores_favoritos_id ?? '').trim() || null
     const existing = await c.env.SHARE_DB.prepare(`SELECT id FROM contas_apagar WHERE lancamentos_id = ? AND status <> 'CANCELADO' LIMIT 1`).bind(lancamentoId).first<{ id: string }>()
     const rateiosExistentes = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id FROM rateio_despesas WHERE lancamento_id IN (?, ?)`).bind(lancamentoId, lancamentoClienteRateioId).all<{ id: string; lancamento_id: string | null }>().catch(() => ({ results: [] }))
     const rateiosDoCliente = rateiosExistentes.results ?? []

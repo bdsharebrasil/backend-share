@@ -197,6 +197,29 @@ async function buscarFornecedor(db: Database, fornecedorId: unknown): Promise<{ 
     : null
 }
 
+async function resolverFornecedor(
+  db: Database,
+  fornecedorId: unknown,
+  fornecedorNome: unknown,
+): Promise<{ id: string; nome_completo: string | null } | null> {
+  const idOuNome = nullableText(fornecedorId)
+  const nome = nullableText(fornecedorNome) || idOuNome
+  if (!idOuNome && !nome) return null
+  const existente = await buscarFornecedor(db, idOuNome)
+  if (existente) return existente
+  const favoritoExistente = nome
+    ? await db.prepare(`SELECT id, nome_completo FROM fornecedores_favoritos
+         WHERE lower(trim(COALESCE(nome_completo, ''))) = lower(trim(?1))
+            OR lower(trim(COALESCE(apelido, ''))) = lower(trim(?1))
+         LIMIT 1`).bind(nome).first<{ id: string; nome_completo: string | null }>()
+    : null
+  if (favoritoExistente) return favoritoExistente
+  const novoId = crypto.randomUUID()
+  await db.prepare(`INSERT INTO fornecedores_favoritos (id, nome_completo, apelido, categoria_fornecedor)
+    VALUES (?, ?, ?, 'nenhum')`).bind(novoId, nome, nome).run()
+  return { id: novoId, nome_completo: nome }
+}
+
 async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Row> {
   const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
   const fornecedor = await buscarFornecedor(db, fornecedorId)
@@ -2384,7 +2407,7 @@ export async function processFinanceQueue(
 async function createReimbursementFinance(db: Database, schema: SchemaCache, command: Row, input: Row, receiptId: string, userId: string | null): Promise<{ shareLancamentoId: string; clienteLancamentoId: string | null; contaReceberId: string | null }> {
   const receiptMeta = await db.prepare('SELECT numero_recibo, url_recibo FROM recibos WHERE id = ? LIMIT 1').bind(receiptId).first<{ numero_recibo: string | null; url_recibo: string | null }>()
   const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
-  const fornecedor = await buscarFornecedor(db, fornecedorId)
+  const fornecedor = await buscarFornecedor(db, fornecedorId) ?? await resolverFornecedor(db, fornecedorId, command.fornecedor_nome ?? command.fornecedor)
   const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
   const categoriaShare = await db.prepare(`
     SELECT id FROM categoria_movimentacao_share
@@ -2681,6 +2704,11 @@ export async function enviarReciboPagamentoParaRateio(
     `SELECT id FROM rateio_hold WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
   const rateioExistente = Boolean(existingClient?.id || existingHolding?.id)
+  const fornecedorResolvido = await resolverFornecedor(
+    db,
+    body.fornecedor_id ?? receipt.fornecedor_id,
+    body.fornecedor_nome ?? body.fornecedor ?? receipt.fornecedor_nome ?? receipt.fornecedor,
+  )
   const envioVinculado = await db.prepare(
     `SELECT destino_id AS id FROM financeiro_vinculos WHERE origem_tipo = 'RECIBO' AND origem_id = ?1 AND destino_tipo = 'ENVIO_DESPESA' LIMIT 1`,
   ).bind(receiptId).first<{ id: string }>().catch(() => null)
@@ -2712,8 +2740,8 @@ export async function enviarReciboPagamentoParaRateio(
       categoria_id: receipt.categoria_movimentacao_id,
       categoria_cliente_id: receipt.categoria_movimentacao_id,
       categoria_nome: receipt.categoria_nome,
-      fornecedor_id: body.fornecedor_id ?? receipt.fornecedor_id,
-      fornecedor_nome: body.fornecedor_nome ?? body.fornecedor ?? receipt.fornecedor_nome ?? receipt.fornecedor,
+      fornecedor_id: fornecedorResolvido?.id ?? null,
+      fornecedor_nome: fornecedorResolvido?.nome_completo ?? body.fornecedor_nome ?? body.fornecedor ?? receipt.fornecedor_nome ?? receipt.fornecedor,
       subcategoria_1: body.subcategoria_1 ?? receipt.subcategoria_1,
       subcategoria_2: body.subcategoria_2 ?? receipt.subcategoria_2,
       subcategoria_3: body.subcategoria_3 ?? receipt.subcategoria_3,
@@ -2931,7 +2959,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   const vencimento = nullableText(body.data_vencimento ?? receipt.data_vencimento) || data
   const cotistaId = text(receipt.cotista_aeronave_id)
   const fornecedorId = nullableText(body.fornecedor_id ?? body.fornecedores_favoritos_id ?? receipt.share_fornecedor_id)
-  const fornecedor = await buscarFornecedor(db, fornecedorId)
+  const fornecedor = await buscarFornecedor(db, fornecedorId) ?? await resolverFornecedor(db, fornecedorId, body.fornecedor_nome ?? body.fornecedor)
   const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
   if (abastecimentosId) {
     const lancamentoCotistaExistente = await db.prepare(`
