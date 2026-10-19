@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { createExpense } from './FinanceiroKernel'
+import { createExpense, resolveReceivableAllocations } from './FinanceiroKernel'
 import { mapConta } from './contas'
 import { errorResponse } from './errorResponse'
 import { enriquecerFornecedores } from './repositories/contas'
@@ -39,23 +39,11 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const mapped = (await enriquecerFornecedores(c.env.SHARE_DB, rows)).map(mapConta)
   if (table !== 'contas_areceber') return mapped
 
-  const lancamentoIds = [...new Set(mapped
-    .map(conta => conta.lancamentoId)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0))]
-  const rateios = lancamentoIds.length
-    ? await listar(c.env.SHARE_DB,
-      `SELECT id, lancamento_id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id IN (${lancamentoIds.map(() => '?').join(', ')}) ORDER BY rowid`,
-      ...lancamentoIds,
-    )
-    : []
-  const rateiosPorLancamento = new Map<string, typeof rateios>()
-  for (const rateio of rateios) {
-    const lancamentoId = String(rateio.lancamento_id)
-    const agrupados = rateiosPorLancamento.get(lancamentoId) ?? []
-    agrupados.push(rateio)
-    rateiosPorLancamento.set(lancamentoId, agrupados)
-  }
-  return mapped.map(conta => ({ ...conta, rateios: rateiosPorLancamento.get(String(conta.lancamentoId)) ?? [] }))
+  const resolved = await resolveReceivableAllocations(c.env.SHARE_DB, rows)
+  return mapped.map(conta => {
+    const allocation = resolved.get(String(conta.id))
+    return { ...conta, rateios: allocation?.rateios || [], conciliacaoErro: allocation?.erro || (allocation?.rateios.length ? null : 'Obrigação sem rateio vinculado.') }
+  })
 }
 
 contasRoutes.get('/contas-apagar', async (c) => {
