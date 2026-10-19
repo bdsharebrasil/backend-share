@@ -410,6 +410,10 @@ emailRoutes.post('/api/interno/emails', async c => {
   const todosDestinatarios = [...destinatarios, ...copias]
   const assunto = String(body.assunto || '').trim(); const mensagem = [String(body.mensagem || '').trim(), String(body.dados_bancarios || '').trim()].filter(Boolean).join('\n\n'); const ids = [...new Set(Array.isArray(body.anexos) ? body.anexos.map(String) : (() => { try { const parsed = JSON.parse(String(body.anexos || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })())]
   const referencias = Array.isArray(body.referencias) ? body.referencias.map(String) : (() => { try { const parsed = JSON.parse(String(body.referencias || '[]')); return Array.isArray(parsed) ? parsed.map(String) : [] } catch { return [] } })()
+  const rascunhoId = String(body.rascunho_id || '').trim()
+  const cotistaId = String(body.cotista_id || '').trim()
+  const chaveIdempotencia = String(body.idempotency_key || '').trim()
+  if (rascunhoId && (!cotistaId || !chaveIdempotencia)) return c.json({ error: 'destinatario_e_chave_idempotencia_obrigatorios' }, 400)
   const origens = [...new Set([...referencias, ...ids])]
   if (!destinatarios.length || !assunto || !mensagem) return c.json({ error: 'destinatario_assunto_e_mensagem_obrigatorios' }, 400)
   if (todosDestinatarios.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return c.json({ error: 'destinatario_invalido' }, 400)
@@ -425,6 +429,24 @@ emailRoutes.post('/api/interno/emails', async c => {
   if (!c.env.RESEND_API_KEY || !emailFrom) return c.json({ error: 'email_nao_configurado' }, 503)
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
   const db = c.env.SHARE_DB; const anexos: any[] = []; let erroAnexo: string | null = null
+  let idempotenciaDestinatario: { id: string; status: string; email_id: string | null } | null = null
+  if (rascunhoId) {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS envio_pagamento_email_destinatarios (
+      id TEXT PRIMARY KEY, rascunho_id TEXT NOT NULL, cotista_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'PENDENTE',
+      email_id TEXT, erro TEXT, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (rascunho_id, cotista_id)
+    )`).run()
+    const rascunho = await db.prepare('SELECT id FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(rascunhoId, user.id).first<{ id: string }>().catch(() => null)
+    if (!rascunho) return c.json({ error: 'rascunho_nao_encontrado' }, 404)
+    const existente = await db.prepare('SELECT id, status, email_id, idempotency_key FROM envio_pagamento_email_destinatarios WHERE rascunho_id = ? AND cotista_id = ?').bind(rascunhoId, cotistaId).first<{ id: string; status: string; email_id: string | null; idempotency_key: string }>()
+    if (existente && existente.idempotency_key !== chaveIdempotencia) return c.json({ error: 'chave_de_idempotencia_nao_pode_mudar' }, 409)
+    if (existente?.status === 'ENVIADO') return c.json({ success: true, id: existente.email_id, idempotent: true }, 200)
+    idempotenciaDestinatario = existente ?? { id: uuid(), status: 'PENDENTE', email_id: null }
+    await db.prepare(`INSERT INTO envio_pagamento_email_destinatarios (id, rascunho_id, cotista_id, idempotency_key, status)
+      VALUES (?, ?, ?, ?, 'PROCESSANDO') ON CONFLICT(rascunho_id, cotista_id) DO UPDATE SET status = 'PROCESSANDO', erro = NULL, atualizado_em = CURRENT_TIMESTAMP`)
+      .bind(idempotenciaDestinatario.id, rascunhoId, cotistaId, chaveIdempotencia).run()
+  }
   for (const id of ids) {
     const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
     if (prefix === 'abastecimento') {
@@ -502,6 +524,15 @@ emailRoutes.post('/api/interno/emails', async c => {
   // repeated `arquivos` fields, so truncating here silently dropped attachments
   // after the tenth one (and made multi-image uploads incomplete).
   for (const file of arquivosLocais) anexos.push({ filename: file.name, content: arrayBufferBase64(await file.arrayBuffer()), content_type: file.type || 'application/octet-stream' })
+  const arquivosPersistidos = Array.isArray(body.arquivos_persistidos) ? body.arquivos_persistidos : (() => { try { const parsed = JSON.parse(String(body.arquivos_persistidos || '[]')); return Array.isArray(parsed) ? parsed : [] } catch { return [] } })()
+  for (const arquivo of arquivosPersistidos) {
+    const key = String(arquivo?.key || '')
+    const filename = String(arquivo?.filename || '')
+    if (!key.startsWith(`share/nf-boletos-clients/${user.id}/`) || !filename) { erroAnexo = 'anexo_persistido_invalido'; continue }
+    const object = await shareBrasilBucket(c)?.get(key)
+    if (!object) { erroAnexo = `anexo_persistido_indisponivel:${filename}`; continue }
+    anexos.push({ filename, content: arrayBufferBase64(await object.arrayBuffer()), content_type: String(arquivo?.content_type || object.httpMetadata?.contentType || 'application/octet-stream') })
+  }
   const id = uuid(); let status = erroAnexo ? 'erro' : 'enviado'; let erro: string | null = erroAnexo
   const anexosDetalhes: Array<{ nome_arquivo: string; tipo_arquivo: string; tamanho_bytes: number; key: string }> = []
   if (!erroAnexo) {
@@ -516,7 +547,7 @@ emailRoutes.post('/api/interno/emails', async c => {
   const logoRemota = /^https?:\/\//i.test(String(assinaturaAtual.logo_url || '').trim())
   const logoInline = logoRemota ? [] : [{ filename: 'share-brasil-logo.png', content: SIGNATURE_LOGO_BASE64, content_type: 'image/png', content_id: SIGNATURE_LOGO_CID }]
   if (!erroAnexo) {
-    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: emailFrom, reply_to: emailFromDepartamento || user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
+    const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json', ...(chaveIdempotencia ? { 'Idempotency-Key': chaveIdempotencia } : {}) }, body: JSON.stringify({ from: emailFrom, reply_to: emailFromDepartamento || user.email, to: destinatarios, ...(copias.length ? { cc: copias } : {}), subject: assunto, html: `<p>${escapeHtml(mensagem).replace(/\n/g, '<br>')}</p>${assinaturaHtml(assinaturaAtual)}`, attachments: [...logoInline, ...anexos] }) })
     if (!response.ok) { status = 'erro'; erro = await response.text().catch(() => 'falha_ao_enviar_email') }
   }
   const [primeiroPrefix, primeiroRawId] = (origens[0] || '').includes(':') ? origens[0].split(':', 2) : [null, null]
@@ -526,6 +557,10 @@ emailRoutes.post('/api/interno/emails', async c => {
     // A FK de lancamentos.email_enviado_id exige que o registro pai exista
     // antes da atualização do lançamento.
     await marcarEmailEnviadoParaOrigens(c, origens, id).catch(error => { log.error('[interno/emails] origem não atualizada após envio', error) })
+  }
+  if (idempotenciaDestinatario) {
+    await db.prepare(`UPDATE envio_pagamento_email_destinatarios SET status = ?, email_id = ?, erro = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(status === 'enviado' ? 'ENVIADO' : 'FALHOU', status === 'enviado' ? id : null, erro, idempotenciaDestinatario.id).run()
   }
   if (status === 'erro') {
     let detalhe: Record<string, unknown> | null = null
