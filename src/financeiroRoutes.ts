@@ -8,6 +8,8 @@ import {
   processFinanceQueue,
   settlePayable,
   settleReceivable,
+  contextoBaixaCotista,
+  settleCotista,
   validateFinanceSchema,
 } from './financeiro/FinanceiroKernel'
 import { pagamentosFolhaRoutes } from './financeiro/pagamentosFolhaRoutes'
@@ -482,6 +484,23 @@ financeiroRoutes.delete('/lancamentos/:id', async (c) => {
     return c.json({ ok: true, id, status: 'CANCELADO', origem })
   } catch (error) { return errorResponse(c, error) }
 })
+financeiroRoutes.get('/lancamentos/:id/contexto-baixa', async (c) => {
+  try {
+    const contexto = await contextoBaixaCotista(c.env.SHARE_DB, c.req.param('id'))
+    if (contexto.natureza === 'RECEBIMENTO_SHARE') { const denied = await requireCaixaShareAccess(c); if (denied) return denied }
+    return c.json(contexto)
+  }
+  catch (error) { return errorResponse(c, error) }
+})
+financeiroRoutes.post('/lancamentos/:id/baixa-conciliada', async (c) => {
+  try {
+    const contexto = await contextoBaixaCotista(c.env.SHARE_DB, c.req.param('id'))
+    if (contexto.natureza === 'RECEBIMENTO_SHARE') { const denied = await requireCaixaShareAccess(c); if (denied) return denied }
+    return c.json(await settleCotista(c.env.SHARE_DB, c.req.param('id'), await c.req.json<Record<string, unknown>>(), c.get('userId') || null))
+  }
+  catch (error) { return errorResponse(c, error) }
+})
+
 financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -489,6 +508,13 @@ financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const entidade = await entidadeLancamentoFinanceiro(db, id)
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
+    // Client/allocated obligations must use the same ledger as Share receipts.
+    const principal = await db.prepare('SELECT tipo_caixa, origem_tipo FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
+    if (['rateio_despesas', 'rateio_despesas_pai'].includes(String(entidade.origem)) || principal?.tipo_caixa === 'CLIENTE' || ['RECIBO_SAIDA', 'NF_SAIDA'].includes(String(principal?.origem_tipo))) {
+      const contexto = await contextoBaixaCotista(db, id)
+      if (contexto.natureza === 'RECEBIMENTO_SHARE') { const denied = await requireCaixaShareAccess(c); if (denied) return denied }
+      return c.json(await settleCotista(db, id, body, c.get('userId') || null))
+    }
     const ehRateioPai = String(entidade.origem) === 'rateio_despesas_pai'
     const origem = ehRateioPai ? 'rateio_despesas' : String(entidade.origem)
     const data = String(body.data_pagamento ?? body.dataPagamento ?? new Date().toISOString().slice(0, 10))
@@ -628,6 +654,7 @@ financeiroRoutes.get('/contas-apagar/:id/comprovante/arquivo', async (c) => {
 
 financeiroRoutes.post('/contas-areceber/:id/baixa', async (c) => {
   try {
+    const denied = await requireCaixaShareAccess(c); if (denied) return denied
     const result = await settleReceivable(
       c.env.SHARE_DB,
       c.req.param('id'),
