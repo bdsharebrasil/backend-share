@@ -103,7 +103,7 @@ recibosSaidaRoutes.post('/recibos-saida', async (c) => {
             percentual_uso = 100,
             periodicidade = 'MENSAL',
             valor_pago_real_centavos = 0,
-            status = 'AGUARDANDO_REEMBOLSO',
+            status = 'EM_ABERTO',
             atualizado_em = CURRENT_TIMESTAMP
         WHERE lancamento_id = ?
       `).bind(cotistaId, lancamentoClienteId))
