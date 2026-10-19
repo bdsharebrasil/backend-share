@@ -1,6 +1,6 @@
 export function mapConta(row: Record<string, unknown>): Record<string, unknown> {
   const documento = row.numero_doc ?? row.numero_demonstrativo ?? row.numero_nf ?? row.numero_recibo ?? null
-  const documentoUrl = row.url_demonstrativo ?? row.url_nf ?? row.url_recibo ?? row.url_boleto ?? row.url_doc ?? row.lancamento_boleto_url ?? row.lancamento_nf_url ?? row.boleto_url ?? row.nf_url ?? null
+  const documentoUrl = row.relatorio_pdf_url ?? row.url_demonstrativo ?? row.url_nf ?? row.url_recibo ?? row.url_boleto ?? row.url_doc ?? row.lancamento_boleto_url ?? row.lancamento_nf_url ?? row.boleto_url ?? row.nf_url ?? null
   return {
     id: row.id,
     dataEmissao: row.lancamento_data_emissao ?? row.data_emissao ?? row.data ?? null,
