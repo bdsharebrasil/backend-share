@@ -30,11 +30,21 @@ enviosPagamentoRoutes.get('/envios-pagamento/rascunhos', async (c) => {
   if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
   const db = c.env.SHARE_DB
   await garantirTabelasRascunho(db)
-  const { results } = await db.prepare(`SELECT r.*, COUNT(CASE WHEN e.status = 'ENVIADO' THEN 1 END) AS emails_enviados,
-      COUNT(e.cotista_id) AS total_destinatarios
-    FROM envio_pagamento_rascunhos r LEFT JOIN envio_pagamento_email_destinatarios e ON e.rascunho_id = r.id
+  const { results } = await db.prepare(`SELECT r.*,
+      e.status AS envio_status, e.lancamento_id AS envio_lancamento_id, e.movimentacao_id AS envio_movimentacao_id,
+      (SELECT COUNT(*) FROM envio_pagamento_email_destinatarios ed WHERE ed.rascunho_id = r.id AND ed.status = 'ENVIADO') AS emails_enviados,
+      (SELECT COUNT(*) FROM envio_pagamento_email_destinatarios ed WHERE ed.rascunho_id = r.id) AS total_destinatarios,
+      (SELECT COUNT(*) FROM envio_pagamento_email_destinatarios ed WHERE ed.rascunho_id = r.id AND ed.status = 'FALHOU') AS emails_falhos,
+      (SELECT COUNT(*) FROM rateio_despesas rd
+        WHERE rd.lancamento_id = COALESCE(e.lancamento_id, e.id)
+          AND UPPER(COALESCE(rd.status, '')) <> 'CANCELADO') AS rateio_total,
+      (SELECT COUNT(*) FROM rateio_despesas rd
+        WHERE rd.lancamento_id = COALESCE(e.lancamento_id, e.id)
+          AND UPPER(COALESCE(rd.status, '')) IN ('PAGO', 'PAGO_DIRETAMENTE', 'REEMBOLSADO')) AS rateio_concluidos
+    FROM envio_pagamento_rascunhos r
+    LEFT JOIN envio_despesas e ON e.id = r.envio_id
     WHERE r.criado_por = ? AND r.status <> 'CONCLUIDO'
-    GROUP BY r.id ORDER BY r.atualizado_em DESC`).bind(userId).all<Record<string, unknown>>()
+    ORDER BY r.atualizado_em DESC`).bind(userId).all<Record<string, unknown>>()
   return c.json({ rascunhos: results ?? [] })
 })
 
@@ -52,7 +62,7 @@ enviosPagamentoRoutes.get('/envios-pagamento/rascunhos/:id', async (c) => {
 enviosPagamentoRoutes.post('/envios-pagamento/rascunhos', async (c) => {
   const userId = c.get('userId')
   if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}))
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
   const id = String(body.id ?? '').trim()
   const tipo = String(body.tipo_envio ?? '').trim()
   const idempotencyKey = String(body.idempotency_key ?? '').trim()
