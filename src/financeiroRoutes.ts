@@ -652,6 +652,58 @@ financeiroRoutes.get('/contas-apagar/:id/comprovante/arquivo', async (c) => {
   return c.body(await object.arrayBuffer(), 200, { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'inline', 'Cache-Control': 'private, max-age=3600' })
 })
 
+financeiroRoutes.post('/contas-areceber/:id/comprovante-upload', async (c) => {
+  const denied = await requireCaixaShareAccess(c)
+  if (denied) return denied
+  const id = c.req.param('id')
+  const conta = await c.env.SHARE_DB.prepare('SELECT id, status FROM contas_areceber WHERE id = ?')
+    .bind(id).first<{ id: string; status: string }>()
+  if (!conta) return c.json({ error: 'conta_a_receber_nao_encontrada' }, 404)
+  if (['RECEBIDO', 'CANCELADO'].includes(String(conta.status).toUpperCase())) {
+    return c.json({ error: 'comprovante_nao_pode_ser_alterado' }, 409)
+  }
+  const bucket = c.env.SHARE_FILES || c.env.FILES
+  if (!bucket) return c.json({ error: 'armazenamento_de_anexos_indisponivel' }, 503)
+  const form = await c.req.formData()
+  const valorArquivo = form.get('arquivo') as unknown
+  if (!valorArquivo || typeof valorArquivo !== 'object' || !('arrayBuffer' in valorArquivo) || !('type' in valorArquivo) || !('size' in valorArquivo)) {
+    return c.json({ error: 'arquivo_obrigatorio' }, 400)
+  }
+  const arquivo = valorArquivo as File
+  const formatos: Record<string, { extensao: string; assinatura: (bytes: Uint8Array) => boolean }> = {
+    'application/pdf': { extensao: 'pdf', assinatura: (bytes) => bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 },
+    'image/jpeg': { extensao: 'jpg', assinatura: (bytes) => bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff },
+    'image/png': { extensao: 'png', assinatura: (bytes) => bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 },
+    'image/webp': { extensao: 'webp', assinatura: (bytes) => String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP' },
+  }
+  const formato = formatos[arquivo.type]
+  if (!formato) return c.json({ error: 'formato_de_comprovante_nao_permitido' }, 415)
+  if (arquivo.size < 1 || arquivo.size > 10 * 1024 * 1024) return c.json({ error: 'comprovante_deve_ter_ate_10_mb' }, 413)
+  const bytes = new Uint8Array(await arquivo.arrayBuffer())
+  if (!formato.assinatura(bytes)) return c.json({ error: 'conteudo_do_comprovante_invalido' }, 415)
+  const key = `financeiro/contas-areceber/${id}/comprovante/${crypto.randomUUID()}.${formato.extensao}`
+  await bucket.put(key, bytes, { httpMetadata: { contentType: arquivo.type, contentDisposition: 'inline' } })
+  const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
+  const url = publicBase
+    ? `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
+    : `/api/financeiro/contas-areceber/${encodeURIComponent(id)}/comprovante/arquivo?key=${encodeURIComponent(key)}`
+  return c.json({ url }, 201)
+})
+
+financeiroRoutes.get('/contas-areceber/:id/comprovante/arquivo', async (c) => {
+  const denied = await requireCaixaShareAccess(c)
+  if (denied) return denied
+  const id = c.req.param('id')
+  const key = c.req.query('key') || ''
+  const prefixo = `financeiro/contas-areceber/${id}/comprovante/`
+  if (!key.startsWith(prefixo) || !/^[a-f0-9-]+\.(pdf|jpg|png|webp)$/i.test(key.slice(prefixo.length))) return c.notFound()
+  const bucket = c.env.SHARE_FILES || c.env.FILES
+  if (!bucket) return c.json({ error: 'armazenamento_de_anexos_indisponivel' }, 503)
+  const object = await bucket.get(key)
+  if (!object) return c.notFound()
+  return c.body(await object.arrayBuffer(), 200, { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'inline', 'Cache-Control': 'private, max-age=3600' })
+})
+
 financeiroRoutes.post('/contas-areceber/:id/baixa', async (c) => {
   try {
     const denied = await requireCaixaShareAccess(c); if (denied) return denied
