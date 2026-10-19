@@ -8,6 +8,80 @@ type Bindings = { SHARE_DB: D1Database; SHARE_FILES?: R2Bucket; FILES?: R2Bucket
 type Variables = { userId: string | null }
 
 export const enviosPagamentoRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
+async function garantirTabelasRascunho(db: D1Database) {
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS envio_pagamento_rascunhos (
+      id TEXT PRIMARY KEY, criado_por TEXT NOT NULL, tipo_envio TEXT NOT NULL,
+      etapa_atual INTEGER NOT NULL DEFAULT 0, dados_json TEXT NOT NULL DEFAULT '{}',
+      idempotency_key TEXT NOT NULL UNIQUE, envio_id TEXT, status TEXT NOT NULL DEFAULT 'PREENCHIMENTO',
+      atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS envio_pagamento_email_destinatarios (
+      id TEXT PRIMARY KEY, rascunho_id TEXT NOT NULL, cotista_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'PENDENTE',
+      email_id TEXT, erro TEXT, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (rascunho_id, cotista_id)
+    )`),
+  ])
+}
+
+enviosPagamentoRoutes.get('/envios-pagamento/rascunhos', async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = c.env.SHARE_DB
+  await garantirTabelasRascunho(db)
+  const { results } = await db.prepare(`SELECT r.*, COUNT(CASE WHEN e.status = 'ENVIADO' THEN 1 END) AS emails_enviados,
+      COUNT(e.cotista_id) AS total_destinatarios
+    FROM envio_pagamento_rascunhos r LEFT JOIN envio_pagamento_email_destinatarios e ON e.rascunho_id = r.id
+    WHERE r.criado_por = ? AND r.status <> 'CONCLUIDO'
+    GROUP BY r.id ORDER BY r.atualizado_em DESC`).bind(userId).all<Record<string, unknown>>()
+  return c.json({ rascunhos: results ?? [] })
+})
+
+enviosPagamentoRoutes.get('/envios-pagamento/rascunhos/:id', async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = c.env.SHARE_DB
+  await garantirTabelasRascunho(db)
+  const rascunho = await db.prepare('SELECT * FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(c.req.param('id'), userId).first<Record<string, unknown>>()
+  if (!rascunho) return c.json({ error: 'rascunho_nao_encontrado' }, 404)
+  const { results: destinatarios } = await db.prepare('SELECT cotista_id, status, email_id, erro, atualizado_em FROM envio_pagamento_email_destinatarios WHERE rascunho_id = ? ORDER BY atualizado_em').bind(rascunho.id).all()
+  return c.json({ rascunho, destinatarios: destinatarios ?? [] })
+})
+
+enviosPagamentoRoutes.post('/envios-pagamento/rascunhos', async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}))
+  const id = String(body.id ?? '').trim()
+  const tipo = String(body.tipo_envio ?? '').trim()
+  const idempotencyKey = String(body.idempotency_key ?? '').trim()
+  const etapa = Number(body.etapa_atual)
+  if (!id || !idempotencyKey || !['share', 'cliente', 'reembolso'].includes(tipo) || !Number.isInteger(etapa) || etapa < 0 || etapa > 3 || !body.dados || typeof body.dados !== 'object') {
+    return c.json({ error: 'dados_de_rascunho_invalidos' }, 400)
+  }
+  const db = c.env.SHARE_DB
+  await garantirTabelasRascunho(db)
+  const atual = await db.prepare('SELECT id, idempotency_key FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(id, userId).first<{ id: string; idempotency_key: string }>()
+  if (atual && atual.idempotency_key !== idempotencyKey) return c.json({ error: 'chave_de_idempotencia_nao_pode_mudar' }, 409)
+  const status = String(body.status ?? 'PREENCHIMENTO')
+  if (!['PREENCHIMENTO', 'EMAIL_PENDENTE', 'CONCLUIDO'].includes(status)) return c.json({ error: 'status_de_rascunho_invalido' }, 400)
+  if (atual) {
+    await db.prepare(`UPDATE envio_pagamento_rascunhos SET tipo_envio = ?, etapa_atual = ?, dados_json = ?, envio_id = ?, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND criado_por = ?`)
+      .bind(tipo, etapa, JSON.stringify(body.dados), body.envio_id ? String(body.envio_id) : null, status, id, userId).run()
+  } else {
+    await db.prepare(`INSERT INTO envio_pagamento_rascunhos (id, criado_por, tipo_envio, etapa_atual, dados_json, idempotency_key, envio_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, userId, tipo, etapa, JSON.stringify(body.dados), idempotencyKey, body.envio_id ? String(body.envio_id) : null, status).run()
+  }
+  const cotistas = Array.isArray(body.destinatarios) ? [...new Set(body.destinatarios.map((value) => String(value ?? '').trim()).filter(Boolean))] : []
+  for (const cotistaId of cotistas) {
+    await db.prepare(`INSERT OR IGNORE INTO envio_pagamento_email_destinatarios (id, rascunho_id, cotista_id, idempotency_key, status)
+      VALUES (?, ?, ?, ?, 'PENDENTE')`).bind(crypto.randomUUID(), id, cotistaId, `email:${id}:${cotistaId}`).run()
+  }
+  return c.json({ ok: true, atualizado_em: new Date().toISOString() })
+})
+
 enviosPagamentoRoutes.post('/envios-pagamento', async (c) => {
   try {
     let input
