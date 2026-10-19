@@ -1394,25 +1394,6 @@ async function portalLoanFlightSequence(c: Context<{ Bindings: Bindings }>, clie
   return `${codigo}-${portalAircraftSuffix(registration)}${String(sequence).padStart(3, '0')}/${ano}`
 }
 
-async function notificarConfirmacaoAgendamento(c: Context<{ Bindings: Bindings }>, solicitacaoId: string, numeroVoo: string, dataAgendada: string, pilotoId: string): Promise<boolean> {
-  if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return false
-  const destinatario = await c.env.SHARE_DB.prepare(`SELECT COALESCE(c.razao_social, hs.nome, 'Cotista') AS cotista_nome, COALESCE(c.email_principal, hs.email_principal) AS email, COALESCE(t.nome_completo, tf.nome_completo, 'tripulante não informado') AS tripulante_nome
-    FROM solicitacoes_reserva_voo s LEFT JOIN cliente c ON c.id = s.cliente_id LEFT JOIN hold_socios hs ON hs.id = s.socio_id
-    LEFT JOIN tripulacao t ON t.id = ?2 LEFT JOIN tripulacao_freelancer tf ON tf.id = ?2 WHERE s.id = ?1`).bind(solicitacaoId, pilotoId).first<{ cotista_nome: string; email: string | null; tripulante_nome: string }>()
-  if (!destinatario) return false
-  const email = destinatario.email?.trim()
-  if (!email) return false
-  const data = new Date(`${dataAgendada.slice(0, 10)}T00:00:00Z`).toLocaleDateString('pt-BR', { timeZone: 'UTC' })
-  const mensagem = `Olá ${destinatario.cotista_nome}, seu voo ${numeroVoo} foi confirmado para o dia ${data} com o tripulante ${destinatario.tripulante_nome}.`
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [email], subject: `Voo ${numeroVoo} confirmado`, text: mensagem, html: `<p>${escapeHtml(mensagem)}</p>` }),
-  })
-  if (!response.ok) throw new Error(`Resend HTTP ${response.status}`)
-  return true
-}
-
 app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
@@ -1806,16 +1787,11 @@ app.post('/api/interno/solicitacoes/:id/aprovar', async c => {
   const numeroVoo = vooEmprestado
     ? await portalLoanFlightSequence(c, cotista.codigo_cliente, aeronave.matricula_registro, cotistaKey)
     : await portalFlightSequence(c, cotista.codigo_cliente, cotistaKey)
-  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aeronave_id = ?, cliente_emprestimo_id = ?, socio_emprestimo_id = ?, voo_emprestado = ?, data_agendada = ?, horario_previsto_agendamento = ?, dias_duracao = ?, numero_passageiros = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'")
-    .bind(numeroVoo, piloto.id, copiloto?.id || null, aeronaveId, clienteEmprestimoId, socioEmprestimoId, vooEmprestado ? 'sim' : 'nao', dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, id).run()
+  const aprovadoPor = extractSupabaseUserId(c)
+  const result = await c.env.SHARE_DB.prepare("UPDATE solicitacoes_reserva_voo SET status = 'aprovada', numero_voo = ?, piloto_id = ?, copiloto_id = ?, aeronave_id = ?, cliente_emprestimo_id = ?, socio_emprestimo_id = ?, voo_emprestado = ?, data_agendada = ?, horario_previsto_agendamento = ?, dias_duracao = ?, numero_passageiros = ?, aprovado_por = ?, aprovado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pendente'")
+    .bind(numeroVoo, piloto.id, copiloto?.id || null, aeronaveId, clienteEmprestimoId, socioEmprestimoId, vooEmprestado ? 'sim' : 'nao', dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, aprovadoPor, id).run()
   if (!result.meta.changes) return c.json({ error: 'solicitacao_nao_pendente' }, 409)
-  let notificationSent = false
-  try {
-    notificationSent = await notificarConfirmacaoAgendamento(c, id, numeroVoo, dataAgendada, piloto.id)
-  } catch (error) {
-    log.error('[agendamento] falha ao notificar confirmação', error)
-  }
-  return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: numeroVoo, aeronave_id: aeronaveId, data_agendada: dataAgendada, horario_previsto_agendamento: horarioPrevisto, dias_duracao: diasDuracao, numero_passageiros: numeroPassageiros, voo_emprestado: vooEmprestado ? 'sim' : 'nao', piloto, copiloto, notification_sent: notificationSent })
+  return c.json({ success: true, status: 'aprovada', solicitacao_id: id, numero_voo: numeroVoo, aeronave_id: aeronaveId, data_agendada: dataAgendada, horario_previsto_agendamento: horarioPrevisto, dias_duracao: diasDuracao, numero_passageiros: numeroPassageiros, voo_emprestado: vooEmprestado ? 'sim' : 'nao', piloto, copiloto, notification_sent: false })
 })
 
 app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
