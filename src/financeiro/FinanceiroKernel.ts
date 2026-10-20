@@ -2127,6 +2127,11 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     ? nullableText(reimbursement.lancamento_cliente_id) ?? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id) ?? resolved.lancamentoId
     : resolved.lancamentoId
   const shareId = resolved.shareLancamentoId ?? nullableText(row.lancamentos_id ?? row.lancamento_id)
+  const shareLancamento = shareId
+    ? await db.prepare('SELECT tipo_caixa, fluxo FROM lancamentos WHERE id = ?').bind(shareId).first<Row>()
+    : null
+  const isShareRevenue = upper(shareLancamento?.tipo_caixa) === 'SHARE'
+    && ['ENTRADA', 'RECEITA'].includes(upper(shareLancamento?.fluxo))
   let rateios = { results: resolved.rateios }
   const statements: D1PreparedStatement[] = [settlementRevisionStatement(db, `receber:${receivableId}`, revision)]
   const rateiosLegadosShare = reimbursement && rateioLancamentoId && !(rateios.results || []).length && nullableText(reimbursement.lancamento_origem_id)
@@ -2238,9 +2243,9 @@ export async function settleReceivable(db: Database, receivableId: string, body:
       valor_pago_real_centavos: paid,
       status,
       data_pagamento: paid >= expected ? paymentForRateio.data_pagamento : null,
+      ...(isShareRevenue && rateioColumns?.has('pago_diretamente') ? { pago_diretamente: 1 } : {}),
       ...(documentoSaida ? {
         ...(rateioColumns?.has('pago_por') ? { pago_por: paymentForRateio.pagador_cotista_id ?? paymentForRateio.pagador_holding_id ?? null } : {}),
-        ...(rateioColumns?.has('pago_diretamente') ? { pago_diretamente: 0 } : {}),
         ...(rateioColumns?.has('url_doc') ? { url_doc: nullableText(paymentForRateio.comprovante_url) } : {}),
       } : {}),
       atualizado_em: new Date().toISOString(),
@@ -2248,7 +2253,17 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   }
   if (shareId) {
     const allPaid = (rateios.results || []).every(r => (existingByRateio.get(String(r.id)) || 0) + (distributed.get(String(r.id)) || 0) >= Number(r.valor_rateado_centavos))
-    if (novoStatusConta === 'RECEBIDO') statements.push(updateStatement(db, schema, 'lancamentos', { status: reimbursement ? 'REEMBOLSADO' : 'RECEBIDO', data_pagamento: lastDate, conta_bancaria_id: lastBank, comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl), forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString() }, 'id = ?', [shareId]))
+    if (novoStatusConta === 'RECEBIDO' || isShareRevenue) statements.push(updateStatement(db, schema, 'lancamentos', {
+      ...(novoStatusConta === 'RECEBIDO' ? {
+        status: reimbursement ? 'REEMBOLSADO' : 'RECEBIDO',
+        data_pagamento: lastDate,
+        conta_bancaria_id: lastBank,
+        comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl),
+        forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento),
+      } : {}),
+      ...(isShareRevenue ? { pago_diretamente: 1 } : {}),
+      atualizado_em: new Date().toISOString(),
+    }, 'id = ?', [shareId]))
     const client = rateioLancamentoId && rateioLancamentoId !== shareId ? { id: rateioLancamentoId } : null
     if (client && allPaid) {
       const clientColumns = schema.get('lancamentos')

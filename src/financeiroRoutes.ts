@@ -558,7 +558,7 @@ financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {
     const entidade = await entidadeLancamentoFinanceiro(db, id)
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
     // Client/allocated obligations must use the same ledger as Share receipts.
-    const principal = await db.prepare('SELECT tipo_caixa, origem_tipo, reembolsavel FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
+    const principal = await db.prepare('SELECT tipo_caixa, origem_tipo, reembolsavel, fluxo FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
     if (principal && (principal.reembolsavel === 1 || principal.reembolsavel === '1' || principal.reembolsavel === true)) {
       return c.json({ error: 'lancamento_reembolsavel_nao_pode_ser_baixado' }, 409)
     }
@@ -589,6 +589,7 @@ financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {
       values.push(pago ?? Number((await db.prepare(`SELECT valor_rateado_centavos FROM ${tabela} WHERE id = ?`).bind(id).first<{ valor_rateado_centavos: number }>())?.valor_rateado_centavos ?? 0))
       if (body.pago_por !== undefined || body.pagoPor !== undefined) { sets.push('pago_por = ?'); values.push(body.pago_por ?? body.pagoPor ?? null) }
     } else if (origem === 'lancamentos') {
+      if (String(principal?.tipo_caixa).toUpperCase() === 'SHARE' && ['ENTRADA', 'RECEITA'].includes(String(principal?.fluxo).toUpperCase())) sets.push('pago_diretamente = 1')
       if (body.pago_por !== undefined || body.pagoPor !== undefined) { sets.push('pago_por = ?'); values.push(body.pago_por ?? body.pagoPor ?? null) }
     }
     await db.prepare(`UPDATE ${tabela} SET ${sets.join(', ')} WHERE id = ?`).bind(...values, id).run()

@@ -168,7 +168,7 @@ test("ações do lançamento consolidado reconhecem o ID-pai e atualizam o grupo
 });
 
 test("baixa genérica rejeita lançamento marcado como reembolsável", () => {
-  assert.match(financeRoutes, /SELECT tipo_caixa, origem_tipo, reembolsavel FROM lancamentos WHERE id = \?/);
+  assert.match(financeRoutes, /SELECT tipo_caixa, origem_tipo, reembolsavel, fluxo FROM lancamentos WHERE id = \?/);
   assert.match(financeRoutes, /lancamento_reembolsavel_nao_pode_ser_baixado/);
 });
 
