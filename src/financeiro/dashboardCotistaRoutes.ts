@@ -1,3 +1,4 @@
+import { carregarDadosBalancoMensal } from './balancoMensalRoutes'
 import { carregarBalancoOperacional } from './balancoOperacional'
 import { Hono } from 'hono'
 import {
@@ -332,7 +333,19 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     const balancoOperacional = aeronaveId && !cotistaId
       ? await carregarBalancoOperacional(db, schema, aeronaveId, inicio, fim)
       : null
-    return c.json({ balanco_operacional: balancoOperacional, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    // A falha da extensão não derruba as abas existentes. Nunca amplia consulta individual.
+    let balancoFontes = null
+    let balancoDetalhadoErro: string | null = null
+    if (aeronaveId && !cotistaId) {
+      try {
+        const dados = await carregarDadosBalancoMensal(db, aeronaveId, fim || new Date().toISOString().slice(0, 10))
+        balancoFontes = { versao: 1, aeronaveId, participantes: dados.participantes, rateios: dados.rateios, pagamentos: dados.pagamentos, ajustes: dados.ajustes }
+      } catch (e) {
+        console.error('Falha ao carregar balanço detalhado', e)
+        balancoDetalhadoErro = 'Não foi possível carregar rateios e pagamentos. Verifique a migração 20261006_balanco.sql e os vínculos dos dados.'
+      }
+    }
+    return c.json({ balanco_fontes: balancoFontes, balanco_detalhado_erro: balancoDetalhadoErro, balanco_operacional: balancoOperacional, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 
