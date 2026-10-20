@@ -141,6 +141,7 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
           )
         ORDER BY date(l.data_emissao) DESC, l.criado_em DESC LIMIT 500`),
       listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.numero_recibo, l.numero_demonstrativo,
+          l.comprovante_url, a.matricula_registro,
           l.data_emissao AS lancamento_data_emissao, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
           COALESCE(NULLIF(TRIM(voo.numero_voo), ''), NULLIF(TRIM(l.numero_voo), '')) AS numero_voo,
           l.aeronave_id, a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
@@ -165,7 +166,19 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
           AND UPPER(cp.status) NOT IN ('PAGO', 'CANCELADO')
         ORDER BY date(cp.data_vencimento) ASC LIMIT 500`),
     ])
-    return c.json({ envios, reembolsos: reembolsos.map(mapConta) })
+    return c.json({ envios, reembolsos: reembolsos.map((row) => ({
+      ...mapConta(row),
+      lancamentoId: row.lancamentos_id ?? null,
+      descricao: row.lancamento_descricao ?? null,
+      matricula_registro: row.matricula_registro ?? null,
+      aeronave_matricula: row.matricula_registro ?? null,
+      comprovante_url: row.comprovante_url ?? null,
+      url_doc: row.url_doc ?? null,
+      url_demonstrativo: row.url_demonstrativo ?? null,
+      url_nf: row.url_nf ?? null,
+      url_recibo: row.url_recibo ?? null,
+      url_boleto: row.url_boleto ?? null,
+    })) })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -477,7 +490,7 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (body.periodicidade !== undefined && origem !== 'lancamentos') campos.push(['periodicidade', body.periodicidade || null])
     if (body.observacoes !== undefined) campos.push(['observacoes', body.observacoes || null])
     if (origem === 'lancamentos') {
-      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
       if (Object.prototype.hasOwnProperty.call(body, 'categoria_id') || Object.prototype.hasOwnProperty.call(body, 'categoria_share_id')) {
         campos.push(['categoria_share_id', body.categoria_share_id ?? body.categoria_id ?? null])
@@ -645,12 +658,10 @@ financeiroRoutes.post('/contas-apagar/:id/comprovante-upload', async (c) => {
   const denied = await requireCaixaShareAccess(c)
   if (denied) return denied
   const id = c.req.param('id')
-  const conta = await c.env.SHARE_DB.prepare(`SELECT cp.colaborador_id, cp.status FROM contas_apagar cp
-    LEFT JOIN lancamentos l ON l.id = cp.lancamentos_id
-    WHERE cp.id = ?
-      AND (COALESCE(l.reembolsavel, 0) = 1 OR UPPER(COALESCE(cp.origem_tipo, '')) = 'RELATORIO_DESPESA_VIAGEM' OR UPPER(COALESCE(cp.categoria_nome, '')) LIKE '%REEMBOLS%')
-      AND NULLIF(TRIM(cp.colaborador_id), '') IS NOT NULL`).bind(id).first<{ colaborador_id: string | null; status: string }>()
-  if (!conta?.colaborador_id) return c.json({ error: 'reembolso_colaborador_nao_encontrado' }, 404)
+  const conta = await c.env.SHARE_DB.prepare(
+    'SELECT id, colaborador_id, lancamentos_id, status FROM contas_apagar WHERE id = ?',
+  ).bind(id).first<{ id: string; colaborador_id: string | null; lancamentos_id: string | null; status: string }>()
+  if (!conta) return c.json({ error: 'conta_a_pagar_nao_encontrada' }, 404)
   if (['PAGO', 'CANCELADO'].includes(String(conta.status).toUpperCase())) return c.json({ error: 'comprovante_nao_pode_ser_alterado' }, 409)
   const bucket = c.env.SHARE_FILES || c.env.FILES
   if (!bucket) return c.json({ error: 'armazenamento_de_anexos_indisponivel' }, 503)
@@ -675,6 +686,18 @@ financeiroRoutes.post('/contas-apagar/:id/comprovante-upload', async (c) => {
   const url = publicBase
     ? `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
     : `/api/financeiro/contas-apagar/${encodeURIComponent(id)}/comprovante/arquivo?key=${encodeURIComponent(key)}`
+  // Anexar um comprovante não altera status, saldo, rateio nem realiza baixa.
+  // Usa o vínculo real da conta: nunca confunde ID de conta ou de rateio com lançamento.
+  try {
+    if (conta.lancamentos_id) {
+      await c.env.SHARE_DB.prepare(
+        'UPDATE lancamentos SET comprovante_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?',
+      ).bind(url, conta.lancamentos_id).run()
+    }
+  } catch (error) {
+    await bucket.delete(key).catch(() => undefined)
+    return errorResponse(c, error)
+  }
   return c.json({ url }, 201)
 })
 financeiroRoutes.get('/contas-apagar/:id/comprovante/arquivo', async (c) => {
