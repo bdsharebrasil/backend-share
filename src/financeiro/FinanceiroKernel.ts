@@ -2113,6 +2113,13 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   for (const rateio of rateiosLegadosShare.results || []) {
     statements.push(db.prepare('UPDATE rateio_despesas SET lancamento_id = ? WHERE id = ? AND lancamento_id = ?').bind(rateioLancamentoId, rateio.id, reimbursement!.lancamento_origem_id))
   }
+  if (reimbursement && rateioLancamentoId) {
+    for (const rateio of rateios.results || []) {
+      if (nullableText(rateio.lancamento_id) && nullableText(rateio.lancamento_id) !== rateioLancamentoId) {
+        statements.push(db.prepare('UPDATE rateio_despesas SET lancamento_id = ? WHERE id = ? AND lancamento_id = ?').bind(rateioLancamentoId, rateio.id, rateio.lancamento_id))
+      }
+    }
+  }
   if (!rateios.results.length) throw new FinanceError('Obrigação sem rateio vinculado. Regularize a emissão antes de registrar o pagamento.', 'rateio_nao_vinculado', 409)
   if (documentoSaida && rateios.results.reduce((sum, r) => sum + Number(r.valor_rateado_centavos), 0) !== total) throw new FinanceError('Total dos rateios diferente do valor da conta. Regularize antes de receber.', 'rateio_total_divergente', 409)
   const allowed = new Map((rateios.results || []).map(r => [String(r.id), Number(r.valor_rateado_centavos)]))
@@ -3431,6 +3438,22 @@ export async function resolveReceivableAllocations(db: Database, contas: Row[]):
       const rows = (await db.prepare(`SELECT * FROM ${table} WHERE ${column} IN (${page.map(() => '?').join(',')}) AND COALESCE(status, '') <> 'CANCELADO' ORDER BY id`).bind(...page).all<Row>()).results || []
       for (const [key, target] of targets) if (target.holding === holding && page.includes(target.target)) result.get(key)!.rateios = rows.filter(r => r[column] === target.target)
     }
+  }
+  for (const c of contas) {
+    const key = String(c.id)
+    const resolved = result.get(key)
+    const shareId = nullableText(resolved?.shareLancamentoId)
+    if (!resolved || resolved.rateios.length || !shareId || upper(c.origem_tipo) === 'RELATORIO_DESPESA_VIAGEM') continue
+    const legacy = (await db.prepare(`SELECT rd.* FROM rateio_despesas rd
+      WHERE rd.lancamento_id = ? AND COALESCE(rd.status, '') <> 'CANCELADO' ORDER BY rd.id`).bind(shareId).all<Row>()).results || []
+    if (legacy.length) {
+      resolved.rateios = legacy
+      continue
+    }
+    const receiptRateios = (await db.prepare(`SELECT rd.* FROM recibo_rateio rr
+      INNER JOIN rateio_despesas rd ON rd.id = rr.rateio_id
+      WHERE rr.recibo_id = ? AND COALESCE(rd.status, '') <> 'CANCELADO' ORDER BY rd.id`).bind(c.origem_id).all<Row>().catch(() => ({ results: [] as Row[] }))).results || []
+    if (receiptRateios.length) resolved.rateios = receiptRateios
   }
   return result
 }

@@ -39,6 +39,9 @@ test("baixa genérica resolve o Share mesmo quando o recebível aponta para o Cl
   assert.match(resolver, /share\.id = principal\.origem_id/);
   assert.match(resolver, /share\.origem_id = principal\.id/);
   assert.match(resolver, /shareLancamentoId = shareIds\[0\]/);
+  assert.match(resolver, /SELECT rd\.\* FROM rateio_despesas rd/);
+  assert.match(resolver, /INNER JOIN rateio_despesas rd ON rd\.id = rr\.rateio_id/);
+  assert.match(settlement, /UPDATE rateio_despesas SET lancamento_id = \? WHERE id = \? AND lancamento_id = \?/);
   assert.match(settlement, /const shareId = resolved\.shareLancamentoId/);
   assert.match(settlement, /status: 'PAGO'/);
 });
