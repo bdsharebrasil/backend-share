@@ -7,6 +7,9 @@ import { calcularCompensacaoBalanco, consolidarRateiosLancamentos } from "../src
 const source = await readFile(new URL("../src/financeiro/dashboardCotistaRoutes.ts", import.meta.url), "utf8");
 const financeRoutes = await readFile(new URL("../src/financeiroRoutes.ts", import.meta.url), "utf8");
 
+test("dashboard expõe tipo_rateio sem substituir a origem técnica", () => {
+  assert.match(source, /tipo: row\.origem_rateio \?\? null, tipoRateio: row\.tipo_rateio \?\? null/);
+});
 function projectionColumnCount(branch) {
   const selectIndex = branch.search(/\bSELECT\b/i);
   const fromIndex = branch.search(/\bFROM\b/i);
