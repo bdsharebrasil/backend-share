@@ -1294,7 +1294,7 @@ export async function createExpense(
         categoria_nome: ehDespesaCliente
           ? nullableText(command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA')
           : shareCategory!.categoria_nome,
-        grupo_categoria: ehDespesaCliente ? nullableText(command.grupo_categoria) : shareCategory!.grupo_categoria,
+        grupo_categoria: ehDespesaCliente ? 'CAIXA CLIENTE' : shareCategory!.grupo_categoria,
         periodicidade: nullableText(command.periodicidade),
         ...buildDocumentFields(command.anexos_json),
         subcategoria_1: nullableText(command.subcategoria_1),
@@ -1595,9 +1595,7 @@ export async function issueRevenue(
           ),
           fornecedor_nome: documentoSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
           fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-          grupo_categoria:
-            nullableText(command.grupo_categoria_cliente) ||
-            'ADM SHARE BRASIL',
+          grupo_categoria: 'CAIXA CLIENTE',
           data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
           periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
@@ -1941,7 +1939,7 @@ export async function createReimbursement(
         categoria_nome: nullableText(
           command.categoria_cliente_nome ?? command.categoria_nome ?? 'REEMBOLSO',
         ),
-        grupo_categoria: 'REEMBOLSO',
+        grupo_categoria: 'CAIXA CLIENTE',
         periodicidade: nullableText(command.periodicidade),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
         fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
@@ -3093,7 +3091,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     insertStatement(db, schema, 'lancamentos', {
       id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_aeronave_id: cotistaId,
       abastecimentos_id: abastecimentosId,
-      descricao: receipt.descricao || 'Reembolso de despesa', grupo_categoria: 'REEMBOLSO',
+      descricao: receipt.descricao || 'Reembolso de despesa', grupo_categoria: 'CAIXA CLIENTE',
       fluxo: 'SAIDA', tipo_caixa: 'CLIENTE', valor_centavos: amount,
       data_emissao: data, data_vencimento: vencimento, status: 'EM_ABERTO',
       escopo_financeiro: 'FINANCEIRO', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,

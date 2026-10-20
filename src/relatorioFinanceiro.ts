@@ -412,7 +412,7 @@ async function ensureLancamentoCustoIntegral(
     descricao: description,
     categoria_cliente_id: categoriaCliente.id,
     categoria_nome: categoriaCliente.nome,
-    grupo_categoria: categoriaCliente.nome,
+    grupo_categoria: 'CAIXA CLIENTE',
     subcategoria_1: categoriaCliente.subcategoria_1,
     subcategoria_2: categoriaCliente.subcategoria_2,
     subcategoria_3: categoriaCliente.subcategoria_3,
