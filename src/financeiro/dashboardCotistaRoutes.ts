@@ -1,3 +1,4 @@
+import { carregarBalancoOperacional } from './balancoOperacional'
 import { Hono } from 'hono'
 import {
   holdingMovementColumn,
@@ -327,7 +328,11 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       custosPorMes.set(mes, (custosPorMes.get(mes) ?? 0) + Number(row.valor_centavos || row.valor_rateado_centavos || 0))
     }
     const mediasMensais = calcularMediasCotistaPorMes(voosMedias as VooMediasCotista[], custosPorMes)
-    return c.json({ lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    // O fechamento gerencial exige o conjunto da aeronave; não amplia consultas individuais.
+    const balancoOperacional = aeronaveId && !cotistaId
+      ? await carregarBalancoOperacional(db, schema, aeronaveId, inicio, fim)
+      : null
+    return c.json({ balanco_operacional: balancoOperacional, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 
