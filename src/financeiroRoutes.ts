@@ -96,14 +96,35 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
   try {
     const db = c.env.SHARE_DB
     const [envios, reembolsos] = await Promise.all([
-      listar(db, `SELECT e.*,
-          COALESCE(NULLIF(TRIM(e.fornecedor), ''), NULLIF(TRIM(ff.apelido), ''), NULLIF(TRIM(ff.nome_completo), ''), NULLIF(TRIM(fc.nome_fornecedor), ''), NULLIF(TRIM(fc.nome_cidade), '')) AS fornecedor_nome,
-          COALESCE(u.nome_exibicao, u.nome_completo, u.email, e.criado_por) AS solicitante_nome
-        FROM envio_despesas e
-        LEFT JOIN fornecedores_favoritos ff ON ff.id = e.fornecedor_id
-        LEFT JOIN fornecedores_combustivel fc ON fc.id = e.fornecedor_id
-        LEFT JOIN user_profiles u ON u.id = e.criado_por
-        WHERE e.tipo IN ('cliente', 'reembolso') ORDER BY e.criado_em DESC LIMIT 500`),
+      listar(db, `SELECT l.*,
+          'cliente' AS tipo,
+          CAST(l.valor_centavos AS REAL) / 100 AS valor,
+          l.data_emissao AS data_despesa,
+          l.data_vencimento AS vencimento,
+          l.id AS lancamento_id,
+          l.fornecedores_favoritos_id AS fornecedor_id,
+          COALESCE(NULLIF(TRIM(l.fornecedor_nome), ''), NULLIF(TRIM(ff.apelido), ''), NULLIF(TRIM(ff.nome_completo), ''), NULLIF(TRIM(fc.nome_fornecedor), ''), NULLIF(TRIM(fc.nome_cidade), '')) AS lancamento_fornecedor_nome,
+          COALESCE(NULLIF(TRIM(cat_cliente.nome), ''), NULLIF(TRIM(cat_share.nome), ''), NULLIF(TRIM(l.categoria_nome), '')) AS lancamento_categoria_nome,
+          a.matricula_registro AS aeronave_matricula,
+          COALESCE(NULLIF(TRIM(voo.numero_voo), ''), NULLIF(TRIM(l.numero_voo), '')) AS numero_voo_exibicao,
+          COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), NULLIF(TRIM(ca.codigo_cliente), '')) AS cliente_razao_social,
+          COALESCE(NULLIF(TRIM(u.nome_exibicao), ''), NULLIF(TRIM(u.nome_completo), ''), NULLIF(TRIM(u.email), '')) AS solicitante_nome
+        FROM lancamentos l
+        LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id
+        LEFT JOIN cliente cl ON cl.id = COALESCE(l.cliente_id, ca.cliente_id)
+        LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+        LEFT JOIN aeronave a ON a.id = l.aeronave_id
+        LEFT JOIN solicitacoes_reserva_voo voo ON voo.id = l.numero_voo
+        LEFT JOIN categoria_movimentacao_cliente cat_cliente ON cat_cliente.id = l.categoria_cliente_id
+        LEFT JOIN categoria_movimentacao_share cat_share ON cat_share.id = l.categoria_share_id
+        LEFT JOIN fornecedores_favoritos ff ON ff.id = l.fornecedores_favoritos_id
+        LEFT JOIN fornecedores_combustivel fc ON fc.id = l.fornecedores_favoritos_id
+        LEFT JOIN user_profiles u ON u.id = l.criado_por
+        WHERE UPPER(COALESCE(l.fluxo, '')) = 'SAIDA'
+          AND UPPER(COALESCE(l.tipo_caixa, '')) = 'CLIENTE'
+          AND COALESCE(l.reembolsavel, 0) = 1
+          AND COALESCE(l.pago_diretamente, 0) = 0
+        ORDER BY date(l.data_emissao) DESC, l.criado_em DESC LIMIT 500`),
       listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.numero_recibo, l.numero_demonstrativo,
           l.data_emissao AS lancamento_data_emissao, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
           COALESCE(NULLIF(TRIM(voo.numero_voo), ''), NULLIF(TRIM(l.numero_voo), '')) AS numero_voo,

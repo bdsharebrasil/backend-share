@@ -7,11 +7,19 @@ const inicio = source.indexOf("financeiroRoutes.get('/solicitacoes-pagamento'");
 const fim = source.indexOf("financeiroRoutes.get('/lancamentos/opcoes'", inicio);
 const rota = source.slice(inicio, fim);
 
- test("solicitações de pagamento resolvem o fornecedor sem usar o criador como fornecedor", () => {
-  assert.match(rota, /COALESCE\(NULLIF\(TRIM\(e\.fornecedor\), ''\), NULLIF\(TRIM\(ff\.apelido\), ''\), NULLIF\(TRIM\(ff\.nome_completo\), ''\), NULLIF\(TRIM\(fc\.nome_fornecedor\), ''\), NULLIF\(TRIM\(fc\.nome_cidade\), ''\)\) AS fornecedor_nome/);
-  assert.match(rota, /LEFT JOIN fornecedores_favoritos ff ON ff\.id = e\.fornecedor_id/);
-  assert.match(rota, /LEFT JOIN fornecedores_combustivel fc ON fc\.id = e\.fornecedor_id/);
-  assert.match(rota, /COALESCE\(u\.nome_exibicao, u\.nome_completo, u\.email, e\.criado_por\) AS solicitante_nome/);
+test("caixa cliente lista apenas lançamentos de saída reembolsáveis não pagos diretamente", () => {
+  assert.match(rota, /SELECT l\.\*/);
+  assert.match(rota, /FROM lancamentos l/);
+  assert.match(rota, /UPPER\(COALESCE\(l\.tipo_caixa, ''\)\) = 'CLIENTE'/);
+  assert.match(rota, /COALESCE\(l\.reembolsavel, 0\) = 1/);
+  assert.match(rota, /COALESCE\(l\.pago_diretamente, 0\) = 0/);
+  assert.match(rota, /UPPER\(COALESCE\(l\.fluxo, ''\)\) = 'SAIDA'/);
+  assert.match(rota, /l\.data_emissao AS data_despesa/);
+  assert.match(rota, /l\.id AS lancamento_id/);
+  assert.match(rota, /AS lancamento_categoria_nome/);
+  assert.match(rota, /AS lancamento_fornecedor_nome/);
+  assert.match(rota, /AS cliente_razao_social/);
+  assert.doesNotMatch(rota, /FROM envio_despesas e[\s\S]*?WHERE e\.tipo IN \('cliente', 'reembolso'\)/);
 });
 
 test("fila de reembolso colaborador exige colaborador_id e não expõe seu UUID como nome", () => {
