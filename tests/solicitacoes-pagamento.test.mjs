@@ -17,6 +17,8 @@ test("aba Caixa cliente lista despesas SHARE reembolsáveis não pagas diretamen
   assert.match(consultaCaixaCliente, /COALESCE\(l\.pago_diretamente, 0\) = 0/);
   assert.match(consultaCaixaCliente, /UPPER\(COALESCE\(l\.fluxo, ''\)\) = 'SAIDA'/);
   assert.match(consultaCaixaCliente, /UPPER\(COALESCE\(l\.tipo_caixa, ''\)\) = 'SHARE'/);
+  assert.match(consultaCaixaCliente, /NULLIF\(TRIM\(l\.colaborador_id\), ''\) IS NULL/);
+  assert.match(consultaCaixaCliente, /NOT EXISTS \([\s\S]*FROM contas_apagar cp_colaborador[\s\S]*NULLIF\(TRIM\(cp_colaborador\.colaborador_id\), ''\) IS NOT NULL/);
   assert.match(consultaCaixaCliente, /l\.data_emissao AS data_despesa/);
   assert.match(consultaCaixaCliente, /l\.id AS lancamento_id/);
   assert.match(consultaCaixaCliente, /AS lancamento_categoria_nome/);

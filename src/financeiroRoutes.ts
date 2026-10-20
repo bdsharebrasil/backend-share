@@ -124,6 +124,12 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
           AND UPPER(COALESCE(l.tipo_caixa, '')) = 'SHARE'
           AND COALESCE(l.reembolsavel, 0) = 1
           AND COALESCE(l.pago_diretamente, 0) = 0
+          AND NULLIF(TRIM(l.colaborador_id), '') IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM contas_apagar cp_colaborador
+            WHERE cp_colaborador.lancamentos_id = l.id
+              AND NULLIF(TRIM(cp_colaborador.colaborador_id), '') IS NOT NULL
+          )
         ORDER BY date(l.data_emissao) DESC, l.criado_em DESC LIMIT 500`),
       listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.numero_recibo, l.numero_demonstrativo,
           l.data_emissao AS lancamento_data_emissao, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
