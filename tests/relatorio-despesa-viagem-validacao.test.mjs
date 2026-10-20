@@ -136,6 +136,25 @@ test("lookup de cliente consulta a tabela singular existente no D1", async () =>
   assert.deepEqual(parametros, ["cliente-1"]);
 });
 
+test("envio ao cliente usa uma categoria compatível com cada FK e tipo de caixa", () => {
+  assert.match(rotaEnvioCliente, /categoria_cliente_id FROM categoria_movimentacao_share/);
+  assert.match(rotaEnvioCliente, /SELECT id, nome FROM categoria_movimentacao_cliente WHERE id = \?1 LIMIT 1/);
+  assert.match(rotaEnvioCliente, /categoria_cliente_id, categoria_nome, grupo_categoria/);
+  assert.match(rotaEnvioCliente, /categoriaClienteId, categoriaCliente\.nome/);
+  assert.match(rotaEnvioCliente, /categoriaClienteId, categoriaCliente\.nome, valorCentavos/);
+  assert.match(rotaEnvioCliente, /categoria_id: categoriaReceitaShare\.id/);
+  assert.match(rotaEnvioCliente, /descricao, categoriaClienteId, categoriaCliente\.nome, 'CAIXA CLIENTE'/);
+  assert.match(rotaEnvioCliente, /categoriaReceitaShare\.id, categoriaReceitaShare\.nome, 'REEMBOLSOS ENTRADAS'/);
+  assert.match(rotaEnvioCliente, /categoria_cliente_relatorio_viagem_nao_encontrada/);
+  assert.match(rotaEnvioCliente, /categoria_share_entrada_reembolso_nao_encontrada/);
+});
+test("envio ao cliente cria lançamentos antes do recebível que os referencia por FK", () => {
+  const insertLancamento = rotaEnvioCliente.indexOf("INSERT INTO lancamentos");
+  const insertRecebivel = rotaEnvioCliente.indexOf("statements.push(receivable.statement)");
+  assert.notEqual(insertLancamento, -1);
+  assert.notEqual(insertRecebivel, -1);
+  assert.ok(insertLancamento < insertRecebivel);
+});
 test("envio ao cliente reconcilia o recebível sem interromper a criação dos lançamentos ausentes", () => {
   assert.match(rotaEnvioCliente, /ensureRelatorioContaAReceber\(db, \{/);
   assert.match(moduloContaReceber, /const canonicalKey = `RELATORIO_DESPESA_VIAGEM:\$\{reportId\}:CONTA_RECEBER`/);
@@ -167,14 +186,16 @@ test("envio ao cliente só grava cliente_id se existir na tabela de cadastro", (
   assert.match(worker, /import \{ ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements \} from '\.\/financeiro\/relatorioContaReceber'/);
   assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
   assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);
-  assert.match(rotaEnvioCliente, /\.bind\(cotista\.id, clienteIdLancamentoFk, 'SHARE BRASIL'/);
+  assert.match(rotaEnvioCliente, /clienteIdLancamentoFk, periodicidade, tipoRateio, 'SHARE BRASIL'/);
 });
 
 test("programação de reembolso pré-preenche vencimento, periodicidade e tipo de rateio", () => {
   assert.match(worker, /r\.data_vencimento_reembolso/);
   assert.match(worker, /data_vencimento_reembolso: row\.data_vencimento_reembolso \|\| null/);
   assert.match(worker, /periodicidade: 'EVENTUAL', tipo_rateio: 'VARIAVEL POR VOO'/);
-  assert.match(rotaEnvioCliente, /const periodicidade = 'EVENTUAL'; const tipoRateio = body\.tipo_rateio \|\| 'VARIAVEL POR VOO'/);
+  assert.match(rotaEnvioCliente, /const periodicidade = String\(body\.periodicidade \|\| 'EVENTUAL'\)/);
+  assert.match(rotaEnvioCliente, /const tipoRateio = String\(body\.tipo_rateio \|\| 'VARIAVEL POR VOO'\)/);
+  assert.match(rotaEnvioCliente, /periodicidade, tipo_rateio, status, fluxo/);
   assert.match(frontendRelatorio, /vencimento: prefill\.data_vencimento_reembolso \|\| new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
   assert.match(frontendRelatorio, /periodicidade: prefill\.periodicidade \|\| PERIODICIDADE_REEMBOLSO_PADRAO/);
   assert.match(frontendRelatorio, /tipoRateio: prefill\.tipo_rateio \|\| TIPO_RATEIO_REEMBOLSO_PADRAO/);
