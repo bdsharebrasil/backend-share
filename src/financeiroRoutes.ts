@@ -102,6 +102,8 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
           l.data_emissao AS data_despesa,
           l.data_vencimento AS vencimento,
           l.id AS lancamento_id,
+          cp_pagar.id AS conta_a_pagar_id,
+          cp_pagar.status AS conta_a_pagar_status,
           l.fornecedores_favoritos_id AS fornecedor_id,
           COALESCE(NULLIF(TRIM(l.fornecedor_nome), ''), NULLIF(TRIM(ff.apelido), ''), NULLIF(TRIM(ff.nome_completo), ''), NULLIF(TRIM(fc.nome_fornecedor), ''), NULLIF(TRIM(fc.nome_cidade), '')) AS lancamento_fornecedor_nome,
           COALESCE(NULLIF(TRIM(cat_cliente.nome), ''), NULLIF(TRIM(cat_share.nome), ''), NULLIF(TRIM(l.categoria_nome), '')) AS lancamento_categoria_nome,
@@ -120,6 +122,13 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
         LEFT JOIN fornecedores_favoritos ff ON ff.id = l.fornecedores_favoritos_id
         LEFT JOIN fornecedores_combustivel fc ON fc.id = l.fornecedores_favoritos_id
         LEFT JOIN user_profiles u ON u.id = l.criado_por
+        LEFT JOIN contas_apagar cp_pagar ON cp_pagar.id = (
+          SELECT cp.id FROM contas_apagar cp
+          WHERE cp.lancamentos_id = l.id
+            AND NULLIF(TRIM(cp.colaborador_id), '') IS NULL
+          ORDER BY CASE WHEN UPPER(COALESCE(cp.status, '')) IN ('PAGO', 'CANCELADO') THEN 1 ELSE 0 END, cp.criado_em DESC
+          LIMIT 1
+        )
         WHERE UPPER(COALESCE(l.fluxo, '')) = 'SAIDA'
           AND UPPER(COALESCE(l.tipo_caixa, '')) = 'SHARE'
           AND COALESCE(l.reembolsavel, 0) = 1
@@ -468,7 +477,7 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (body.periodicidade !== undefined && origem !== 'lancamentos') campos.push(['periodicidade', body.periodicidade || null])
     if (body.observacoes !== undefined) campos.push(['observacoes', body.observacoes || null])
     if (origem === 'lancamentos') {
-      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
       if (Object.prototype.hasOwnProperty.call(body, 'categoria_id') || Object.prototype.hasOwnProperty.call(body, 'categoria_share_id')) {
         campos.push(['categoria_share_id', body.categoria_share_id ?? body.categoria_id ?? null])

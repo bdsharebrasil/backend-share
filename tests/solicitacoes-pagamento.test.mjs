@@ -21,6 +21,8 @@ test("aba Caixa cliente lista despesas SHARE reembolsáveis não pagas diretamen
   assert.match(consultaCaixaCliente, /NOT EXISTS \([\s\S]*FROM contas_apagar cp_colaborador[\s\S]*NULLIF\(TRIM\(cp_colaborador\.colaborador_id\), ''\) IS NOT NULL/);
   assert.match(consultaCaixaCliente, /l\.data_emissao AS data_despesa/);
   assert.match(consultaCaixaCliente, /l\.id AS lancamento_id/);
+  assert.match(consultaCaixaCliente, /cp_pagar\.id AS conta_a_pagar_id/);
+  assert.match(consultaCaixaCliente, /cp\.lancamentos_id = l\.id/);
   assert.match(consultaCaixaCliente, /AS lancamento_categoria_nome/);
   assert.match(consultaCaixaCliente, /AS lancamento_fornecedor_nome/);
   assert.match(consultaCaixaCliente, /AS cliente_razao_social/);
@@ -42,4 +44,9 @@ test("reembolsos incluem campos do lançamento e resolvem categoria, cotista e n
   assert.match(rota, /cotista_aeronave ca ON ca\.id = l\.cotista_aeronave_id/);
   assert.match(rota, /AS cotista_nome/);
   assert.match(rota, /solicitacoes_reserva_voo voo ON voo\.id = l\.numero_voo/);
+});
+
+test("edição do lançamento aceita recibo e sincroniza o valor da conta a pagar", () => {
+  assert.match(source, /const camposLegados = \[[^\]]*'numero_recibo'/);
+  assert.match(source, /UPDATE contas_apagar SET valor_centavos = \? WHERE lancamentos_id = \?/);
 });
