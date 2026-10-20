@@ -66,6 +66,11 @@ test("dashboard Cotista prioriza a data de envio de e-mail registrada no rateio"
   assert.match(source, /COALESCE\(r\.email_enviado_em, mh\.email_enviado_em\) AS email_enviado_em/);
 });
 
+test("dashboard Cotista propaga reembolsavel do lançamento-pai para o rateio", () => {
+  assert.match(source, /COALESCE\(l\.reembolsavel, 0\) AS reembolsavel/);
+  assert.match(source, /COALESCE\(l\.reembolso_quitado, 0\) AS reembolso_quitado/);
+});
+
 test("dashboard Cotista converte IDs de fornecedor em nomes antes de responder", () => {
   assert.match(source, /SELECT id, nome_completo FROM fornecedores_favoritos WHERE id IN/);
   assert.match(source, /fornecedoresPorId\.get\(String\(row\.fornecedor_id/);

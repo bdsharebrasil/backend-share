@@ -132,7 +132,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
              r.categoria_nome, r.tipo_rateio AS grupo_categoria, r.tipo_rateio, r.periodicidade,
              r.data_vencimento, r.data_pagamento, 'SAIDA' AS fluxo, r.valor_rateado_centavos AS valor_centavos,
              r.valor_rateado_centavos AS valor_rateado_centavos, r.valor_pago_real_centavos, r.percentual_sociedade, r.percentual_uso, r.pago_por,
-             r.pago_diretamente, 0 AS reembolsavel, 0 AS reembolso_quitado, r.status, r.observacoes,
+             r.pago_diretamente, COALESCE(l.reembolsavel, 0) AS reembolsavel, COALESCE(l.reembolso_quitado, 0) AS reembolso_quitado, r.status, r.observacoes,
              COALESCE(r.email_enviado_em, l.email_enviado_em) AS email_enviado_em, 'rateio_despesas' AS origem_rateio, NULL AS local,
              COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, r.cotista_id) AS participante_nome,
              r.lancamento_id AS lancamento_id
