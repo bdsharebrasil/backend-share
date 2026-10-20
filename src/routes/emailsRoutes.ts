@@ -6,6 +6,7 @@ import { validateWorkerSchema } from '../lib/schema'
 import { authenticatedColaborador, checkInternalAuth, extractSupabaseUserId, requireAuthenticatedUser, shareBrasilUser } from '../lib/auth'
 import { chaveStorageDeUrl, shareBrasilBucket, shareBrasilFileName } from '../lib/storage'
 import { holdingMovementColumn, loadSchema } from '../financeiro/FinanceiroKernel'
+import { selecionarAnexosEnvioPagamento } from '../financeiro/paymentEmailAttachments'
 
 type Bindings = { SHARE_DB: D1Database; FILES: R2Bucket; SHARE_FILES?: R2Bucket; RESEND_API_KEY?: string; INTERNAL_TOKEN?: string; SUPABASE_URL?: string; SUPABASE_ANON_KEY?: string; SUPABASE_SERVICE_ROLE_KEY?: string; VITE_SUPABASE_PUBLISHABLE_KEY?: string; EMAIL_FROM?: string; R2_PUBLIC_URL?: string }
 type Variables = Record<string, never>
@@ -430,6 +431,16 @@ emailRoutes.post('/api/interno/emails', async c => {
   await garantirTabelaEmails(c).catch(error => { log.error('[interno/emails] schema de histórico indisponível', error) })
   const db = c.env.SHARE_DB; const anexos: any[] = []; let erroAnexo: string | null = null
   let idempotenciaDestinatario: { id: string; status: string; email_id: string | null } | null = null
+  const referenciasEnvioPagamento = referencias
+    .filter((referencia) => referencia.startsWith('envio_despesa:'))
+    .map((referencia) => referencia.slice('envio_despesa:'.length))
+    .filter((envioId, index, envioIds) => envioIds.indexOf(envioId) === index)
+  const anexosEnvioPagamento: Array<Record<string, unknown>> = []
+  for (const envioId of referenciasEnvioPagamento) {
+    const envio = await db.prepare('SELECT anexos_json FROM envio_despesas WHERE id = ?1').bind(envioId).first<{ anexos_json: unknown }>().catch(() => null)
+    const cotistaFiltro = cotistaId === '__principal__' ? '' : cotistaId
+    if (envio) anexosEnvioPagamento.push(...selecionarAnexosEnvioPagamento(envio.anexos_json, ids, cotistaFiltro))
+  }
   if (rascunhoId) {
     await db.prepare(`CREATE TABLE IF NOT EXISTS envio_pagamento_email_destinatarios (
       id TEXT PRIMARY KEY, rascunho_id TEXT NOT NULL, cotista_id TEXT NOT NULL,
@@ -449,6 +460,18 @@ emailRoutes.post('/api/interno/emails', async c => {
   }
   for (const id of ids) {
     const [prefix, rawId, tipoAbastecimento] = id.includes(':') ? id.split(':', 3) : ['', id]
+    if (!prefix && referenciasEnvioPagamento.length) {
+      const anexo = anexosEnvioPagamento.find((item) => String(item.id) === id)
+      if (!anexo) { erroAnexo = `anexo_envio_despesa_nao_encontrado:${id}`; continue }
+      const caminho = chaveStorageDeUrl(anexo.url || anexo.url_arquivo || anexo.caminho_arquivo || anexo.storage_key)
+      if (!caminho.startsWith(`share/nf-boletos-clients/${user.id}/`)) { erroAnexo = `anexo_envio_despesa_invalido:${id}`; continue }
+      const bucket = shareBrasilBucket(c)
+      const object = caminho && bucket ? await bucket.get(caminho) : null
+      if (!object) { erroAnexo = `anexo_envio_despesa_indisponivel:${id}`; continue }
+      const nomeArquivo = String(anexo.nome_arquivo || anexo.filename || anexo.nome || caminho.split('/').pop() || 'documento-da-despesa')
+      anexos.push({ filename: nomeArquivo, content: arrayBufferBase64(await object.arrayBuffer()), content_type: String(anexo.tipo_arquivo || anexo.content_type || object.httpMetadata?.contentType || 'application/octet-stream') })
+      continue
+    }
     if (prefix === 'abastecimento') {
       const column = tipoAbastecimento === 'nota' ? 'nota_url' : tipoAbastecimento === 'boleto' ? 'boleto_url' : 'comanda_url'
       const row = await db.prepare(`SELECT ${column} AS caminho FROM abastecimentos WHERE id = ?1`).bind(rawId).first<any>().catch(() => null)
