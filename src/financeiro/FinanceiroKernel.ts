@@ -3346,7 +3346,11 @@ export async function resolveReceivableAllocations(db: Database, contas: Row[]):
   for (let i = 0; i < contas.length; i += 40) {
     const page = contas.slice(i, i + 40)
     const ids = page.map(c => c.id)
-    const candidates = (await db.prepare(`SELECT cr.id AS conta_id, re.id AS reembolso_id, cl.id AS cliente_id
+    const candidates = (await db.prepare(`SELECT cr.id AS conta_id, re.id AS reembolso_id, cl.id AS cliente_id,
+        COALESCE(
+          CASE WHEN UPPER(COALESCE(principal.tipo_caixa, '')) = 'SHARE' THEN principal.id END,
+          share.id
+        ) AS share_id
       FROM contas_areceber cr
       LEFT JOIN lancamentos principal ON principal.id = cr.lancamentos_id
       LEFT JOIN reembolsos re ON re.conta_receber_id = cr.id
@@ -3356,6 +3360,11 @@ export async function resolveReceivableAllocations(db: Database, contas: Row[]):
           OR cl.origem_id = COALESCE(cr.recibos_saida_id, cr.nf_saida_id, principal.origem_id))
         AND (cr.aeronave_id IS NULL OR cl.aeronave_id = cr.aeronave_id)
         AND (cr.cotista_id IS NULL OR cl.cotista_aeronave_id = cr.cotista_id)
+      LEFT JOIN lancamentos share ON UPPER(COALESCE(share.tipo_caixa, '')) = 'SHARE'
+        AND COALESCE(share.status, '') <> 'CANCELADO'
+        AND (share.id = cr.lancamentos_id OR share.id = principal.origem_id OR share.origem_id = principal.id
+          OR share.origem_id = cr.lancamentos_id OR share.origem_id = re.id)
+        AND (cr.aeronave_id IS NULL OR share.aeronave_id = cr.aeronave_id)
       WHERE cr.id IN (${ids.map(() => '?').join(',')})
         AND UPPER(COALESCE(cr.origem_tipo, '')) <> 'RELATORIO_DESPESA_VIAGEM'`).bind(...ids).all<Row>()).results || []
     const relatorios = (await db.prepare(`SELECT cr.id AS conta_id,
@@ -3400,9 +3409,17 @@ export async function resolveReceivableAllocations(db: Database, contas: Row[]):
       if (clients.length > 1 || reimbursements.length > 1) {
         result.set(key, { lancamentoId: null, rateios: [], erro: 'Mais de um vínculo econômico para esta conta. Regularize os vínculos.' }); continue
       }
+      const shareIds = [...new Set(matches.map(r => nullableText(r.share_id)).filter(Boolean))]
+      if (shareIds.length > 1) {
+        result.set(key, { lancamentoId: null, shareLancamentoId: null, rateios: [], erro: 'Mais de um lançamento Share para esta conta. Regularize os vínculos.' }); continue
+      }
       const documento = ['RECIBO_SAIDA', 'NF_SAIDA'].includes(upper(c.origem_tipo)) || c.recibos_saida_id || c.nf_saida_id
       const target = clients[0] ?? (documento || reimbursements.length ? null : nullableText(c.lancamentos_id))
-      if (target) { targets.set(key, { target, holding: false }); result.get(key)!.lancamentoId = target }
+      if (target) {
+        targets.set(key, { target, holding: false })
+        result.get(key)!.lancamentoId = target
+        result.get(key)!.shareLancamentoId = shareIds[0] ?? nullableText(c.lancamentos_id)
+      }
     }
   }
   for (const holding of [false, true]) {

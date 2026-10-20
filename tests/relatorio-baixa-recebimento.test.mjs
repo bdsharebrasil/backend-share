@@ -33,3 +33,12 @@ test("baixa usa o lançamento Share resolvido, liquida o Cliente e retorna os ra
 test("novo recebível do relatório referencia o lançamento do Caixa Share", () => {
   assert.match(worker, /lancamentos_id: shareLancamentoFinalId/);
 });
+
+test("baixa genérica resolve o Share mesmo quando o recebível aponta para o Cliente", () => {
+  assert.match(resolver, /share\.id = cr\.lancamentos_id/);
+  assert.match(resolver, /share\.id = principal\.origem_id/);
+  assert.match(resolver, /share\.origem_id = principal\.id/);
+  assert.match(resolver, /shareLancamentoId = shareIds\[0\]/);
+  assert.match(settlement, /const shareId = resolved\.shareLancamentoId/);
+  assert.match(settlement, /status: 'PAGO'/);
+});
