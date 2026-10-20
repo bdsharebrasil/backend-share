@@ -121,7 +121,7 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
         LEFT JOIN fornecedores_combustivel fc ON fc.id = l.fornecedores_favoritos_id
         LEFT JOIN user_profiles u ON u.id = l.criado_por
         WHERE UPPER(COALESCE(l.fluxo, '')) = 'SAIDA'
-          AND UPPER(COALESCE(l.tipo_caixa, '')) = 'CLIENTE'
+          AND UPPER(COALESCE(l.tipo_caixa, '')) = 'SHARE'
           AND COALESCE(l.reembolsavel, 0) = 1
           AND COALESCE(l.pago_diretamente, 0) = 0
         ORDER BY date(l.data_emissao) DESC, l.criado_em DESC LIMIT 500`),
