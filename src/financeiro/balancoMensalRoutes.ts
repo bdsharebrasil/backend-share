@@ -12,9 +12,9 @@ export function limitesMes(mes: string) {
   const [ano, m] = mes.split('-').map(Number)
   return { inicio: `${mes}-01`, fim: new Date(Date.UTC(ano, m, 0)).toISOString().slice(0, 10) }
 }
-async function carregar(db: D1Database, aeronaveId: string, fim: string) {
+export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: string, fim: string) {
   const [participantesDB, rows, eventos, ajustesDB, movimentos] = await Promise.all([
-    listarTodos(db, `SELECT ca.id, ca.socio_id, COALESCE(hs.nome,cl.razao_social,ca.codigo_cliente,ca.id) AS nome,
+    listarTodos(db, `SELECT ca.id, ca.socio_id, ca.cliente_id, COALESCE(hs.nome,cl.razao_social,ca.codigo_cliente,ca.id) AS nome,
       CASE WHEN ca.socio_id IS NULL THEN 'CLIENTES' ELSE 'HOLD:' || hs.holding_id END AS dominio
       FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id
       LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.aeronave_id=? ORDER BY ca.id`, aeronaveId),
@@ -26,9 +26,13 @@ async function carregar(db: D1Database, aeronaveId: string, fim: string) {
       AND COALESCE(escopo_financeiro,'FINANCEIRO')='FINANCEIRO' ORDER BY id`, aeronaveId),
   ])
   const participantes = participantesDB.map(p => ({ id: String(p.id), nome: String(p.nome), dominio: String(p.dominio) }))
-  const aliases = new Map(participantes.map(p => [p.id, p.id]))
+  const aliases = new Map<string, string | null>(participantes.map(p => [p.id, p.id]))
   // Nunca resolver por nome: IDs antigos de sócio são convertidos para cotista_aeronave.id.
-  for (const p of participantesDB) if (p.socio_id) aliases.set(String(p.socio_id), String(p.id))
+  for (const p of participantesDB) for (const valor of [p.socio_id, p.cliente_id]) {
+    if (!valor) continue
+    const chave = String(valor), id = String(p.id)
+    aliases.set(chave, !aliases.has(chave) || aliases.get(chave) === id ? id : null)
+  }
   const rateios: RateioBalanco[] = rows.map(r => ({
     id: String(r.id), participanteId: String(r.participante_id), dominio: String(r.dominio), origemChave: String(r.origem_chave),
     competencia: competencia(r.competencia), categoria: String(r.categoria_nome || 'Sem categoria'), descricao: String(r.descricao_despesa || ''),
@@ -76,7 +80,7 @@ balancoMensalRoutes.get('/cotista/balanco-mensal', async c => {
   catch { return c.json({ error: 'competencia_invalida' }, 400) }
   if (!aeronaveId) return c.json({ error: 'aeronave_id_obrigatorio' }, 400)
   try {
-    const dados = await carregar(c.env.SHARE_DB, aeronaveId, periodo.fim)
+    const dados = await carregarDadosBalancoMensal(c.env.SHARE_DB, aeronaveId, periodo.fim)
     const balanco = calcularBalancoMensal(dados.participantes, dados.rateios, dados.pagamentos, dados.ajustes, periodo.inicio, periodo.fim)
     return c.json({ ...balanco, aeronaveId, holdings: dados.holdings })
   } catch (e) { return errorResponse(c, e) }
