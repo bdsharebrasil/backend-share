@@ -28,6 +28,12 @@ type CategoriaClienteRelatorio = {
   subcategoria_4: string | null
 }
 
+const CATEGORIA_SHARE_REEMBOLSO_RELATORIO = {
+  categoria_share_id: 'a7555994-103d-4739-96a5-001c3bec1424',
+  categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
+  grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
+}
+
 const FORNECEDOR_RELATORIO_VIAGEM = 'SHARE BRASIL'
 
 function addCalendarDays(value: unknown, days: number): string {
@@ -521,6 +527,18 @@ export async function sincronizarRelatorioViagemFinanceiro(
     : null
   const reportId = text(report.id)
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
+  const categoriaSharePersistida = await db.prepare(`
+    SELECT id, nome, grupo_categoria FROM categoria_movimentacao_share
+    WHERE upper(COALESCE(grupo_categoria, '')) = 'DESPESAS REEMBOLSÁVEIS'
+    ORDER BY nome LIMIT 1
+  `).first<{ id: string; nome: string | null; grupo_categoria: string | null }>()
+  const shareCategory = categoriaSharePersistida?.id
+    ? {
+      categoria_share_id: categoriaSharePersistida.id,
+      categoria_nome: categoriaSharePersistida.nome || CATEGORIA_SHARE_REEMBOLSO_RELATORIO.categoria_nome,
+      grupo_categoria: categoriaSharePersistida.grupo_categoria || CATEGORIA_SHARE_REEMBOLSO_RELATORIO.grupo_categoria,
+    }
+    : CATEGORIA_SHARE_REEMBOLSO_RELATORIO
   const expenses = expensesFromReport(report)
   if (!expenses.length) throw new Error('relatorio_sem_despesas')
   const reportTotalCentavos = Math.round(expenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
@@ -638,8 +656,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
             url_doc: text(report.pdf_path) || null,
             cotista_aeronave_id: rows[0]?.id || null,
             cliente_id: text(report.cliente_id) || null,
-            categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
-            grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
+            ...shareCategory,
             status: 'EM_ABERTO',
             fluxo: 'SAIDA',
             tipo_caixa: 'SHARE',
@@ -734,8 +751,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
         url_doc: text(report.pdf_path) || null,
         cotista_aeronave_id: allocations[0]?.id || null,
         cliente_id: kind === 'CLIENTE' ? clienteLancamentoId : null,
-        categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
-        grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
+        ...shareCategory,
         status: 'EM_ABERTO',
         fluxo: 'SAIDA',
         tipo_caixa: 'SHARE',

@@ -240,6 +240,28 @@ async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Ro
   }
 }
 
+/** A categoria Share é a fonte de verdade do nome e do grupo do lançamento. */
+export async function resolveShareLancamentoCategory(
+  db: Database,
+  categoryId: unknown,
+): Promise<{ categoria_share_id: string; categoria_nome: string; grupo_categoria: string }> {
+  const id = nullableText(categoryId)
+  if (!id) throw new FinanceError('Lançamento do caixa Share exige categoria Share', 'categoria_share_obrigatoria')
+  const category = await db.prepare(
+    'SELECT id, nome, grupo_categoria FROM categoria_movimentacao_share WHERE id = ? LIMIT 1',
+  ).bind(id).first<{ id: string; nome: string | null; grupo_categoria: string | null }>()
+  if (!category?.id || !nullableText(category.nome)) {
+    throw new FinanceError('Categoria Share inválida', 'categoria_share_invalida')
+  }
+  const group = nullableText(category.grupo_categoria)
+  if (!group) throw new FinanceError('Categoria Share sem grupo de classificação', 'grupo_categoria_share_ausente')
+  return {
+    categoria_share_id: category.id,
+    categoria_nome: category.nome!.trim(),
+    grupo_categoria: group,
+  }
+}
+
 /**
  * Decide o modo do reembolso a partir do valor do recibo, do total da despesa
  * e da quantidade de linhas de rateio informadas.
@@ -1086,6 +1108,9 @@ export async function createExpense(
   if (existing) return existing
 
   const context = await resolveCotista(db, command)
+  const shareCategory = upper(command.tipo_caixa) === 'SHARE'
+    ? await resolveShareLancamentoCategory(db, command.categoria_id)
+    : null
   const rawLines = allocationLines(command)
   const lines = await Promise.all(rawLines.map(async (line) => {
     if (line.socioId) return line
@@ -1264,15 +1289,12 @@ export async function createExpense(
         descricao: command.descricao,
         fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-        categoria_share_id: ehDespesaCliente ? null : nullableText(command.categoria_id),
+        categoria_share_id: ehDespesaCliente ? null : shareCategory!.categoria_share_id,
         categoria_cliente_id: ehDespesaCliente ? nullableText(command.categoria_cliente_id ?? command.categoria_id) : null,
-        categoria_nome: nullableText(
-          command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA',
-        ),
-        grupo_categoria: nullableText(
-          command.grupo_categoria ||
-          (reembolsavel ? 'DESPESAS REEMBOLSÁVEIS' : 'DESPESAS EMPRESA'),
-        ),
+        categoria_nome: ehDespesaCliente
+          ? nullableText(command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA')
+          : shareCategory!.categoria_nome,
+        grupo_categoria: ehDespesaCliente ? nullableText(command.grupo_categoria) : shareCategory!.grupo_categoria,
         periodicidade: nullableText(command.periodicidade),
         ...buildDocumentFields(command.anexos_json),
         subcategoria_1: nullableText(command.subcategoria_1),
@@ -1458,6 +1480,11 @@ export async function issueRevenue(
   if (existing) return existing
 
   const context = await resolveCotista(db, command)
+  const documentoSaida = ['RECIBO_SAIDA', 'NF_SAIDA'].includes(upper(command.origem_tipo))
+  const shareCategory = await resolveShareLancamentoCategory(
+    db,
+    command.categoria_id,
+  )
   // O cliente_id de cotista_aeronave referencia a tabela D1 `cliente`.
   // Valide contra essa tabela antes de gravar o vínculo direto em lancamentos;
   // cotista_aeronave_id continua preservando o vínculo de negócio.
@@ -1473,7 +1500,6 @@ export async function issueRevenue(
       ? id()
       : null
 
-  const documentoSaida = ['RECIBO_SAIDA', 'NF_SAIDA'].includes(upper(command.origem_tipo))
   const notaFiscalSaida = upper(command.origem_tipo) === 'NF_SAIDA'
   if (notaFiscalSaida && context?.kind === 'HOLDING' && (!context.holdingId || !context.socioId)) {
     throw new FinanceError('Cotista Holding sem sócio ou holding vinculado', 'holding_cotista_incompleto')
@@ -1500,11 +1526,9 @@ export async function issueRevenue(
         fluxo: notaFiscalSaida ? 'RECEITA' : 'ENTRADA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
-        categoria_share_id: nullableText(command.categoria_id),
-        categoria_nome: nullableText(
-          command.categoria_nome ?? 'RECEITAS OPERACIONAIS',
-        ),
-        grupo_categoria: 'RECEITAS OPERACIONAIS',
+        categoria_share_id: shareCategory.categoria_share_id,
+        categoria_nome: shareCategory.categoria_nome,
+        grupo_categoria: shareCategory.grupo_categoria,
         numero_nf: nullableText(command.numero_nf),
         url_nf: nullableText(command.url_nf),
         periodicidade: nullableText(command.periodicidade ?? (upper(command.origem_tipo) === 'RECIBO_SAIDA' ? 'MENSAL' : null)),
@@ -1845,6 +1869,7 @@ export async function createReimbursement(
   const clientLancamentoId = id()
   const contaReceberId = id()
   const rateioIds = rateioBase.map(() => id())
+  const shareCategory = await resolveShareLancamentoCategory(db, command.categoria_id)
 
   await db.batch([
     insertStatement(
@@ -1875,10 +1900,10 @@ export async function createReimbursement(
         aeronave_id: context.aeronaveId,
         cotista_aeronave_id: context.cotistaAeronaveId,
         descricao: command.descricao || 'Reembolso de despesa',
-        categoria_share_id: null,
+        categoria_share_id: shareCategory.categoria_share_id,
         categoria_cliente_id: nullableText(command.categoria_cliente_id ?? command.categoria_id),
-        categoria_nome: nullableText(command.categoria_nome ?? 'REEMBOLSOS ENTRADAS'),
-        grupo_categoria: nullableText(command.grupo_categoria ?? 'REEMBOLSOS ENTRADAS'),
+        categoria_nome: shareCategory.categoria_nome,
+        grupo_categoria: shareCategory.grupo_categoria,
         periodicidade: nullableText(command.periodicidade),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
         fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
@@ -2432,6 +2457,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
      WHERE id = ? OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%' OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, nome LIMIT 1
   `).bind(CATEGORIA_SHARE_RECIBO, CATEGORIA_SHARE_RECIBO).first<{ id: string }>()
+  const shareCategory = await resolveShareLancamentoCategory(db, categoriaShare?.id)
   const cotista = await db.prepare(`
     SELECT id FROM cotista_aeronave
      WHERE id = ? OR (cliente_id = ? AND aeronave_id = ?)
@@ -2451,9 +2477,9 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       cotista_aeronave_id: cotistaId,
       cliente_id: clienteId,
       descricao: input.descricao,
-      categoria_share_id: categoriaShare?.id ?? null,
-      categoria_nome: 'REEMBOLSOS SHARE',
-      grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
+      categoria_share_id: shareCategory.categoria_share_id,
+      categoria_nome: shareCategory.categoria_nome,
+      grupo_categoria: shareCategory.grupo_categoria,
       fluxo: 'SAIDA',
       tipo_caixa: 'SHARE',
       valor_centavos: amount,
