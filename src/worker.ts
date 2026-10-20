@@ -4341,7 +4341,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
         categoria_nome: 'RELATORIO DE VIAGEM',
         descricao,
         aeronave_id: report.aeronave_id,
-        lancamentos_id: clienteLancamentoFinalId,
+        lancamentos_id: shareLancamentoFinalId,
         movimentos_id: null,
         status: 'EM_ABERTO',
         criado_por: user.id,

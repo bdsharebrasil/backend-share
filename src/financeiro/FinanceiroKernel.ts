@@ -2096,12 +2096,12 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const payments = Array.isArray(body.pagamentos) ? body.pagamentos as RealPayment[] : []
   if (!payments.length) throw new FinanceError('Informe pelo menos um pagador real', 'pagadores_obrigatorios')
   const total = asPositiveCents(row.valor_centavos)
-  const shareId = nullableText(row.lancamentos_id ?? row.lancamento_id)
   const movimentoHoldingId = nullableText(row.movimentos_id)
   const documentoSaida = ['NF_SAIDA', 'RECIBO_SAIDA'].includes(upper(row.origem_tipo))
   const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id = ? LIMIT 1').bind(receivableId).first<Row>()
   const resolved = await resolveReceivableAllocation(db, row)
   const rateioLancamentoId = resolved.lancamentoId
+  const shareId = resolved.shareLancamentoId ?? nullableText(row.lancamentos_id ?? row.lancamento_id)
   const rateios = { results: resolved.rateios }
   const statements: D1PreparedStatement[] = [settlementRevisionStatement(db, `receber:${receivableId}`, revision)]
   if (!rateios.results.length) throw new FinanceError('Obrigação sem rateio vinculado. Regularize a emissão antes de registrar o pagamento.', 'rateio_nao_vinculado', 409)
@@ -2249,8 +2249,8 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const updated = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
   const updatedRateios = movimentoHoldingId
     ? await db.prepare(`SELECT id, socio_id AS cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_hold WHERE ${holdingMovementColumn(schema)} = ? ORDER BY rowid`).bind(movimentoHoldingId).all<Row>()
-    : rateioLancamentoId
-    ? await db.prepare('SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE lancamento_id = ? ORDER BY rowid').bind(rateioLancamentoId).all<Row>()
+    : rateios.results.length
+    ? await db.prepare(`SELECT id, cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_despesas WHERE id IN (${rateios.results.map(() => '?').join(',')}) ORDER BY id`).bind(...rateios.results.map(rateio => rateio.id)).all<Row>()
     : { results: [] as Row[] }
   return { ...updated, idempotent: false, pagamentos: acceptedPayments, rateios: updatedRateios.results || [] }
 }
@@ -3330,9 +3330,9 @@ async function issueReceiptInternal(
 }
 
 // Shared obligation resolution: reads never create expenses or allocations.
-export async function resolveReceivableAllocations(db: Database, contas: Row[]): Promise<Map<string, { lancamentoId: string | null; rateios: Row[]; erro?: string }>> {
+export async function resolveReceivableAllocations(db: Database, contas: Row[]): Promise<Map<string, { lancamentoId: string | null; shareLancamentoId?: string | null; rateios: Row[]; erro?: string }>> {
   const schema = await loadSchema(db)
-  const result = new Map<string, { lancamentoId: string | null; rateios: Row[]; erro?: string }>()
+  const result = new Map<string, { lancamentoId: string | null; shareLancamentoId?: string | null; rateios: Row[]; erro?: string }>()
   const targets = new Map<string, { target: string; holding: boolean }>()
   for (let i = 0; i < contas.length; i += 40) {
     const page = contas.slice(i, i + 40)
@@ -3347,11 +3347,44 @@ export async function resolveReceivableAllocations(db: Database, contas: Row[]):
           OR cl.origem_id = COALESCE(cr.recibos_saida_id, cr.nf_saida_id, principal.origem_id))
         AND (cr.aeronave_id IS NULL OR cl.aeronave_id = cr.aeronave_id)
         AND (cr.cotista_id IS NULL OR cl.cotista_aeronave_id = cr.cotista_id)
-      WHERE cr.id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all<Row>()).results || []
+      WHERE cr.id IN (${ids.map(() => '?').join(',')})
+        AND UPPER(COALESCE(cr.origem_tipo, '')) <> 'RELATORIO_DESPESA_VIAGEM'`).bind(...ids).all<Row>()).results || []
+    const relatorios = (await db.prepare(`SELECT cr.id AS conta_id,
+        COALESCE(cliente.id, CASE WHEN UPPER(COALESCE(principal.tipo_caixa, '')) = 'CLIENTE' THEN principal.id END) AS lancamento_cliente_id,
+        share.id AS lancamento_share_id,
+        rd.*
+      FROM contas_areceber cr
+      LEFT JOIN lancamentos principal ON principal.id = cr.lancamentos_id
+      LEFT JOIN lancamentos cliente ON cliente.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || cr.origem_id || ':REEMBOLSO_CLIENTE:LANCAMENTO_CLIENTE'
+      LEFT JOIN lancamentos share ON share.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || cr.origem_id || ':REEMBOLSO_CLIENTE:LANCAMENTO_SHARE'
+      LEFT JOIN rateio_despesas rd ON rd.cotista_id = cr.cotista_id
+        AND COALESCE(rd.status, '') <> 'CANCELADO'
+        AND (rd.lancamento_id = (SELECT id FROM lancamentos
+              WHERE idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || cr.origem_id || ':CUSTO_INTEGRAL' LIMIT 1)
+          OR rd.id IN (SELECT destino_id FROM financeiro_vinculos
+              WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = cr.origem_id
+                AND destino_tipo = 'RATEIO_DESPESAS'))
+      WHERE cr.id IN (${ids.map(() => '?').join(',')})
+        AND UPPER(COALESCE(cr.origem_tipo, '')) = 'RELATORIO_DESPESA_VIAGEM'`).bind(...ids).all<Row>()).results || []
     for (const c of page) {
       const key = String(c.id)
-      result.set(key, { lancamentoId: null, rateios: [] })
+      result.set(key, { lancamentoId: null, shareLancamentoId: null, rateios: [] })
       if (c.movimentos_id) { targets.set(key, { target: String(c.movimentos_id), holding: true }); continue }
+      if (upper(c.origem_tipo) === 'RELATORIO_DESPESA_VIAGEM') {
+        const matches = relatorios.filter(r => String(r.conta_id) === key)
+        const link = matches[0]
+        const rateios = matches.filter(r => r.id !== null && r.id !== undefined)
+          .map(({ conta_id: _contaId, lancamento_cliente_id: _clienteId, lancamento_share_id: _shareId, ...rateio }) => rateio)
+        result.set(key, {
+          lancamentoId: nullableText(link?.lancamento_cliente_id),
+          shareLancamentoId: nullableText(link?.lancamento_share_id),
+          rateios,
+          ...(!nullableText(link?.lancamento_cliente_id) || !nullableText(link?.lancamento_share_id)
+            ? { erro: 'Lançamentos Cliente e Share do relatório não encontrados.' }
+            : {}),
+        })
+        continue
+      }
       const matches = candidates.filter(r => r.conta_id === c.id)
       const clients = [...new Set(matches.map(r => nullableText(r.cliente_id)).filter(Boolean))]
       const reimbursements = [...new Set(matches.map(r => nullableText(r.reembolso_id)).filter(Boolean))]
@@ -3375,7 +3408,7 @@ export async function resolveReceivableAllocations(db: Database, contas: Row[]):
   }
   return result
 }
-export async function resolveReceivableAllocation(db: Database, conta: Row): Promise<{ lancamentoId: string | null; rateios: Row[] }> {
+export async function resolveReceivableAllocation(db: Database, conta: Row): Promise<{ lancamentoId: string | null; shareLancamentoId?: string | null; rateios: Row[] }> {
   const resolved = (await resolveReceivableAllocations(db, [conta])).get(String(conta.id))!
   if (resolved.erro) throw new FinanceError(resolved.erro, 'vinculo_ambiguo', 409)
   return resolved
