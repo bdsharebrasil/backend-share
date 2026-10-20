@@ -545,7 +545,10 @@ financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {
     const entidade = await entidadeLancamentoFinanceiro(db, id)
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
     // Client/allocated obligations must use the same ledger as Share receipts.
-    const principal = await db.prepare('SELECT tipo_caixa, origem_tipo FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
+    const principal = await db.prepare('SELECT tipo_caixa, origem_tipo, reembolsavel FROM lancamentos WHERE id = ?').bind(id).first<Record<string, unknown>>()
+    if (principal && (principal.reembolsavel === 1 || principal.reembolsavel === '1' || principal.reembolsavel === true)) {
+      return c.json({ error: 'lancamento_reembolsavel_nao_pode_ser_baixado' }, 409)
+    }
     if (['rateio_despesas', 'rateio_despesas_pai'].includes(String(entidade.origem)) || principal?.tipo_caixa === 'CLIENTE' || ['RECIBO_SAIDA', 'NF_SAIDA'].includes(String(principal?.origem_tipo))) {
       const contexto = await contextoBaixaCotista(db, id)
       if (contexto.natureza === 'RECEBIMENTO_SHARE') { const denied = await requireCaixaShareAccess(c); if (denied) return denied }

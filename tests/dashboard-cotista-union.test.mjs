@@ -159,6 +159,11 @@ test("ações do lançamento consolidado reconhecem o ID-pai e atualizam o grupo
   assert.match(financeRoutes, /WHERE lancamento_id = \? AND UPPER\(COALESCE\(status, ''\)\) <> 'CANCELADO'/);
 });
 
+test("baixa genérica rejeita lançamento marcado como reembolsável", () => {
+  assert.match(financeRoutes, /SELECT tipo_caixa, origem_tipo, reembolsavel FROM lancamentos WHERE id = \?/);
+  assert.match(financeRoutes, /lancamento_reembolsavel_nao_pode_ser_baixado/);
+});
+
 test("predicado de deduplicação não consulta colunas de origem ausentes no schema", () => {
   const schema = new Map([
     ["lancamentos", new Set(["fluxo"])],
