@@ -10,7 +10,7 @@ export type RateioBalanco = {
 }
 export type PagamentoBalanco = {
   id: string; rateioId: string; pagadorId: string | null;
-  valor: number; data: string; status: string;
+  valor: number; data: string; status: string; tipoPagador?: string;
 }
 export type AjusteBalanco = {
   id: string; origemRateioId: string; destinoRateioId: string; valor: number; motivo: string;
@@ -84,6 +84,9 @@ export function calcularBalancoMensal(
     // ajustado. Pagamentos parciais cobrem proporcionalmente o custo da despesa.
     for (const r of comLedger) for (const p of ledgerPorRateio.get(r.id)!) {
       if (p.status.toUpperCase() !== 'CONFIRMADO' || p.data > fim) continue
+      // SHARE/HOLDING são fontes coletivas conhecidas: não são desembolso pessoal
+      // nem inconsistência de identidade. O ledger também impede fallback legado.
+      if (['SHARE', 'HOLDING'].includes(String(p.tipoPagador || '').toUpperCase())) continue
       registrar(p.pagadorId, centavos(p.valor), r.dominio)
     }
     for (const r of grupo.filter(r => !ledgerPorRateio.has(r.id))) {
@@ -91,8 +94,8 @@ export function calcularBalancoMensal(
       if (!v) continue
       if (!r.dataPagamento) { avisos.add('Pagamento legado sem data: não incluído no corte.'); continue }
       if (r.dataPagamento > fim) continue
-      // Rateio hold liquidado pelo banco não é dinheiro pessoal do sócio.
-      if (r.dominio.startsWith('HOLD:') && !r.direto) continue
+      // Pagamentos não diretos são liquidados por caixa comum; não são crédito pessoal.
+      if (!r.direto) continue
       registrar(r.pagadorId, v, r.dominio)
     }
     const totalPago = [...pagos.values()].reduce((s, v) => s + v, 0)

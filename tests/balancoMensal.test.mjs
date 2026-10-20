@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { calcularBalancoMensal as calcular, distribuirCentavos } from '../src/financeiro/balancoMensal.ts'
+import { calcularBalancoMensal as calcular, distribuirCentavos, simularProximaDespesa } from '../src/financeiro/balancoMensal.ts'
 const ps = [{id:'a',nome:'A',dominio:'CLIENTES'},{id:'b',nome:'B',dominio:'CLIENTES'}]
 const linha = (id,pessoa,devido,pago=0,pagador=null,extra={})=>({id,participanteId:pessoa,dominio:'CLIENTES',origemChave:'d1',competencia:'2026-10-01',categoria:'Seguro',descricao:'Seguro',tipo:'FIXO',devido,pagoReal:pago,pagadorId:pagador,direto:true,dataPagamento:'2026-10-03',status:'EM_ABERTO',...extra})
 const run=(rs,ev=[],aj=[],participantes=ps)=>calcular(participantes,rs,ev,aj,'2026-10-01','2026-10-31')
@@ -11,6 +11,23 @@ test('um paga tudo: A recebe 500 de B; zero do não pagador permanece zero',()=>
 test('cada um paga sua parte: nenhum ajuste',()=>{
  const r=run([linha('1','a',50000,50000,'a'),linha('2','b',50000,50000,'b')]);assert.deepEqual(r.compensacoes,[])
  assert.equal(r.diferencaCustoPagamentoCentavos,0)
+})
+test('pagamento de caixa Share não é pessoal e não bloqueia a simulação',()=>{
+ const r=run([linha('1','a',50000,50000,null),linha('2','b',50000)], [{id:'s',rateioId:'1',pagadorId:null,tipoPagador:'SHARE',valor:50000,data:'2026-10-04',status:'CONFIRMADO'}])
+ assert.equal(r.pagoPessoalCentavos,0)
+ assert.ok(!r.avisos.some(a=>a.includes('Pagamento sem cotista identificável')))
+ assert.doesNotThrow(()=>simularProximaDespesa(r,10000,[{id:'a',peso:50},{id:'b',peso:50}]))
+})
+test('pagamento legado não direto é caixa comum, não cotista sem identidade',()=>{
+ const r=run([linha('1','a',50000,50000,null,{direto:false}),linha('2','b',50000)])
+ assert.equal(r.pagoPessoalCentavos,0)
+ assert.ok(!r.avisos.some(a=>a.includes('Pagamento sem cotista identificável')))
+ assert.doesNotThrow(()=>simularProximaDespesa(r,10000,[{id:'a',peso:50},{id:'b',peso:50}]))
+})
+test('evento de cotista sem vínculo continua gerando aviso de conciliação',()=>{
+ const r=run([linha('1','a',50000),linha('2','b',50000)], [{id:'p',rateioId:'1',pagadorId:null,tipoPagador:'COTISTA',valor:10000,data:'2026-10-04',status:'CONFIRMADO'}])
+ assert.ok(r.avisos.some(a=>a.includes('Pagamento sem cotista identificável')))
+ assert.throws(()=>simularProximaDespesa(r,10000,[{id:'a',peso:50},{id:'b',peso:50}]),/Concilie os avisos/)
 })
 test('ledger prevalece sobre agregado do trigger e crédito vai ao pagador real',()=>{
  const r=run([linha('1','a',50000,50000,null),linha('2','b',50000,50000,null)],[

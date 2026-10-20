@@ -42,7 +42,7 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
   }))
   const pagamentos: PagamentoBalanco[] = eventos.map(p => ({ id: String(p.id), rateioId: `CLIENTE:${p.rateio_id}`,
     pagadorId: p.tipo_pagador === 'COTISTA' ? aliases.get(String(p.pagador_cotista_id)) || null : null,
-    valor: Number(p.valor_centavos), data: String(p.data_pagamento).slice(0,10), status: String(p.status) }))
+    valor: Number(p.valor_centavos), data: String(p.data_pagamento).slice(0,10), status: String(p.status), tipoPagador: String(p.tipo_pagador || '') }))
   const ajustes: AjusteBalanco[] = ajustesDB.map(a => ({ id: String(a.id), origemRateioId: String(a.origem_rateio_id),
     destinoRateioId: String(a.destino_rateio_id), valor: Number(a.valor_centavos), motivo: String(a.motivo) }))
   const acumulado = calcularBalancoMensal(participantes, rateios, pagamentos, ajustes, '2000-01-01', fim)
