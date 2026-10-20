@@ -2100,10 +2100,19 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const documentoSaida = ['NF_SAIDA', 'RECIBO_SAIDA'].includes(upper(row.origem_tipo))
   const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id = ? LIMIT 1').bind(receivableId).first<Row>()
   const resolved = await resolveReceivableAllocation(db, row)
-  const rateioLancamentoId = resolved.lancamentoId
+  const rateioLancamentoId = reimbursement
+    ? nullableText(reimbursement.lancamento_cliente_id) ?? nullableText((await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ? AND tipo_caixa = 'CLIENTE' LIMIT 1").bind(reimbursement.id).first<Row>())?.id) ?? resolved.lancamentoId
+    : resolved.lancamentoId
   const shareId = resolved.shareLancamentoId ?? nullableText(row.lancamentos_id ?? row.lancamento_id)
-  const rateios = { results: resolved.rateios }
+  let rateios = { results: resolved.rateios }
   const statements: D1PreparedStatement[] = [settlementRevisionStatement(db, `receber:${receivableId}`, revision)]
+  const rateiosLegadosShare = reimbursement && rateioLancamentoId && !(rateios.results || []).length && nullableText(reimbursement.lancamento_origem_id)
+    ? await db.prepare("SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_despesas WHERE lancamento_id = ? AND status NOT IN ('CANCELADO')").bind(reimbursement.lancamento_origem_id).all<Row>()
+    : { results: [] as Row[] }
+  if (rateiosLegadosShare.results?.length) rateios = rateiosLegadosShare
+  for (const rateio of rateiosLegadosShare.results || []) {
+    statements.push(db.prepare('UPDATE rateio_despesas SET lancamento_id = ? WHERE id = ? AND lancamento_id = ?').bind(rateioLancamentoId, rateio.id, reimbursement!.lancamento_origem_id))
+  }
   if (!rateios.results.length) throw new FinanceError('Obrigação sem rateio vinculado. Regularize a emissão antes de registrar o pagamento.', 'rateio_nao_vinculado', 409)
   if (documentoSaida && rateios.results.reduce((sum, r) => sum + Number(r.valor_rateado_centavos), 0) !== total) throw new FinanceError('Total dos rateios diferente do valor da conta. Regularize antes de receber.', 'rateio_total_divergente', 409)
   const allowed = new Map((rateios.results || []).map(r => [String(r.id), Number(r.valor_rateado_centavos)]))
