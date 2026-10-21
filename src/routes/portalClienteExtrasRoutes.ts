@@ -77,6 +77,59 @@ portalClienteExtrasRoutes.get('/api/portal/diario-bordo', async c => {
   return c.json({ de, ate, voos: result.results || [] })
 })
 
+// ── Manutenção: horímetro, próxima revisão e histórico RAS ────────────────
+portalClienteExtrasRoutes.get('/api/portal/manutencao', async c => {
+  const user = await usuario(c)
+  if (!user) return c.json({ error: 'client_auth_required' }, 401)
+  const db = c.env.SHARE_DB
+  const [aeronaves, manutencoes] = await Promise.all([
+    db.prepare(`
+      SELECT a.id AS aeronave_id, a.matricula_registro, a.fabricante, a.modelo, a.ano,
+             CASE WHEN dm.modo_celula = 'tvoo'
+                  THEN dm.celula_atual_tvoo ELSE dm.celula_atual_ttotal END AS horas_atual,
+             CASE WHEN dm.modo_celula = 'tvoo' AND COALESCE(dm.celula_prox_revisao_tvoo, 0) > 0
+                  THEN dm.celula_prox_revisao_tvoo
+                  WHEN COALESCE(dm.celula_prox_revisao_ttotal, 0) > 0 THEN dm.celula_prox_revisao_ttotal
+                  ELSE dm.celula_prox_revisao_tvoo END AS proxima_revisao_horas,
+             CASE WHEN dm.modo_celula = 'tvoo' AND COALESCE(dm.celula_prox_revisao_tvoo, 0) > 0
+                  THEN dm.celula_disponivel_tvoo
+                  WHEN COALESCE(dm.celula_prox_revisao_ttotal, 0) > 0 THEN dm.celula_disponivel_ttotal
+                  ELSE dm.celula_disponivel_tvoo END AS horas_restantes,
+             dm.modo_celula, dm.ano AS diario_ano, dm.mes AS diario_mes
+        FROM aeronave a
+        LEFT JOIN diario_mes dm ON dm.id = (
+          SELECT dm2.id FROM diario_mes dm2
+           WHERE dm2.aeronave_id = a.id
+           ORDER BY dm2.ano DESC, dm2.mes DESC LIMIT 1
+        )
+       WHERE EXISTS (
+         SELECT 1 FROM cotista_aeronave ca
+          WHERE ca.aeronave_id = a.id
+            AND lower(trim(COALESCE(ca.status, ''))) = 'ativo'
+            AND (ca.cliente_id = ?1 OR ca.socio_id = ?2)
+       )
+       ORDER BY a.matricula_registro`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>(),
+    db.prepare(`
+      SELECT r.id, r.aeronave_id, a.matricula_registro, r.numero, r.tipo_manutencao,
+             r.objetivo, r.descricao, r.data_entrada, r.data_saida,
+             r.horas_celula_entrada, r.horas_celula_saida, r.status,
+             CAST(strftime('%m', COALESCE(NULLIF(r.data_saida, ''), r.data_entrada)) AS INTEGER) AS mes,
+             CAST(strftime('%Y', COALESCE(NULLIF(r.data_saida, ''), r.data_entrada)) AS INTEGER) AS ano
+        FROM ctm_ras r
+        JOIN aeronave a ON a.id = r.aeronave_id
+       WHERE lower(COALESCE(r.status, '')) IN ('in_progress', 'completed')
+         AND EXISTS (
+           SELECT 1 FROM cotista_aeronave ca
+            WHERE ca.aeronave_id = r.aeronave_id
+              AND lower(trim(COALESCE(ca.status, ''))) = 'ativo'
+              AND (ca.cliente_id = ?1 OR ca.socio_id = ?2)
+         )
+       ORDER BY CASE WHEN lower(COALESCE(r.status, '')) = 'in_progress' THEN 0 ELSE 1 END,
+                date(COALESCE(NULLIF(r.data_saida, ''), r.data_entrada)) DESC, r.id DESC`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>(),
+  ])
+  return c.json({ aeronaves: aeronaves.results || [], manutencoes: manutencoes.results || [] })
+})
+
 // ── Meu Balanço (rateio_despesas p/ cliente, rateio_hold p/ holding) ───────
 portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
   const user = await usuario(c)
