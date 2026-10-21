@@ -3530,6 +3530,16 @@ export async function contextoBaixaCotista(db: Database, entityId: string): Prom
   const allocation = await db.prepare('SELECT * FROM rateio_despesas WHERE id = ?').bind(entityId).first<Row>()
   const lancamentoId = nullableText(allocation?.lancamento_id) ?? entityId
   const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
+  if (!lancamento && allocation && !nullableText(allocation.lancamento_id)) {
+    if (upper(allocation.status) === 'CANCELADO') throw new FinanceError('Lançamento cancelado ou estornado', 'lancamento_cancelado', 409)
+    return {
+      natureza: 'PAGAMENTO_DIRETO',
+      conta_id: null,
+      lancamento: { id: null, descricao: allocation.descricao_despesa, aeronave_id: allocation.aeronave_id },
+      rateios: [allocation],
+      cotista_id: allocation.cotista_id,
+    }
+  }
   if (!lancamento) throw new FinanceError('Lançamento vinculado não encontrado', 'lancamento_nao_encontrado', 404)
   if (['CANCELADO', 'ESTORNO'].includes(upper(lancamento.status)) || upper(allocation?.status) === 'CANCELADO') throw new FinanceError('Lançamento cancelado ou estornado', 'lancamento_cancelado', 409)
   const contas = await db.prepare(`SELECT DISTINCT cr.* FROM contas_areceber cr
@@ -3566,7 +3576,9 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
     return settleReceivable(db, String(initial.conta_id), { ...body, pagamentos: payments }, userId)
   }
   const lancamento = initial.lancamento as Row
-  const key = `direto:${lancamento.id}`
+  const lancamentoId = nullableText(lancamento.id)
+  const aeronaveId = nullableText(lancamento.aeronave_id)
+  const key = `direto:${lancamentoId ?? entityId}`
   const revision = await readSettlementRevision(db, key)
   const context = await contextoBaixaCotista(db, entityId)
   const rows = context.rateios as Row[]
@@ -3577,7 +3589,7 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
   const requestKey = nullableText(p.idempotency_key)
   if (!requestKey) throw new FinanceError('Identificador do pagamento obrigatório', 'idempotency_key_obrigatoria')
   if (p.tipo_pagador !== 'COTISTA' || !p.pagador_cotista_id) throw new FinanceError('Pagamento direto exige identificar o cotista pagador', 'cotista_pagador_obrigatorio')
-  const payer = await db.prepare('SELECT id FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(p.pagador_cotista_id, lancamento.aeronave_id).first<Row>()
+  const payer = await db.prepare('SELECT id FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(p.pagador_cotista_id, aeronaveId).first<Row>()
   if (!payer) throw new FinanceError('Pagador não pertence à aeronave', 'pagador_invalido')
   if (!validSettlementDate(String(p.data_pagamento || ''))) throw new FinanceError('Data de pagamento inválida', 'data_pagamento_invalida')
   if (p.conta_bancaria_id) throw new FinanceError('Pagamento direto do cotista não utiliza uma conta bancária da Share', 'conta_share_em_pagamento_direto')
@@ -3611,13 +3623,13 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
     }, 'id = ?', [r.id]))
   }
   // Parent is paid only when EVERY active allocation is settled (including allocations outside the selection).
-  statements.push(db.prepare(`UPDATE lancamentos SET status = CASE WHEN NOT EXISTS (
+  if (lancamentoId) statements.push(db.prepare(`UPDATE lancamentos SET status = CASE WHEN NOT EXISTS (
       SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO'
         AND valor_pago_real_centavos < valor_rateado_centavos) THEN 'PAGO' ELSE 'EM_ABERTO' END,
     data_pagamento = CASE WHEN NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' AND valor_pago_real_centavos < valor_rateado_centavos) THEN ? ELSE NULL END,
-    pago_diretamente = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(lancamento.id, lancamento.id, p.data_pagamento, lancamento.id))
+    pago_diretamente = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(lancamentoId, lancamentoId, p.data_pagamento, lancamentoId))
   await commitSettlement(db, statements)
-  return { ok: true, idempotent: false, natureza: 'PAGAMENTO_DIRETO', lancamento_id: lancamento.id }
+  return { ok: true, idempotent: false, natureza: 'PAGAMENTO_DIRETO', lancamento_id: lancamentoId, rateio_id: lancamentoId ? null : rows[0]?.id }
 }
 
 function receiptReplayMatches(p: RealPayment, saved: Row[]): boolean {
