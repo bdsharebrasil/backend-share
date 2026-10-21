@@ -12,16 +12,18 @@ const baixaDireta = kernel.slice(
   kernel.indexOf('function receiptReplayMatches(', kernel.indexOf('export async function settleCotista(')),
 );
 
-test('rateio sem lançamento pai fornece contexto de pagamento direto usando seus próprios dados', () => {
-  assert.match(contexto, /if \(!lancamento && allocation && !nullableText\(allocation\.lancamento_id\)\)/);
+test('rateio referenciado por envio_despesas fornece contexto de pagamento direto sem lançamento Share', () => {
+  assert.match(contexto, /SELECT id, tipo, status, descricao, aeronave_id FROM envio_despesas WHERE id = \?/);
+  assert.match(contexto, /envio && upper\(envio\.tipo\) === 'CLIENTE'/);
   assert.match(contexto, /natureza: 'PAGAMENTO_DIRETO'/);
-  assert.match(contexto, /descricao: allocation\.descricao_despesa, aeronave_id: allocation\.aeronave_id/);
-  assert.match(contexto, /rateios: \[allocation\]/);
+  assert.match(contexto, /envio_id: envio\.id/);
+  assert.match(contexto, /rateio_despesas WHERE lancamento_id = \? AND COALESCE\(status, ''\) <> 'CANCELADO'/);
 });
 
-test('baixa de rateio sem lançamento pai atualiza somente o rateio, sem tentar alterar o caixa Share', () => {
-  assert.match(baixaDireta, /const lancamentoId = nullableText\(lancamento\.id\)/);
-  assert.match(baixaDireta, /UPDATE rateio_despesas SET|updateStatement\(db, schema, 'rateio_despesas'/);
+test('baixa direta de envio atualiza rateios e conclui envio somente quando todos estiverem pagos', () => {
+  assert.match(baixaDireta, /updateStatement\(db, schema, 'rateio_despesas'/);
   assert.match(baixaDireta, /if \(lancamentoId\) statements\.push\(db\.prepare\(`UPDATE lancamentos SET/);
+  assert.match(baixaDireta, /if \(envioId\) statements\.push\(db\.prepare\(`UPDATE envio_despesas SET status = 'CONCLUIDO'/);
+  assert.match(baixaDireta, /AND NOT EXISTS \(SELECT 1 FROM rateio_despesas WHERE lancamento_id = \? AND COALESCE\(status, ''\) <> 'CANCELADO'/);
   assert.match(baixaDireta, /if \(p\.conta_bancaria_id\) throw new FinanceError\('Pagamento direto do cotista não utiliza uma conta bancária da Share'/);
 });
