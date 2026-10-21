@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { portalFeatureForPath, portalHasFeature } from '../src/routes/portalRoutes.ts'
+import { Hono } from 'hono'
+import { portalClienteExtrasRoutes } from '../src/routes/portalClienteExtrasRoutes.ts'
+import { portalFeatureForPath, portalHasFeature, portalRoutes } from '../src/routes/portalRoutes.ts'
 
 const usuarioSecundario = (permissoes) => ({ id: 'secundario-1', principal_id: 'principal-1', permissoes })
 
@@ -26,4 +28,23 @@ test('rotas de dados e ações são associadas ao módulo protegido corresponden
   assert.equal(portalFeatureForPath('/api/portal/aeronave/abc/dashboard'), 'aeronave')
   assert.equal(portalFeatureForPath('/api/portal/manutencao'), 'manutencao')
   assert.equal(portalFeatureForPath('/api/portal/contexto'), null)
+})
+
+test('middleware das rotas complementares deixa o endpoint de login seguir sem token', async () => {
+  const app = new Hono()
+  app.route('/', portalClienteExtrasRoutes)
+  app.route('/', portalRoutes)
+  const env = {
+    RATE_LIMITER: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: async () => new Response(JSON.stringify({ allowed: true }), { status: 200 }) }),
+    },
+  }
+  const response = await app.request('/api/portal/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  }, env)
+  assert.equal(response.status, 400)
+  assert.deepEqual(await response.json(), { error: 'login_e_senha_obrigatorios' })
 })

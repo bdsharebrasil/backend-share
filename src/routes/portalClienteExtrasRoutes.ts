@@ -49,6 +49,7 @@ async function usuario(c: Ctx) {
 }
 
 portalClienteExtrasRoutes.use('/api/portal/*', async (c, next) => {
+  if (c.req.path === '/api/portal/login') return next()
   const user = await portalSession(c as any)
   if (!user) return c.json({ error: 'client_auth_required' }, 401)
   const feature = portalFeatureForPath(c.req.path)
