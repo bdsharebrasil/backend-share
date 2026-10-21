@@ -3597,6 +3597,7 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
   const p = payments[0]
   const requestKey = nullableText(p.idempotency_key)
   if (!requestKey) throw new FinanceError('Identificador do pagamento obrigatório', 'idempotency_key_obrigatoria')
+  if (requestKey.length > 128) throw new FinanceError('Identificador do pagamento inválido', 'idempotency_key_invalida')
   if (p.tipo_pagador !== 'COTISTA' || !p.pagador_cotista_id) throw new FinanceError('Pagamento direto exige identificar o cotista pagador', 'cotista_pagador_obrigatorio')
   const payer = await db.prepare('SELECT id FROM cotista_aeronave WHERE id = ? AND aeronave_id = ?').bind(p.pagador_cotista_id, aeronaveId).first<Row>()
   if (!payer) throw new FinanceError('Pagador não pertence à aeronave', 'pagador_invalido')
@@ -3606,7 +3607,8 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
   const allocations = p.rateios || []
   if (!allocations.length || new Set(allocations.map(r => r.rateio_id)).size !== allocations.length) throw new FinanceError('Distribuição de pagamento inválida', 'rateios_invalidos')
   if (allocations.reduce((s, r) => s + asPositiveCents(r.valor_centavos), 0) !== amount) throw new FinanceError('Valor diferente da soma dos rateios', 'distribuicao_pagamento_invalida')
-  const existing = await db.prepare("SELECT * FROM rateio_pagamentos WHERE status = 'CONFIRMADO' AND idempotency_key LIKE ?").bind(`DIRETO-COTISTA:${requestKey}:%`).all<Row>()
+  const idempotencyPrefix = `DIRETO-COTISTA:${requestKey}:`
+  const existing = await db.prepare("SELECT * FROM rateio_pagamentos WHERE status = 'CONFIRMADO' AND substr(idempotency_key, 1, ?) = ?").bind(idempotencyPrefix.length, idempotencyPrefix).all<Row>()
   if ((existing.results || []).length) {
     const old = existing.results || []
     if (old.some(o => o.pagador_cotista_id !== p.pagador_cotista_id || o.data_pagamento !== p.data_pagamento || o.tipo_pagador !== 'COTISTA') || old.length !== allocations.length || !allocations.every(a => old.some(o => o.idempotency_key === `DIRETO-COTISTA:${requestKey}:${a.rateio_id}` && o.valor_centavos === a.valor_centavos))) throw new FinanceError('Chave de pagamento reutilizada com outros dados', 'idempotencia_conflitante', 409)

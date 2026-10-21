@@ -15,6 +15,10 @@ const baixaLancamento = routes.slice(
   routes.indexOf("financeiroRoutes.post('/lancamentos/:id/baixa'"),
   routes.indexOf("financeiroRoutes.post('/lancamentos/:id/duplicar'", routes.indexOf("financeiroRoutes.post('/lancamentos/:id/baixa'")),
 );
+const settleCotista = kernel.slice(
+  kernel.indexOf('export async function settleCotista('),
+  kernel.indexOf('function receiptReplayMatches(', kernel.indexOf('export async function settleCotista(')),
+);
 
 test("baixa conciliada identifica receita do caixa Share e marca os rateios como pagos diretamente", () => {
   assert.match(settleReceivable, /const isShareRevenue = upper\(shareLancamento\?\.tipo_caixa\) === 'SHARE'\s*&& \['ENTRADA', 'RECEITA'\]\.includes\(upper\(shareLancamento\?\.fluxo\)\)/);
@@ -25,4 +29,10 @@ test("baixa conciliada identifica receita do caixa Share e marca os rateios como
 test("baixa simples marca pago_diretamente apenas para lançamento de receita no caixa Share", () => {
   assert.match(baixaLancamento, /SELECT tipo_caixa, origem_tipo, reembolsavel, fluxo FROM lancamentos WHERE id = \?/);
   assert.match(baixaLancamento, /String\(principal\?\.tipo_caixa\)\.toUpperCase\(\) === 'SHARE'[\s\S]*?\['ENTRADA', 'RECEITA'\]\.includes\(String\(principal\?\.fluxo\)\.toUpperCase\(\)\)[\s\S]*?sets\.push\('pago_diretamente = 1'\)/);
+});
+
+test("idempotência da baixa direta usa prefixo literal, sem padrão LIKE/GLOB", () => {
+  assert.match(settleCotista, /requestKey\.length > 128/);
+  assert.match(settleCotista, /substr\(idempotency_key, 1, \?\) = \?/);
+  assert.doesNotMatch(settleCotista, /idempotency_key LIKE/);
 });
