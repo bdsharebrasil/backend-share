@@ -11,6 +11,7 @@ import { jornadasRoutes } from './routes/jornadasRoutes'
 import { aiswebRoutes } from './routes/aiswebRoutes'
 import { valuationRoutes } from './routes/valuationRoutes'
 import { portalRoutes } from './routes/portalRoutes'
+import { portalClienteExtrasRoutes } from './routes/portalClienteExtrasRoutes'
 import { emailRoutes } from './routes/emailsRoutes'
 import { mensagensRoutes } from './routes/mensagensRoutes'
 import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
@@ -118,6 +119,7 @@ app.route('/', diarioBordoRoutes)
 app.route('/', jornadasRoutes)
 app.route('/', aiswebRoutes)
 app.route('/', valuationRoutes)
+app.route('/', portalClienteExtrasRoutes)
 app.route('/', portalRoutes)
 app.route('/', emailRoutes)
 app.route('/', mensagensRoutes)

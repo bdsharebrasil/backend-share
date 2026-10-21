@@ -172,7 +172,7 @@ async function portalCreateSession(user: PortalUser, c: Context<{ Bindings: Bind
   return { token: `${encoded}.${signature}`, expires_at: new Date(exp * 1000).toISOString() }
 }
 
-async function portalSession(c: Context<{ Bindings: Bindings; Variables: Variables }>): Promise<PortalUser | null> {
+export async function portalSession(c: Context<{ Bindings: Bindings; Variables: Variables }>): Promise<PortalUser | null> {
   const authorization = c.req.header('authorization')
   if (!authorization?.startsWith('Bearer ')) return null
   const [encoded, signature] = authorization.slice(7).trim().split('.')
@@ -208,7 +208,7 @@ async function portalContext(c: Context<{ Bindings: Bindings; Variables: Variabl
   return { user, cliente: cliente ?? null, socio: socio ?? null, participacoes: participacoes.results }
 }
 
-async function portalTelegram(c: Context<{ Bindings: Bindings; Variables: Variables }>, message: string): Promise<void> {
+export async function portalTelegram(c: Context<{ Bindings: Bindings; Variables: Variables }>, message: string): Promise<void> {
   if (!c.env.TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN não configurado')
   const company = await c.env.SHARE_DB.prepare('SELECT telegram_chat_id FROM empresa ORDER BY criado_em LIMIT 1').first<{ telegram_chat_id: string | null }>()
   const chatId = company?.telegram_chat_id?.trim()
