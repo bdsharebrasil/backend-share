@@ -15,20 +15,64 @@ type PortalUser = {
   url_avatar: string | null
   cliente_id: string | null
   socio_id: string | null
+  principal_id: string | null
+  permissoes: PortalFeature[] | null
+}
+
+export type PortalFeature = 'agendamento' | 'financeiro' | 'aeronave' | 'manutencao'
+
+function parsePortalPermissions(value: unknown): PortalFeature[] | null {
+  if (value == null || value === '') return null
+  try {
+    const parsed = JSON.parse(String(value))
+    if (!Array.isArray(parsed)) return []
+    const valid = new Set<PortalFeature>(['agendamento', 'financeiro', 'aeronave', 'manutencao'])
+    return [...new Set(parsed.filter((item): item is PortalFeature => typeof item === 'string' && valid.has(item as PortalFeature)))]
+  } catch {
+    return []
+  }
+}
+
+export function portalHasFeature(user: PortalUser, feature: PortalFeature): boolean {
+  return !user.principal_id || user.permissoes === null || user.permissoes.includes(feature)
+}
+
+export function portalFeatureForPath(path: string): PortalFeature | null {
+  if (/^\/api\/portal\/(aerodromos|disponibilidade|solicitacoes)(\/|$)/.test(path) || path === '/api/portal/diario-bordo') return 'agendamento'
+  if (/^\/api\/portal\/(financeiro|balanco|abastecimentos|baixas|comprovantes)(\/|$)/.test(path)) return 'financeiro'
+  if (/^\/api\/portal\/aeronave(\/|$)/.test(path)) return 'aeronave'
+  if (path === '/api/portal/manutencao') return 'manutencao'
+  return null
+}
+
+async function portalUserColumns(db: D1Database): Promise<Set<string>> {
+  const schema = await db.prepare('SELECT name FROM pragma_table_info(?1)').bind('user_cliente').all<{ name: string }>()
+  return new Set((schema.results || []).map(column => String(column.name)))
 }
 
 async function portalUserForLogin(db: D1Database, login: string): Promise<(PortalUser & { senha: string }) | null> {
-  const schema = await db.prepare('SELECT name FROM pragma_table_info(?1)').bind('user_cliente').all<{ name: string }>()
-  const columns = new Set((schema.results || []).map(column => String(column.name)))
+  const columns = await portalUserColumns(db)
   if (!columns.has('cotista_id')) throw new Error('user_cliente sem coluna cotista_id')
-  return db.prepare(`
-    SELECT u.id, u.login, u.senha, u.nome_exibicao, u.url_avatar,
+  const principalSelect = columns.has('principal_id') ? 'u.principal_id' : 'NULL AS principal_id'
+  const permissionsSelect = columns.has('permissoes') ? 'u.permissoes' : 'NULL AS permissoes'
+  const row = await db.prepare(`
+    SELECT u.id, u.login, u.senha, u.nome_exibicao, u.url_avatar, ${principalSelect}, ${permissionsSelect},
       ca.cliente_id AS cliente_id, ca.socio_id AS socio_id
     FROM user_cliente u
     LEFT JOIN cotista_aeronave ca ON ca.id = u.cotista_id
     WHERE lower(u.login) = ?1
     LIMIT 1
-  `).bind(login).first<PortalUser & { senha: string }>()
+  `).bind(login).first<Record<string, unknown>>()
+  if (!row) return null
+  return {
+    id: String(row.id), login: String(row.login), senha: String(row.senha || ''),
+    nome_exibicao: row.nome_exibicao == null ? null : String(row.nome_exibicao),
+    url_avatar: row.url_avatar == null ? null : String(row.url_avatar),
+    cliente_id: row.cliente_id == null ? null : String(row.cliente_id),
+    socio_id: row.socio_id == null ? null : String(row.socio_id),
+    principal_id: row.principal_id == null ? null : String(row.principal_id),
+    permissoes: parsePortalPermissions(row.permissoes),
+  }
 }
 
 type PortalCliente = {
@@ -181,7 +225,26 @@ export async function portalSession(c: Context<{ Bindings: Bindings; Variables: 
     const valid = await crypto.subtle.verify('HMAC', await portalHmacKey(portalSessionSecret(c)), portalFromBase64Url(signature), portalEncoder.encode(encoded))
     const session = JSON.parse(portalDecoder.decode(portalFromBase64Url(encoded))) as PortalSession
     if (!valid || !session.id || !session.login || session.exp <= Math.floor(Date.now() / 1000)) return null
-    return { id: session.id, login: session.login, nome_exibicao: session.nome_exibicao, url_avatar: session.url_avatar, cliente_id: session.cliente_id, socio_id: session.socio_id }
+    const columns = await portalUserColumns(c.env.SHARE_DB)
+    const principalSelect = columns.has('principal_id') ? 'u.principal_id' : 'NULL AS principal_id'
+    const permissionsSelect = columns.has('permissoes') ? 'u.permissoes' : 'NULL AS permissoes'
+    const current = await c.env.SHARE_DB.prepare(`
+      SELECT u.id, u.login, u.nome_exibicao, u.url_avatar, ${principalSelect}, ${permissionsSelect},
+             ca.cliente_id, ca.socio_id
+        FROM user_cliente u
+        LEFT JOIN cotista_aeronave ca ON ca.id = u.cotista_id
+       WHERE u.id = ?1 LIMIT 1
+    `).bind(session.id).first<Record<string, unknown>>()
+    if (!current || !current.cliente_id && !current.socio_id) return null
+    return {
+      id: String(current.id), login: String(current.login),
+      nome_exibicao: current.nome_exibicao == null ? null : String(current.nome_exibicao),
+      url_avatar: current.url_avatar == null ? null : String(current.url_avatar),
+      cliente_id: current.cliente_id == null ? null : String(current.cliente_id),
+      socio_id: current.socio_id == null ? null : String(current.socio_id),
+      principal_id: current.principal_id == null ? null : String(current.principal_id),
+      permissoes: parsePortalPermissions(current.permissoes),
+    }
   } catch {
     return null
   }
@@ -256,7 +319,10 @@ portalRoutes.post('/api/portal/login', async c => {
     if (Boolean(row.cliente_id) === Boolean(row.socio_id)) return c.json({ error: 'vinculo_usuario_invalido' }, 409)
     if (verification.legacy) await c.env.SHARE_DB.prepare('UPDATE user_cliente SET senha = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(await portalCreatePasswordHash(senha), row.id).run()
 
-    const user: PortalUser = { id: row.id, login: row.login, nome_exibicao: row.nome_exibicao, url_avatar: row.url_avatar, cliente_id: row.cliente_id, socio_id: row.socio_id }
+    const user: PortalUser = {
+      id: row.id, login: row.login, nome_exibicao: row.nome_exibicao, url_avatar: row.url_avatar,
+      cliente_id: row.cliente_id, socio_id: row.socio_id, principal_id: row.principal_id, permissoes: row.permissoes,
+    }
     return c.json({ user, ...(await portalCreateSession(user, c)) })
   } catch (error: any) {
     log.error('[portal/login]', error?.message ?? error)
@@ -266,7 +332,10 @@ portalRoutes.post('/api/portal/login', async c => {
 
 portalRoutes.use('/api/portal/*', async (c, next) => {
   if (c.req.path === '/api/portal/login') return next()
-  if (!(await portalSession(c))) return c.json({ error: 'client_auth_required' }, 401)
+  const user = await portalSession(c)
+  if (!user) return c.json({ error: 'client_auth_required' }, 401)
+  const feature = portalFeatureForPath(c.req.path)
+  if (feature && !portalHasFeature(user, feature)) return c.json({ error: 'portal_feature_forbidden' }, 403)
   return next()
 })
 
@@ -275,7 +344,22 @@ portalRoutes.get('/api/portal/me', async c => c.json({ user: await portalSession
 portalRoutes.get('/api/portal/contexto', async c => {
   const user = await portalSession(c)
   if (!user) return c.json({ error: 'client_auth_required' }, 401)
-  return c.json(await portalContext(c, user))
+  const contexto = await portalContext(c, user)
+  if (!portalHasFeature(user, 'aeronave')) contexto.participacoes = []
+  if (user.principal_id) {
+    if (contexto.cliente) contexto.cliente = {
+      ...contexto.cliente, cnpj: null, inscricao_estadual: null, proprietario: null,
+      endereco: null, cidade: null, uf: null, contato_financeiro: null,
+      telefone_financeiro: null, telefone_cliente: null, telefone_outro: null,
+      email_principal: null, emails: '[]', url_logo: null, codigo_cliente: null, observacoes: null,
+    }
+    if (contexto.socio) contexto.socio = {
+      ...contexto.socio, cpf: '', email_principal: null, emails: '[]', endereco: null,
+      cidade: null, uf: null, contato_financeiro: null, telefone_financeiro: null,
+      telefone: null, observacoes: null,
+    }
+  }
+  return c.json(contexto)
 })
 
 portalRoutes.get('/api/portal/financeiro', async c => {
@@ -402,7 +486,17 @@ portalRoutes.get('/api/portal/overview', async c => {
     if (String(row.data_emissao || '').slice(0, 7) === inicioMes.slice(0, 7)) acc.mesCentavos += esperado
     return acc
   }, { totalCentavos: 0, pagoCentavos: 0, mesCentavos: 0, abertas: 0, pagas: 0 })
-  return c.json({ proximoVoo, voosRecentes: voosRecentes.results || [], resumo: { ...resumo, abertoCentavos: resumo.totalCentavos - resumo.pagoCentavos }, manutencao: { mensagem: 'Consulte a área de Manutenções para ver os registros disponíveis.' } })
+  const podeAgendar = portalHasFeature(user, 'agendamento')
+  const podeVerFinanceiro = portalHasFeature(user, 'financeiro')
+  const financeiroVazio = { totalCentavos: 0, pagoCentavos: 0, mesCentavos: 0, abertas: 0, pagas: 0, abertoCentavos: 0 }
+  return c.json({
+    proximoVoo: podeAgendar ? proximoVoo : null,
+    voosRecentes: podeAgendar ? (voosRecentes.results || []).map(row => ({
+      ...row, custo_centavos: podeVerFinanceiro ? row.custo_centavos : 0,
+    })) : [],
+    resumo: podeVerFinanceiro ? { ...resumo, abertoCentavos: resumo.totalCentavos - resumo.pagoCentavos } : financeiroVazio,
+    manutencao: { mensagem: 'Consulte a área de Manutenções para ver os registros disponíveis.' },
+  })
 })
 portalRoutes.get('/api/portal/aerodromos', async c => {
   const query = (c.req.query('q') || '').trim().toLowerCase()

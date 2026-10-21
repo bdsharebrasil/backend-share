@@ -1,5 +1,5 @@
 import { Hono, Context } from 'hono'
-import { portalSession, portalTelegram } from './portalRoutes'
+import { portalCreatePasswordHash, portalFeatureForPath, portalHasFeature, portalSession, portalTelegram, type PortalFeature } from './portalRoutes'
 
 // Rotas complementares do Portal Cliente (Fase 1):
 // diário de bordo do cliente, balanço multi-mês, abastecimentos,
@@ -47,6 +47,182 @@ async function usuario(c: Ctx) {
   if (!user.cliente_id && !user.socio_id) return null
   return user
 }
+
+portalClienteExtrasRoutes.use('/api/portal/*', async (c, next) => {
+  const user = await portalSession(c as any)
+  if (!user) return c.json({ error: 'client_auth_required' }, 401)
+  const feature = portalFeatureForPath(c.req.path)
+  if (feature && !portalHasFeature(user, feature)) return c.json({ error: 'portal_feature_forbidden' }, 403)
+  return next()
+})
+
+function normalizeEmails(value: unknown): string[] | null {
+  let values: unknown[]
+  if (Array.isArray(value)) values = value
+  else if (typeof value === 'string') {
+    const raw = value.trim()
+    if (!raw) values = []
+    else {
+      try {
+        const parsed = JSON.parse(raw)
+        values = Array.isArray(parsed) ? parsed : raw.split(/[\n,;]+/)
+      } catch {
+        values = raw.split(/[\n,;]+/)
+      }
+    }
+  } else return null
+  const emails = [...new Set(values.map(item => String(item || '').trim().toLowerCase()).filter(Boolean))]
+  if (emails.length > 20 || emails.some(email => email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return null
+  return emails
+}
+
+const PORTAL_FEATURES: PortalFeature[] = ['agendamento', 'financeiro', 'aeronave', 'manutencao']
+
+function permissionsFromBody(value: unknown): PortalFeature[] | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (!Array.isArray(value) || value.some(item => !PORTAL_FEATURES.includes(item as PortalFeature))) return undefined
+  return [...new Set(value as PortalFeature[])]
+}
+
+async function exigirPrincipal(c: Ctx) {
+  const user = await usuario(c)
+  if (!user) return { response: c.json({ error: 'client_auth_required' }, 401) }
+  const schema = await c.env.SHARE_DB.prepare('SELECT name FROM pragma_table_info(?1)').bind('user_cliente').all<{ name: string }>()
+  const columns = new Set((schema.results || []).map(column => String(column.name)))
+  if (!columns.has('principal_id') || !columns.has('permissoes')) {
+    return { response: c.json({ error: 'portal_migracao_acessos_pendente' }, 503) }
+  }
+  if (user.principal_id) return { response: c.json({ error: 'portal_configuracoes_restritas' }, 403) }
+  const principal = await c.env.SHARE_DB.prepare('SELECT id, cotista_id FROM user_cliente WHERE id = ?1 AND principal_id IS NULL LIMIT 1').bind(user.id).first<{ id: string; cotista_id: string | null }>()
+  if (!principal?.cotista_id) return { response: c.json({ error: 'portal_usuario_sem_cotista' }, 409) }
+  return { user, principal }
+}
+
+portalClienteExtrasRoutes.get('/api/portal/configuracoes', async c => {
+  const auth = await exigirPrincipal(c)
+  if ('response' in auth) return auth.response
+  const { user, principal } = auth
+  const [perfil, acessos] = await Promise.all([
+    user.cliente_id
+      ? c.env.SHARE_DB.prepare('SELECT razao_social AS nome, endereco, cidade, uf, telefone_financeiro, contato_financeiro, emails FROM cliente WHERE id = ?1').bind(user.cliente_id).first<Record<string, unknown>>()
+      : c.env.SHARE_DB.prepare('SELECT nome, endereco, cidade, uf, telefone_financeiro, contato_financeiro, emails FROM hold_socios WHERE id = ?1').bind(user.socio_id).first<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare('SELECT id, login, nome_exibicao, permissoes, criado_em FROM user_cliente WHERE principal_id = ?1 ORDER BY criado_em, id').bind(principal.id).all<Record<string, unknown>>(),
+  ])
+  return c.json({
+    tipo: user.cliente_id ? 'cliente' : 'socio',
+    login_principal: user.login,
+    perfil: { ...(perfil || {}), emails: normalizeEmails(perfil?.emails) || [] },
+    acessos: (acessos.results || []).map(row => ({
+      id: row.id, login: row.login, nome: row.nome_exibicao,
+      permissoes: row.permissoes == null ? null : (normalizeFeatureList(row.permissoes) ?? []),
+      criado_em: row.criado_em,
+    })),
+  })
+})
+
+function normalizeFeatureList(value: unknown): PortalFeature[] | null {
+  try {
+    const parsed = JSON.parse(String(value))
+    return Array.isArray(parsed) ? [...new Set(parsed.filter((item): item is PortalFeature => PORTAL_FEATURES.includes(item as PortalFeature)))] : null
+  } catch {
+    return null
+  }
+}
+
+portalClienteExtrasRoutes.put('/api/portal/configuracoes/perfil', async c => {
+  const auth = await exigirPrincipal(c)
+  if ('response' in auth) return auth.response
+  const { user } = auth
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null)
+  if (!body) return c.json({ error: 'dados_perfil_invalidos' }, 400)
+  const campos = ['endereco', 'cidade', 'uf', 'telefone_financeiro', 'contato_financeiro'] as const
+  const valores = campos.map(campo => String(body[campo] ?? '').trim())
+  if (valores.some(valor => valor.length > 240) || valores[2].length > 2) return c.json({ error: 'dados_perfil_invalidos' }, 400)
+  const emails = normalizeEmails(body.emails)
+  if (!emails) return c.json({ error: 'emails_invalidos' }, 400)
+  const db = c.env.SHARE_DB
+  const table = user.cliente_id ? 'cliente' : 'hold_socios'
+  const id = user.cliente_id || user.socio_id
+  await db.prepare(`UPDATE ${table} SET endereco = ?1, cidade = ?2, uf = ?3, telefone_financeiro = ?4, contato_financeiro = ?5, emails = ?6${user.cliente_id ? ', atualizado_em = CURRENT_TIMESTAMP' : ''} WHERE id = ?7`)
+    .bind(valores[0], valores[1], valores[2].toUpperCase(), valores[3], valores[4], JSON.stringify(emails), id).run()
+  return c.json({ success: true })
+})
+
+portalClienteExtrasRoutes.post('/api/portal/configuracoes/acessos', async c => {
+  const auth = await exigirPrincipal(c)
+  if ('response' in auth) return auth.response
+  const { user, principal } = auth
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null)
+  if (!body) return c.json({ error: 'dados_acesso_invalidos' }, 400)
+  const nome = String(body.nome || '').trim()
+  const login = String(body.login || '').trim().toLowerCase()
+  const senha = String(body.senha || '')
+  const permissoes = permissionsFromBody(body.permissoes)
+  if (!nome || nome.length > 100 || !/^[a-z0-9._-]{3,80}$/.test(login)) return c.json({ error: 'dados_acesso_invalidos' }, 400)
+  if (senha.length < 12 || senha.length > 128) return c.json({ error: 'senha_deve_ter_entre_12_e_128_caracteres' }, 400)
+  if (permissoes === undefined) return c.json({ error: 'permissoes_invalidas' }, 400)
+  const db = c.env.SHARE_DB
+  const existing = await db.prepare('SELECT id FROM user_cliente WHERE lower(login) = lower(?1) LIMIT 1').bind(login).first()
+  if (existing) return c.json({ error: 'login_ja_em_uso' }, 409)
+  const id = crypto.randomUUID()
+  const hash = await portalCreatePasswordHash(senha)
+  await db.prepare(`INSERT INTO user_cliente (id, login, senha, nome_exibicao, url_avatar, cotista_id, criado_em, atualizado_em, principal_id, permissoes)
+    VALUES (?1, ?2, ?3, ?4, NULL, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?6, ?7)`)
+    .bind(id, login, hash, nome, principal.cotista_id, user.id, permissoes === null ? null : JSON.stringify(permissoes)).run()
+  return c.json({ success: true, acesso: { id, login, nome, permissoes: permissoes ?? null } }, 201)
+})
+
+portalClienteExtrasRoutes.put('/api/portal/configuracoes/acessos/:id', async c => {
+  const auth = await exigirPrincipal(c)
+  if ('response' in auth) return auth.response
+  const { user } = auth
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null)
+  if (!body) return c.json({ error: 'dados_acesso_invalidos' }, 400)
+  const id = c.req.param('id')
+  const current = await c.env.SHARE_DB.prepare('SELECT id, login, nome_exibicao FROM user_cliente WHERE id = ?1 AND principal_id = ?2').bind(id, user.id).first<{ id: string; login: string; nome_exibicao: string | null }>()
+  if (!current) return c.json({ error: 'acesso_nao_encontrado' }, 404)
+  const updates: string[] = []
+  const values: unknown[] = []
+  const add = (column: string, value: unknown) => { values.push(value); updates.push(`${column} = ?${values.length}`) }
+  if (body.nome !== undefined) {
+    const nome = String(body.nome || '').trim()
+    if (!nome || nome.length > 100) return c.json({ error: 'dados_acesso_invalidos' }, 400)
+    add('nome_exibicao', nome)
+  }
+  if (body.login !== undefined) {
+    const login = String(body.login || '').trim().toLowerCase()
+    if (!/^[a-z0-9._-]{3,80}$/.test(login)) return c.json({ error: 'dados_acesso_invalidos' }, 400)
+    const existing = await c.env.SHARE_DB.prepare('SELECT id FROM user_cliente WHERE lower(login) = lower(?1) AND id <> ?2 LIMIT 1').bind(login, id).first()
+    if (existing) return c.json({ error: 'login_ja_em_uso' }, 409)
+    add('login', login)
+  }
+  if (body.senha !== undefined && String(body.senha)) {
+    const senha = String(body.senha)
+    if (senha.length < 12 || senha.length > 128) return c.json({ error: 'senha_deve_ter_entre_12_e_128_caracteres' }, 400)
+    add('senha', await portalCreatePasswordHash(senha))
+  }
+  if (body.permissoes !== undefined) {
+    const permissoes = permissionsFromBody(body.permissoes)
+    if (permissoes === undefined) return c.json({ error: 'permissoes_invalidas' }, 400)
+    add('permissoes', permissoes === null ? null : JSON.stringify(permissoes))
+  }
+  if (!updates.length) return c.json({ error: 'nenhuma_alteracao_informada' }, 400)
+  values.push(id, user.id)
+  const result = await c.env.SHARE_DB.prepare(`UPDATE user_cliente SET ${updates.join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?${values.length - 1} AND principal_id = ?${values.length}`)
+    .bind(...values).run()
+  if (!result.meta?.changes) return c.json({ error: 'acesso_nao_encontrado' }, 404)
+  return c.json({ success: true })
+})
+
+portalClienteExtrasRoutes.delete('/api/portal/configuracoes/acessos/:id', async c => {
+  const auth = await exigirPrincipal(c)
+  if ('response' in auth) return auth.response
+  const { user } = auth
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM user_cliente WHERE id = ?1 AND principal_id = ?2').bind(c.req.param('id'), user.id).run()
+  if (!result.meta?.changes) return c.json({ error: 'acesso_nao_encontrado' }, 404)
+  return c.json({ success: true })
+})
 
 // ── Diário de bordo resumido (apenas voos do cliente) ──────────────────────
 portalClienteExtrasRoutes.get('/api/portal/diario-bordo', async c => {

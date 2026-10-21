@@ -1243,7 +1243,9 @@ CREATE TABLE IF NOT EXISTS "user_cliente"(
   url_avatar TEXT,
   criado_em TEXT,
   atualizado_em TEXT,
-  cotista_id TEXT
+  cotista_id TEXT,
+  principal_id TEXT,
+  permissoes TEXT
 );
 CREATE TABLE IF NOT EXISTS "contrato_cotista"(
   id TEXT,
