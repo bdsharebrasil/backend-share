@@ -61,7 +61,16 @@ portalClienteExtrasRoutes.get('/api/portal/diario-bordo', async c => {
            l.distancia_nm, l.litros_combustivel_abastecido, l.voo_emprestado, a.matricula_registro, a.modelo
       FROM lancamentos_diario_bordo l
       LEFT JOIN aeronave a ON a.id = l.aeronave_id
-     WHERE (l.cliente_id = ?1 OR l.socio_id = ?2 OR l.cliente_tomador_emprestimo_id = ?1 OR l.socio_tomador_emprestimo_id = ?2)
+     WHERE (
+         l.cliente_id = ?1 OR l.socio_id = ?2
+         OR l.cliente_tomador_emprestimo_id = ?1 OR l.socio_tomador_emprestimo_id = ?2
+         OR EXISTS (
+           SELECT 1 FROM cotista_aeronave ca
+            WHERE ca.aeronave_id = l.aeronave_id
+              AND lower(trim(COALESCE(ca.status, ''))) = 'ativo'
+              AND (ca.cliente_id = ?1 OR ca.socio_id = ?2)
+         )
+       )
        AND date(l.data_registro) BETWEEN date(?3) AND date(?4)
      ORDER BY date(l.data_registro) DESC, l.tempo_dep DESC
      LIMIT 500`).bind(user.cliente_id, user.socio_id, de, ate).all<Record<string, unknown>>()
@@ -206,7 +215,7 @@ portalClienteExtrasRoutes.post('/api/portal/comprovantes', async c => {
   const tipo = String(form.get('tipo') || '')
   const referenciaId = String(form.get('referencia_id') || '').trim()
   const observacao = String(form.get('observacao') || '').trim().slice(0, 500)
-  const arquivo = form.get('arquivo')
+  const arquivo = form.get('arquivo') as unknown
   if (!['rateio', 'abastecimento'].includes(tipo) || !referenciaId) return c.json({ error: 'parametros_invalidos' }, 400)
   if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
   const ext = TIPOS_PERMITIDOS[arquivo.type]
