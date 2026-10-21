@@ -162,7 +162,8 @@ test("dashboard Cotista consolida as linhas pelo lançamento pai e preserva os d
 
 test("ações do lançamento consolidado reconhecem o ID-pai e atualizam o grupo de rateios", () => {
   assert.match(financeRoutes, /SELECT lancamento_id AS id, "rateio_despesas_pai" AS origem FROM rateio_despesas WHERE lancamento_id = \? LIMIT 1/);
-  assert.match(financeRoutes, /const colunaId = ehRateioPai \? 'lancamento_id' : 'id'/);
+  assert.match(financeRoutes, /const colunaId = atualizarGrupoRateio \? 'lancamento_id' : 'id'/);
+  assert.match(financeRoutes, /atualizacoesDescricaoVinculada\(db, origem, id, String\(body\.descricao\)\.trim\(\), lancamentoPaiId\)/);
   assert.match(financeRoutes, /valor_pago_real_centavos = valor_rateado_centavos/);
   assert.match(financeRoutes, /WHERE lancamento_id = \? AND UPPER\(COALESCE\(status, ''\)\) <> 'CANCELADO'/);
 });

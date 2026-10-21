@@ -467,6 +467,58 @@ async function entidadeLancamentoFinanceiro(db: D1Database, id: string) {
   const movimento = await db.prepare('SELECT id, "movimentos_holding" AS origem FROM movimentos_holding WHERE id = ?').bind(id).first<Record<string, unknown>>()
   return movimento
 }
+
+async function atualizacoesDescricaoVinculada(
+  db: D1Database,
+  origem: string,
+  id: string,
+  descricao: string,
+  lancamentoPaiId: string,
+): Promise<D1PreparedStatement[]> {
+  const atualizacoes: D1PreparedStatement[] = []
+  let lancamento: Record<string, unknown> | null = null
+
+  if (origem === 'rateio_despesas') {
+    lancamento = await db.prepare('SELECT id, tipo_caixa, origem_tipo, origem_id FROM lancamentos WHERE id = ?')
+      .bind(lancamentoPaiId).first<Record<string, unknown>>()
+    const envio = await db.prepare('SELECT id FROM envio_despesas WHERE id = ?')
+      .bind(lancamentoPaiId).first<{ id: string }>()
+    if (lancamento) {
+      atualizacoes.push(db.prepare('UPDATE lancamentos SET descricao = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(descricao, lancamentoPaiId))
+    }
+    if (envio) {
+      atualizacoes.push(db.prepare('UPDATE envio_despesas SET descricao = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(descricao, lancamentoPaiId))
+    }
+  } else if (origem === 'lancamentos') {
+    lancamento = await db.prepare('SELECT id, tipo_caixa, origem_tipo, origem_id FROM lancamentos WHERE id = ?')
+      .bind(id).first<Record<string, unknown>>()
+    atualizacoes.push(
+      db.prepare('UPDATE contas_apagar SET descricao = ?, atualizado_em = CURRENT_TIMESTAMP WHERE lancamentos_id = ?').bind(descricao, id),
+    )
+  }
+
+  const tipoCaixa = String(lancamento?.tipo_caixa ?? '').toUpperCase()
+  const tipoOrigem = String(lancamento?.origem_tipo ?? '').toUpperCase()
+  const lancamentoShareId = tipoCaixa === 'CLIENTE' && ['NF_SAIDA', 'RECIBO_SAIDA'].includes(tipoOrigem)
+    ? String(lancamento?.origem_id ?? '').trim()
+    : ''
+
+  if (lancamentoShareId) {
+    atualizacoes.push(db.prepare('UPDATE lancamentos SET descricao = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(descricao, lancamentoShareId))
+  }
+
+  const idsRecebiveis = [...new Set([origem === 'rateio_despesas' ? lancamentoPaiId : id, lancamentoShareId].filter(Boolean))]
+  if (idsRecebiveis.length) {
+    atualizacoes.push(db.prepare(`UPDATE contas_areceber SET descricao = ?, atualizado_em = CURRENT_TIMESTAMP WHERE lancamentos_id IN (${idsRecebiveis.map(() => '?').join(', ')})`)
+      .bind(descricao, ...idsRecebiveis))
+  }
+
+  return atualizacoes
+}
+
 financeiroRoutes.patch('/lancamentos/:id', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -476,6 +528,11 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (!entidade) return c.json({ error: 'lancamento_nao_encontrado' }, 404)
     const ehRateioPai = String(entidade.origem) === 'rateio_despesas_pai'
     const origem = ehRateioPai ? 'rateio_despesas' : String(entidade.origem)
+    const rateioIndividual = origem === 'rateio_despesas' && !ehRateioPai
+      ? await db.prepare('SELECT lancamento_id FROM rateio_despesas WHERE id = ?').bind(id).first<{ lancamento_id: string | null }>()
+      : null
+    const lancamentoPaiId = ehRateioPai ? id : String(rateioIndividual?.lancamento_id ?? id)
+    const atualizarGrupoRateio = origem === 'rateio_despesas' && (ehRateioPai || Boolean(rateioIndividual?.lancamento_id))
     const tabelas: Record<string, { descricao: string; data: string; valor: string }> = {
       rateio_despesas: { descricao: 'descricao_despesa', data: 'data_emissao', valor: 'valor_rateado_centavos' },
       rateio_hold: { descricao: 'descricao_despesa', data: 'data_emissao', valor: 'valor_rateado_centavos' },
@@ -503,8 +560,15 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
       campos.push([meta.valor, valor])
     }
     if (!campos.length) return c.json({ error: 'nenhum_campo_para_atualizar' }, 400)
-    const colunaId = ehRateioPai ? 'lancamento_id' : 'id'
-    await db.prepare(`UPDATE ${origem} SET ${campos.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE ${colunaId} = ?`).bind(...campos.map(([, valor]) => valor), id).run()
+    const colunaId = atualizarGrupoRateio ? 'lancamento_id' : 'id'
+    const idAtualizacao = atualizarGrupoRateio ? lancamentoPaiId : id
+    const atualizacaoPrincipal = db.prepare(`UPDATE ${origem} SET ${campos.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE ${colunaId} = ?`).bind(...campos.map(([, valor]) => valor), idAtualizacao)
+    if (body.descricao != null) {
+      const relacionadas = await atualizacoesDescricaoVinculada(db, origem, id, String(body.descricao).trim(), lancamentoPaiId)
+      await db.batch([atualizacaoPrincipal, ...relacionadas])
+    } else {
+      await atualizacaoPrincipal.run()
+    }
     const valorAtualizado = campos.find(([campo]) => campo === 'valor_centavos')?.[1]
     if (origem === 'lancamentos' && valorAtualizado != null) await db.batch([
       db.prepare('UPDATE contas_apagar SET valor_centavos = ? WHERE lancamentos_id = ?').bind(valorAtualizado, id),
