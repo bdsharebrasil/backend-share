@@ -421,32 +421,99 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
   if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'parametros_invalidos' }, 400)
   const inicio = `${ano}-01-01`
   const fim = `${ano}-12-31`
-  const vinculo = await c.env.SHARE_DB.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.ano, a.base, a.status, a.url_imagem
+  const vinculo = await c.env.SHARE_DB.prepare(`SELECT ca.id AS cotista_id, ca.percentual_sociedade, a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.ano, a.base, a.status, a.url_imagem
     FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id
-   WHERE a.id = ?1 AND (ca.cliente_id = ?2 OR ca.socio_id = ?3) LIMIT 1`).bind(aeronaveId, user.cliente_id, user.socio_id).first<Record<string, unknown>>()
+   WHERE a.id = ?1 AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+     AND ca.id = (SELECT cotista_id FROM user_cliente WHERE id = ?4 LIMIT 1) LIMIT 1`).bind(aeronaveId, user.cliente_id, user.socio_id, user.id).first<Record<string, unknown>>()
   if (!vinculo) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
-  const [voos, destinos, rateioResumo, meses, categorias] = await Promise.all([
-    c.env.SHARE_DB.prepare(`SELECT COUNT(*) AS voos, COALESCE(SUM(COALESCE(tempo_total, tempo_voo, 0)), 0) AS horas, COALESCE(SUM(COALESCE(pousos_total, 0)), 0) AS pousos
+  const rateioTable = user.cliente_id ? 'rateio_despesas' : 'rateio_hold'
+  const rateioJoin = user.cliente_id ? 'JOIN cotista_aeronave ca ON ca.id = r.cotista_id' : ''
+  const rateioOwner = user.cliente_id ? 'ca.id = ?2' : 'r.socio_id = ?2'
+  const rateioOwnerId = user.cliente_id ? String(vinculo.cotista_id || '') : String(user.socio_id || '')
+  const [voos, destinos, vooMaisLongo, custos, custosMes, horasMes, categorias, usoCotista] = await Promise.all([
+    c.env.SHARE_DB.prepare(`SELECT COUNT(DISTINCT id) AS voos, COALESCE(SUM(COALESCE(tempo_total, tempo_voo, 0)), 0) AS horas,
+        COALESCE(SUM(COALESCE(tempo_voo, 0)), 0) AS tempo_voo_horas, COALESCE(SUM(COALESCE(pousos_total, 0)), 0) AS pousos
       FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
-    c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(aerodromo_chegada), ''), NULLIF(TRIM(trecho), ''), 'Não informado') AS destino, COUNT(*) AS quantidade
+    c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(l.aerodromo_chegada), ''), NULLIF(TRIM(l.trecho), ''), 'Não informado') AS destino, COUNT(*) AS quantidade
+      FROM lancamentos_diario_bordo l JOIN aeronave a ON a.id = l.aeronave_id
+     WHERE l.aeronave_id = ?1 AND date(l.data_registro) BETWEEN date(?2) AND date(?3)
+       AND TRIM(COALESCE(NULLIF(l.aerodromo_chegada, ''), NULLIF(l.trecho, ''), '')) <> ''
+       AND (TRIM(COALESCE(a.base, '')) = '' OR UPPER(TRIM(COALESCE(NULLIF(l.aerodromo_chegada, ''), NULLIF(l.trecho, ''), ''))) <> UPPER(TRIM(a.base)))
+     GROUP BY destino ORDER BY quantidade DESC, destino LIMIT 5`).bind(aeronaveId, inicio, fim).all<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT data_registro, aerodromo_partida, aerodromo_chegada,
+        COALESCE(NULLIF(tempo_voo, 0), tempo_total, 0) AS tempo_voo
       FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)
-      GROUP BY destino ORDER BY quantidade DESC LIMIT 1`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
-    c.env.SHARE_DB.prepare(`SELECT COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos
-      FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
-     WHERE r.aeronave_id = ?1 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
-       AND date(r.data_emissao) BETWEEN date(?4) AND date(?5)`).bind(aeronaveId, user.cliente_id, user.socio_id, inicio, fim).first<Record<string, unknown>>(),
+      ORDER BY COALESCE(NULLIF(tempo_voo, 0), tempo_total, 0) DESC, date(data_registro) DESC LIMIT 1`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos,
+        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'FIXO' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS fixo_centavos,
+        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'VARIAVEL_POR_VOO' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS variavel_voo_centavos,
+        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'VARIAVEL_POR_HORA' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS variavel_hora_centavos,
+        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'EXTRA' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS extra_centavos,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.categoria_nome, '')) LIKE '%combust%' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS combustivel_centavos
+      FROM ${rateioTable} r ${rateioJoin}
+     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+       AND date(r.data_emissao) BETWEEN date(?3) AND date(?4)`).bind(aeronaveId, rateioOwnerId, inicio, fim).first<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT substr(r.data_emissao, 1, 7) AS mes, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
-      FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
-     WHERE r.aeronave_id = ?1 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
-       AND date(r.data_emissao) BETWEEN date(?4) AND date(?5) GROUP BY mes ORDER BY mes`).bind(aeronaveId, user.cliente_id, user.socio_id, inicio, fim).all<Record<string, unknown>>(),
+      FROM ${rateioTable} r ${rateioJoin}
+     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+       AND date(r.data_emissao) BETWEEN date(?3) AND date(?4) GROUP BY mes ORDER BY mes`).bind(aeronaveId, rateioOwnerId, inicio, fim).all<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT substr(data_registro, 1, 7) AS mes,
+        COALESCE(SUM(COALESCE(tempo_total, tempo_voo, 0)), 0) AS horas
+      FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)
+      GROUP BY mes ORDER BY mes`).bind(aeronaveId, inicio, fim).all<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(r.categoria_nome), ''), 'Sem categoria') AS categoria, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
-      FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
-     WHERE r.aeronave_id = ?1 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
-       AND date(r.data_emissao) BETWEEN date(?4) AND date(?5) GROUP BY categoria ORDER BY valor_centavos DESC LIMIT 5`).bind(aeronaveId, user.cliente_id, user.socio_id, inicio, fim).all<Record<string, unknown>>()
+      FROM ${rateioTable} r ${rateioJoin}
+     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+       AND date(r.data_emissao) BETWEEN date(?3) AND date(?4) GROUP BY categoria ORDER BY valor_centavos DESC LIMIT 5`).bind(aeronaveId, rateioOwnerId, inicio, fim).all<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`SELECT COUNT(DISTINCT l.id) AS etapas, COALESCE(SUM(COALESCE(l.tempo_total, l.tempo_voo, 0)), 0) AS horas,
+        COALESCE(SUM(COALESCE(l.pousos_total, 0)), 0) AS pousos
+      FROM lancamentos_diario_bordo l WHERE l.aeronave_id = ?1 AND date(l.data_registro) BETWEEN date(?2) AND date(?3)
+        AND ((COALESCE(NULLIF(l.cliente_tomador_emprestimo_id, ''), l.cliente_id) = ?4 AND ?4 IS NOT NULL)
+          OR (COALESCE(NULLIF(l.socio_tomador_emprestimo_id, ''), l.socio_id) = ?5 AND ?5 IS NOT NULL))`).bind(aeronaveId, inicio, fim, user.cliente_id, user.socio_id).first<Record<string, unknown>>()
   ])
   const horas = Number(voos?.horas || 0)
-  const custoCentavos = Number(rateioResumo?.total_centavos || 0)
-  return c.json({ aeronave: vinculo, ano, estatisticas: { voos: Number(voos?.voos || 0), pousos: Number(voos?.pousos || 0), horas: Number(horas.toFixed(2)), destinoMaisVisitado: destinos?.destino || 'Não informado', custoHoraCentavos: horas > 0 ? Math.round(custoCentavos / horas) : 0, custoTotalCentavos: custoCentavos }, mensal: meses.results.map(row => ({ mes: row.mes, valorCentavos: Number(row.valor_centavos || 0) })), categorias: categorias.results.map(row => ({ categoria: row.categoria, valorCentavos: Number(row.valor_centavos || 0) })) })
+  const custoCentavos = Number(custos?.total_centavos || 0)
+  const horasUso = Number(usoCotista?.horas || 0)
+  const percentualSociedade = Number(vinculo.percentual_sociedade || 0)
+  const percentualUso = horas > 0 ? Number(((horasUso / horas) * 100).toFixed(1)) : 0
+  const valoresCustosMes = new Map((custosMes.results || []).map(row => [String(row.mes), Number(row.valor_centavos || 0)]))
+  const horasVoadaMes = new Map((horasMes.results || []).map(row => [String(row.mes), Number(row.horas || 0)]))
+  const mensal = Array.from({ length: 12 }, (_, index) => {
+    const mes = `${ano}-${String(index + 1).padStart(2, '0')}`
+    const valorCentavos = valoresCustosMes.get(mes) || 0
+    const horasMesAtual = horasVoadaMes.get(mes) || 0
+    return { mes, valorCentavos, horas: Number(horasMesAtual.toFixed(2)), custoHoraCentavos: horasMesAtual > 0 ? Math.round(valorCentavos / horasMesAtual) : 0 }
+  })
+  const destinosMaisVisitados = (destinos.results || []).map(row => ({ destino: String(row.destino || 'Não informado'), quantidade: Number(row.quantidade || 0) }))
+  return c.json({
+    aeronave: vinculo,
+    ano,
+    estatisticas: {
+      voos: Number(voos?.voos || 0), etapasRegistradas: Number(voos?.voos || 0), pousos: Number(voos?.pousos || 0),
+      horas: Number(horas.toFixed(2)), tempoVooHoras: Number(Number(voos?.tempo_voo_horas || 0).toFixed(2)),
+      destinoMaisVisitado: destinosMaisVisitados[0]?.destino || 'Não informado',
+      custoHoraCentavos: horas > 0 ? Math.round(custoCentavos / horas) : 0, custoTotalCentavos: custoCentavos,
+      vooMaisLongo: vooMaisLongo ? {
+        data: String(vooMaisLongo.data_registro || ''), origem: String(vooMaisLongo.aerodromo_partida || ''),
+        destino: String(vooMaisLongo.aerodromo_chegada || ''), horas: Number(Number(vooMaisLongo.tempo_voo || 0).toFixed(2)),
+      } : null,
+    },
+    destinosMaisVisitados,
+    usoCota: {
+      percentualSociedade, horasCotista: Number(horasUso.toFixed(2)),
+      etapasCotista: Number(usoCotista?.etapas || 0), pousosCotista: Number(usoCotista?.pousos || 0),
+      percentualUso, diferencaPontos: Number((percentualUso - percentualSociedade).toFixed(1)),
+    },
+    mensal,
+    projecaoCustos: {
+      fixoCentavos: Number(custos?.fixo_centavos || 0),
+      variavelPorVooCentavos: Number(custos?.variavel_voo_centavos || 0),
+      variavelPorHoraCentavos: Number(custos?.variavel_hora_centavos || 0),
+      extraCentavos: Number(custos?.extra_centavos || 0),
+      combustivelCentavos: Number(custos?.combustivel_centavos || 0),
+    },
+    categorias: (categorias.results || []).map(row => ({ categoria: String(row.categoria || 'Sem categoria'), valorCentavos: Number(row.valor_centavos || 0) })),
+  })
 })
 portalRoutes.get('/api/portal/overview', async c => {
   const user = await portalSession(c)
