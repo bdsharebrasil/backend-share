@@ -92,10 +92,18 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
         SELECT r.id, ${mesExpr} AS mes, r.data_emissao, r.data_vencimento, r.data_pagamento, r.descricao_despesa,
                r.categoria_nome, r.tipo_rateio, r.percentual_sociedade, r.percentual_uso,
                r.valor_total_centavos, r.valor_rateado_centavos, r.valor_pago_real_centavos,
-               r.pago_por, r.pago_diretamente, r.status, a.matricula_registro, r.aeronave_id,
+               COALESCE(NULLIF(TRIM(pagador_cliente.razao_social), ''), NULLIF(TRIM(pagador_socio.nome), ''),
+                 NULLIF(TRIM(pagador_cliente_direto.razao_social), ''), NULLIF(TRIM(pagador_socio_direto.nome), ''),
+                 CASE WHEN NULLIF(TRIM(r.pago_por), '') IS NULL THEN NULL WHEN r.pago_diretamente = 1 THEN 'Pagamento direto' ELSE 'Cotista' END) AS pago_por,
+               r.pago_diretamente, r.status, a.matricula_registro, r.aeronave_id,
                (SELECT e.fornecedor FROM envio_despesas e WHERE e.id = r.lancamento_id LIMIT 1) AS fornecedor
           FROM rateio_despesas r
           JOIN cotista_aeronave ca ON ca.id = r.cotista_id
+          LEFT JOIN cotista_aeronave ca_pagador ON ca_pagador.id = r.pago_por
+          LEFT JOIN cliente pagador_cliente ON pagador_cliente.id = ca_pagador.cliente_id
+          LEFT JOIN hold_socios pagador_socio ON pagador_socio.id = ca_pagador.socio_id
+          LEFT JOIN cliente pagador_cliente_direto ON pagador_cliente_direto.id = r.pago_por
+          LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
          WHERE ca.cliente_id = ?1 AND ?2 IS NULL AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
            AND ${mesExpr} IN (${ph})
@@ -126,8 +134,16 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
       SELECT r.id, ${mesExpr} AS mes, r.data_emissao, r.data_vencimento, r.data_pagamento, r.descricao_despesa,
              r.categoria_nome, r.tipo_rateio, r.percentual_sociedade, r.percentual_uso,
              r.valor_total_centavos, r.valor_rateado_centavos, r.valor_pago_real_centavos,
-             r.pago_por, r.pago_diretamente, r.status, a.matricula_registro, r.aeronave_id, r.fornecedor
+             COALESCE(NULLIF(TRIM(pagador_cliente.razao_social), ''), NULLIF(TRIM(pagador_socio.nome), ''),
+               NULLIF(TRIM(pagador_cliente_direto.razao_social), ''), NULLIF(TRIM(pagador_socio_direto.nome), ''),
+               CASE WHEN NULLIF(TRIM(r.pago_por), '') IS NULL THEN NULL WHEN r.pago_diretamente = 1 THEN 'Pagamento direto' ELSE 'Cotista' END) AS pago_por,
+             r.pago_diretamente, r.status, a.matricula_registro, r.aeronave_id, r.fornecedor
         FROM rateio_hold r
+        LEFT JOIN cotista_aeronave ca_pagador ON ca_pagador.id = r.pago_por
+        LEFT JOIN cliente pagador_cliente ON pagador_cliente.id = ca_pagador.cliente_id
+        LEFT JOIN hold_socios pagador_socio ON pagador_socio.id = ca_pagador.socio_id
+        LEFT JOIN cliente pagador_cliente_direto ON pagador_cliente_direto.id = r.pago_por
+        LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
         LEFT JOIN aeronave a ON a.id = r.aeronave_id
        WHERE r.socio_id = ?1 AND ?2 IS NULL AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
          AND ${mesExpr} IN (${ph})
@@ -159,7 +175,9 @@ portalClienteExtrasRoutes.get('/api/portal/abastecimentos', async c => {
   const meses = mesesDaQuery(c.req.query('meses'))
   const result = await c.env.SHARE_DB.prepare(`
     SELECT ab.id, ab.data, ab.tipo_combustivel, ab.trecho, ab.local, ab.numero_comanda, ab.numero_nf,
-           ab.litros, ab.valor_unitario, ab.valor_total, ab.desconto, ab.status, ab.forma_pagamento,
+           ab.litros, ab.valor_unitario, ab.valor_total, ab.desconto,
+           CASE WHEN UPPER(TRIM(COALESCE(ab.status, ''))) IN ('PAGO', 'PAGO_DIRETAMENTE', 'REEMBOLSADO') THEN 'PAGO' ELSE 'PENDENTE' END AS status,
+           ab.forma_pagamento,
            ab.data_vencimento_boleto, ab.numero_voo,
            CASE WHEN ab.comanda_url IS NOT NULL AND ab.comanda_url <> '' THEN 1 ELSE 0 END AS tem_comanda,
            CASE WHEN ab.nota_url IS NOT NULL AND ab.nota_url <> '' THEN 1 ELSE 0 END AS tem_nota,
