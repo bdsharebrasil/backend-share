@@ -31,6 +31,7 @@ import { enviosPagamentoRoutes } from './financeiro/enviosPagamentoRoutes'
 import { STATUS_LANCAMENTO } from './financeiro/statuses'
 import { requireCaixaShareAccess } from './financeiro/access'
 import { portalClienteRoutes } from './financeiro/portalClienteRoutes'
+import { portalBaixasRoutes } from './financeiro/portalBaixasRoutes'
 
 type Bindings = {
   SHARE_DB: D1Database
@@ -66,6 +67,7 @@ financeiroRoutes.route('/', demonstrativoIARoutes)
 financeiroRoutes.route('/', recibosRoutes)
 financeiroRoutes.route('/', enviosPagamentoRoutes)
 financeiroRoutes.route('/', portalClienteRoutes)
+financeiroRoutes.route('/', portalBaixasRoutes)
 
 /*
  * Esta rota somente valida o schema. Ela não cria, altera ou exclui tabelas.
