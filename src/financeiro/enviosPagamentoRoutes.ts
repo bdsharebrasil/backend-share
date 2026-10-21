@@ -210,6 +210,7 @@ enviosPagamentoRoutes.get('/envios-pagamento/anexos/arquivo', async (c) => {
 })
 
 enviosPagamentoRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) => {
+  if (!c.get('userId')) return c.json({ error: 'nao_autorizado' }, 401)
   const result = await c.env.SHARE_DB.prepare(`
     SELECT ca.id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.codigo_cliente,
            ca.percentual_sociedade,
@@ -219,10 +220,41 @@ enviosPagamentoRoutes.get('/envios-pagamento/aeronave/:id/cotistas', async (c) =
       FROM cotista_aeronave ca
       LEFT JOIN cliente cl ON cl.id = ca.cliente_id
       LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
-     WHERE ca.aeronave_id = ?
+     WHERE ca.aeronave_id = ? AND lower(COALESCE(ca.status, 'ativo')) = 'ativo'
      ORDER BY COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente)
   `).bind(c.req.param('id')).all()
   return c.json({ cotistas: result.results ?? [] })
+})
+
+enviosPagamentoRoutes.patch('/envios-pagamento/cotistas/:id', async (c) => {
+  if (!c.get('userId')) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = c.env.SHARE_DB
+  const id = c.req.param('id')
+  const body = await c.req.json<{ aeronave_id?: unknown; percentual_sociedade?: unknown }>().catch(() => null)
+  if (!body) return c.json({ error: 'dados_invalidos' }, 400)
+  const current = await db.prepare("SELECT id, cliente_id, socio_id, aeronave_id FROM cotista_aeronave WHERE id = ? AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(id).first<{ id: string; cliente_id: string | null; socio_id: string | null; aeronave_id: string }>()
+  if (!current) return c.json({ error: 'participacao_nao_encontrada' }, 404)
+  const percentual = Number(body.percentual_sociedade)
+  const aeronaveId = String(body.aeronave_id ?? current.aeronave_id).trim()
+  if (body.percentual_sociedade === undefined || !Number.isFinite(percentual) || percentual < 0 || percentual > 100) return c.json({ error: 'percentual_invalido' }, 400)
+  const aeronave = await db.prepare('SELECT id FROM aeronave WHERE id = ?').bind(aeronaveId).first<{ id: string }>()
+  if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
+  if (aeronaveId !== current.aeronave_id) {
+    const duplicado = await db.prepare("SELECT id FROM cotista_aeronave WHERE aeronave_id = ? AND id <> ? AND lower(COALESCE(status, 'ativo')) = 'ativo' AND ((? IS NOT NULL AND cliente_id = ?) OR (? IS NOT NULL AND socio_id = ?)) LIMIT 1")
+      .bind(aeronaveId, id, current.cliente_id, current.cliente_id, current.socio_id, current.socio_id).first()
+    if (duplicado) return c.json({ error: 'cotista_ja_vinculado_a_aeronave' }, 409)
+    const historico = await db.prepare('SELECT 1 AS existe FROM rateio_despesas WHERE cotista_id = ? UNION ALL SELECT 1 FROM rateio_pagamentos WHERE pagador_cotista_id = ? UNION ALL SELECT 1 FROM recibos_saida WHERE cotista_id = ? LIMIT 1').bind(id, id, id).first()
+    if (historico) return c.json({ error: 'aeronave_nao_pode_ser_alterada_com_historico_financeiro' }, 409)
+  }
+  await db.prepare("UPDATE cotista_aeronave SET aeronave_id = ?, percentual_sociedade = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(aeronaveId, percentual, id).run()
+  return c.json({ success: true, id, aeronave_id: aeronaveId, percentual_sociedade: percentual })
+})
+enviosPagamentoRoutes.delete('/envios-pagamento/cotistas/:id', async (c) => {
+  if (!c.get('userId')) return c.json({ error: 'nao_autorizado' }, 401)
+  const id = c.req.param('id')
+  const result = await c.env.SHARE_DB.prepare("UPDATE cotista_aeronave SET status = 'inativo', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(id).run()
+  if (!result.meta?.changes) return c.json({ error: 'participacao_nao_encontrada' }, 404)
+  return c.json({ success: true, id, status: 'inativo' })
 })
 
 enviosPagamentoRoutes.patch('/envios-pagamento/:id', async (c) => {
