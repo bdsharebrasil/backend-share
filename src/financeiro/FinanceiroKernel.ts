@@ -3531,17 +3531,21 @@ export async function contextoBaixaCotista(db: Database, entityId: string): Prom
   const referenciaId = nullableText(allocation?.lancamento_id) ?? entityId
   const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(referenciaId).first<Row>()
   if (!lancamento) {
-    const envio = await db.prepare('SELECT id, tipo, tipo_caixa, status, descricao, aeronave_id FROM envio_despesas WHERE id = ?').bind(referenciaId).first<Row>()
+    const envio = await db.prepare(`SELECT id, tipo, tipo_caixa, status, descricao, aeronave_id, lancamento_id
+      FROM envio_despesas WHERE id = ? OR lancamento_id = ?
+      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1`).bind(referenciaId, referenciaId, referenciaId).first<Row>()
     if (envio && (upper(envio.tipo) === 'CLIENTE' || upper(envio.tipo_caixa) === 'CLIENTE')) {
       if (upper(allocation?.status) === 'CANCELADO') throw new FinanceError('Lançamento cancelado ou estornado', 'lancamento_cancelado', 409)
+      const envioLancamentoId = nullableText(envio.lancamento_id) ?? String(envio.id)
       const rows = allocation
         ? [allocation]
-        : (await db.prepare("SELECT * FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' ORDER BY id").bind(envio.id).all<Row>()).results || []
+        : (await db.prepare("SELECT * FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' ORDER BY id").bind(envioLancamentoId).all<Row>()).results || []
       if (!rows.length) throw new FinanceError('Despesa sem rateio. Defina a responsabilidade antes da baixa.', 'rateio_nao_vinculado', 409)
       return {
         natureza: 'PAGAMENTO_DIRETO',
         conta_id: null,
         envio_id: envio.id,
+        envio_lancamento_id: envioLancamentoId,
         lancamento: { id: null, descricao: envio.descricao ?? rows[0].descricao_despesa, aeronave_id: envio.aeronave_id ?? rows[0].aeronave_id },
         rateios: rows,
         cotista_id: allocation?.cotista_id ?? rows[0].cotista_id,
@@ -3586,8 +3590,9 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
   const lancamento = initial.lancamento as Row
   const lancamentoId = nullableText(lancamento.id)
   const envioId = nullableText(initial.envio_id)
+  const envioLancamentoId = nullableText(initial.envio_lancamento_id) ?? envioId
   const aeronaveId = nullableText(lancamento.aeronave_id)
-  const key = `direto:${lancamentoId ?? envioId ?? entityId}`
+  const key = `direto:${lancamentoId ?? envioLancamentoId ?? entityId}`
   const revision = await readSettlementRevision(db, key)
   const context = await contextoBaixaCotista(db, entityId)
   const rows = context.rateios as Row[]
@@ -3639,11 +3644,11 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
         AND valor_pago_real_centavos < valor_rateado_centavos) THEN 'PAGO' ELSE 'EM_ABERTO' END,
     data_pagamento = CASE WHEN NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' AND valor_pago_real_centavos < valor_rateado_centavos) THEN ? ELSE NULL END,
     pago_diretamente = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(lancamentoId, lancamentoId, p.data_pagamento, lancamentoId))
-  if (envioId) statements.push(db.prepare(`UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP
+  if (envioId && envioLancamentoId) statements.push(db.prepare(`UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP
     WHERE id = ? AND status IN ('CONVERTIDO', 'APROVADO', 'EMAIL_ENVIADO')
       AND EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO')
       AND NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO'
-        AND valor_pago_real_centavos < valor_rateado_centavos)`).bind(envioId, envioId, envioId))
+        AND valor_pago_real_centavos < valor_rateado_centavos)`).bind(envioId, envioLancamentoId, envioLancamentoId))
   await commitSettlement(db, statements)
   return { ok: true, idempotent: false, natureza: 'PAGAMENTO_DIRETO', lancamento_id: lancamentoId, envio_id: envioId }
 }
