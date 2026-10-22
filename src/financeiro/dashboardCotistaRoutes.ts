@@ -356,7 +356,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     const paramsEmprestimos: unknown[] = [aeronaveId]
     if (inicio) { filtrosEmprestimos.push('date(a.data) >= date(?)'); paramsEmprestimos.push(inicio) }
     if (fim) { filtrosEmprestimos.push('date(a.data) <= date(?)'); paramsEmprestimos.push(fim) }
-    const emprestimosAeronave = aeronaveId && schema.get('abastecimentos')?.has('voo_emprestado')
+    const emprestimosAeronave = aeronaveId && !cotistaId && schema.get('abastecimentos')?.has('voo_emprestado')
       ? await listar(db, `SELECT a.id, a.numero_voo, a.data, a.trecho, a.local, a.litros, a.valor_total,
           a.status AS status_abastecimento, a.numero_comanda, a.numero_nf, a.aeronave_id,
           l.id AS lancamento_id, l.status AS status_lancamento, re.status AS status_reembolso,

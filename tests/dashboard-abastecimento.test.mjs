@@ -47,3 +47,7 @@ test("schema financeiro carrega abastecimentos e consulta empréstimos sem dupli
 test("resumo do dashboard mantém media_lancamento para consumidores existentes", () => {
   assert.match(dashboardCotista, /media_lancamento: lancamentos\.length \? saidas \/ lancamentos\.length : 0/);
 });
+
+test("empréstimos da aeronave não são incluídos no dashboard individual do cotista", () => {
+  assert.match(dashboardCotista, /const emprestimosAeronave = aeronaveId && !cotistaId && schema\.get\('abastecimentos'\)\?\.has\('voo_emprestado'\)/);
+});
