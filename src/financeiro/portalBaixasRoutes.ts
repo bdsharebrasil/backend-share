@@ -13,6 +13,7 @@ type Solicitacao = {
   pagador_cotista_id: string
   valor_centavos: number
   data_pagamento: string
+  data_vencimento: string | null
   comprovante_url: string | null
   observacoes: string | null
   status_solicitacao: string
@@ -29,7 +30,7 @@ type Solicitacao = {
 async function solicitacaoPendente(db: D1Database, id: string): Promise<Solicitacao | null> {
   return db.prepare(`SELECT p.id, p.rateio_id, p.pagador_cotista_id, p.valor_centavos, p.data_pagamento,
       p.comprovante_url, p.observacoes, p.status AS status_solicitacao, p.criado_em,
-      r.descricao_despesa, r.valor_rateado_centavos, r.valor_pago_real_centavos, r.status AS status_rateio,
+      r.descricao_despesa, r.valor_rateado_centavos, r.valor_pago_real_centavos, r.status AS status_rateio, r.data_vencimento,
       r.lancamento_id,
       COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, 'Cotista') AS nome_cotista,
       a.matricula_registro AS aeronave
