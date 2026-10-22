@@ -3531,8 +3531,8 @@ export async function contextoBaixaCotista(db: Database, entityId: string): Prom
   const referenciaId = nullableText(allocation?.lancamento_id) ?? entityId
   const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(referenciaId).first<Row>()
   if (!lancamento) {
-    const envio = await db.prepare('SELECT id, tipo, status, descricao, aeronave_id FROM envio_despesas WHERE id = ?').bind(referenciaId).first<Row>()
-    if (envio && upper(envio.tipo) === 'CLIENTE') {
+    const envio = await db.prepare('SELECT id, tipo, tipo_caixa, status, descricao, aeronave_id FROM envio_despesas WHERE id = ?').bind(referenciaId).first<Row>()
+    if (envio && (upper(envio.tipo) === 'CLIENTE' || upper(envio.tipo_caixa) === 'CLIENTE')) {
       if (upper(allocation?.status) === 'CANCELADO') throw new FinanceError('Lançamento cancelado ou estornado', 'lancamento_cancelado', 409)
       const rows = allocation
         ? [allocation]
