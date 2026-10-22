@@ -511,8 +511,17 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
   const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac), nomeTripulantePorCanac(c, body.sic_canac), trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)])
   const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
+  const abastecimentoId = String(body.abastecimento_id || '').trim()
   let abastecimentoStmt: D1PreparedStatement | null = null
-  if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
+  if (abastecimentoId) {
+    await garantirTabelaAbastecimentos(c)
+    const existente = await db.prepare('SELECT id, aeronave_id, lancamento_diario_id FROM abastecimentos WHERE id = ?1 LIMIT 1').bind(abastecimentoId).first<{ id: string; aeronave_id: string | null; lancamento_diario_id: string | null }>()
+    if (!existente) return c.json({ error: 'abastecimento_nao_encontrado' }, 404)
+    if (existente.aeronave_id !== aeronaveId) return c.json({ error: 'abastecimento_aeronave_incompativel' }, 409)
+    if (existente.lancamento_diario_id) return c.json({ error: 'abastecimento_ja_vinculado' }, 409)
+    abastecimentoStmt = db.prepare('UPDATE abastecimentos SET lancamento_diario_id = ?1 WHERE id = ?2 AND lancamento_diario_id IS NULL').bind(id, abastecimentoId)
+  }
+  if (!abastecimentoId && abastecimento && diarioNumber(abastecimento.litros) > 0) {
     await garantirTabelaAbastecimentos(c)
     const referenciaAbastecimentoInvalida = await validarReferenciasDiario(db, [
       { tabela: 'cliente', valor: diarioBoolean(body.voo_emprestado) ? (body.cliente_tomador_emprestimo_id || abastecimento.cliente_id) : abastecimento.cliente_id, campo: 'abastecimento.cliente_id' },
@@ -563,7 +572,10 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   try {
     await statements[0].run()
     lancamentoInserido = true
-    if (abastecimentoStmt) await abastecimentoStmt.run()
+    if (abastecimentoStmt) {
+      const vinculacao = await abastecimentoStmt.run()
+      if (abastecimentoId && Number(vinculacao.meta?.changes || 0) !== 1) throw new Error('abastecimento_ja_vinculado')
+    }
     if (pernaId) {
       const pernaAtualizada = await statements[statements.length - 1].run()
       if (Number(pernaAtualizada.meta?.changes || 0) !== 1) throw new Error('perna_ja_lancada_no_diario')
@@ -571,11 +583,12 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   } catch (error) {
     if (lancamentoInserido) {
       await db.batch([
-        db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
+        abastecimentoId ? db.prepare('UPDATE abastecimentos SET lancamento_diario_id = NULL WHERE id = ?1 AND lancamento_diario_id = ?2').bind(abastecimentoId, id) : db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
         db.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id),
       ])
     }
     if (error instanceof Error && error.message === 'perna_ja_lancada_no_diario') return c.json({ error: error.message }, 409)
+    if (error instanceof Error && error.message === 'abastecimento_ja_vinculado') return c.json({ error: error.message }, 409)
     if (String(error).includes('FOREIGN KEY')) {
       log.error('FK inválida ao persistir lançamento do diário', { id, aeronave_id: row.aeronave_id, diario_mes_id: row.diario_mes_id, criado_por: row.criado_por, holding_id: row.holding_id, socio_id: row.socio_id })
       return c.json({ error: 'referencia_invalida', campo: 'lancamento_diario_bordo' }, 400)
@@ -588,7 +601,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   } catch (error) {
     const rollback = [
       ...(pernaId ? [db.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = NULL WHERE id = ?1 AND lancamento_diario_id = ?2').bind(pernaId, id)] : []),
-      db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
+      abastecimentoId ? db.prepare('UPDATE abastecimentos SET lancamento_diario_id = NULL WHERE id = ?1 AND lancamento_diario_id = ?2').bind(abastecimentoId, id) : db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id),
       db.prepare('DELETE FROM lancamentos_diario_bordo WHERE id = ?1').bind(id),
     ]
     await db.batch(rollback)
@@ -625,8 +638,15 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
   if (updates.length === 0) return c.json({ error: 'nenhum_campo_informado' }, 400)
   if (body.data_registro !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.data_registro)) || String(row.data_registro).slice(0, 7) !== `${current.diario_ano || ''}-${String(current.diario_mes || '').padStart(2, '0')}`)) return c.json({ error: 'data_fora_do_mes' }, 400)
   const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
+  const abastecimentoId = body.abastecimento_id === undefined ? '' : String(body.abastecimento_id || '').trim()
   let abastecimentoLocal: string | null = null
-  if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
+  if (abastecimentoId) {
+    await garantirTabelaAbastecimentos(c)
+    const selecionado = await db.prepare('SELECT id, aeronave_id, lancamento_diario_id FROM abastecimentos WHERE id = ?1 LIMIT 1').bind(abastecimentoId).first<{ id: string; aeronave_id: string | null; lancamento_diario_id: string | null }>()
+    if (!selecionado) return c.json({ error: 'abastecimento_nao_encontrado' }, 404)
+    if (selecionado.aeronave_id !== current.aeronave_id) return c.json({ error: 'abastecimento_aeronave_incompativel' }, 409)
+    if (selecionado.lancamento_diario_id && selecionado.lancamento_diario_id !== id) return c.json({ error: 'abastecimento_ja_vinculado' }, 409)
+  } else if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
     await garantirTabelaAbastecimentos(c)
     abastecimentoLocal = await normalizarLocalAbastecimento(db, abastecimento.local || row.local_combustivel || row.aerodromo_partida)
     if (!abastecimentoLocal) return c.json({ error: 'local_abastecimento_invalido' }, 400)
@@ -651,8 +671,15 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
   if (referenciaInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaInvalida.campo, valor: referenciaInvalida.valor }, 400)
   const assignments = updates.filter(([field], index, list) => list.findIndex(([candidate]) => candidate === field) === index)
   await db.prepare(`UPDATE lancamentos_diario_bordo SET ${assignments.map(([field]) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...assignments.map(([, value]) => value), id).run()
-  if (body.abastecido === false || (body.abastecimento && diarioNumber(body.abastecimento.litros) <= 0)) {
-    await db.prepare('DELETE FROM abastecimentos WHERE lancamento_diario_id = ?1').bind(id).run()
+  if (body.abastecimento_id !== undefined && !abastecimentoId) {
+    await db.prepare('UPDATE abastecimentos SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1').bind(id).run()
+  }
+  if (body.abastecido === false || abastecimentoId === '' && (body.abastecimento && diarioNumber(body.abastecimento.litros) <= 0)) {
+    await db.prepare('UPDATE abastecimentos SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1').bind(id).run()
+  } else if (abastecimentoId) {
+    await db.prepare('UPDATE abastecimentos SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1 AND id <> ?2').bind(id, abastecimentoId).run()
+    const vinculacao = await db.prepare('UPDATE abastecimentos SET lancamento_diario_id = ?1 WHERE id = ?2 AND (lancamento_diario_id IS NULL OR lancamento_diario_id = ?1)').bind(id, abastecimentoId).run()
+    if (Number(vinculacao.meta?.changes || 0) !== 1) return c.json({ error: 'abastecimento_ja_vinculado' }, 409)
   } else if (abastecimento && diarioNumber(abastecimento.litros) > 0) {
     const vooEmprestadoAtual = diarioBoolean(body.voo_emprestado ?? current.voo_emprestado)
     const titularAbastecimentoCliente = vooEmprestadoAtual ? (current.cliente_tomador_emprestimo_id || abastecimento.cliente_id || null) : (abastecimento.cliente_id || null)
