@@ -25,9 +25,13 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   if (!(await checkRateLimit(c, `rastreio:${clientIp(c)}`, 120))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   configurarProvedor(c.env.ADSB_PROVIDER)
+  const aeronaveSchema = await c.env.SHARE_DB.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
+  const colunaIcaoHex = (aeronaveSchema.results || []).some((column) => column.name === 'icao_hex')
+    ? 'a.icao_hex'
+    : 'NULL AS icao_hex'
   const rows = await c.env.SHARE_DB.prepare(`
     SELECT s.id, s.numero_voo, lower(trim(s.status)) AS status_bruto, s.aeronave_id,
-      s.origem, s.destino, s.horario_previsto_agendamento, a.matricula_registro, a.modelo, a.icao_hex,
+      s.origem, s.destino, s.horario_previsto_agendamento, a.matricula_registro, a.modelo, ${colunaIcaoHex},
       COALESCE(hs.nome, cl.razao_social) AS cotista_nome,
       COALESCE(tp.nome_completo, fp.nome_completo) AS piloto_nome,
       COALESCE(tc.nome_completo, fc.nome_completo) AS copiloto_nome,
