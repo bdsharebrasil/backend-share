@@ -298,6 +298,7 @@ export async function loadSchema(db: Database): Promise<SchemaCache> {
   if (cached && cached.expiresAt > Date.now()) return cached.schema
   const tables = [
     'lancamentos',
+    'abastecimentos',
     'contas_apagar',
     'contas_areceber',
     'rateio_despesas',

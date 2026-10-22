@@ -364,6 +364,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
           COALESCE(ad.designativo_icao, a.local) AS local_icao
         FROM abastecimentos a
         LEFT JOIN lancamentos l ON l.abastecimentos_id = a.id
+          AND l.tipo_caixa = 'CLIENTE'
           AND UPPER(COALESCE(l.status, '')) <> 'CANCELADO'
         LEFT JOIN reembolsos re ON re.lancamento_cliente_id = l.id
         LEFT JOIN aeronave ar ON ar.id = a.aeronave_id
@@ -371,7 +372,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         WHERE ${filtrosEmprestimos.join(' AND ')}
         ORDER BY date(a.data) DESC, a.id DESC`, ...paramsEmprestimos)
       : []
-    return c.json({ balanco_fontes: balancoFontes, balanco_detalhado_erro: balancoDetalhadoErro, balanco_operacional: balancoOperacional, emprestimos_aeronave: emprestimosAeronave, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    return c.json({ balanco_fontes: balancoFontes, balanco_detalhado_erro: balancoDetalhadoErro, balanco_operacional: balancoOperacional, emprestimos_aeronave: emprestimosAeronave, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 

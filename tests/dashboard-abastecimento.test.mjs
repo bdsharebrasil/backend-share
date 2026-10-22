@@ -38,3 +38,12 @@ test("programação mantém o reembolso sem participante no lançamento de voo e
   assert.match(financeiroKernel, /cotista_aeronave_id: cotistaLancamentoId/);
   assert.match(financeiroKernel, /status: 'AGUARDANDO_REEMBOLSO'/);
 });
+
+test("schema financeiro carrega abastecimentos e consulta empréstimos sem duplicar lançamentos Share", () => {
+  assert.match(financeiroKernel, /const tables = \[\s*'lancamentos',\s*'abastecimentos'/);
+  assert.match(dashboardCotista, /LEFT JOIN lancamentos l ON l\.abastecimentos_id = a\.id\s+AND l\.tipo_caixa = 'CLIENTE'\s+AND UPPER\(COALESCE\(l\.status, ''\)\) <> 'CANCELADO'/);
+});
+
+test("resumo do dashboard mantém media_lancamento para consumidores existentes", () => {
+  assert.match(dashboardCotista, /media_lancamento: lancamentos\.length \? saidas \/ lancamentos\.length : 0/);
+});
