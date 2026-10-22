@@ -357,8 +357,13 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
     if (inicio) { filtrosEmprestimos.push('date(a.data) >= date(?)'); paramsEmprestimos.push(inicio) }
     if (fim) { filtrosEmprestimos.push('date(a.data) <= date(?)'); paramsEmprestimos.push(fim) }
     const emprestimosAeronave = aeronaveId && !cotistaId && schema.get('abastecimentos')?.has('voo_emprestado')
-      ? await listar(db, `SELECT a.id, a.numero_voo, a.data, a.trecho, a.local, a.litros, a.valor_total,
+        ? await listar(db, `SELECT a.id, a.numero_voo, a.data, a.trecho, a.local, a.litros, a.valor_total,
           a.status AS status_abastecimento, a.numero_comanda, a.numero_nf, a.aeronave_id,
+          d.cliente_id AS emprestador_cliente_id, d.socio_id AS emprestador_socio_id,
+          d.cliente_tomador_emprestimo_id AS tomador_cliente_id,
+          d.socio_tomador_emprestimo_id AS tomador_socio_id,
+          COALESCE(NULLIF(TRIM(tomador_cliente.razao_social), ''), NULLIF(TRIM(tomador_socio.nome), '')) AS tomador_nome,
+          COALESCE(NULLIF(TRIM(emprestador_cliente.razao_social), ''), NULLIF(TRIM(emprestador_socio.nome), '')) AS emprestador_nome,
           l.id AS lancamento_id, l.status AS status_lancamento, re.status AS status_reembolso,
           ar.matricula_registro, ar.fabricante, ar.modelo,
           COALESCE(ad.designativo_icao, a.local) AS local_icao
@@ -367,6 +372,11 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
           AND l.tipo_caixa = 'CLIENTE'
           AND UPPER(COALESCE(l.status, '')) <> 'CANCELADO'
         LEFT JOIN reembolsos re ON re.lancamento_cliente_id = l.id
+        LEFT JOIN lancamentos_diario_bordo d ON d.id = a.lancamento_diario_id
+        LEFT JOIN cliente tomador_cliente ON tomador_cliente.id = d.cliente_tomador_emprestimo_id
+        LEFT JOIN hold_socios tomador_socio ON tomador_socio.id = d.socio_tomador_emprestimo_id
+        LEFT JOIN cliente emprestador_cliente ON emprestador_cliente.id = d.cliente_id
+        LEFT JOIN hold_socios emprestador_socio ON emprestador_socio.id = d.socio_id
         LEFT JOIN aeronave ar ON ar.id = a.aeronave_id
         LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local))
         WHERE ${filtrosEmprestimos.join(' AND ')}

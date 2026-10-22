@@ -51,3 +51,11 @@ test("resumo do dashboard mantém media_lancamento para consumidores existentes"
 test("empréstimos da aeronave não são incluídos no dashboard individual do cotista", () => {
   assert.match(dashboardCotista, /const emprestimosAeronave = aeronaveId && !cotistaId && schema\.get\('abastecimentos'\)\?\.has\('voo_emprestado'\)/);
 });
+
+test("empréstimos da aeronave retornam IDs e nomes de emprestador e tomador", () => {
+  assert.match(dashboardCotista, /d\.cliente_id AS emprestador_cliente_id, d\.socio_id AS emprestador_socio_id/);
+  assert.match(dashboardCotista, /LEFT JOIN lancamentos_diario_bordo d ON d\.id = a\.lancamento_diario_id/);
+  assert.match(dashboardCotista, /AS tomador_nome/);
+  assert.match(dashboardCotista, /AS emprestador_nome/);
+  assert.match(dashboardCotista, /AND l\.tipo_caixa = 'CLIENTE'/);
+});
