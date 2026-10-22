@@ -6,6 +6,7 @@ const dashboard = await readFile(new URL("../src/financeiro/dashboardShareRoutes
 const dashboardCotista = await readFile(new URL("../src/financeiro/dashboardCotistaRoutes.ts", import.meta.url), "utf8");
 const abastecimentosRoutes = await readFile(new URL("../src/routes/abastecimentosRoutes.ts", import.meta.url), "utf8");
 const financeRoutes = await readFile(new URL("../src/financeiroRoutes.ts", import.meta.url), "utf8");
+const financeiroKernel = await readFile(new URL("../src/financeiro/FinanceiroKernel.ts", import.meta.url), "utf8");
 
 test("dashboard financeiro projeta abastecimento pendente como movimentação", () => {
   assert.match(dashboard, /origem_tipo: 'abastecimentos'/);
@@ -23,4 +24,17 @@ test("abastecimento rateado preserva o titular e não duplica o valor integral n
   assert.match(dashboardCotista, /r\.percentual_uso = 100 AND r\.valor_rateado_centavos = r\.valor_total_centavos/);
   assert.match(dashboardCotista, /ab\.rateio_entre_cotistas = 1 AND titular\.id = r\.cotista_id/);
   assert.match(dashboardCotista, /lancamentoSemRateio/);
+});
+
+test("voo emprestado não entra no balanço do cotista e aparece como informação por aeronave", () => {
+  assert.match(dashboardCotista, /la\.id = r\.lancamento_id AND ab\.voo_emprestado = 1/);
+  assert.match(dashboardCotista, /ab\.id = l\.abastecimentos_id AND ab\.voo_emprestado = 1/);
+  assert.match(dashboardCotista, /emprestimos_aeronave: emprestimosAeronave/);
+  assert.match(dashboardCotista, /re\.status AS status_reembolso/);
+});
+
+test("programação mantém o reembolso sem participante no lançamento de voo emprestado", () => {
+  assert.match(financeiroKernel, /const cotistaLancamentoId = vooEmprestado \? null : cotistaId/);
+  assert.match(financeiroKernel, /cotista_aeronave_id: cotistaLancamentoId/);
+  assert.match(financeiroKernel, /status: 'AGUARDANDO_REEMBOLSO'/);
 });

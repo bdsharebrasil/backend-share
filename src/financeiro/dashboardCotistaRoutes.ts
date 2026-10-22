@@ -114,6 +114,13 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
       ))`)
       filtrosLancamentos.push(`NOT EXISTS (SELECT 1 FROM abastecimentos ab WHERE ab.id = l.abastecimentos_id AND ab.rateio_entre_cotistas = 1)`)
     }
+    if (schema.get('abastecimentos')?.has('voo_emprestado')) {
+      filtrosLancamentos.push(`NOT EXISTS (SELECT 1 FROM abastecimentos ab
+        WHERE ab.id = l.abastecimentos_id AND ab.voo_emprestado = 1)`)
+      filtrosCliente.push(`NOT EXISTS (SELECT 1 FROM lancamentos la
+        JOIN abastecimentos ab ON ab.id = la.abastecimentos_id
+        WHERE la.id = r.lancamento_id AND ab.voo_emprestado = 1)`)
+    }
     const movimentoHoldingSemRateio = `NOT EXISTS (SELECT 1 FROM rateio_hold rh WHERE rh.${holdingColumn} = mh.id AND UPPER(COALESCE(rh.status, '')) <> 'CANCELADO')`
     const rows = await listar(db, `
       SELECT r.id, r.aeronave_id, r.cotista_id AS participante_id, r.data_emissao AS data, r.descricao_despesa AS descricao,
@@ -345,7 +352,26 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         balancoDetalhadoErro = 'Não foi possível carregar rateios e pagamentos. Verifique a migração 20261006_balanco.sql e os vínculos dos dados.'
       }
     }
-    return c.json({ balanco_fontes: balancoFontes, balanco_detalhado_erro: balancoDetalhadoErro, balanco_operacional: balancoOperacional, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0, media_lancamento: lancamentos.length ? saidas / lancamentos.length : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
+    const filtrosEmprestimos: string[] = ['a.aeronave_id = ?', 'a.voo_emprestado = 1']
+    const paramsEmprestimos: unknown[] = [aeronaveId]
+    if (inicio) { filtrosEmprestimos.push('date(a.data) >= date(?)'); paramsEmprestimos.push(inicio) }
+    if (fim) { filtrosEmprestimos.push('date(a.data) <= date(?)'); paramsEmprestimos.push(fim) }
+    const emprestimosAeronave = aeronaveId && schema.get('abastecimentos')?.has('voo_emprestado')
+      ? await listar(db, `SELECT a.id, a.numero_voo, a.data, a.trecho, a.local, a.litros, a.valor_total,
+          a.status AS status_abastecimento, a.numero_comanda, a.numero_nf, a.aeronave_id,
+          l.id AS lancamento_id, l.status AS status_lancamento, re.status AS status_reembolso,
+          ar.matricula_registro, ar.fabricante, ar.modelo,
+          COALESCE(ad.designativo_icao, a.local) AS local_icao
+        FROM abastecimentos a
+        LEFT JOIN lancamentos l ON l.abastecimentos_id = a.id
+          AND UPPER(COALESCE(l.status, '')) <> 'CANCELADO'
+        LEFT JOIN reembolsos re ON re.lancamento_cliente_id = l.id
+        LEFT JOIN aeronave ar ON ar.id = a.aeronave_id
+        LEFT JOIN aerodromo ad ON ad.id = a.local OR upper(trim(ad.designativo_icao)) = upper(trim(a.local))
+        WHERE ${filtrosEmprestimos.join(' AND ')}
+        ORDER BY date(a.data) DESC, a.id DESC`, ...paramsEmprestimos)
+      : []
+    return c.json({ balanco_fontes: balancoFontes, balanco_detalhado_erro: balancoDetalhadoErro, balanco_operacional: balancoOperacional, emprestimos_aeronave: emprestimosAeronave, balanco_escopo: cotistaId ? 'cotista' : aeronaveId ? 'aeronave' : 'geral', lancamentos, ...compensacao, holdings, movimentos_holding: extratoHolding, medias, medias_mensais: mediasMensais, resumo: { entradas, saidas, saldo: entradas - saidas, custo_rateado: [...porMes.values()].reduce((total, item) => total + item.custoRateado, 0), pendentes: lancamentos.filter(row => ['EM_ABERTO', 'EM_ATRASO'].includes(String(row.status).toUpperCase())).length, media_mensal: porMes.size ? saidas / porMes.size : 0 }, fechamento_mensal: [...porMes.values()].sort((a, b) => a.mes.localeCompare(b.mes)), ranking_gastos: [...porCategoria.entries()].map(([categoria, value]) => ({ categoria, ...value })).sort((a, b) => b.valor - a.valor), ranking_cotistas: [] })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -373,7 +399,7 @@ dashboardCotistaRoutes.get('/cotista/relatorio-geral', async (c) => {
       listar(db, `SELECT l.data_emissao AS data, l.categoria_nome AS categoria, l.grupo_categoria AS grupo, l.periodicidade, l.descricao, l.valor_centavos
         FROM lancamentos l
        WHERE l.aeronave_id = ? AND UPPER(COALESCE(l.fluxo, '')) = 'SAIDA' AND ${naoCancelado('l.status')} AND ${periodo('l.data_emissao')}
-         AND ${lancamentoSemRateio}`, aeronaveId, inicio, fim),
+         AND ${lancamentoSemRateio}${schema.get('abastecimentos')?.has('voo_emprestado') && schema.get('lancamentos')?.has('abastecimentos_id') ? " AND NOT EXISTS (SELECT 1 FROM abastecimentos ab WHERE ab.id = l.abastecimentos_id AND ab.voo_emprestado = 1)" : ''}`, aeronaveId, inicio, fim),
       listar(db, `SELECT MIN(r.data_emissao) AS data, MIN(r.categoria_nome) AS categoria, MIN(r.tipo_rateio) AS tipo_rateio, MIN(r.periodicidade) AS periodicidade,
           MIN(r.descricao_despesa) AS descricao, SUM(r.valor_rateado_centavos) AS rateado
         FROM rateio_hold r

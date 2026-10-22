@@ -3082,6 +3082,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   const fornecedorId = nullableText(body.fornecedor_id ?? body.fornecedores_favoritos_id ?? receipt.share_fornecedor_id)
   const fornecedor = await buscarFornecedor(db, fornecedorId) ?? await resolverFornecedor(db, fornecedorId, body.fornecedor_nome ?? body.fornecedor)
   const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
+  const vooEmprestado = abastecimentosId && schema.get('abastecimentos')?.has('voo_emprestado')
+    ? Number((await db.prepare('SELECT voo_emprestado FROM abastecimentos WHERE id = ? LIMIT 1').bind(abastecimentosId).first<{ voo_emprestado: number | null }>())?.voo_emprestado) === 1
+    : false
+  const cotistaLancamentoId = vooEmprestado ? null : cotistaId
   if (abastecimentosId) {
     const lancamentoCotistaExistente = await db.prepare(`
       SELECT id FROM lancamentos
@@ -3105,7 +3109,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       status: 'AGUARDANDO_REEMBOLSO', idempotency_key: `programar-recibo-reembolso:${receiptId}`, criado_por: userId,
     }, ['id', 'lancamento_origem_id', 'valor_centavos']),
     insertStatement(db, schema, 'lancamentos', {
-      id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_aeronave_id: cotistaId,
+      id: clientLancamentoId, aeronave_id: receipt.aeronave_id, cotista_aeronave_id: cotistaLancamentoId,
       abastecimentos_id: abastecimentosId,
       descricao: receipt.descricao || 'Reembolso de despesa', grupo_categoria: 'CAIXA CLIENTE',
       fluxo: 'SAIDA', tipo_caixa: 'CLIENTE', valor_centavos: amount,
