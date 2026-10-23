@@ -38,7 +38,7 @@ export function portalHasFeature(user: PortalUser, feature: PortalFeature): bool
 }
 
 export function portalFeatureForPath(path: string): PortalFeature | null {
-  if (/^\/api\/portal\/(aerodromos|disponibilidade|solicitacoes)(\/|$)/.test(path) || path === '/api/portal/diario-bordo') return 'agendamento'
+  if (/^\/api\/portal\/(aerodromos|disponibilidade|solicitacoes|simulador)(\/|$)/.test(path) || path === '/api/portal/diario-bordo') return 'agendamento'
   if (/^\/api\/portal\/(financeiro|balanco|abastecimentos|baixas|comprovantes)(\/|$)/.test(path)) return 'financeiro'
   if (/^\/api\/portal\/aeronave(\/|$)/.test(path)) return 'aeronave'
   if (path === '/api/portal/manutencao') return 'manutencao'
@@ -572,13 +572,29 @@ portalRoutes.get('/api/portal/aerodromos', async c => {
   return c.json({ aerodromos: result.results })
 })
 
+portalRoutes.get('/api/portal/simulador/combustivel', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cliente_nao_vinculado' }, 409)
+  const icao = (c.req.query('icao') || '').trim().toUpperCase()
+  const tipo = (c.req.query('tipo') || '').trim().toUpperCase()
+  if (!/^[A-Z]{4}$/.test(icao) || !['AVGAS', 'JET'].includes(tipo)) return c.json({ error: 'parametros_invalidos' }, 400)
+  const coluna = tipo === 'JET' ? 'preco_jet' : 'preco_avgas'
+  const db = c.env.SHARE_DB
+  const local = await db.prepare(`SELECT AVG(${coluna}) AS media, COUNT(*) AS amostras FROM fornecedores_combustivel WHERE upper(COALESCE(codigo_icao, '')) = ?1 AND COALESCE(${coluna}, 0) > 0`).bind(icao).first<{ media: number | null; amostras: number }>().catch(() => null)
+  if (local?.media && local.media > 0) return c.json({ icao, tipo, preco_medio: local.media, fonte: 'fornecedores_combustivel_icao', amostras: local.amostras })
+  const nacional = await db.prepare(`SELECT AVG(${coluna}) AS media, COUNT(*) AS amostras FROM fornecedores_combustivel WHERE COALESCE(${coluna}, 0) > 0`).first<{ media: number | null; amostras: number }>().catch(() => null)
+  if (nacional?.media && nacional.media > 0) return c.json({ icao, tipo, preco_medio: nacional.media, fonte: 'fornecedores_combustivel_media_banco', amostras: nacional.amostras })
+  const historico = await db.prepare("SELECT AVG(valor_unitario) AS media, COUNT(*) AS amostras FROM abastecimentos WHERE (upper(COALESCE(local, '')) = ?1 OR upper(COALESCE(trecho, '')) LIKE ?2) AND upper(COALESCE(tipo_combustivel, '')) LIKE ?3 AND COALESCE(valor_unitario, 0) > 0 AND date(data) >= date('now', '-365 days')").bind(icao, `%${icao}%`, tipo === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null; amostras: number }>().catch(() => null)
+  return c.json({ icao, tipo, preco_medio: historico?.media && historico.media > 0 ? historico.media : null, fonte: historico?.media ? 'abastecimentos_historico_12m' : 'indisponivel', amostras: historico?.amostras || 0 })
+})
+
 portalRoutes.get('/api/portal/disponibilidade', async c => {
   const user = await portalSession(c)
   if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cliente_nao_vinculado' }, 409)
   const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
   const to = c.req.query('ate') || from
   const [aircraft, reservations] = await Promise.all([
-    c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.status, a.consumo_combustivel, a.velocidade_cruzeiro, a.preco_hora, p.velocidade_cruzeiro_kt FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = a.performance_aeronave_id JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE lower(a.status) = 'ativa' AND (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY a.matricula_registro").bind(user.cliente_id, user.socio_id).all(),
+    c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.status, a.consumo_combustivel, a.velocidade_cruzeiro, a.preco_hora, p.velocidade_cruzeiro_kt, (SELECT MAX(pb.peso_maximo_decolagem) FROM ctm_peso_balanceamento pb WHERE pb.aeronave_id = a.id) AS peso_maximo_decolagem FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = a.performance_aeronave_id JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE lower(a.status) = 'ativa' AND (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY a.matricula_registro").bind(user.cliente_id, user.socio_id).all(),
     c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?1) AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo') ORDER BY data_agendada").bind(from, to).all(),
   ])
   return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
