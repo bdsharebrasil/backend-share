@@ -593,8 +593,14 @@ portalRoutes.get('/api/portal/disponibilidade', async c => {
   if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cliente_nao_vinculado' }, 409)
   const from = c.req.query('de') || new Date().toISOString().slice(0, 10)
   const to = c.req.query('ate') || from
+  const aircraftSql = "SELECT DISTINCT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.status, a.consumo_combustivel, a.velocidade_cruzeiro, a.preco_hora, COALESCE(p.velocidade_cruzeiro_kt, (SELECT p2.velocidade_cruzeiro_kt FROM performance_aeronave p2 WHERE lower(trim(p2.modelo)) = lower(trim(a.modelo)) ORDER BY p2.atualizado_em DESC LIMIT 1)) AS velocidade_cruzeiro_kt FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = a.performance_aeronave_id JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE lower(a.status) = 'ativa' AND (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY a.matricula_registro"
+  const aircraftWithWeightSql = aircraftSql.replace('AS velocidade_cruzeiro_kt FROM aeronave', 'AS velocidade_cruzeiro_kt, (SELECT MAX(pb.peso_maximo_decolagem) FROM ctm_peso_balanceamento pb WHERE pb.aeronave_id = a.id) AS peso_maximo_decolagem FROM aeronave')
+  const aircraftPromise = c.env.SHARE_DB.prepare(aircraftWithWeightSql).bind(user.cliente_id, user.socio_id).all().catch(async error => {
+    log.warn('[portal] MTOW indisponível; usando a performance da aeronave sem peso máximo', error)
+    return c.env.SHARE_DB.prepare(aircraftSql).bind(user.cliente_id, user.socio_id).all()
+  })
   const [aircraft, reservations] = await Promise.all([
-    c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.matricula_registro, a.fabricante, a.modelo, a.tipo_aeronave, a.status, a.consumo_combustivel, a.velocidade_cruzeiro, a.preco_hora, COALESCE(p.velocidade_cruzeiro_kt, (SELECT p2.velocidade_cruzeiro_kt FROM performance_aeronave p2 WHERE lower(trim(p2.modelo)) = lower(trim(a.modelo)) ORDER BY p2.atualizado_em DESC LIMIT 1)) AS velocidade_cruzeiro_kt, (SELECT MAX(pb.peso_maximo_decolagem) FROM ctm_peso_balanceamento pb WHERE pb.aeronave_id = a.id) AS peso_maximo_decolagem FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = a.performance_aeronave_id JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE lower(a.status) = 'ativa' AND (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY a.matricula_registro").bind(user.cliente_id, user.socio_id).all(),
+    aircraftPromise,
     c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?1) AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo') ORDER BY data_agendada").bind(from, to).all(),
   ])
   return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
