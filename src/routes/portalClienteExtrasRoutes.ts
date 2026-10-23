@@ -232,26 +232,41 @@ portalClienteExtrasRoutes.get('/api/portal/diario-bordo', async c => {
   const hoje = new Date().toISOString().slice(0, 10)
   const de = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('de') || '') ? c.req.query('de')! : new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10)
   const ate = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('ate') || '') ? c.req.query('ate')! : hoje
-  const result = await c.env.SHARE_DB.prepare(`
-    SELECT l.id, l.numero_voo, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada, l.trecho,
-           l.pic_nome, l.sic_nome, l.tempo_dep, l.tempo_pou, l.tempo_voo, l.tempo_total, l.pousos_total,
-           l.distancia_nm, l.litros_combustivel_abastecido, l.voo_emprestado, a.matricula_registro, a.modelo
-      FROM lancamentos_diario_bordo l
-      LEFT JOIN aeronave a ON a.id = l.aeronave_id
-     WHERE (
-         l.cliente_id = ?1 OR l.socio_id = ?2
-         OR l.cliente_tomador_emprestimo_id = ?1 OR l.socio_tomador_emprestimo_id = ?2
-         OR EXISTS (
-           SELECT 1 FROM cotista_aeronave ca
-            WHERE ca.aeronave_id = l.aeronave_id
-              AND lower(trim(COALESCE(ca.status, ''))) = 'ativo'
-              AND (ca.cliente_id = ?1 OR ca.socio_id = ?2)
+  const [result, emprestimos] = await Promise.all([
+    c.env.SHARE_DB.prepare(`
+      SELECT l.id, l.numero_voo, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada, l.trecho,
+             l.pic_nome, l.sic_nome, l.tempo_dep, l.tempo_pou, l.tempo_voo, l.tempo_total, l.pousos_total,
+             l.distancia_nm, l.litros_combustivel_abastecido, l.voo_emprestado, a.matricula_registro, a.modelo
+        FROM lancamentos_diario_bordo l
+        LEFT JOIN aeronave a ON a.id = l.aeronave_id
+       WHERE (
+           l.cliente_id = ?1 OR l.socio_id = ?2
+           OR l.cliente_tomador_emprestimo_id = ?1 OR l.socio_tomador_emprestimo_id = ?2
+           OR EXISTS (
+             SELECT 1 FROM cotista_aeronave ca
+              WHERE ca.aeronave_id = l.aeronave_id
+                AND lower(trim(COALESCE(ca.status, ''))) = 'ativo'
+                AND (ca.cliente_id = ?1 OR ca.socio_id = ?2)
+           )
          )
-       )
-       AND date(l.data_registro) BETWEEN date(?3) AND date(?4)
-     ORDER BY date(l.data_registro) DESC, l.tempo_dep DESC
-     LIMIT 500`).bind(user.cliente_id, user.socio_id, de, ate).all<Record<string, unknown>>()
-  return c.json({ de, ate, voos: result.results || [] })
+         AND date(l.data_registro) BETWEEN date(?3) AND date(?4)
+       ORDER BY date(l.data_registro) DESC, l.tempo_dep DESC
+       LIMIT 500`).bind(user.cliente_id, user.socio_id, de, ate).all<Record<string, unknown>>(),
+    c.env.SHARE_DB.prepare(`
+      SELECT l.id, l.numero_voo, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada,
+             l.pic_nome, l.tempo_voo, l.tempo_total, l.voo_emprestado, a.matricula_registro,
+             COALESCE(NULLIF(TRIM(c.razao_social), ''), NULLIF(TRIM(s.nome), ''), NULLIF(TRIM(l.pic_nome), ''), 'Não identificado') AS utilizado_por
+        FROM lancamentos_diario_bordo l
+        LEFT JOIN aeronave a ON a.id = l.aeronave_id
+        LEFT JOIN cliente c ON c.id = l.cliente_id
+        LEFT JOIN hold_socios s ON s.id = l.socio_id
+       WHERE COALESCE(l.voo_emprestado, 0) = 1
+         AND ((?1 IS NOT NULL AND l.cliente_tomador_emprestimo_id = ?1)
+           OR (?2 IS NOT NULL AND l.socio_tomador_emprestimo_id = ?2))
+       ORDER BY date(l.data_registro) DESC, l.tempo_dep DESC
+       LIMIT 1000`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>(),
+  ])
+  return c.json({ de, ate, voos: result.results || [], voos_emprestimo: emprestimos.results || [] })
 })
 
 // ── Manutenção: horímetro, próxima revisão e histórico RAS ────────────────
