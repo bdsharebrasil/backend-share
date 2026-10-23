@@ -1,8 +1,10 @@
 import { Hono, Context } from "hono"
 import { checkRateLimit, clientIp } from "../lib/cache"
 import { normalizarHorarioAgendamento } from "../lib/schedule"
+import { haversineKm } from "../lib/geo"
+import { buscarPosicoes, configurarProvedor, type PosicaoAeronave } from "../lib/adsbProvider"
 
-type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; CLIENT_SESSION_SECRET?: string; CLIENT_SESSION_TTL_SECONDS?: string; INTERNAL_TOKEN?: string; TELEGRAM_BOT_TOKEN?: string }
+type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; CLIENT_SESSION_SECRET?: string; CLIENT_SESSION_TTL_SECONDS?: string; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string; TELEGRAM_BOT_TOKEN?: string }
 type Variables = Record<string, never>
 
 export const portalRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
@@ -570,6 +572,113 @@ portalRoutes.get('/api/portal/aerodromos', async c => {
   const pattern = `%${query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`
   const result = await c.env.SHARE_DB.prepare("SELECT id, nome, designativo_icao, coordenadas FROM aerodromo WHERE lower(nome) LIKE ?1 ESCAPE '\\' OR lower(designativo_icao) LIKE ?1 ESCAPE '\\' ORDER BY designativo_icao LIMIT 50").bind(pattern).all<{ id: string; nome: string; designativo_icao: string; coordenadas: string | null }>()
   return c.json({ aerodromos: result.results })
+})
+
+function parseAeroportoCoordinates(value: unknown): { lat: number; lon: number } | null {
+  const parts = String(value || '').split(',').map(part => Number(part.trim()))
+  if (parts.length !== 2 || !parts.every(Number.isFinite) || Math.abs(parts[0]!) > 90 || Math.abs(parts[1]!) > 180) return null
+  return { lat: parts[0]!, lon: parts[1]! }
+}
+
+function positiveNumber(value: unknown): number | null {
+  const parsed = Number.parseFloat(String(value ?? '').trim().replace(',', '.'))
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+portalRoutes.post('/api/portal/simulador/voo', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
+  const body = await c.req.json<{ aeronave_id?: string; origem?: string; destino?: string }>().catch(() => null)
+  const aeronaveId = String(body?.aeronave_id || '').trim()
+  const origem = String(body?.origem || '').trim().toUpperCase()
+  const destino = String(body?.destino || '').trim().toUpperCase()
+  if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !/^[A-Z]{4}$/.test(origem) || !/^[A-Z]{4}$/.test(destino) || origem === destino) {
+    return c.json({ error: 'parametros_invalidos' }, 400)
+  }
+  const aircraft = await c.env.SHARE_DB.prepare(`SELECT a.id, a.consumo_combustivel, a.velocidade_cruzeiro,
+      a.tipo_aeronave, COALESCE(p.velocidade_cruzeiro_kt,
+        (SELECT p2.velocidade_cruzeiro_kt FROM performance_aeronave p2
+          WHERE lower(trim(p2.modelo)) = lower(trim(a.modelo)) ORDER BY p2.atualizado_em DESC LIMIT 1)) AS velocidade_cruzeiro_kt
+    FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = a.performance_aeronave_id
+    JOIN cotista_aeronave ca ON ca.aeronave_id = a.id
+    WHERE a.id = ?1 AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+      AND ca.id = (SELECT cotista_id FROM user_cliente WHERE id = ?4 LIMIT 1) LIMIT 1`)
+    .bind(aeronaveId, user.cliente_id, user.socio_id, user.id).first<Record<string, unknown>>()
+  if (!aircraft) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
+  const aerodromos = await c.env.SHARE_DB.prepare(`SELECT designativo_icao, coordenadas FROM aerodromo
+    WHERE upper(trim(designativo_icao)) IN (?1, ?2)`).bind(origem, destino).all<{ designativo_icao: string; coordenadas: string | null }>()
+  const airportByCode = new Map((aerodromos.results || []).map(item => [String(item.designativo_icao).toUpperCase(), item]))
+  const origemCoord = parseAeroportoCoordinates(airportByCode.get(origem)?.coordenadas)
+  const destinoCoord = parseAeroportoCoordinates(airportByCode.get(destino)?.coordenadas)
+  if (!origemCoord || !destinoCoord) return c.json({ error: 'coordenadas_aerodromo_indisponiveis' }, 422)
+  const velocidade = positiveNumber(aircraft.velocidade_cruzeiro_kt) || positiveNumber(aircraft.velocidade_cruzeiro)
+  const consumo = positiveNumber(aircraft.consumo_combustivel)
+  if (!velocidade || !consumo) return c.json({ error: 'dados_aeronave_indisponiveis' }, 422)
+  const distanciaNm = haversineKm(origemCoord.lat, origemCoord.lon, destinoCoord.lat, destinoCoord.lon) / 1.852
+  const tempoHoras = distanciaNm / velocidade
+  const tempoVooMinutos = Math.max(1, Math.round(tempoHoras * 60))
+  const tipoCombustivel = String(aircraft.tipo_aeronave || '').toUpperCase() === 'JATO' || String(aircraft.tipo_aeronave || '').toUpperCase() === 'TURBOELICE' ? 'JET' : 'AVGAS'
+  const colunaPreco = tipoCombustivel === 'JET' ? 'preco_jet' : 'preco_avgas'
+  const airportPrices = await Promise.all([origem, destino].map(async icao => {
+    const local = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
+      WHERE upper(COALESCE(codigo_icao, '')) = ?1 AND COALESCE(${colunaPreco}, 0) > 0`).bind(icao).first<{ media: number | null }>().catch(() => null)
+    if (positiveNumber(local?.media)) return { price: positiveNumber(local?.media)!, source: 'fornecedores_combustivel_icao' }
+    const nacional = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
+      WHERE COALESCE(${colunaPreco}, 0) > 0`).first<{ media: number | null }>().catch(() => null)
+    if (positiveNumber(nacional?.media)) return { price: positiveNumber(nacional?.media)!, source: 'fornecedores_combustivel_media_banco' }
+    const historico = await c.env.SHARE_DB.prepare(`SELECT AVG(valor_unitario) AS media FROM abastecimentos
+      WHERE (upper(COALESCE(local, '')) = ?1 OR upper(COALESCE(trecho, '')) LIKE ?2)
+        AND upper(COALESCE(tipo_combustivel, '')) LIKE ?3 AND COALESCE(valor_unitario, 0) > 0
+        AND date(data) >= date('now', '-365 days')`).bind(icao, `%${icao}%`, tipoCombustivel === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null }>().catch(() => null)
+    return positiveNumber(historico?.media) ? { price: positiveNumber(historico?.media)!, source: 'abastecimentos_historico_12m' } : null
+  }))
+  const validPrices = airportPrices.filter((item): item is { price: number; source: string } => Boolean(item))
+  if (!validPrices.length) return c.json({ error: 'preco_combustivel_indisponivel' }, 422)
+  const precoMedio = validPrices.reduce((sum, item) => sum + item.price, 0) / validPrices.length
+  const consumoLitros = consumo * tempoHoras
+  const totalCentavos = Math.round(consumoLitros * precoMedio * 100)
+  return c.json({ total_centavos: totalCentavos, distancia_nm: Number(distanciaNm.toFixed(1)), tempo_voo_minutos: tempoVooMinutos,
+    combustivel: { tipo: tipoCombustivel, litros_estimados: Number(consumoLitros.toFixed(1)), preco_medio_litro: Number(precoMedio.toFixed(2)),
+      fonte: [...new Set(validPrices.map(item => item.source))].join('+'), inclui_custos_fixos: false } })
+})
+
+portalRoutes.get('/api/portal/aeronave/:aeronaveId/rastreio', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
+  const aeronaveId = c.req.param('aeronaveId')
+  if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId)) return c.json({ error: 'parametros_invalidos' }, 400)
+  c.header('Cache-Control', 'private, no-store, no-cache, must-revalidate')
+  if (!(await checkRateLimit(c, `portal-rastreio:${user.id}:${clientIp(c)}`, 120))) return c.json({ error: 'muitas_tentativas' }, 429)
+  const ownedAircraft = await c.env.SHARE_DB.prepare(`SELECT a.id FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id
+    WHERE a.id = ?1 AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+      AND ca.id = (SELECT cotista_id FROM user_cliente WHERE id = ?4 LIMIT 1) LIMIT 1`)
+    .bind(aeronaveId, user.cliente_id, user.socio_id, user.id).first<{ id: string }>()
+  if (!ownedAircraft) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
+  const schema = await c.env.SHARE_DB.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
+  const icaoColumn = (schema.results || []).some(column => column.name === 'icao_hex') ? 'a.icao_hex' : 'NULL AS icao_hex'
+  const flight = await c.env.SHARE_DB.prepare(`SELECT lower(trim(COALESCE(s.status, ''))) AS status,
+      s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id,
+      a.matricula_registro, ${icaoColumn}
+    FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id
+    WHERE s.aeronave_id = ?1 AND lower(trim(COALESCE(s.status, ''))) IN ('em_voo', 'em voo', 'em_rota', 'em rota')
+    ORDER BY COALESCE(s.atualizado_em, s.criado_em) DESC LIMIT 1`).bind(aeronaveId).first<Record<string, unknown>>()
+  if (!flight) return c.json({ status: 'sem_voo' })
+  const isOwnFlight = (user.cliente_id && [flight.cliente_id, flight.cliente_emprestimo_id].includes(user.cliente_id))
+    || (user.socio_id && [flight.socio_id, flight.socio_emprestimo_id].includes(user.socio_id))
+  if (!isOwnFlight) return c.json({ status: 'em_voo' })
+  configurarProvedor(c.env.ADSB_PROVIDER)
+  const positions = await buscarPosicoes({
+    hex: flight.icao_hex ? [String(flight.icao_hex)] : [],
+    matriculas: flight.matricula_registro ? [String(flight.matricula_registro)] : [],
+  })
+  const identifier = String(flight.icao_hex || '').trim().toUpperCase()
+  const registration = String(flight.matricula_registro || '').trim().toUpperCase()
+  const position: PosicaoAeronave | undefined = positions.find(item => item.hex === identifier || item.matricula === registration)
+  if (!position || position.visto_ha_s === null || position.visto_ha_s > 300) return c.json({ status: 'em_voo', posicao: null })
+  return c.json({ status: 'em_voo', posicao: {
+    lat: position.lat, lon: position.lon, altitude_ft: position.alt_ft, velocidade_kt: position.gs_kt,
+    rumo_graus: position.rumo_graus, atualizado_ha_s: position.visto_ha_s,
+  } })
 })
 
 portalRoutes.get('/api/portal/simulador/combustivel', async c => {
