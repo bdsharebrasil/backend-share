@@ -20,8 +20,8 @@ type PernaOperacao = {
 const INTERVALO_MIN_TRILHA_S = 15
 const MAX_PONTOS_TRILHA = 1500
 const RETENCAO_TRILHA_DIAS = 3
-// acionado e pousado contam como "em solo"; só decolado é "em voo"
-const STATUS_EM_SOLO = ['acionado', 'em_solo', 'em solo', 'pousado']
+// Acionado pode decolar sem que o horário DEP seja lançado; somente estados de pouso dispensam ADS-B.
+const STATUS_EM_SOLO = ['em_solo', 'em solo', 'pousado']
 
 rastreioRoutes.get('/api/rastreio/aeronave/matricula/:matricula', async (c) => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
@@ -82,6 +82,14 @@ function statusRastreio(posicao: PosicaoAeronave | null, semIdentificador: boole
   if (!posicao || posicao.visto_ha_s === null || posicao.visto_ha_s > 300) return 'sem_sinal'
   if (posicao.visto_ha_s > 30) return 'atrasado'
   return 'ao_vivo'
+}
+
+export function statusOperacaoRastreio(statusBruto: string, rastreio: PosicaoAeronave | null): 'acionado' | 'em_voo' | 'em_solo' {
+  const normalizado = String(statusBruto || '').trim().toLowerCase()
+  const confirmadoNoAr = ['aprovada', 'acionado'].includes(normalizado)
+    && Boolean(rastreio && !rastreio.no_solo && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
+  if (confirmadoNoAr || !['acionado', ...STATUS_EM_SOLO].includes(normalizado)) return 'em_voo'
+  return normalizado === 'acionado' ? 'acionado' : 'em_solo'
 }
 
 /** Busca as coordenadas dos aeródromos em lotes (limite de parâmetros do D1). */
@@ -237,15 +245,15 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
   const indisponivel = provedorIndisponivel()
 
   const voos = itens.map((item) => {
-    const statusRegistrado = noSolo(item.status_bruto) ? 'em_solo' : 'em_voo'
+    const statusRegistrado = noSolo(item.status_bruto) ? 'em_solo' : item.status_bruto === 'acionado' ? 'acionado' : 'em_voo'
     const identificador = String(item.icao_hex || '').trim().toUpperCase()
     const matricula = String(item.matricula_registro || '').trim().toUpperCase()
-    const rastreio = statusRegistrado === 'em_voo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
-    // Voo só aprovado (sem jornada iniciada) só aparece se o ADS-B confirmar que está no ar
-    const confirmadoNoAr = item.status_bruto === 'aprovada'
+    const rastreio = statusRegistrado !== 'em_solo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
+    // Reservas aprovadas sem operação e voos acionados só contam como em voo após confirmação ADS-B recente.
+    const confirmadoNoAr = ['aprovada', 'acionado'].includes(item.status_bruto)
       && Boolean(rastreio && !rastreio.no_solo && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
     if (item.status_bruto === 'aprovada' && !confirmadoNoAr) return null
-    const status = confirmadoNoAr ? 'em_voo' : statusRegistrado
+    const status = statusOperacaoRastreio(item.status_bruto, rastreio)
     const semIdentificador = !/^[0-9A-F]{6}$/.test(identificador) && !matricula
 
     const pernas: PernaOperacao[] = (pernasPorSolicitacao.get(item.id) || []).map((perna) => ({
