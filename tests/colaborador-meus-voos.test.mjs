@@ -12,7 +12,7 @@ const jornadas = await readFile(new URL("../src/routes/jornadasRoutes.ts", impor
 test("Meus Voos lista somente reservas designadas ao tripulante autenticado", () => {
   assert.match(route, /authenticatedColaborador\(c\)/);
   assert.match(route, /s\.piloto_id = \?1 OR s\.copiloto_id = \?1/);
-  assert.match(route, /'aprovada', 'em_voo'.*'em_solo'.*'encerrada', 'concluida'/);
+  assert.match(route, /'aprovada', 'acionado', 'decolado'.*'em_voo'.*'em_solo'.*'encerrada', 'concluida'/);
   assert.match(route, /FROM solicitacoes_reserva_voo s/);
   assert.match(worker, /app\.route\('\/', colaboradorVoosRoutes\)/);
 });
@@ -34,7 +34,7 @@ test("detalhe reúne hospedagem, exibe cliente/cotista em um único campo e usa 
 });
 
 test("ficha pendente pode ser salva em voo aprovado, em operação ou encerrado", () => {
-  for (const status of ["aprovada", "em_voo", "em_rota", "em_solo", "pousado", "encerrada", "concluida"]) {
+  for (const status of ["aprovada", "acionado", "decolado", "em_voo", "em_rota", "em_solo", "pousado", "encerrada", "concluida"]) {
     assert.equal(statusPermiteEdicaoFichaPeso(status), true, `status ${status}`);
   }
   for (const status of ["pendente", "cancelada", "reprovada", "desconhecida"]) {

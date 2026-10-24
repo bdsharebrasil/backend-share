@@ -558,7 +558,7 @@ portalRoutes.get('/api/portal/overview', async c => {
     c.env.SHARE_DB.prepare(`SELECT s.id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.status, a.matricula_registro
       FROM solicitacoes_reserva_voo s JOIN cotista_aeronave ca ON ca.aeronave_id = s.aeronave_id LEFT JOIN aeronave a ON a.id = s.aeronave_id
      WHERE (ca.cliente_id = ?1 OR ca.socio_id = ?2) AND date(s.data_agendada) >= date(?3)
-       AND lower(trim(COALESCE(s.status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo')
+       AND lower(trim(COALESCE(s.status, ''))) IN ('pendente', 'aprovada', 'acionado', 'decolado', 'em_voo', 'em_solo')
      ORDER BY date(s.data_agendada), s.horario_previsto_agendamento LIMIT 1`).bind(user.cliente_id, user.socio_id, today).first<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT DISTINCT l.id, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada, l.tempo_total, l.tempo_voo, a.matricula_registro,
         COALESCE((SELECT SUM(r.valor_rateado_centavos) FROM ${rateioTable} r ${recenteRateioJoin}
@@ -705,7 +705,7 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/rastreio', async c => {
       s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id,
       a.matricula_registro, ${icaoColumn}
     FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id
-    WHERE s.aeronave_id = ?1 AND lower(trim(COALESCE(s.status, ''))) IN ('em_voo', 'em voo', 'em_rota', 'em rota')
+    WHERE s.aeronave_id = ?1 AND lower(trim(COALESCE(s.status, ''))) IN ('decolado', 'em_voo', 'em voo', 'em_rota', 'em rota')
     ORDER BY COALESCE(s.atualizado_em, s.criado_em) DESC LIMIT 1`).bind(aeronaveId).first<Record<string, unknown>>()
   if (!flight) return c.json({ status: 'sem_voo' })
   const isOwnFlight = (user.cliente_id && [flight.cliente_id, flight.cliente_emprestimo_id].includes(user.cliente_id))
@@ -755,7 +755,7 @@ portalRoutes.get('/api/portal/disponibilidade', async c => {
   })
   const [aircraft, reservations] = await Promise.all([
     aircraftPromise,
-    c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?1) AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo') ORDER BY data_agendada").bind(from, to).all(),
+    c.env.SHARE_DB.prepare("SELECT aeronave_id, data_agendada, dias_duracao, status FROM solicitacoes_reserva_voo WHERE date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?1) AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'acionado', 'decolado', 'em_voo', 'em_solo') ORDER BY data_agendada").bind(from, to).all(),
   ])
   return c.json({ from, to, aeronaves: aircraft.results, reservas: reservations.results })
 })
@@ -826,7 +826,7 @@ portalRoutes.post('/api/portal/solicitacoes', async c => {
   const dataFim = portalReservationEnd(dataAgendada, diasDuracao)
   const aircraft = await c.env.SHARE_DB.prepare("SELECT DISTINCT a.id, a.status FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id WHERE a.id = ?1 AND lower(a.status) = 'ativa' AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)").bind(String(body.aeronave_id), user?.cliente_id, user?.socio_id).first<{ id: string; status: string }>()
   if (!aircraft) return c.json({ error: 'aeronave_indisponivel' }, 409)
-  const conflict = await c.env.SHARE_DB.prepare("SELECT id FROM solicitacoes_reserva_voo WHERE aeronave_id = ?1 AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'em_voo', 'em_solo') AND date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?3) LIMIT 1").bind(aircraft.id, dataFim, dataAgendada).first<{ id: string }>()
+  const conflict = await c.env.SHARE_DB.prepare("SELECT id FROM solicitacoes_reserva_voo WHERE aeronave_id = ?1 AND lower(trim(COALESCE(status, ''))) IN ('pendente', 'aprovada', 'acionado', 'decolado', 'em_voo', 'em_solo') AND date(data_agendada) <= date(?2) AND date(data_agendada, '+' || (COALESCE(dias_duracao, 1) - 1) || ' days') >= date(?3) LIMIT 1").bind(aircraft.id, dataFim, dataAgendada).first<{ id: string }>()
   if (conflict) return c.json({ error: 'aeronave_indisponivel_no_periodo' }, 409)
   const id = crypto.randomUUID()
   await c.env.SHARE_DB.prepare("INSERT INTO solicitacoes_reserva_voo (id, cliente_id, socio_id, aeronave_id, voo_emprestado, origem, destino, data_agendada, horario_previsto_agendamento, dias_duracao, numero_passageiros, status, observacoes, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").bind(id, clientId, user?.socio_id || null, String(body.aeronave_id), String(body.voo_emprestado || 'nao'), String(body.origem), String(body.destino), dataAgendada, horarioPrevisto, diasDuracao, numeroPassageiros, body.observacoes ? String(body.observacoes) : null).run()

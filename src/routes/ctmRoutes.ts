@@ -20,7 +20,7 @@ type Variables = Record<string, never>
 export const ctmRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 const STATUS_EDITAVEIS_FICHA_PESO = new Set([
-  'aprovada', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida',
+  'aprovada', 'acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida',
 ])
 
 export function statusPermiteEdicaoFichaPeso(status: unknown) {

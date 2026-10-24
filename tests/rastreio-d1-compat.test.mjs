@@ -7,13 +7,13 @@ const source = await readFile(new URL('../src/routes/rastreioRoutes.ts', import.
 test('rastreio D1 tolera aeronave sem coluna icao_hex e mantém fallback por matrícula', () => {
   assert.match(source, /pragma_table_info\('aeronave'\)/)
   assert.match(source, /\?\s*'a\.icao_hex'\s*:\s*'NULL AS icao_hex'/)
-  assert.match(source, /matriculas: emVoo\.map\(\(item\) => item\.matricula_registro\)/)
+  assert.match(source, /matriculas: emVoo\.map\(\(item\) => String\(item\.matricula_registro \|\| ''\)\.replace\(/)
 })
 
 test('agendamento aprovado perto do horário só vira voo operacional com ADS-B recente e fora do solo', () => {
   assert.match(source, /= 'aprovada'[\s\S]*datetime\('now', '-6 hours'\)[\s\S]*datetime\('now', '\+2 hours'\)/)
   assert.match(source, /!rastreio\.no_solo && rastreio\.visto_ha_s !== null && rastreio\.visto_ha_s <= 30/)
-  assert.match(source, /if \(item\.status_bruto === 'aprovada' && !confirmadoNoAr\) return null/)
+  assert.match(source, /if \(statusBruto === 'aprovada' && !confirmadoNoAr\) return null/)
 })
 
 test('consulta individual ADS-B aceita matrícula ou hex e preserva o formato ac do endpoint v2', () => {

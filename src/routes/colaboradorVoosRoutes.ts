@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { authenticatedColaborador } from '../lib/auth'
+import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
 
 type Bindings = { SHARE_DB: D1Database }
 type Variables = Record<string, never>
@@ -17,13 +18,13 @@ async function tripulanteDoUsuario(c: Parameters<typeof authenticatedColaborador
 }
 
 const VOOS_COLABORADOR_SQL = `
-  SELECT s.id, s.numero_voo, s.status, s.aeronave_id, s.origem, s.destino,
+  SELECT s.id, s.numero_voo, __STATUS_OPERACIONAL__ AS status, s.aeronave_id, s.origem, s.destino,
     s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros,
     s.piloto_id, s.copiloto_id, a.matricula_registro, a.modelo
   FROM solicitacoes_reserva_voo s
   LEFT JOIN aeronave a ON a.id = s.aeronave_id
   WHERE (s.piloto_id = ?1 OR s.copiloto_id = ?1)
-    AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
+    AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
   ORDER BY date(s.data_agendada) DESC, s.horario_previsto_agendamento DESC, s.criado_em DESC
 `
 
@@ -32,7 +33,8 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const tripulante = await tripulanteDoUsuario(c, user.id, user.canac)
   if (!tripulante) return c.json({ tripulante: null, voos: [] })
-  const result = await c.env.SHARE_DB.prepare(VOOS_COLABORADOR_SQL).bind(tripulante.id).all()
+  const statusSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(c.env.SHARE_DB))
+  const result = await c.env.SHARE_DB.prepare(VOOS_COLABORADOR_SQL.replace('__STATUS_OPERACIONAL__', statusSql)).bind(tripulante.id).all()
   return c.json({ tripulante, voos: result.results || [] })
 })
 
@@ -43,8 +45,9 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
   if (!tripulante) return c.notFound()
 
   const db = c.env.SHARE_DB
+  const statusSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(db))
   const voo = await db.prepare(`
-    SELECT s.*, date(s.data_agendada, '+' || (MAX(COALESCE(s.dias_duracao, 1), 1) - 1) || ' days') AS data_fim,
+    SELECT s.*, ${statusSql} AS status_operacional, date(s.data_agendada, '+' || (MAX(COALESCE(s.dias_duracao, 1), 1) - 1) || ' days') AS data_fim,
       a.matricula_registro, a.modelo, a.fabricante,
       CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL THEN 'Cotista' ELSE 'Cliente' END AS cliente_tipo,
       CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL
@@ -62,10 +65,12 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
     LEFT JOIN tripulacao cp ON cp.id = s.copiloto_id
     LEFT JOIN tripulacao_freelancer cpf ON cpf.id = s.copiloto_id
     WHERE s.id = ?1 AND (s.piloto_id = ?2 OR s.copiloto_id = ?2)
-      AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
+      AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
     LIMIT 1
   `).bind(c.req.param('id'), tripulante.id).first<Record<string, any>>()
   if (!voo) return c.notFound()
+  voo.status = voo.status_operacional || voo.status
+  delete voo.status_operacional
 
   const [jornadas, hospedagens] = await Promise.all([
     db.prepare(`

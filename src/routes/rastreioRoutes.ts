@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { requireShareInternal } from '../lib/auth'
 import { checkRateLimit, clientIp } from '../lib/cache'
 import { buscarPosicoes, configurarProvedor, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
+import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
 
 type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string }
 type Variables = Record<string, never>
@@ -69,52 +70,60 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
   if (!(await checkRateLimit(c, `rastreio:${clientIp(c)}`, 120))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   configurarProvedor(c.env.ADSB_PROVIDER)
   const aeronaveSchema = await c.env.SHARE_DB.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
+  const statusOperacionalSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(c.env.SHARE_DB))
   const colunaIcaoHex = (aeronaveSchema.results || []).some((column) => column.name === 'icao_hex')
     ? 'a.icao_hex'
     : 'NULL AS icao_hex'
   const rows = await c.env.SHARE_DB.prepare(`
-    SELECT s.id, s.numero_voo, lower(trim(s.status)) AS status_bruto, s.aeronave_id,
-      s.origem, s.destino, s.horario_previsto_agendamento, a.matricula_registro, a.modelo, ${colunaIcaoHex},
-      COALESCE(hs.nome, cl.razao_social) AS cotista_nome,
-      COALESCE(tp.nome_completo, fp.nome_completo) AS piloto_nome,
-      COALESCE(tc.nome_completo, fc.nome_completo) AS copiloto_nome,
-      ao.coordenadas AS origem_coordenadas, ad.coordenadas AS destino_coordenadas
-    FROM solicitacoes_reserva_voo s
-    LEFT JOIN aeronave a ON a.id = s.aeronave_id
-    LEFT JOIN hold_socios hs ON hs.id = s.socio_id
-    LEFT JOIN cliente cl ON cl.id = s.cliente_id
-    LEFT JOIN tripulacao tp ON tp.id = s.piloto_id
-    LEFT JOIN tripulacao_freelancer fp ON fp.id = s.piloto_id
-    LEFT JOIN tripulacao tc ON tc.id = s.copiloto_id
-    LEFT JOIN tripulacao_freelancer fc ON fc.id = s.copiloto_id
-    LEFT JOIN aerodromo ao ON upper(trim(ao.designativo_icao)) = upper(trim(s.origem))
-    LEFT JOIN aerodromo ad ON upper(trim(ad.designativo_icao)) = upper(trim(s.destino))
-    WHERE lower(trim(COALESCE(s.status, ''))) IN ('em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo')
-      OR (lower(trim(COALESCE(s.status, ''))) = 'aprovada'
-        AND datetime(COALESCE(s.horario_previsto_agendamento, s.data_agendada || 'T00:00:00Z'))
+    WITH operacoes AS (
+      SELECT s.id, s.numero_voo, ${statusOperacionalSql} AS status_bruto, s.aeronave_id, s.criado_em,
+        s.origem, s.destino, s.horario_previsto_agendamento, s.data_agendada,
+        a.matricula_registro, a.modelo, ${colunaIcaoHex},
+        COALESCE(hs.nome, cl.razao_social) AS cotista_nome,
+        COALESCE(tp.nome_completo, fp.nome_completo) AS piloto_nome,
+        COALESCE(tc.nome_completo, fc.nome_completo) AS copiloto_nome,
+        ao.coordenadas AS origem_coordenadas, ad.coordenadas AS destino_coordenadas
+      FROM solicitacoes_reserva_voo s
+      LEFT JOIN aeronave a ON a.id = s.aeronave_id
+      LEFT JOIN hold_socios hs ON hs.id = s.socio_id
+      LEFT JOIN cliente cl ON cl.id = s.cliente_id
+      LEFT JOIN tripulacao tp ON tp.id = s.piloto_id
+      LEFT JOIN tripulacao_freelancer fp ON fp.id = s.piloto_id
+      LEFT JOIN tripulacao tc ON tc.id = s.copiloto_id
+      LEFT JOIN tripulacao_freelancer fc ON fc.id = s.copiloto_id
+      LEFT JOIN aerodromo ao ON upper(trim(ao.designativo_icao)) = upper(trim(s.origem))
+      LEFT JOIN aerodromo ad ON upper(trim(ad.designativo_icao)) = upper(trim(s.destino))
+    )
+    SELECT * FROM operacoes
+    WHERE lower(trim(status_bruto)) IN ('acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo')
+      OR (lower(trim(status_bruto)) = 'aprovada'
+        AND datetime(COALESCE(horario_previsto_agendamento, data_agendada || 'T00:00:00Z'))
           BETWEEN datetime('now', '-6 hours') AND datetime('now', '+2 hours'))
-    ORDER BY s.criado_em DESC`).all<any>()
+    ORDER BY criado_em DESC`).all<any>()
   const itens = rows.results || []
   const emVoo = itens.filter((item) => !['em_solo', 'em solo'].includes(item.status_bruto))
   const posicoes = await buscarPosicoes({
     hex: emVoo.map((item) => item.icao_hex).filter(Boolean),
-    matriculas: emVoo.map((item) => item.matricula_registro).filter(Boolean),
+    matriculas: emVoo.map((item) => String(item.matricula_registro || '').replace(/-/g, '')).filter(Boolean),
   })
   const porChave = new Map<string, PosicaoAeronave>()
   posicoes.forEach((item) => {
     porChave.set(item.hex, item)
-    if (item.matricula) porChave.set(item.matricula, item)
+    if (item.matricula) porChave.set(item.matricula.replace(/-/g, ''), item)
   })
   const indisponivel = provedorIndisponivel()
   const voos = itens.map((item) => {
-    const statusRegistrado = ['em_solo', 'em solo'].includes(item.status_bruto) ? 'em_solo' : 'em_voo'
+    const statusBruto = String(item.status_bruto || '').trim().toLowerCase()
+    const statusRegistrado = ['em_solo', 'em solo'].includes(statusBruto)
+      ? 'em_solo'
+      : statusBruto === 'acionado' ? 'acionado' : 'decolado'
     const identificador = String(item.icao_hex || '').trim().toUpperCase()
-    const matricula = String(item.matricula_registro || '').trim().toUpperCase()
-    const rastreio = statusRegistrado === 'em_voo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
-    const confirmadoNoAr = item.status_bruto === 'aprovada'
+    const matricula = String(item.matricula_registro || '').trim().toUpperCase().replace(/-/g, '')
+    const rastreio = statusRegistrado !== 'em_solo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
+    const confirmadoNoAr = ['aprovada', 'acionado'].includes(statusBruto)
       && Boolean(rastreio && !rastreio.no_solo && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
-    if (item.status_bruto === 'aprovada' && !confirmadoNoAr) return null
-    const status = confirmadoNoAr ? 'em_voo' : statusRegistrado
+    if (statusBruto === 'aprovada' && !confirmadoNoAr) return null
+    const status = confirmadoNoAr ? 'decolado' : statusRegistrado
     const semIdentificador = !/^[0-9A-F]{6}$/.test(identificador) && !matricula
     return {
       id: item.id, numero_voo: item.numero_voo || null, status, aeronave_id: item.aeronave_id || null,

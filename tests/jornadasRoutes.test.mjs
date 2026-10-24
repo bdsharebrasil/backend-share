@@ -30,17 +30,20 @@ test('agrupa PIC e SIC vinculados à mesma jornada-raiz sem duplicar o históric
   assert.equal(grupos[0].registros.length, 2)
 })
 
-test('mantém EM VOO somente enquanto houver perna sem pouso registrado', () => {
-  assert.equal(determinarStatusAgendamentoVoo('aprovada', 1, 0), 'em_voo')
-  assert.equal(determinarStatusAgendamentoVoo('em_voo', 0, 1), 'em_solo')
-  assert.equal(determinarStatusAgendamentoVoo('em_voo', 0, 0), 'em_solo')
+test('deriva status operacional do último evento registrado na jornada', () => {
+  assert.equal(determinarStatusAgendamentoVoo('aprovada', 'acionado'), 'acionado')
+  assert.equal(determinarStatusAgendamentoVoo('acionado', 'decolado'), 'decolado')
+  assert.equal(determinarStatusAgendamentoVoo('decolado', 'em_solo'), 'em_solo')
+  assert.equal(determinarStatusAgendamentoVoo('em_rota', null), 'decolado')
+  assert.equal(determinarStatusAgendamentoVoo('aprovada', null), 'aprovada')
 })
 
-test('mantém agendamento em solo ao encerrar jornada individual e preserva solicitações ainda sem voo', () => {
-  assert.equal(determinarStatusAgendamentoVoo('aprovada', 0, 0), 'aprovada')
-  assert.equal(determinarStatusAgendamentoVoo('aprovada', 0, 0, true), 'em_solo')
-  assert.equal(determinarStatusAgendamentoVoo('pendente', 0, 1, true), 'pendente')
-  assert.equal(determinarStatusAgendamentoVoo('encerrada', 0, 1, true), 'encerrada')
+test('preserva estados terminais e não chama jornada sem pouso registrado de em_solo', () => {
+  assert.equal(determinarStatusAgendamentoVoo('aprovada', null), 'aprovada')
+  assert.equal(determinarStatusAgendamentoVoo('acionado', null), 'acionado')
+  assert.equal(determinarStatusAgendamentoVoo('decolado', null), 'decolado')
+  assert.equal(determinarStatusAgendamentoVoo('pendente', 'em_solo'), 'pendente')
+  assert.equal(determinarStatusAgendamentoVoo('encerrada', 'em_solo'), 'encerrada')
 })
 
 test('somente checklist pré-voo concluído libera o início da jornada', () => {
@@ -49,8 +52,8 @@ test('somente checklist pré-voo concluído libera o início da jornada', () => 
   assert.equal(checklistPreVooConcluido(' CONCLUIDO '), true)
 })
 
-test('permite nova jornada em agendamentos aprovados, em voo ou em solo', () => {
-  for (const status of ['aprovada', 'em_voo', 'em voo', 'em_solo', 'em_rota']) {
+test('permite nova jornada em agendamentos aprovados ou com operação iniciada', () => {
+  for (const status of ['aprovada', 'acionado', 'decolado', 'em_voo', 'em voo', 'em_solo', 'em_rota']) {
     assert.equal(agendamentoPermiteIniciarJornada(status), true, `status ${status}`)
   }
   for (const status of ['pendente', 'encerrada', 'cancelada', 'reprovada']) {
@@ -69,8 +72,8 @@ test('iniciar jornada não exige ficha de peso e balanceamento concluída', asyn
   assert.doesNotMatch(endpoint, /ctm_ficha_peso_balanceamento|peso_balanceamento_obrigatorio|pesoBalanceamentoConcluido/)
 })
 
-test('permite editar todos os dados da perna em voo ou em solo, mas não antes ou depois do agendamento', async () => {
-  for (const status of ['em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo', 'pousado']) {
+test('permite editar horários a partir do acionamento ou decolagem, mas não fora da operação', async () => {
+  for (const status of ['acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo', 'pousado']) {
     assert.equal(agendamentoPermiteCompletarHorarios(status), true, `status ${status}`)
   }
   for (const status of ['aprovada', 'encerrada', 'concluida', 'cancelada', 'reprovada']) {
@@ -88,4 +91,10 @@ test('permite editar todos os dados da perna em voo ou em solo, mas não antes o
   assert.doesNotMatch(endpoint, /campos_restritos/)
   assert.doesNotMatch(endpoint, /isInternalRequest/)
   assert.match(endpoint, /perna\.lancamento_diario_id/)
+})
+
+test('sincronização do resumo lê horario_dep antes de preservar a fase AC', async () => {
+  const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
+  assert.match(source, /SELECT horario_ac, horario_dep, horario_pouso, horario_corte, status FROM pernas_jornada_voo/)
+  assert.match(source, /ultimaPerna\?\.horario_dep \|\| ultimaPerna\?\.status === 'em_voo' \? 'em_rota'/)
 })

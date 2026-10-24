@@ -109,7 +109,7 @@ async function buscarSemCache(hex: string[], matriculas: string[]): Promise<Resu
 
 export async function buscarPosicoes(opts: { hex: string[]; matriculas: string[] }): Promise<PosicaoAeronave[]> {
   const hex = [...new Set(opts.hex.map((item) => item.trim().toUpperCase()).filter((item) => /^[0-9A-F]{6}$/.test(item)))]
-  const matriculas = [...new Set(opts.matriculas.map((item) => item.trim().toUpperCase()).filter(Boolean))]
+  const matriculas = [...new Set(opts.matriculas.map((item) => item.trim().toUpperCase().replace(/-/g, '')).filter(Boolean))]
   const chave = `${hex.sort().join(',')}|${matriculas.sort().join(',')}`
   if (!chave || chave === '|') {
     ultimoProvedorIndisponivel = false

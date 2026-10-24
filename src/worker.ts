@@ -24,6 +24,7 @@ import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincroni
 import { ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements } from './financeiro/relatorioContaReceber'
 import { lotesIcaoRelatorio, nomearRotaRelatorio, sequenciaRotaRelatorio, type PernaRotaRelatorio } from './relatorioViagemRota'
 import { validateWorkerSchema } from './lib/schema'
+import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from './lib/flightStatus'
 import { escapeHtml } from './lib/format'
 import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from './lib/schedule'
 import { checkRateLimit, clientIp } from './lib/cache'
@@ -1304,14 +1305,15 @@ app.post('/api/colaborador/ferias', async c => {
 app.get('/api/interno/dashboard/operacoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const dataReferencia = c.req.query('data') || new Date().toISOString().slice(0, 10)
+  const statusOperacionalSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(c.env.SHARE_DB))
   const [resumo, solicitacoes] = await Promise.all([
     c.env.SHARE_DB.prepare(`SELECT
       SUM(CASE WHEN date(data_agendada) = ?1 THEN 1 ELSE 0 END) AS voos_hoje,
       SUM(CASE WHEN status = 'pendente' THEN 1 ELSE 0 END) AS pendencias,
       COUNT(*) AS reservas_abertas
       FROM solicitacoes_reserva_voo
-      WHERE date(data_agendada) >= ?1 AND status IN ('pendente', 'aprovada')`).bind(dataReferencia).first<Record<string, number>>(),
-    c.env.SHARE_DB.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, hs.nome AS socio_nome, COALESCE((SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.socio_id = s.socio_id AND ca.codigo_cliente IS NOT NULL AND (ca.aeronave_id = s.aeronave_id OR s.aeronave_id IS NULL) ORDER BY CASE WHEN ca.aeronave_id = s.aeronave_id THEN 0 ELSE 1 END LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo
+      WHERE date(data_agendada) >= ?1 AND status IN ('pendente', 'aprovada', 'acionado', 'decolado', 'em_voo', 'em_rota', 'em_solo')`).bind(dataReferencia).first<Record<string, number>>(),
+    c.env.SHARE_DB.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, ${statusOperacionalSql} AS status, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, c.razao_social AS cliente_razao_social, hs.nome AS socio_nome, COALESCE((SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE ca.socio_id = s.socio_id AND ca.codigo_cliente IS NOT NULL AND (ca.aeronave_id = s.aeronave_id OR s.aeronave_id IS NULL) ORDER BY CASE WHEN ca.aeronave_id = s.aeronave_id THEN 0 ELSE 1 END LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo
       FROM solicitacoes_reserva_voo s
       LEFT JOIN cliente c ON c.id = s.cliente_id
       LEFT JOIN hold_socios hs ON hs.id = s.socio_id
@@ -1509,8 +1511,9 @@ app.get('/api/interno/agendamento', async c => {
   const inicio = c.req.query('inicio') || new Date().toISOString().slice(0, 10)
   const fim = c.req.query('fim') || inicio.slice(0, 7) + '-31'
   const db = c.env.SHARE_DB
+  const statusOperacionalSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(db))
   const [agendamentos, aeronave, tripulacao, freelancers, disponibilidades] = await Promise.all([
-    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, s.status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
+    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, ${statusOperacionalSql} AS status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status = 'encerrada') AS jornadas_encerradas,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status <> 'encerrada') AS jornadas_abertas,
         c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, (SELECT cae.codigo_cliente FROM cotista_aeronave cae WHERE (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id) AND cae.aeronave_id = s.aeronave_id ORDER BY cae.codigo_cliente LIMIT 1), (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id ORDER BY ca.codigo_cliente LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave,
