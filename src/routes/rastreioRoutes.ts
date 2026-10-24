@@ -46,7 +46,10 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
     LEFT JOIN tripulacao_freelancer fc ON fc.id = s.copiloto_id
     LEFT JOIN aerodromo ao ON upper(trim(ao.designativo_icao)) = upper(trim(s.origem))
     LEFT JOIN aerodromo ad ON upper(trim(ad.designativo_icao)) = upper(trim(s.destino))
-    WHERE lower(trim(COALESCE(s.status, ''))) IN ('em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo')
+    WHERE lower(trim(COALESCE(s.status, ''))) IN ('em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo')
+      OR (lower(trim(COALESCE(s.status, ''))) = 'aprovada'
+        AND datetime(COALESCE(s.horario_previsto_agendamento, s.data_agendada || 'T00:00:00Z'))
+          BETWEEN datetime('now', '-6 hours') AND datetime('now', '+2 hours'))
     ORDER BY s.criado_em DESC`).all<any>()
   const itens = rows.results || []
   const emVoo = itens.filter((item) => !['em_solo', 'em solo'].includes(item.status_bruto))
@@ -61,10 +64,14 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
   })
   const indisponivel = provedorIndisponivel()
   const voos = itens.map((item) => {
-    const status = ['em_solo', 'em solo'].includes(item.status_bruto) ? 'em_solo' : 'em_voo'
+    const statusRegistrado = ['em_solo', 'em solo'].includes(item.status_bruto) ? 'em_solo' : 'em_voo'
     const identificador = String(item.icao_hex || '').trim().toUpperCase()
     const matricula = String(item.matricula_registro || '').trim().toUpperCase()
-    const rastreio = status === 'em_voo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
+    const rastreio = statusRegistrado === 'em_voo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
+    const confirmadoNoAr = item.status_bruto === 'aprovada'
+      && Boolean(rastreio && !rastreio.no_solo && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
+    if (item.status_bruto === 'aprovada' && !confirmadoNoAr) return null
+    const status = confirmadoNoAr ? 'em_voo' : statusRegistrado
     const semIdentificador = !/^[0-9A-F]{6}$/.test(identificador) && !matricula
     return {
       id: item.id, numero_voo: item.numero_voo || null, status, aeronave_id: item.aeronave_id || null,
@@ -75,6 +82,6 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
       cotista_nome: item.cotista_nome || null, piloto_nome: item.piloto_nome || null, copiloto_nome: item.copiloto_nome || null,
       rastreio, rastreio_status: statusRastreio(rastreio, semIdentificador, indisponivel),
     }
-  })
+  }).filter(Boolean)
   return c.json({ atualizado_em: new Date().toISOString(), voos })
 })
