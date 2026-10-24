@@ -28,4 +28,5 @@ export type Env = {
   MEETING_ROOMS: DurableObjectNamespace
   R2_PUBLIC_URL?: string
   ADSB_PROVIDER?: string
+  API_OPENSTREETMAP?: string
 }
