@@ -130,3 +130,13 @@ test('sincronização do resumo lê horario_dep antes de preservar a fase AC', a
   assert.match(source, /ultimaPerna\?\.horario_dep \|\| ultimaPerna\?\.status === 'em_voo' \? 'em_rota'/)
   assert.match(source, /horario_decolagem = \(SELECT p\.horario_dep/)
 })
+
+test('sincronização propaga pouso e corte da perna-raiz para jornadas PIC/SIC vinculadas', async () => {
+  const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
+  const inicio = source.indexOf('async function sincronizarResumoJornada')
+  const fim = source.indexOf('\nasync function acumuladoTripulante', inicio)
+  const sincronizacao = source.slice(inicio, fim)
+  assert.match(sincronizacao, /horario_pouso = \(SELECT p\.horario_pouso FROM pernas_jornada_voo p WHERE p\.jornada_id = COALESCE\(jornadas_voo\.jornada_principal_id, jornadas_voo\.id\)/)
+  assert.match(sincronizacao, /horario_corte = \(SELECT p\.horario_corte FROM pernas_jornada_voo p WHERE p\.jornada_id = COALESCE\(jornadas_voo\.jornada_principal_id, jornadas_voo\.id\)/)
+  assert.match(sincronizacao, /WHERE COALESCE\(jornada_principal_id, id\) =/)
+})

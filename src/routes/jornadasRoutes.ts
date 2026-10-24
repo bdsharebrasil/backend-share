@@ -92,10 +92,6 @@ function minutosDaJornada(jornada: any, fimPrevisto?: string | null): number {
 }
 
 async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
-  await db.prepare(`UPDATE jornadas_voo SET
-      horario_pouso = (SELECT p.horario_pouso FROM pernas_jornada_voo p WHERE p.jornada_id = ?1 ORDER BY p.numero DESC LIMIT 1),
-      horario_corte = (SELECT p.horario_corte FROM pernas_jornada_voo p WHERE p.jornada_id = ?1 ORDER BY p.numero DESC LIMIT 1)
-    WHERE id = ?1`).bind(jornadaId).run()
   const jornada = await db.prepare('SELECT horario_apresentacao, horario_acionamento, minutos_pos_corte, status FROM jornadas_voo WHERE id = ?1').bind(jornadaId).first<any>()
   const pernas = await db.prepare('SELECT horario_ac, horario_dep, horario_pouso, horario_corte, status FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(jornadaId).all<any>()
   const registros = pernas.results || []
@@ -105,6 +101,8 @@ async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
       : ultimaPerna?.horario_ac || jornada?.horario_acionamento ? 'em_solo' : null
   const minutos = minutosDaJornada({ ...jornada, pernas: registros })
   await db.prepare(`UPDATE jornadas_voo SET
+      horario_pouso = (SELECT p.horario_pouso FROM pernas_jornada_voo p WHERE p.jornada_id = COALESCE(jornadas_voo.jornada_principal_id, jornadas_voo.id) ORDER BY p.numero DESC LIMIT 1),
+      horario_corte = (SELECT p.horario_corte FROM pernas_jornada_voo p WHERE p.jornada_id = COALESCE(jornadas_voo.jornada_principal_id, jornadas_voo.id) ORDER BY p.numero DESC LIMIT 1),
       horario_decolagem = (SELECT p.horario_dep FROM pernas_jornada_voo p WHERE p.jornada_id = COALESCE(jornada_principal_id, id) ORDER BY p.numero LIMIT 1),
       minutos_pos_corte = 30, minutos_jornada = ?1,
       status = CASE WHEN status = 'encerrada' OR ?2 IS NULL THEN status ELSE ?2 END,
