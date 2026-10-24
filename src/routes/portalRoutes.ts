@@ -3,6 +3,7 @@ import { checkRateLimit, clientIp } from "../lib/cache"
 import { normalizarHorarioAgendamento } from "../lib/schedule"
 import { haversineKm } from "../lib/geo"
 import { buscarPosicoes, configurarProvedor, type PosicaoAeronave } from "../lib/adsbProvider"
+import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from "../lib/flightStatus"
 
 type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; CLIENT_SESSION_SECRET?: string; CLIENT_SESSION_TTL_SECONDS?: string; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string; TELEGRAM_BOT_TOKEN?: string }
 type Variables = Record<string, never>
@@ -701,12 +702,19 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/rastreio', async c => {
   if (!ownedAircraft) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
   const schema = await c.env.SHARE_DB.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
   const icaoColumn = (schema.results || []).some(column => column.name === 'icao_hex') ? 'a.icao_hex' : 'NULL AS icao_hex'
-  const flight = await c.env.SHARE_DB.prepare(`SELECT lower(trim(COALESCE(s.status, ''))) AS status,
-      s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id,
-      a.matricula_registro, ${icaoColumn}
-    FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id
-    WHERE s.aeronave_id = ?1 AND lower(trim(COALESCE(s.status, ''))) IN ('decolado', 'em_voo', 'em voo', 'em_rota', 'em rota')
-    ORDER BY COALESCE(s.atualizado_em, s.criado_em) DESC LIMIT 1`).bind(aeronaveId).first<Record<string, unknown>>()
+  const statusSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(c.env.SHARE_DB))
+  const flight = await c.env.SHARE_DB.prepare(`WITH voos AS (
+      SELECT ${statusSql} AS status, s.data_agendada, s.horario_previsto_agendamento,
+        s.atualizado_em, s.criado_em, s.cliente_id, s.socio_id, s.cliente_emprestimo_id,
+        s.socio_emprestimo_id, a.matricula_registro, ${icaoColumn}
+      FROM solicitacoes_reserva_voo s LEFT JOIN aeronave a ON a.id = s.aeronave_id
+      WHERE s.aeronave_id = ?1
+    )
+    SELECT * FROM voos
+    WHERE status IN ('decolado', 'em_voo', 'em voo', 'em_rota', 'em rota')
+      OR (status = 'aprovada' AND datetime(COALESCE(horario_previsto_agendamento, data_agendada || 'T00:00:00Z'))
+        BETWEEN datetime('now', '-6 hours') AND datetime('now', '+2 hours'))
+    ORDER BY COALESCE(atualizado_em, criado_em) DESC LIMIT 1`).bind(aeronaveId).first<Record<string, unknown>>()
   if (!flight) return c.json({ status: 'sem_voo' })
   const isOwnFlight = (user.cliente_id && [flight.cliente_id, flight.cliente_emprestimo_id].includes(user.cliente_id))
     || (user.socio_id && [flight.socio_id, flight.socio_emprestimo_id].includes(user.socio_id))
@@ -719,6 +727,9 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/rastreio', async c => {
   const identifier = String(flight.icao_hex || '').trim().toUpperCase()
   const registration = String(flight.matricula_registro || '').trim().toUpperCase()
   const position: PosicaoAeronave | undefined = positions.find(item => item.hex === identifier || item.matricula === registration)
+  const vooAprovadoConfirmado = flight.status === 'aprovada'
+    && Boolean(position && !position.no_solo && position.visto_ha_s !== null && position.visto_ha_s <= 30)
+  if (flight.status === 'aprovada' && !vooAprovadoConfirmado) return c.json({ status: 'sem_voo' })
   if (!position || position.visto_ha_s === null || position.visto_ha_s > 300) return c.json({ status: 'em_voo', posicao: null })
   return c.json({ status: 'em_voo', posicao: {
     lat: position.lat, lon: position.lon, altitude_ft: position.alt_ft, velocidade_kt: position.gs_kt,

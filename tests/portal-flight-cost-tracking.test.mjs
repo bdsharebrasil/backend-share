@@ -21,3 +21,10 @@ test('rastreio limita acesso à aeronave vinculada e não retorna posição para
   assert.match(source, /status: 'sem_voo'/);
   assert.doesNotMatch(source, /return c\.json\(\{[^\n]*rastreio: position/);
 });
+
+test('rastreio do portal usa status operacional da jornada e confirma voo aprovado com ADS-B recente', () => {
+  assert.match(source, /statusAgendamentoComJornadaSql\(await jornadaOperacionalDisponivel\(c\.env\.SHARE_DB\)\)/);
+  assert.match(source, /status IN \('decolado', 'em_voo', 'em voo', 'em_rota', 'em rota'\)/);
+  assert.match(source, /status = 'aprovada'[\s\S]*datetime\('now', '-6 hours'\)[\s\S]*datetime\('now', '\+2 hours'\)/);
+  assert.match(source, /!position\.no_solo && position\.visto_ha_s !== null && position\.visto_ha_s <= 30/);
+});
