@@ -7,6 +7,49 @@ type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: Dur
 type Variables = Record<string, never>
 export const rastreioRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
+rastreioRoutes.get('/api/rastreio/aeronave/matricula/:matricula', async (c) => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await checkRateLimit(c, `rastreio-matricula:${clientIp(c)}`, 120))) {
+    return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+  }
+
+  c.header('Cache-Control', 'private, no-store, no-cache, must-revalidate')
+  const identificador = c.req.param('matricula').replace(/-/g, '').trim().toUpperCase()
+  if (!/^(?:[0-9A-F]{6}|[A-Z0-9]{3,10})$/.test(identificador)) {
+    return c.json({ error: 'matricula_ou_hex_invalido' }, 400)
+  }
+
+  configurarProvedor(c.env.ADSB_PROVIDER)
+  try {
+    const porHex = /^[0-9A-F]{6}$/.test(identificador)
+    const posicoes = await buscarPosicoes({
+      hex: porHex ? [identificador] : [],
+      matriculas: porHex ? [] : [identificador],
+    })
+    if (provedorIndisponivel()) return c.json({ error: 'provedor_adsb_indisponivel' }, 503)
+
+    const correspondentes = posicoes.filter((posicao) => porHex
+      ? posicao.hex === identificador
+      : posicao.matricula?.replace(/-/g, '').toUpperCase() === identificador)
+    return c.json({ ac: correspondentes.map((posicao) => ({
+      hex: posicao.hex,
+      r: posicao.matricula,
+      flight: posicao.callsign,
+      lat: posicao.lat,
+      lon: posicao.lon,
+      alt_baro: posicao.no_solo ? 'ground' : posicao.alt_ft,
+      gs: posicao.gs_kt,
+      track: posicao.rumo_graus,
+      nav_heading: posicao.rumo_graus,
+      baro_rate: posicao.vs_fpm,
+      squawk: posicao.squawk,
+      seen_pos: posicao.visto_ha_s,
+    })) })
+  } catch {
+    return c.json({ error: 'erro_ao_buscar_dados_adsb' }, 502)
+  }
+})
+
 function coordenada(valor: unknown): { lat: number; lon: number } | null {
   const partes = String(valor || '').split(',').map((item) => Number(item.trim()))
   if (partes.length !== 2 || !partes.every(Number.isFinite) || Math.abs(partes[0]!) > 90 || Math.abs(partes[1]!) > 180) return null

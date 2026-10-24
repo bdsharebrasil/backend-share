@@ -15,3 +15,12 @@ test('agendamento aprovado perto do horário só vira voo operacional com ADS-B 
   assert.match(source, /!rastreio\.no_solo && rastreio\.visto_ha_s !== null && rastreio\.visto_ha_s <= 30/)
   assert.match(source, /if \(item\.status_bruto === 'aprovada' && !confirmadoNoAr\) return null/)
 })
+
+test('consulta individual ADS-B aceita matrícula ou hex e preserva o formato ac do endpoint v2', () => {
+  assert.match(source, /get\('\/api\/rastreio\/aeronave\/matricula\/:matricula'/)
+  assert.match(source, /requireShareInternal\(c\)/)
+  assert.match(source, /replace\(\/-\/g, ''\)\.trim\(\)\.toUpperCase\(\)/)
+  assert.match(source, /hex: porHex \? \[identificador\] : \[\]/)
+  assert.match(source, /matriculas: porHex \? \[\] : \[identificador\]/)
+  assert.match(source, /return c\.json\(\{ ac: correspondentes\.map/)
+})
