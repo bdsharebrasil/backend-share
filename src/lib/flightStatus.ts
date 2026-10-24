@@ -14,11 +14,11 @@ export function statusAgendamentoComJornadaSql(jornadaDisponivel: boolean): stri
   const statusDaJornadaMaisRecente = `(
     SELECT CASE
       WHEN (CASE WHEN p.id IS NOT NULL THEN p.horario_pouso ELSE j.horario_pouso END) IS NOT NULL
-        OR (p.id IS NOT NULL AND p.status = 'pousado')
+        OR (p.id IS NOT NULL AND p.status IN ('em_solo', 'pousado'))
         OR (p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) = 'pousado') THEN 'em_solo'
       WHEN (p.id IS NOT NULL AND (p.horario_dep IS NOT NULL OR p.status = 'em_voo'))
         OR (p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) IN ('decolado', 'em_rota', 'em voo', 'em_voo')) THEN 'decolado'
-      WHEN (p.id IS NOT NULL AND p.horario_ac IS NOT NULL)
+      WHEN (p.id IS NOT NULL AND (p.horario_ac IS NOT NULL OR p.status = 'acionado'))
         OR (p.id IS NULL AND j.horario_acionamento IS NOT NULL)
         OR (p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) = 'acionado') THEN 'acionado'
       WHEN p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) = 'em_solo' THEN 'em_solo'

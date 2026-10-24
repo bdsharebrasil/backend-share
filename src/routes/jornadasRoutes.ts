@@ -10,7 +10,7 @@ export const jornadasRoutes = new Hono<{ Bindings: Bindings; Variables: Variable
 
 async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings; Variables: Variables }>) {
   await validateWorkerSchema(c, [
-    { table: 'jornadas_voo', columns: ['id', 'solicitacao_id', 'aeronave_id', 'data', 'horario_acionamento', 'horario_apresentacao', 'tripulante_id', 'funcao_tripulante', 'jornada_principal_id', 'status'] },
+    { table: 'jornadas_voo', columns: ['id', 'solicitacao_id', 'aeronave_id', 'data', 'horario_acionamento', 'horario_apresentacao', 'horario_decolagem', 'tripulante_id', 'funcao_tripulante', 'jornada_principal_id', 'status'] },
     { table: 'pernas_jornada_voo', columns: ['id', 'jornada_id', 'numero', 'origem', 'destino', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'passageiros', 'status'] },
   ])
 }
@@ -57,6 +57,11 @@ function normalizarHorarioJornada(data: string, valor: unknown, referencia?: str
   return instante.toISOString()
 }
 
+export function derivarHorarioApresentacao(acionamento: string): string | null {
+  const instante = new Date(acionamento).getTime()
+  return Number.isFinite(instante) ? new Date(instante - 30 * 60_000).toISOString() : null
+}
+
 function minutosEntre(inicio: string | null, fim: string | null): number {
   if (!inicio || !fim) return 0
   const a = new Date(inicio).getTime()
@@ -95,11 +100,13 @@ async function sincronizarResumoJornada(db: D1Database, jornadaId: string) {
   const pernas = await db.prepare('SELECT horario_ac, horario_dep, horario_pouso, horario_corte, status FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(jornadaId).all<any>()
   const registros = pernas.results || []
   const ultimaPerna = registros[registros.length - 1]
-  const statusOperacional = ultimaPerna?.horario_pouso || ultimaPerna?.status === 'pousado' ? 'em_solo'
+  const statusOperacional = ultimaPerna?.horario_pouso || ['em_solo', 'pousado'].includes(ultimaPerna?.status) ? 'em_solo'
     : ultimaPerna?.horario_dep || ultimaPerna?.status === 'em_voo' ? 'em_rota'
       : ultimaPerna?.horario_ac || jornada?.horario_acionamento ? 'em_solo' : null
   const minutos = minutosDaJornada({ ...jornada, pernas: registros })
-  await db.prepare(`UPDATE jornadas_voo SET minutos_pos_corte = 30, minutos_jornada = ?1,
+  await db.prepare(`UPDATE jornadas_voo SET
+      horario_decolagem = (SELECT p.horario_dep FROM pernas_jornada_voo p WHERE p.jornada_id = COALESCE(jornada_principal_id, id) ORDER BY p.numero LIMIT 1),
+      minutos_pos_corte = 30, minutos_jornada = ?1,
       status = CASE WHEN status = 'encerrada' OR ?2 IS NULL THEN status ELSE ?2 END,
       atualizado_em = CURRENT_TIMESTAMP
     WHERE COALESCE(jornada_principal_id, id) = (
@@ -144,10 +151,11 @@ async function avaliarLimitesJornada(c: Context<{ Bindings: Bindings; Variables:
   }
 }
 
-function statusPerna(p: { horario_ac?: string | null; horario_corte?: string | null; horario_pouso?: string | null; horario_dep?: string | null }) {
+export function statusPerna(p: { horario_ac?: string | null; horario_corte?: string | null; horario_pouso?: string | null; horario_dep?: string | null }) {
   if (p.horario_corte) return 'cortado'
-  if (p.horario_pouso) return 'pousado'
+  if (p.horario_pouso) return 'em_solo'
   if (p.horario_dep) return 'em_voo'
+  if (p.horario_ac) return 'acionado'
   return 'programada'
 }
 
@@ -180,10 +188,11 @@ async function sincronizarStatusAgendamentoVoo(db: D1Database, solicitacaoId: st
     db.prepare('SELECT status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(solicitacaoId).first<{ status: string }>(),
     db.prepare(`SELECT CASE
         WHEN (CASE WHEN p.id IS NOT NULL THEN p.horario_pouso ELSE j.horario_pouso END) IS NOT NULL
+          OR (p.id IS NOT NULL AND p.status IN ('em_solo', 'pousado'))
           OR (p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) = 'pousado') THEN 'em_solo'
         WHEN (p.id IS NOT NULL AND p.horario_dep IS NOT NULL)
           OR (p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) IN ('decolado', 'em_rota', 'em_voo', 'em voo')) THEN 'decolado'
-        WHEN (p.id IS NOT NULL AND p.horario_ac IS NOT NULL)
+        WHEN (p.id IS NOT NULL AND (p.horario_ac IS NOT NULL OR p.status = 'acionado'))
           OR (p.id IS NULL AND (j.horario_acionamento IS NOT NULL OR lower(trim(COALESCE(j.status, ''))) = 'acionado')) THEN 'acionado'
         WHEN p.id IS NULL AND lower(trim(COALESCE(j.status, ''))) = 'em_solo' THEN 'em_solo'
       END AS fase
@@ -247,15 +256,16 @@ jornadasRoutes.get('/api/interno/agendamento/:id/jornada', async c => {
   const raiz = grupoAtual.raizId
   const pernas = await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(raiz).all<any>()
   let pernasNormalizadas = (pernas.results || []).map(normalizarPernaJornada)
-  if (!pernasNormalizadas.length && principal.status !== 'encerrada' && (principal.horario_acionamento || principal.horario_dep || principal.horario_pouso || principal.horario_corte)) {
+  if (!pernasNormalizadas.length && principal.status !== 'encerrada' && (principal.horario_acionamento || principal.horario_decolagem || principal.horario_dep || principal.horario_pouso || principal.horario_corte)) {
     const voo = await c.env.SHARE_DB.prepare('SELECT origem, destino FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<{ origem: string | null; destino: string | null }>()
     const origem = String(voo?.origem || '').trim().toUpperCase()
     const destino = String(voo?.destino || '').trim().toUpperCase()
     if (origem && destino) {
-      const status = statusPerna({ horario_dep: principal.horario_dep, horario_pouso: principal.horario_pouso, horario_corte: principal.horario_corte })
+      const horarioDep = principal.horario_decolagem || principal.horario_dep || null
+      const status = statusPerna({ horario_dep: horarioDep, horario_pouso: principal.horario_pouso, horario_corte: principal.horario_corte })
       const pernaId = uuid()
       await c.env.SHARE_DB.prepare(`INSERT INTO pernas_jornada_voo (id, jornada_id, numero, origem, destino, passageiros, horario_ac, horario_dep, horario_pouso, horario_corte, status)
-        VALUES (?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)`).bind(pernaId, raiz, origem, destino, principal.horario_acionamento || null, principal.horario_dep || null, principal.horario_pouso || null, principal.horario_corte || null, status === 'programada' && principal.status === 'em_rota' ? 'em_voo' : status).run()
+        VALUES (?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)`).bind(pernaId, raiz, origem, destino, principal.horario_acionamento || null, horarioDep, principal.horario_pouso || null, principal.horario_corte || null, status === 'programada' && principal.status === 'em_rota' ? 'em_voo' : status).run()
       pernasNormalizadas = [(await c.env.SHARE_DB.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(pernaId).first<any>())].filter(Boolean).map(normalizarPernaJornada)
     }
   }
@@ -329,10 +339,12 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const destino = String(body.destino || body.aerodromo_chegada || '').trim().toUpperCase()
   const numeroPassageiros = normalizarNumeroPassageiros(body.numero_passageiros)
   if (numeroPassageiros === null) return c.json({ error: 'numero_passageiros_invalido' }, 400)
-  const apresentacao = normalizarHorarioJornada(data, body.horario_apresentacao || body.tripulacao_checkin_hora)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || !apresentacao) return c.json({ error: 'data_rota_e_apresentacao_obrigatorias', detail: 'Informe a data, partida, chegada e a apresentação do tripulante.' }, 400)
-  const acionamento = normalizarHorarioJornada(data, body.horario_acionamento || body.tempo_ac, apresentacao)
-  if (!acionamento || new Date(acionamento).getTime() - new Date(apresentacao).getTime() !== 30 * 60_000) {
+  const apresentacaoInformada = normalizarHorarioJornada(data, body.horario_apresentacao || body.tripulacao_checkin_hora)
+  const acionamentoInformado = normalizarHorarioJornada(data, body.horario_acionamento || body.tempo_ac, apresentacaoInformada)
+  const apresentacao = apresentacaoInformada || (acionamentoInformado ? derivarHorarioApresentacao(acionamentoInformado) : null)
+  const acionamento = acionamentoInformado || (apresentacaoInformada ? new Date(new Date(apresentacaoInformada).getTime() + 30 * 60_000).toISOString() : null)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || !apresentacao || !acionamento) return c.json({ error: 'data_rota_e_acionamento_obrigatorios', detail: 'Informe a data, partida, chegada e o acionamento.' }, 400)
+  if (new Date(acionamento).getTime() - new Date(apresentacao).getTime() !== 30 * 60_000) {
     return c.json({ error: 'apresentacao_deve_ser_30_minutos_antes_do_acionamento' }, 400)
   }
   const corteInicio = normalizarHorarioJornada(data, body.horario_pouso, apresentacao)
@@ -345,10 +357,10 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
     const jornadaId = uuid()
     await db.prepare(`INSERT INTO jornadas_voo
         (id, solicitacao_id, aeronave_id, tripulante_id, funcao_tripulante, jornada_principal_id, numero_jornada, data,
-         horario_apresentacao, horario_acionamento, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         horario_apresentacao, horario_acionamento, horario_decolagem, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(jornadaId, idSolicitacao, voo.aeronave_id, item.tripulante_id, item.funcao, principalId, numeroJornada, data,
-        apresentacao, acionamento, corteInicio, LIMITES_JORNADA.posCorte, corteInicio ? 'em_solo' : horarioDep ? 'em_rota' : 'em_solo',
+         apresentacao, acionamento, horarioDep, corteInicio, LIMITES_JORNADA.posCorte, corteInicio ? 'em_solo' : horarioDep ? 'em_rota' : 'em_solo',
         body.observacoes || null, extractSupabaseUserId(c)).run()
     if (!principalId) {
       principalId = jornadaId
@@ -580,6 +592,10 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
   const campos = Object.keys(valores)
   await db.prepare(`UPDATE pernas_jornada_voo SET ${campos.map((campo, i) => `${campo} = ?${i + 1}`).join(', ')} WHERE id = ?${campos.length + 1}`)
     .bind(...campos.map((campo) => valores[campo] ?? null), perna.id).run()
+  if (Number(perna.numero) === 1 && valores.horario_dep !== undefined) {
+    await db.prepare('UPDATE jornadas_voo SET horario_decolagem = ?1 WHERE COALESCE(jornada_principal_id, id) = ?2')
+      .bind(valores.horario_dep ?? null, jornada?.jornada_principal_id || jornada?.id).run()
+  }
   const pernas = await sincronizarResumoJornada(db, perna.jornada_id)
   const atualizada = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(perna.id).first<any>()
   const statusAgendamento = jornada ? await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id) : undefined

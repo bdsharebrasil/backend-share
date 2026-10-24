@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
-import { agendamentoPermiteCompletarHorarios, agendamentoPermiteIniciarJornada, agruparJornadasVoo, checklistPreVooConcluido, determinarStatusAgendamentoVoo } from '../src/routes/jornadasRoutes.ts'
+import { agendamentoPermiteCompletarHorarios, agendamentoPermiteIniciarJornada, agruparJornadasVoo, checklistPreVooConcluido, derivarHorarioApresentacao, determinarStatusAgendamentoVoo, statusPerna } from '../src/routes/jornadasRoutes.ts'
+
+test('apresentação é calculada 30 minutos antes do horário de acionamento, inclusive na virada do dia', () => {
+  assert.equal(derivarHorarioApresentacao('2026-10-25T00:15:00.000Z'), '2026-10-24T23:45:00.000Z')
+  assert.equal(derivarHorarioApresentacao('horário inválido'), null)
+})
+
+test('status da perna acompanha acionamento, decolagem e pouso em ordem operacional', () => {
+  assert.equal(statusPerna({ horario_ac: '2026-10-24T12:00:00Z' }), 'acionado')
+  assert.equal(statusPerna({ horario_ac: '2026-10-24T12:00:00Z', horario_dep: '2026-10-24T12:10:00Z' }), 'em_voo')
+  assert.equal(statusPerna({ horario_ac: '2026-10-24T12:00:00Z', horario_dep: '2026-10-24T12:10:00Z', horario_pouso: '2026-10-24T13:00:00Z' }), 'em_solo')
+  assert.equal(statusPerna({ horario_ac: '2026-10-24T12:00:00Z', horario_corte: '2026-10-24T13:30:00Z' }), 'cortado')
+})
 
 test('preserva cada jornada legada sem jornada principal como registro independente', () => {
   const registros = [
@@ -72,6 +84,18 @@ test('iniciar jornada não exige ficha de peso e balanceamento concluída', asyn
   assert.doesNotMatch(endpoint, /ctm_ficha_peso_balanceamento|peso_balanceamento_obrigatorio|pesoBalanceamentoConcluido/)
 })
 
+test('iniciar jornada aceita acionamento sem decolagem e registra o horário de decolagem quando fornecido', async () => {
+  const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
+  const inicio = source.indexOf("jornadasRoutes.post('/api/interno/agendamento/:id/jornada'")
+  const proximaRota = source.indexOf('\njornadasRoutes.', inicio + 1)
+  const endpoint = source.slice(inicio, proximaRota === -1 ? undefined : proximaRota)
+
+  assert.match(endpoint, /derivarHorarioApresentacao\(acionamentoInformado\)/)
+  assert.match(endpoint, /horario_apresentacao, horario_acionamento, horario_decolagem/)
+  assert.match(endpoint, /horario_dep: horarioDep/)
+  assert.doesNotMatch(endpoint, /if \(!horarioDep\)/)
+})
+
 test('permite editar horários a partir do acionamento ou decolagem, mas não fora da operação', async () => {
   for (const status of ['acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo', 'pousado']) {
     assert.equal(agendamentoPermiteCompletarHorarios(status), true, `status ${status}`)
@@ -97,4 +121,5 @@ test('sincronização do resumo lê horario_dep antes de preservar a fase AC', a
   const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
   assert.match(source, /SELECT horario_ac, horario_dep, horario_pouso, horario_corte, status FROM pernas_jornada_voo/)
   assert.match(source, /ultimaPerna\?\.horario_dep \|\| ultimaPerna\?\.status === 'em_voo' \? 'em_rota'/)
+  assert.match(source, /horario_decolagem = \(SELECT p\.horario_dep/)
 })

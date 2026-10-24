@@ -2574,15 +2574,14 @@ CREATE TABLE pernas_jornada_voo (
   origem                TEXT NOT NULL,      -- ICAO
   destino               TEXT NOT NULL,      -- ICAO
 
-  -- ISO 8601 UTC, mesma convenção da jornada. horario_ac e horario_dep entram junto na criação;
-  -- horario_pouso e horario_corte são preenchidos depois, em PATCHes separados.
+  -- ISO 8601 UTC; acionamento, decolagem, pouso e corte atualizam progressivamente o status.
   horario_ac            TEXT,
   horario_dep           TEXT,
   horario_pouso         TEXT,
   horario_corte         TEXT,
 
   status                TEXT NOT NULL DEFAULT 'programada'
-                         CHECK (status IN ('programada', 'em_voo', 'pousado', 'cortado')),
+                         CHECK (status IN ('programada', 'acionado', 'em_voo', 'em_solo', 'pousado', 'cortado')),
 
   -- Preenchido pelo POST /diario-bordo/lancamentos quando esta perna vira um lançamento real.
   -- Uma vez setado, a perna não pode ser lançada de novo (idempotência do pré-lançamento).
@@ -2697,8 +2696,8 @@ CREATE TABLE jornadas_voo(
   atualizado_em            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   funcao_tripulante        TEXT NOT NULL DEFAULT 'PIC',
-  jornada_principal_id     TEXT REFERENCES jornadas_voo(id)
-, horario_decolagem INTEGER);
+  jornada_principal_id     TEXT REFERENCES jornadas_voo(id),
+  horario_decolagem        TEXT);
 CREATE TABLE fornecedores_combustivel (
   id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
 
@@ -3409,8 +3408,9 @@ BEGIN
   UPDATE pernas_jornada_voo
   SET status = CASE
     WHEN NEW.horario_corte IS NOT NULL THEN 'cortado'
-    WHEN NEW.horario_pouso IS NOT NULL THEN 'pousado'
+    WHEN NEW.horario_pouso IS NOT NULL THEN 'em_solo'
     WHEN NEW.horario_dep   IS NOT NULL THEN 'em_voo'
+    WHEN NEW.horario_ac    IS NOT NULL THEN 'acionado'
     ELSE 'programada'
   END
   WHERE id = NEW.id;

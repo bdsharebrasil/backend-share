@@ -76,7 +76,7 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
     db.prepare(`
       SELECT j.id, j.solicitacao_id, j.aeronave_id, j.tripulante_id, j.funcao_tripulante,
         j.jornada_principal_id, j.numero_jornada, j.data, j.horario_apresentacao,
-        j.horario_acionamento, j.horario_pouso, j.horario_corte, j.minutos_pos_corte,
+        j.horario_acionamento, j.horario_decolagem, j.horario_pouso, j.horario_corte, j.minutos_pos_corte,
         j.minutos_jornada, j.nivel_alerta, j.status, j.observacoes,
         COALESCE(t.nome_completo, f.nome_completo) AS tripulante_nome
       FROM jornadas_voo j
