@@ -2,8 +2,7 @@ import { Hono } from 'hono'
 import { requireShareInternal } from '../lib/auth'
 import { checkRateLimit, clientIp } from '../lib/cache'
 import { buscarPosicoes, configurarProvedor, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
-// AJUSTE o caminho para o arquivo onde estão jornadaOperacionalDisponivel e statusAgendamentoComJornadaSql
-import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/jornadaOperacional'
+import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
 
 type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string }
 type Variables = Record<string, never>
