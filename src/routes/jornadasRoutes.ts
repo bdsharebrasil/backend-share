@@ -178,9 +178,12 @@ export function agendamentoPermiteIniciarJornada(status: unknown) {
   const normalizado = String(status || '').trim().toLowerCase().replace(/\s+/g, '_')
   return ['aprovada', 'acionado', 'decolado', 'em_rota', 'em_voo', 'em_solo'].includes(normalizado)
 }
-export function agendamentoPermiteCompletarHorarios(status: unknown) {
+export function agendamentoPermiteCompletarHorarios(status: unknown, fasePerna?: unknown) {
   const normalizado = String(status || '').trim().toLowerCase().replace(/\s+/g, '_')
-  return ['acionado', 'decolado', 'em_rota', 'em_voo', 'em_solo', 'pousado'].includes(normalizado)
+  if (['encerrada', 'concluida', 'cancelada', 'reprovada', 'pendente'].includes(normalizado)) return false
+  if (['acionado', 'decolado', 'em_rota', 'em_voo', 'em_solo', 'pousado'].includes(normalizado)) return true
+  const fase = String(fasePerna || '').trim().toLowerCase().replace(/\s+/g, '_')
+  return ['acionado', 'em_voo', 'em_solo', 'pousado'].includes(fase)
 }
 
 async function sincronizarStatusAgendamentoVoo(db: D1Database, solicitacaoId: string) {
@@ -557,7 +560,7 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
     FROM jornadas_voo j LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id
     WHERE j.id = ?1`).bind(perna.jornada_id).first<{ solicitacao_id: string; status_agendamento: string | null }>()
   if (!jornadaAcesso || !(await requireFlightOperationAccess(c, jornadaAcesso.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
-  if (!agendamentoPermiteCompletarHorarios(jornadaAcesso.status_agendamento)) return c.json({ error: 'agendamento_fora_da_operacao', detail: 'Os horários da perna podem ser completados somente enquanto o agendamento estiver em voo ou em solo.' }, 409)
+  if (!agendamentoPermiteCompletarHorarios(jornadaAcesso.status_agendamento, statusPerna(perna))) return c.json({ error: 'agendamento_fora_da_operacao', detail: 'Os horários da perna podem ser completados somente enquanto o agendamento estiver em voo ou em solo.' }, 409)
   if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))

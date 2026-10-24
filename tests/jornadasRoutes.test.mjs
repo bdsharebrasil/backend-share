@@ -96,6 +96,13 @@ test('iniciar jornada aceita acionamento sem decolagem e registra o horário de 
   assert.doesNotMatch(endpoint, /if \(!horarioDep\)/)
 })
 
+test('permite completar horários pela fase real da perna quando o status da reserva está desatualizado', () => {
+  assert.equal(agendamentoPermiteCompletarHorarios('aprovada', 'em_voo'), true)
+  assert.equal(agendamentoPermiteCompletarHorarios('aprovada', 'em_solo'), true)
+  assert.equal(agendamentoPermiteCompletarHorarios('cancelada', 'em_voo'), false)
+  assert.equal(agendamentoPermiteCompletarHorarios('encerrada', 'em_solo'), false)
+})
+
 test('permite editar horários a partir do acionamento ou decolagem, mas não fora da operação', async () => {
   for (const status of ['acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'em solo', 'pousado']) {
     assert.equal(agendamentoPermiteCompletarHorarios(status), true, `status ${status}`)
@@ -110,7 +117,7 @@ test('permite editar horários a partir do acionamento ou decolagem, mas não fo
   const endpoint = source.slice(inicio, proximaRota === -1 ? undefined : proximaRota)
   assert.notEqual(inicio, -1)
   assert.match(endpoint, /requireFlightOperationAccess\(c, jornadaAcesso\.solicitacao_id\)/)
-  assert.match(endpoint, /agendamentoPermiteCompletarHorarios\(jornadaAcesso\.status_agendamento\)/)
+  assert.match(endpoint, /agendamentoPermiteCompletarHorarios\(jornadaAcesso\.status_agendamento, statusPerna\(perna\)\)/)
   assert.match(endpoint, /!body \|\| typeof body !== 'object' \|\| Array\.isArray\(body\)/)
   assert.doesNotMatch(endpoint, /campos_restritos/)
   assert.doesNotMatch(endpoint, /isInternalRequest/)
