@@ -66,6 +66,7 @@ new_sqlite_classes = ["RateLimitCounter"]
 # TELEGRAM_BOT_TOKEN
 # WINSOCK_VALUATION_URL
 # WINSOCK_API_KEY
+# API_OPENSTREETMAP
 # WINSOCK_AUTH_HEADER (opcional; padrão no código: X-API-Key)
 # WINSOCK_AUTH_PREFIX (opcional; padrão no código: '' — sem prefixo)
 
