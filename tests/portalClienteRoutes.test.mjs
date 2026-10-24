@@ -19,14 +19,14 @@ class FakeD1 {
     this.cotista = {
       id: 'cotista-aeronave-1', cliente_id: 'cliente-1', socio_id: null,
       codigo_cliente: 'CLI-01', percentual_sociedade: 50,
-      nome: 'Cotista Teste', email: 'cotista@example.com', matricula_registro: 'PT-ABC',
+      nome: 'Cotista Teste', matricula_registro: 'PT-ABC',
     }
   }
   prepare(sql) { return new FakeStatement(this, sql) }
   async all(sql) {
     if (sql.includes('pragma_table_info')) return { results: COLUNAS_PORTAL.map((name) => ({ name })) }
     if (sql.includes('EXISTS (SELECT 1 FROM user_cliente u WHERE u.cotista_id = ca.id)')) {
-      return { results: [{ cotista_aeronave_id: this.cotista.id, cliente_id: this.cotista.cliente_id, socio_id: null, codigo_cliente: 'CLI-01', percentual_sociedade: 50, nome: this.cotista.nome, email: this.cotista.email, matricula_registro: 'PT-ABC', possui_acesso: this.usuario ? 1 : 0, login: this.usuario?.login || null }] }
+      return { results: [{ cotista_aeronave_id: this.cotista.id, cliente_id: this.cotista.cliente_id, socio_id: null, codigo_cliente: 'CLI-01', percentual_sociedade: 50, nome: this.cotista.nome, matricula_registro: 'PT-ABC', possui_acesso: this.usuario ? 1 : 0, login: this.usuario?.login || null }] }
     }
     throw new Error(`Consulta all não simulada: ${sql}`)
   }
@@ -98,28 +98,37 @@ test('lista os acessos por aeronave usando cotista_id sem retornar senha nem has
   assert.equal('senha' in body.cotistas[0], false)
 })
 
-test('cria usuário vinculado exclusivamente por cotista_id e armazena hash PBKDF2', async () => {
+test('cria usuário com senha definida pelo operador sem mínimo e armazena hash PBKDF2', async () => {
   const db = new FakeD1()
-  const response = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST' })
+  const senha = '7'
+  const response = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha }) })
   assert.equal(response.status, 201)
   const body = await response.json()
   assert.equal(typeof body.login, 'string')
-  assert.equal(typeof body.senha_temporaria, 'string')
+  assert.equal('senha_temporaria' in body, false)
   assert.match(db.usuario.senha, /^pbkdf2_sha256\$100000\$/)
-  assert.notEqual(db.usuario.senha, body.senha_temporaria)
+  assert.notEqual(db.usuario.senha, senha)
   assert.equal(db.usuario.cotista_id, 'cotista-aeronave-1')
   assert.equal('cliente_id' in db.usuario, false)
   assert.equal('socio_id' in db.usuario, false)
 })
 
+test('a listagem não expõe o e-mail cadastrado do cotista', async () => {
+  const db = new FakeD1()
+  const response = await chamar(db, '/cotista/portal-cliente?aeronave_id=aircraft-1')
+  const body = await response.json()
+  assert.equal(response.status, 200)
+  assert.equal('email' in body.cotistas[0], false)
+})
+
 test('login do portal resolve cliente pelo cotista_id da conta criada', async () => {
   const db = new FakeD1()
-  const criacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST' })
+  const criacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: '1' }) })
   const credenciais = await criacao.json()
   const resposta = await portalRoutes.request('/api/portal/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ login: credenciais.login, senha: credenciais.senha_temporaria }),
+    body: JSON.stringify({ login: credenciais.login, senha: '1' }),
   }, portalEnv(db))
   assert.equal(resposta.status, 200)
   const body = await resposta.json()
@@ -155,7 +164,7 @@ test('login rejeita credenciais com tipos inválidos ou além dos limites aceito
 
 test('atualiza login e senha e permite autenticação apenas com as novas credenciais', async () => {
   const db = new FakeD1()
-  const criacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST' })
+  const criacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: '2' }) })
   const antigas = await criacao.json()
   const senhaNova = 'Senha-portal-2026!'
   const atualizacao = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/credenciais', {
@@ -175,20 +184,48 @@ test('atualiza login e senha e permite autenticação apenas com as novas creden
     body: JSON.stringify({ login, senha }),
   }, portalEnv(db))
   assert.equal((await autenticar('novo.login', senhaNova)).status, 200)
-  assert.equal((await autenticar(antigas.login, antigas.senha_temporaria)).status, 401)
+  assert.equal((await autenticar(antigas.login, '2')).status, 401)
 })
 
-test('restaura a senha anterior quando o provedor de e-mail rejeita a mensagem', async () => {
+test('envia senha escolhida para destinatário manual e restaura senha anterior se e-mail falhar', async () => {
   const senhaAnterior = 'pbkdf2_sha256$100000$salt$hash'
   const db = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: senhaAnterior, cotista_id: 'cotista-aeronave-1' } })
   const fetchOriginal = globalThis.fetch
-  globalThis.fetch = async () => new Response(JSON.stringify({ message: 'rejeitado' }), { status: 500 })
+  let emailEnviado
+  globalThis.fetch = async (_url, init) => { emailEnviado = JSON.parse(init.body); return new Response(JSON.stringify({ message: 'rejeitado' }), { status: 500 }) }
   try {
-    const response = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/enviar-acesso', { method: 'POST' })
+    const response = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/enviar-acesso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: '9', destinatario: 'destino@example.com' }) })
     assert.equal(response.status, 502)
     assert.equal((await response.json()).error, 'falha_envio_email')
+    assert.deepEqual(emailEnviado.to, ['destino@example.com'])
+    assert.match(emailEnviado.html, /<code>9<\/code>/)
     assert.equal(db.usuario.senha, senhaAnterior)
   } finally {
     globalThis.fetch = fetchOriginal
   }
+})
+
+test('confirma envio ao destinatário indicado e mantém a senha escolhida', async () => {
+  const db = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: 'hash-anterior', cotista_id: 'cotista-aeronave-1' } })
+  const fetchOriginal = globalThis.fetch
+  let emailEnviado
+  globalThis.fetch = async (_url, init) => { emailEnviado = JSON.parse(init.body); return new Response(JSON.stringify({ id: 'email-1' }), { status: 200 }) }
+  try {
+    const response = await chamar(db, '/cotista/portal-cliente/cotista-aeronave-1/enviar-acesso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: '1234', destinatario: 'destino@example.com' }) })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { success: true, destinatario: 'destino@example.com' })
+    assert.deepEqual(emailEnviado.to, ['destino@example.com'])
+    assert.match(emailEnviado.html, /<code>1234<\/code>/)
+    assert.notEqual(db.usuario.senha, 'hash-anterior')
+  } finally {
+    globalThis.fetch = fetchOriginal
+  }
+})
+
+test('rejeita senha vazia e destinatário de e-mail inválido', async () => {
+  const criar = await chamar(new FakeD1(), '/cotista/portal-cliente/cotista-aeronave-1/credenciais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: '' }) })
+  assert.equal(criar.status, 400)
+  const dbComUsuario = new FakeD1({ usuario: { id: 'user-1', login: 'cotista.teste', senha: 'hash', cotista_id: 'cotista-aeronave-1' } })
+  const enviar = await chamar(dbComUsuario, '/cotista/portal-cliente/cotista-aeronave-1/enviar-acesso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: 'x', destinatario: 'email-invalido' }) })
+  assert.equal(enviar.status, 400)
 })

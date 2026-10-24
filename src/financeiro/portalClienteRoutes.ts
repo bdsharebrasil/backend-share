@@ -16,7 +16,6 @@ type Cotista = {
   codigo_cliente: string | null
   percentual_sociedade: number | null
   nome: string
-  email: string | null
   matricula_registro: string | null
 }
 type UsuarioCliente = { id: string; login: string; senha: string }
@@ -35,7 +34,6 @@ async function buscarCotista(c: { env: Bindings }, id: string): Promise<Cotista 
   return c.env.SHARE_DB.prepare(`
     SELECT ca.id, ca.cliente_id, ca.socio_id, ca.codigo_cliente, ca.percentual_sociedade,
       COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), ca.codigo_cliente, 'Cotista') AS nome,
-      COALESCE(NULLIF(TRIM(cl.email_principal), ''), NULLIF(TRIM(hs.email_principal), '')) AS email,
       a.matricula_registro
     FROM cotista_aeronave ca
     LEFT JOIN cliente cl ON cl.id = ca.cliente_id
@@ -54,20 +52,12 @@ async function buscarUsuario(c: { env: Bindings }, cotistaId: string): Promise<U
   `).bind(cotistaId).first<UsuarioCliente>()
 }
 
-function gerarSenhaTemporaria(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(24))
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return `A7!${btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')}`
-}
-
 function normalizarLogin(valor: string): string {
   return valor.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9._-]+/g, '.').replace(/^[._-]+|[._-]+$/g, '').slice(0, 38) || 'cotista'
 }
 
 async function gerarLogin(db: D1Database, cotista: Cotista): Promise<string> {
-  const baseEmail = cotista.email?.split('@')[0] || ''
-  const base = normalizarLogin(baseEmail || cotista.codigo_cliente || cotista.nome)
+  const base = normalizarLogin(cotista.codigo_cliente || cotista.nome)
   for (let tentativa = 0; tentativa < 5; tentativa += 1) {
     const sufixo = crypto.randomUUID().replaceAll('-', '').slice(0, 8)
     const login = `${base}.${sufixo}`
@@ -92,7 +82,6 @@ portalClienteRoutes.get('/cotista/portal-cliente', async c => {
       SELECT ca.id AS cotista_aeronave_id, ca.cliente_id, ca.socio_id, ca.codigo_cliente,
         ca.percentual_sociedade,
         COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), ca.codigo_cliente, 'Cotista') AS nome,
-        COALESCE(NULLIF(TRIM(cl.email_principal), ''), NULLIF(TRIM(hs.email_principal), '')) AS email,
         a.matricula_registro,
         EXISTS (SELECT 1 FROM user_cliente u WHERE u.cotista_id = ca.id) AS possui_acesso,
         (SELECT u.login FROM user_cliente u WHERE u.cotista_id = ca.id ORDER BY u.criado_em DESC LIMIT 1) AS login
@@ -118,14 +107,17 @@ portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/credenciais', async
     if (!cotistaComVinculoValido(cotista)) return c.json({ error: 'vinculo_cotista_invalido' }, 409)
     if (await buscarUsuario(c, cotista.id)) return c.json({ error: 'portal_usuario_ja_existe' }, 409)
 
+    const body = await c.req.json<{ senha?: unknown }>().catch(() => null)
+    if (!body || typeof body.senha !== 'string' || body.senha.length < 1 || body.senha.length > 128) {
+      return c.json({ error: 'senha_deve_ter_entre_1_e_128_caracteres' }, 400)
+    }
     const login = await gerarLogin(c.env.SHARE_DB, cotista)
-    const senhaTemporaria = gerarSenhaTemporaria()
-    const hash = await portalCreatePasswordHash(senhaTemporaria)
+    const hash = await portalCreatePasswordHash(body.senha)
     await c.env.SHARE_DB.prepare(`
       INSERT INTO user_cliente (id, login, senha, nome_exibicao, url_avatar, cotista_id, criado_em, atualizado_em)
       VALUES (?1, ?2, ?3, ?4, NULL, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `).bind(crypto.randomUUID(), login, hash, cotista.nome, cotista.id).run()
-    return c.json({ success: true, login, senha_temporaria: senhaTemporaria }, 201)
+    return c.json({ success: true, login }, 201)
   } catch (error) {
     console.error('[financeiro/portal-cliente] falha ao criar acesso', error instanceof Error ? error.message : 'erro_desconhecido')
     return c.json({ error: 'nao_foi_possivel_criar_acesso' }, 500)
@@ -148,7 +140,7 @@ portalClienteRoutes.put('/cotista/portal-cliente/:cotistaId/credenciais', async 
     const login = body.login.trim().toLowerCase()
     const senha = body.senha
     if (!/^[a-z0-9._-]{3,80}$/.test(login)) return c.json({ error: 'login_invalido' }, 400)
-    if (senha.length < 12 || senha.length > 128) return c.json({ error: 'senha_deve_ter_entre_12_e_128_caracteres' }, 400)
+    if (senha.length < 1 || senha.length > 128) return c.json({ error: 'senha_deve_ter_entre_1_e_128_caracteres' }, 400)
 
     const loginOcupado = await c.env.SHARE_DB.prepare(`
       SELECT id FROM user_cliente
@@ -177,12 +169,18 @@ portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/enviar-acesso', asy
     if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
     const cotista = await buscarCotista(c, c.req.param('cotistaId'))
     if (!cotista) return c.json({ error: 'cotista_nao_encontrado' }, 404)
-    if (!cotista.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cotista.email)) return c.json({ error: 'email_cotista_nao_cadastrado' }, 422)
     const usuario = await buscarUsuario(c, cotista.id)
     if (!usuario) return c.json({ error: 'portal_usuario_nao_encontrado' }, 409)
 
-    const senhaTemporaria = gerarSenhaTemporaria()
-    const novoHash = await portalCreatePasswordHash(senhaTemporaria)
+    const body = await c.req.json<{ senha?: unknown; destinatario?: unknown }>().catch(() => null)
+    if (!body || typeof body.senha !== 'string' || body.senha.length < 1 || body.senha.length > 128) {
+      return c.json({ error: 'senha_deve_ter_entre_1_e_128_caracteres' }, 400)
+    }
+    const destinatario = String(body.destinatario || '').trim().toLowerCase()
+    if (destinatario.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(destinatario)) {
+      return c.json({ error: 'email_destinatario_invalido' }, 400)
+    }
+    const novoHash = await portalCreatePasswordHash(body.senha)
     const atualizado = await c.env.SHARE_DB.prepare('UPDATE user_cliente SET senha = ?1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?2 AND senha = ?3')
       .bind(novoHash, usuario.id, usuario.senha).run()
     if (!atualizado.meta?.changes) return c.json({ error: 'portal_usuario_alterado_tente_novamente' }, 409)
@@ -194,9 +192,9 @@ portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/enviar-acesso', asy
         headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           from: c.env.EMAIL_FROM,
-          to: [cotista.email],
+          to: [destinatario],
           subject: 'Acesso ao Portal Cliente Share Brasil',
-          html: `<p>Olá, ${escapeHtml(cotista.nome)}.</p><p>Seu acesso ao Portal Cliente foi atualizado.</p><p><strong>Login:</strong> ${escapeHtml(usuario.login)}<br><strong>Senha temporária:</strong> <code>${escapeHtml(senhaTemporaria)}</code></p><p>Guarde esta mensagem em local seguro. Se não solicitou esta atualização, entre em contato com a Share Brasil.</p>`,
+          html: `<p>Olá, ${escapeHtml(cotista.nome)}.</p><p>Seu acesso ao Portal Cliente foi atualizado.</p><p><strong>Login:</strong> ${escapeHtml(usuario.login)}<br><strong>Senha:</strong> <code>${escapeHtml(body.senha)}</code></p><p>Guarde esta mensagem em local seguro. Se não solicitou esta atualização, entre em contato com a Share Brasil.</p>`,
         }),
       })
     } catch {
@@ -208,7 +206,7 @@ portalClienteRoutes.post('/cotista/portal-cliente/:cotistaId/enviar-acesso', asy
         .bind(usuario.senha, usuario.id, novoHash).run()
       return c.json({ error: restaurado.meta?.changes ? 'falha_envio_email' : 'falha_envio_email_verifique_acesso' }, 502)
     }
-    return c.json({ success: true, destinatario: cotista.email })
+    return c.json({ success: true, destinatario })
   } catch (error) {
     console.error('[financeiro/portal-cliente] falha ao enviar acesso', error instanceof Error ? error.message : 'erro_desconhecido')
     return c.json({ error: 'nao_foi_possivel_enviar_acesso' }, 500)
