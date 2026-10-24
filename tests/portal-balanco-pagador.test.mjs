@@ -21,16 +21,28 @@ async function tokenPortal({ cliente_id, socio_id }) {
 }
 
 class FakeD1 {
-  constructor(nomePagador) {
+  constructor(nomePagador, identidade) {
     this.nomePagador = nomePagador
+    this.identidade = identidade
     this.queries = []
   }
 
   prepare(sql) {
     const db = this
     const statement = {
-      bind() { return this },
+      values: [],
+      bind(...values) { this.values = values; return this },
+      first: async () => {
+        if (sql.includes('FROM portal_sessoes_revogadas')) return null
+        if (sql.includes('FROM user_cliente u')) {
+          return { id: 'usuario-1', login: 'cotista.teste', ...db.identidade }
+        }
+        return null
+      },
       all: async () => {
+        if (sql.includes('pragma_table_info')) {
+          return { results: ['cotista_id', 'principal_id', 'permissoes'].map(name => ({ name })) }
+        }
         db.queries.push(sql)
         if (sql.includes('FROM abastecimentos ab')) return { results: [{ id: 'abast-1', status: 'PENDENTE' }] }
         return { results: sql.includes('SELECT r.id,') ? [{ id: 'rateio-1', pago_por: db.nomePagador }] : [] }
@@ -41,7 +53,7 @@ class FakeD1 {
 }
 
 async function consultarBalanco({ cliente_id, socio_id }, nomePagador) {
-  const db = new FakeD1(nomePagador)
+  const db = new FakeD1(nomePagador, { cliente_id, socio_id })
   const token = await tokenPortal({ cliente_id, socio_id })
   const response = await portalClienteExtrasRoutes.request(
     '/api/portal/balanco?meses=2026-10',
@@ -67,7 +79,7 @@ test('balanço de sócio resolve o UUID do pagador para o nome', async () => {
 })
 
 test('abastecimentos expõe somente os estados PAGO e PENDENTE', async () => {
-  const db = new FakeD1('')
+  const db = new FakeD1('', { cliente_id: 'cliente-1', socio_id: null })
   const token = await tokenPortal({ cliente_id: 'cliente-1', socio_id: null })
   const response = await portalClienteExtrasRoutes.request(
     '/api/portal/abastecimentos?meses=2026-10',

@@ -211,6 +211,11 @@ function portalSessionSecret(c: Context<{ Bindings: Bindings; Variables: Variabl
   return secret
 }
 
+async function portalTokenHash(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', portalEncoder.encode(token))
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
 async function portalCreateSession(user: PortalUser, c: Context<{ Bindings: Bindings; Variables: Variables }>): Promise<{ token: string; expires_at: string }> {
   const exp = Math.floor(Date.now() / 1000) + Number(c.env.CLIENT_SESSION_TTL_SECONDS || PORTAL_SESSION_TTL)
   const encoded = portalBase64Url(portalEncoder.encode(JSON.stringify({ ...user, exp })))
@@ -227,6 +232,9 @@ export async function portalSession(c: Context<{ Bindings: Bindings; Variables: 
     const valid = await crypto.subtle.verify('HMAC', await portalHmacKey(portalSessionSecret(c)), portalFromBase64Url(signature), portalEncoder.encode(encoded))
     const session = JSON.parse(portalDecoder.decode(portalFromBase64Url(encoded))) as PortalSession
     if (!valid || !session.id || !session.login || session.exp <= Math.floor(Date.now() / 1000)) return null
+    const revoked = await c.env.SHARE_DB.prepare('SELECT token_hash FROM portal_sessoes_revogadas WHERE token_hash = ?1 AND expires_at > ?2 LIMIT 1')
+      .bind(await portalTokenHash(authorization.slice(7).trim()), Math.floor(Date.now() / 1000)).first()
+    if (revoked) return null
     const columns = await portalUserColumns(c.env.SHARE_DB)
     const principalSelect = columns.has('principal_id') ? 'u.principal_id' : 'NULL AS principal_id'
     const permissionsSelect = columns.has('permissoes') ? 'u.permissoes' : 'NULL AS permissoes'
@@ -339,6 +347,23 @@ portalRoutes.use('/api/portal/*', async (c, next) => {
   const feature = portalFeatureForPath(c.req.path)
   if (feature && !portalHasFeature(user, feature)) return c.json({ error: 'portal_feature_forbidden' }, 403)
   return next()
+})
+
+portalRoutes.post('/api/portal/logout', async c => {
+  const token = c.req.header('authorization')?.slice(7).trim()
+  if (!token) return c.json({ error: 'client_auth_required' }, 401)
+  const encoded = token.split('.')[0]
+  if (!encoded) return c.json({ error: 'client_auth_required' }, 401)
+  const session = JSON.parse(portalDecoder.decode(portalFromBase64Url(encoded))) as PortalSession
+  await c.env.SHARE_DB.prepare('INSERT INTO portal_sessoes_revogadas (token_hash, expires_at) VALUES (?1, ?2) ON CONFLICT(token_hash) DO UPDATE SET expires_at = excluded.expires_at')
+    .bind(await portalTokenHash(token), session.exp).run()
+  try {
+    await c.env.SHARE_DB.prepare('DELETE FROM portal_sessoes_revogadas WHERE expires_at <= ?1')
+      .bind(Math.floor(Date.now() / 1000)).run()
+  } catch {
+    // A revogação já foi persistida; a limpeza de registros expirados é acessória.
+  }
+  return c.body(null, 204)
 })
 
 portalRoutes.get('/api/portal/me', async c => c.json({ user: await portalSession(c) }))

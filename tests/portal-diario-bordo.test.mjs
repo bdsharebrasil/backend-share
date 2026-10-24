@@ -25,9 +25,19 @@ class FakeD1 {
     const statement = {
       values: [],
       bind(...values) { this.values = values; return this },
+      first: async () => {
+        if (sql.includes('FROM portal_sessoes_revogadas')) return null
+        if (sql.includes('FROM user_cliente u')) {
+          return { id: 'usuario-1', login: 'cotista.teste', cliente_id: 'cliente-1', socio_id: null }
+        }
+        return null
+      },
       all: async () => {
         db.lastSql = sql
         db.lastValues = statement.values
+        if (sql.includes('pragma_table_info')) {
+          return { results: ['cotista_id', 'principal_id', 'permissoes'].map(name => ({ name })) }
+        }
         return { results: [{
           id: 'voo-1',
           data_registro: '2026-10-18',
