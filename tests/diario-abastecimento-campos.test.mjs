@@ -20,3 +20,11 @@ test('novo abastecimento do Diário persiste tipo, valores e fornecedor e retorn
 test('referência de fornecedor é validada antes da gravação no diário', () => {
   assert.match(route, /tabela: 'fornecedores_combustivel', valor: abastecimento\?\.fornecedor_id/)
 })
+
+test('abastecimento direto exige pagador vinculado a cotista da aeronave', () => {
+  assert.match(route, /abastecimento_pagador_obrigatorio/)
+  assert.match(route, /abastecimento_pagador_sem_cotista/)
+  assert.match(route, /FROM cotista_aeronave/)
+  assert.match(route, /abastecimentoClienteId/)
+  assert.match(route, /abastecimentoSocioId/)
+})

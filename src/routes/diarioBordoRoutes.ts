@@ -530,13 +530,37 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   }
   if (!abastecimentoId && abastecimento && diarioNumber(abastecimento.litros) > 0) {
     await garantirTabelaAbastecimentos(c)
+    const vooEmprestado = diarioBoolean(body.voo_emprestado)
+    const abastecimentoClienteId = String(
+      abastecimento.cliente_id ||
+        (vooEmprestado ? body.cliente_tomador_emprestimo_id : body.cliente_id) ||
+        '',
+    ).trim()
+    const abastecimentoSocioId = String(
+      abastecimento.socio_id ||
+        (vooEmprestado ? body.socio_tomador_emprestimo_id : body.socio_id) ||
+        '',
+    ).trim()
+    if (!abastecimentoClienteId && !abastecimentoSocioId) {
+      return c.json({ error: 'abastecimento_pagador_obrigatorio' }, 400)
+    }
+    const cotistaVinculado = await db.prepare(`
+      SELECT id FROM cotista_aeronave
+       WHERE aeronave_id = ?1
+         AND lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado')
+         AND ((cliente_id = ?2 AND ?2 <> '') OR (socio_id = ?3 AND ?3 <> ''))
+       LIMIT 1
+    `).bind(aeronaveId, abastecimentoClienteId, abastecimentoSocioId).first<{ id: string }>()
+    if (!cotistaVinculado) {
+      return c.json({ error: 'abastecimento_pagador_sem_cotista' }, 400)
+    }
     const referenciaAbastecimentoInvalida = await validarReferenciasDiario(db, [
-      { tabela: 'cliente', valor: diarioBoolean(body.voo_emprestado) ? (body.cliente_tomador_emprestimo_id || abastecimento.cliente_id) : abastecimento.cliente_id, campo: 'abastecimento.cliente_id' },
-      { tabela: 'hold_socios', valor: diarioBoolean(body.voo_emprestado) ? (body.socio_tomador_emprestimo_id || abastecimento.socio_id) : abastecimento.socio_id, campo: 'abastecimento.socio_id' },
+      { tabela: 'cliente', valor: abastecimentoClienteId, campo: 'abastecimento.cliente_id' },
+      { tabela: 'hold_socios', valor: abastecimentoSocioId, campo: 'abastecimento.socio_id' },
     ])
     if (referenciaAbastecimentoInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaAbastecimentoInvalida.campo, valor: referenciaAbastecimentoInvalida.valor }, 400)
-    const titularAbastecimentoCliente = diarioBoolean(body.voo_emprestado) ? (body.cliente_tomador_emprestimo_id || abastecimento.cliente_id || null) : (abastecimento.cliente_id || null)
-    const titularAbastecimentoSocio = diarioBoolean(body.voo_emprestado) ? (body.socio_tomador_emprestimo_id || abastecimento.socio_id || null) : (abastecimento.socio_id || null)
+    const titularAbastecimentoCliente = abastecimentoClienteId || null
+    const titularAbastecimentoSocio = abastecimentoSocioId || null
     const abastecimentoLocal = await normalizarLocalAbastecimento(db, abastecimento.local || body.local_combustivel || String(body.aerodromo_partida || ''))
     if (!abastecimentoLocal) return c.json({ error: 'local_abastecimento_invalido' }, 400)
     const novoAbastecimentoId = uuid()
