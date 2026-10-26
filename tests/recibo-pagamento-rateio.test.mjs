@@ -133,3 +133,18 @@ test("respostas de recibo normalizam tipo_caixa para o contrato público", () =>
   assert.match(routes, /tipo_caixa: normalizarTipoCaixaRecibo\(recibo\.tipo_caixa, recibo\.pagador_tipo\)/);
   assert.match(kernel, /tipo_caixa: \['cotista_aeronave', 'cliente'\]\.includes\(input\.pagador_tipo\) \? 'CLIENTE' : 'SHARE'/);
 });
+
+test("programação replica o timestamp do email nos rateios de cliente e holding", () => {
+  const inicio = routes.indexOf("recibosRoutes.post('/recibos/:id/programar-contas-apagar'");
+  const fim = routes.indexOf("recibosRoutes.post('/recibos/:id/cancelar'", inicio);
+  const caminho = routes.slice(inicio, fim);
+  const programacaoInicio = kernel.indexOf("export async function programarReciboReembolso(");
+  const programacaoFim = kernel.indexOf("export async function emitirReciboColaborador(", programacaoInicio);
+  const programacao = kernel.slice(programacaoInicio, programacaoFim);
+
+  assert.match(programacao, /COALESCE\(e\.email_enviado_em, e\.criado_em, CURRENT_TIMESTAMP\) AS email_enviado_em/);
+  assert.match(programacao, /email_enviado_em: emailInfo\?\.email_enviado_em \?\? null/);
+  assert.match(caminho, /UPDATE rateio_despesas[\s\S]*email_enviado_em = COALESCE\(email_enviado_em, \?, CURRENT_TIMESTAMP\)/);
+  assert.match(caminho, /INSERT INTO rateio_despesas[\s\S]*email_enviado_em\)/);
+  assert.match(caminho, /INSERT INTO rateio_hold[\s\S]*email_enviado_em\)/);
+});

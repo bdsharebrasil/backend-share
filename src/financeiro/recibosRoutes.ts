@@ -303,31 +303,35 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
     const reembolso = await programarReciboReembolso(c.env.SHARE_DB, reciboId, bodyNormalizado, c.get('userId') || null)
     const lancamentoShareId = String(reembolso.lancamento_share_id ?? reembolso.lancamento_origem_id ?? '').trim()
     const lancamentoClienteId = String(reembolso.lancamento_cliente_id ?? '').trim()
+    const emailEnviadoEm = String(reembolso.email_enviado_em ?? '').trim() || null
     const receipt = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id, numero_recibo, aeronave_id, tipo_caixa, status, valor, descricao, data_emissao, data_vencimento, categoria_movimentacao_id, grupo_categoria, url_recibo FROM recibos WHERE id = ?`).bind(reciboId).first<Record<string, unknown>>()
     if (!receipt) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     const lancamentoVinculadoId = lancamentoShareId || String(receipt.lancamento_id ?? '').trim()
     const lancamento = lancamentoVinculadoId
-      ? await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_share_id, categoria_nome, data_emissao, data_vencimento, fornecedores_favoritos_id FROM lancamentos WHERE id = ?`).bind(lancamentoVinculadoId).first<Record<string, unknown>>()
-      : await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_share_id, categoria_nome, data_emissao, data_vencimento, fornecedores_favoritos_id FROM lancamentos WHERE origem_id = ? AND origem_tipo = 'RECIBO_REEMBOLSO' ORDER BY criado_em DESC LIMIT 1`).bind(reciboId).first<Record<string, unknown>>()
+      ? await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_share_id, categoria_nome, data_emissao, data_vencimento, fornecedores_favoritos_id, email_enviado_em FROM lancamentos WHERE id = ?`).bind(lancamentoVinculadoId).first<Record<string, unknown>>()
+      : await c.env.SHARE_DB.prepare(`SELECT id, status, tipo_caixa, valor_centavos, descricao, aeronave_id, categoria_share_id, categoria_nome, data_emissao, data_vencimento, fornecedores_favoritos_id, email_enviado_em FROM lancamentos WHERE origem_id = ? AND origem_tipo = 'RECIBO_REEMBOLSO' ORDER BY criado_em DESC LIMIT 1`).bind(reciboId).first<Record<string, unknown>>()
     const lancamentoId = String(lancamento?.id ?? '').trim()
     if (!lancamentoId) return c.json({ error: 'lancamento_do_recibo_nao_encontrado' }, 409)
     if (!lancamento || String(lancamento.tipo_caixa).toUpperCase() !== 'SHARE' || String(lancamento.status).toUpperCase() !== 'EM_ABERTO') return c.json({ error: 'lancamento_share_em_aberto_nao_encontrado' }, 409)
     if (!lancamentoClienteId) return c.json({ error: 'lancamento_cliente_do_reembolso_nao_encontrado' }, 409)
     const lancamentoClienteRateioId = lancamentoClienteId
+    const emailEnviadoEmRateio = emailEnviadoEm || String(lancamento.email_enviado_em ?? '').trim() || null
     const fornecedorId = String(lancamento.fornecedores_favoritos_id ?? body.fornecedor_id ?? body.fornecedores_favoritos_id ?? '').trim() || null
     const existing = await c.env.SHARE_DB.prepare(`SELECT id FROM contas_apagar WHERE lancamentos_id = ? AND status <> 'CANCELADO' LIMIT 1`).bind(lancamentoId).first<{ id: string }>()
     const rateiosExistentes = await c.env.SHARE_DB.prepare(`SELECT id, lancamento_id FROM rateio_despesas WHERE lancamento_id IN (?, ?)`).bind(lancamentoId, lancamentoClienteRateioId).all<{ id: string; lancamento_id: string | null }>().catch(() => ({ results: [] }))
     const rateiosDoCliente = rateiosExistentes.results ?? []
     if (rateiosDoCliente.length) {
       await c.env.SHARE_DB.batch(rateiosDoCliente.map((rateio) => c.env.SHARE_DB.prepare(`UPDATE rateio_despesas
-        SET lancamento_id = ?, fornecedor_id = ?, numero_recibo = ?, url_recibo = ? WHERE id = ?`)
-        .bind(lancamentoClienteRateioId, fornecedorId, receipt.numero_recibo ?? null, receipt.url_recibo ?? null, rateio.id)))
+        SET lancamento_id = ?, fornecedor_id = ?, numero_recibo = ?, url_recibo = ?,
+            email_enviado_em = COALESCE(email_enviado_em, ?, CURRENT_TIMESTAMP) WHERE id = ?`)
+        .bind(lancamentoClienteRateioId, fornecedorId, receipt.numero_recibo ?? null, receipt.url_recibo ?? null, emailEnviadoEmRateio, rateio.id)))
     }
     const existingRateio = rateiosDoCliente[0] ?? null
     const existingRateioHold = existingRateio
       ? null
       : await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_hold WHERE origem_id = ? AND origem_tipo = 'RECIBO' LIMIT 1`).bind(reciboId).first<{ id: string }>().catch(() => null)
     if (existingRateio || existingRateioHold) {
+      if (existingRateioHold?.id) await c.env.SHARE_DB.prepare(`UPDATE rateio_hold SET email_enviado_em = COALESCE(email_enviado_em, ?, CURRENT_TIMESTAMP) WHERE id = ?`).bind(emailEnviadoEmRateio, existingRateioHold.id).run()
       if (existing?.id) await c.env.SHARE_DB.prepare(`UPDATE contas_apagar SET boleto_url = COALESCE(?, boleto_url), fornecedor_id = ?, escopo_financeiro = 'CAIXA_SHARE' WHERE id = ?`).bind(body.boleto_url ? String(body.boleto_url) : null, fornecedorId, existing.id).run()
       return c.json({ ok: true, conta_pagar_id: existing?.id ?? null, rateio_ids: [existingRateio?.id ?? existingRateioHold!.id], idempotent: true })
     }
@@ -375,10 +379,10 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
       const cotista = cotistas.find((item) => String(item.id) === String(linha.cotista_id))!
       const percentual = linha.percentual_uso
       const rateado = valoresRateados[index]
-      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url, fornecedor_id, numero_recibo, url_recibo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?, ?, ?, ?)` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, documento_url, fornecedor_id, numero_recibo, url_recibo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, ?, ?, ?)`
+      const campos = String(cotista.socio_id ?? '').trim() ? `INSERT INTO rateio_hold (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, origem_id, origem_tipo, documento_url, fornecedor_id, numero_recibo, url_recibo, email_enviado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, 'RECIBO', ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))` : `INSERT INTO rateio_despesas (id, lancamento_id, aeronave_id, cotista_id, data_emissao, data_vencimento, categoria_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4, tipo_rateio, periodicidade, percentual_sociedade, percentual_uso, valor_total_centavos, valor_rateado_centavos, valor_pago_real_centavos, status, descricao_despesa, observacoes, documento_url, fornecedor_id, numero_recibo, url_recibo, email_enviado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'EM_ABERTO', ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`
       const parametros = String(cotista.socio_id ?? '').trim()
-        ? [rateioIds[index], movimentoHoldingId, aeronaveId, cotista.socio_id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, bodyNormalizado.subcategoria_1, bodyNormalizado.subcategoria_2, bodyNormalizado.subcategoria_3, bodyNormalizado.subcategoria_4, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl, fornecedorId, receipt.numero_recibo ?? null, documentoUrl]
-        : [rateioIds[index], lancamentoClienteRateioId, aeronaveId, cotista.id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, bodyNormalizado.subcategoria_1, bodyNormalizado.subcategoria_2, bodyNormalizado.subcategoria_3, bodyNormalizado.subcategoria_4, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, documentoUrl, fornecedorId, receipt.numero_recibo ?? null, documentoUrl]
+        ? [rateioIds[index], movimentoHoldingId, aeronaveId, cotista.socio_id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, bodyNormalizado.subcategoria_1, bodyNormalizado.subcategoria_2, bodyNormalizado.subcategoria_3, bodyNormalizado.subcategoria_4, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, reciboId, documentoUrl, fornecedorId, receipt.numero_recibo ?? null, documentoUrl, emailEnviadoEmRateio]
+        : [rateioIds[index], lancamentoClienteRateioId, aeronaveId, cotista.id, dataEmissao, dataVencimento, categoriaIdRateio, categoriaNomeRateio, bodyNormalizado.subcategoria_1, bodyNormalizado.subcategoria_2, bodyNormalizado.subcategoria_3, bodyNormalizado.subcategoria_4, tipoRateio, periodicidade, Number(cotista.percentual_sociedade ?? 0), percentual, valorCentavos, rateado, descricao, body.observacoes ?? null, documentoUrl, fornecedorId, receipt.numero_recibo ?? null, documentoUrl, emailEnviadoEmRateio]
       statements.push(c.env.SHARE_DB.prepare(campos).bind(...parametros))
     })
     await c.env.SHARE_DB.batch(statements)

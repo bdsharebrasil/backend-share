@@ -3046,7 +3046,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // O e-mail pode ter sido enviado antes ou depois da criação dos lançamentos.
   // O histórico é opcional e não pode interromper a programação financeira.
   const emailInfo = await db.prepare(
-    `SELECT e.id FROM emails_enviados e
+    `SELECT e.id, COALESCE(e.email_enviado_em, e.criado_em, CURRENT_TIMESTAMP) AS email_enviado_em FROM emails_enviados e
        LEFT JOIN recibo_anexos a
          ON a.id = e.referencia_id
         AND e.referencia_tipo = 'recibo'
@@ -3054,7 +3054,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
          AND e.referencia_tipo = 'recibo'
          AND (e.referencia_id = ?1 OR a.recibo_id = ?1)
        ORDER BY e.criado_em DESC LIMIT 1`,
-  ).bind(receiptId).first<{ id: string }>().catch(() => null)
+  ).bind(receiptId).first<{ id: string; email_enviado_em: string | null }>().catch(() => null)
   const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id,
       l.categoria_share_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome,
       l.fornecedores_favoritos_id AS share_fornecedor_id
@@ -3065,15 +3065,16 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   if (existing) {
     if (emailInfo?.id) {
       await db.prepare(`UPDATE lancamentos
-        SET email_enviado_em = COALESCE(email_enviado_em, CURRENT_TIMESTAMP),
-            email_enviado_id = COALESCE(email_enviado_id, ?1)
-        WHERE id IN (?2, ?3)`).bind(
+        SET email_enviado_em = COALESCE(email_enviado_em, ?1),
+            email_enviado_id = COALESCE(email_enviado_id, ?2)
+        WHERE id IN (?3, ?4)`).bind(
+        emailInfo.email_enviado_em,
         emailInfo.id,
         existing.lancamento_origem_id,
         existing.lancamento_cliente_id,
       ).run()
     }
-    return { ...existing, idempotent: true }
+    return { ...existing, email_enviado_em: emailInfo?.email_enviado_em ?? null, idempotent: true }
   }
 
   const amount = asPositiveCents(receipt.valor)
@@ -3147,10 +3148,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       .bind(nullableText(body.periodicidade), nullableText(receipt.numero_recibo), nullableText(receipt.url_recibo), receipt.share_lancamento_id),
     ...(emailInfo?.id ? [
       db.prepare(`UPDATE lancamentos
-        SET email_enviado_em = COALESCE(email_enviado_em, CURRENT_TIMESTAMP),
-            email_enviado_id = COALESCE(email_enviado_id, ?1)
-        WHERE id IN (?2, ?3)`)
-        .bind(emailInfo.id, receipt.share_lancamento_id, clientLancamentoId),
+        SET email_enviado_em = COALESCE(email_enviado_em, ?1),
+            email_enviado_id = COALESCE(email_enviado_id, ?2)
+        WHERE id IN (?3, ?4)`)
+        .bind(emailInfo.email_enviado_em, emailInfo.id, receipt.share_lancamento_id, clientLancamentoId),
     ] : []),
     auditStatement(db, schema, 'reembolsos', reimbursementId, 'PROGRAMACAO_REEMBOLSO', userId, null, amount, nullableText(body.observacoes), `programar-recibo-reembolso:${receiptId}`),
   ]
@@ -3165,10 +3166,11 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
     return {
       ...concurrent,
       lancamento_share_id: concurrent.lancamento_origem_id,
+      email_enviado_em: emailInfo?.email_enviado_em ?? null,
       idempotent: true,
     }
   }
-  return { id: reimbursementId, lancamento_share_id: receipt.share_lancamento_id, lancamento_cliente_id: clientLancamentoId, conta_receber_id: contaReceberId, status: 'AGUARDANDO_REEMBOLSO', idempotent: false }
+  return { id: reimbursementId, lancamento_share_id: receipt.share_lancamento_id, lancamento_cliente_id: clientLancamentoId, conta_receber_id: contaReceberId, status: 'AGUARDANDO_REEMBOLSO', email_enviado_em: emailInfo?.email_enviado_em ?? null, idempotent: false }
 }
 
 export async function emitirReciboColaborador(db: Database, body: Row, userId: string | null): Promise<Row> {
