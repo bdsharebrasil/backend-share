@@ -38,7 +38,9 @@ test("emissão de recibo de reembolso aceita, grava e retorna numero_voo", async
   assert.match(writes[0].sql, /categoria_nome, numero_voo/);
   assert.equal(writes[0].values.at(-1), "VOO-2026-001");
   assert.match(kernel, /numero_voo: input\.numero_voo \|\| null/);
-  assert.match(migration, /ALTER TABLE recibos ADD COLUMN numero_voo TEXT;/);
+  assert.match(migration, /ALTER TABLE recibos RENAME COLUMN numero_voo TO numero_voo_id/);
+  assert.match(migration, /SET numero_voo = \([\s\S]*s\.numero_voo[\s\S]*s\.id = recibos\.numero_voo_id/);
+  assert.match(migration, /ALTER TABLE recibos DROP COLUMN numero_voo_id/);
   assert.match(schema, /categoria_nome TEXT,[\s\S]*numero_voo TEXT\n/);
 });
 
