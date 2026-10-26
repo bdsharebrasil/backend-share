@@ -133,8 +133,8 @@ enviosPagamentoRoutes.get('/envios-pagamento/despesas-origem', async (c) => {
   const aeronaveId = c.req.query('aeronave_id')?.trim()
   const numeroVoo = c.req.query('numero_voo')?.trim()
   const origem = c.req.query('origem')?.trim().toUpperCase()
-  if (!aeronaveId || !numeroVoo || !['ABASTECIMENTO', 'RECIBOS', 'RELATORIOS DE VIAGEM'].includes(origem || '')) {
-    return c.json({ error: 'aeronave_id, numero_voo e origem são obrigatórios' }, 400)
+  if (!aeronaveId || !['ABASTECIMENTO', 'RECIBOS', 'RELATORIOS DE VIAGEM'].includes(origem || '')) {
+    return c.json({ error: 'aeronave_id e origem são obrigatórios' }, 400)
   }
   try {
     let registros: Record<string, unknown>[] = []
@@ -144,22 +144,23 @@ enviosPagamentoRoutes.get('/envios-pagamento/despesas-origem', async (c) => {
         a.comanda_url, a.nota_url, a.boleto_url, a.numero_comanda, a.numero_nf,
         a.trecho, a.local, a.tipo_combustivel AS descricao
         FROM abastecimentos a LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id
-        WHERE a.aeronave_id = ? AND TRIM(a.numero_voo) = ? ORDER BY date(a.data) DESC, a.id DESC LIMIT 100`).bind(aeronaveId, numeroVoo).all<Record<string, unknown>>()
+        WHERE a.aeronave_id = ?${numeroVoo ? ' AND TRIM(a.numero_voo) = ?' : ''}
+        ORDER BY date(a.data) DESC, a.id DESC LIMIT 100`).bind(...([aeronaveId, ...(numeroVoo ? [numeroVoo] : [])] as string[])).all<Record<string, unknown>>()
       registros = result.results ?? []
     } else if (origem === 'RECIBOS') {
       const result = await db.prepare(`SELECT r.id, r.numero_voo, r.aeronave_id, r.data_emissao AS data_despesa,
         r.valor / 100.0 AS valor, '' AS fornecedor,
         r.descricao, r.categoria_nome, r.grupo_categoria, r.numero_recibo, r.url_recibo,
         NULL AS url_nf, NULL AS url_boleto, NULL AS url_demonstrativo, NULL AS url_doc
-        FROM recibos r WHERE r.aeronave_id = ? AND TRIM(r.numero_voo) = ?
-        ORDER BY date(r.data_emissao) DESC, r.criado_em DESC LIMIT 100`).bind(aeronaveId, numeroVoo).all<Record<string, unknown>>()
+        FROM recibos r WHERE r.aeronave_id = ?${numeroVoo ? ' AND TRIM(r.numero_voo) = ?' : ''}
+        ORDER BY date(r.data_emissao) DESC, r.criado_em DESC LIMIT 100`).bind(...([aeronaveId, ...(numeroVoo ? [numeroVoo] : [])] as string[])).all<Record<string, unknown>>()
       registros = result.results ?? []
     } else {
       await db.prepare('SELECT id FROM relatorio_despesa_viagem LIMIT 0').all()
       const result = await db.prepare(`SELECT r.id, r.numero_voo, r.aeronave_id, r.data_inicio AS data_despesa,
         r.numero_relatorio, r.rota, r.pdf_url, r.despesas, r.cliente_id, r.socio_id
-        FROM relatorio_despesa_viagem r WHERE r.aeronave_id = ? AND TRIM(r.numero_voo) = ?
-        ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 100`).bind(aeronaveId, numeroVoo).all<Record<string, unknown>>()
+        FROM relatorio_despesa_viagem r WHERE r.aeronave_id = ?${numeroVoo ? ' AND TRIM(r.numero_voo) = ?' : ''}
+        ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 100`).bind(...([aeronaveId, ...(numeroVoo ? [numeroVoo] : [])] as string[])).all<Record<string, unknown>>()
       registros = (result.results ?? []).flatMap((row) => {
         let despesas: unknown[] = []
         try { const parsed = typeof row.despesas === 'string' ? JSON.parse(row.despesas) : row.despesas; if (Array.isArray(parsed)) despesas = parsed } catch { /* relatório legado sem despesas válidas */ }
