@@ -90,7 +90,7 @@ financeiroRoutes.get('/solicitacoes-compra', async (c) => {
       FROM solicitacoes_compra sc
       LEFT JOIN envio_despesas e ON e.solicitacao_compra_id = sc.id
       LEFT JOIN user_profiles u ON u.id = sc.user_id
-      ORDER BY datetime(COALESCE(sc.data_solicitacao, sc.criado_em)) DESC LIMIT 500`)
+      ORDER BY datetime(COALESCE(sc.data_solicitacao, sc.data_criacao)) DESC LIMIT 500`)
     return c.json({ solicitacoes: rows })
   } catch (error) { return errorResponse(c, error) }
 })
