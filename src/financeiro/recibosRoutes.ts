@@ -245,7 +245,7 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
   try {
     const reciboId = c.req.param('id')
     const body = await c.req.json<Record<string, unknown>>()
-    const receiptInicial = await c.env.SHARE_DB.prepare('SELECT id, tipo_recibo, status, categoria_movimentacao_id, categoria_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM recibos WHERE id = ?').bind(reciboId).first<Record<string, unknown>>()
+    const receiptInicial = await c.env.SHARE_DB.prepare('SELECT id, tipo_recibo, status, categoria_movimentacao_id, categoria_nome FROM recibos WHERE id = ?').bind(reciboId).first<Record<string, unknown>>()
     if (!receiptInicial) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     if (String(receiptInicial.status).toUpperCase() !== 'EMAIL_ENVIADO') return c.json({ error: 'recibo_precisa_ser_enviado_por_email' }, 409)
     const camposSubcategoria = ['subcategoria_1', 'subcategoria_2', 'subcategoria_3', 'subcategoria_4'] as const
@@ -262,7 +262,7 @@ recibosRoutes.post('/recibos/:id/programar-contas-apagar', async (c) => {
 
     const subcategoriasInformadas = [...new Set(
       camposSubcategoria
-        .map((campo) => String(body[campo] ?? receiptInicial[campo] ?? '').trim())
+        .map((campo) => String(body[campo] ?? '').trim())
         .filter(Boolean),
     )]
     if (subcategoriasInformadas.length > 1) return c.json({ error: 'subcategorias_inconsistentes' }, 400)

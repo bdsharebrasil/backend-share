@@ -92,6 +92,8 @@ test("programação de reembolso vincula rateio ao lançamento cliente e transfe
   const fim = routes.indexOf("recibosRoutes.post('/recibos/:id/cancelar'", inicio);
   const caminho = routes.slice(inicio, fim);
   assert.match(caminho, /const reembolso = await programarReciboReembolso/);
+  assert.match(caminho, /SELECT id, tipo_recibo, status, categoria_movimentacao_id, categoria_nome FROM recibos WHERE id = \?/);
+  assert.doesNotMatch(caminho, /receiptInicial\[campo\]/);
   assert.match(caminho, /reembolso\.lancamento_share_id \?\? reembolso\.lancamento_origem_id/);
   assert.match(caminho, /const lancamentoClienteId = String\(reembolso\.lancamento_cliente_id \?\? ''\)/);
   assert.match(caminho, /if \(!lancamentoClienteId\) return c\.json\(\{ error: 'lancamento_cliente_do_reembolso_nao_encontrado' \}, 409\)/);
@@ -100,6 +102,8 @@ test("programação de reembolso vincula rateio ao lançamento cliente e transfe
   assert.match(caminho, /SET lancamento_id = \?, fornecedor_id = \?, numero_recibo = \?, url_recibo = \?/);
   assert.match(caminho, /lancamentoClienteRateioId, aeronaveId/);
   assert.match(caminho, /fornecedor_id, numero_recibo, url_recibo/);
+  assert.match(caminho, /INSERT INTO contas_apagar \(id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, lancamentos_id, boleto_url, nf_url, criado_por, origem_tipo, idempotency_key, status, fornecedor_id, escopo_financeiro\)/);
+  assert.doesNotMatch(caminho, /INSERT INTO contas_apagar \([^)]*subcategoria_/);
   assert.match(caminho, /escopo_financeiro\) VALUES[\s\S]*'CAIXA_SHARE'/);
 });
 
@@ -109,7 +113,11 @@ test("baixa de reembolso transfere rateios legados Share para o lançamento clie
   assert.match(settleReceivable, /FROM rateio_despesas WHERE lancamento_id = \? AND status NOT IN \('CANCELADO'\)[\s\S]*bind\(reimbursement\.lancamento_origem_id\)/);
   assert.match(settleReceivable, /if \(rateiosLegadosShare\.results\?\.length\) rateios = rateiosLegadosShare/);
   assert.match(settleReceivable, /UPDATE rateio_despesas SET lancamento_id = \? WHERE id = \? AND lancamento_id = \?/);
-  assert.ok(settleReceivable.indexOf("UPDATE rateio_despesas SET lancamento_id") < settleReceivable.indexOf("if (reimbursement && rateioLancamentoId && !(rateios.results || []).length)"));
+  const rateiosLegadosSelecionados = settleReceivable.indexOf('if (rateiosLegadosShare.results?.length) rateios = rateiosLegadosShare');
+  const transferenciaEnfileirada = settleReceivable.indexOf('for (const rateio of rateiosLegadosShare.results || [])');
+  const validacaoRateio = settleReceivable.indexOf("if (!rateios.results.length) throw new FinanceError('Obrigação sem rateio vinculado.");
+  assert.ok(rateiosLegadosSelecionados >= 0 && transferenciaEnfileirada > rateiosLegadosSelecionados);
+  assert.ok(validacaoRateio > transferenciaEnfileirada);
   assert.match(settleReceivable, /SELECT id, valor_rateado_centavos, valor_pago_real_centavos FROM rateio_despesas WHERE lancamento_id = \?/);
   assert.match(settleReceivable, /existingByRateio\.set\(String\(rateio\.id\), paid\)/);
 });
