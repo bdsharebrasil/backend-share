@@ -306,15 +306,17 @@ function normalizarLancamentoDiario(body: Record<string, any>, aeronave: any, de
 diarioBordoRoutes.get('/api/interno/diario-bordo/opcoes', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = c.env.SHARE_DB
-  const [clientes, holdings, socios, tripulacao, freelancers, aerodromos] = await Promise.all([
+  await validateWorkerSchema(c, [{ table: 'fornecedores_combustivel', columns: ['id', 'nome_fornecedor'] }])
+  const [clientes, holdings, socios, tripulacao, freelancers, aerodromos, fornecedoresCombustivel] = await Promise.all([
     db.prepare("SELECT id, razao_social AS nome, codigo_cliente, proprietario FROM cliente WHERE lower(COALESCE(status, 'ativo')) NOT IN ('inativo', 'cancelado') ORDER BY razao_social").all(),
     db.prepare("SELECT id, nome, proprietario FROM holdings WHERE COALESCE(ativo, 1) = 1 ORDER BY nome").all(),
     db.prepare('SELECT id, nome, cotista_id, holding_id FROM hold_socios ORDER BY nome').all(),
     db.prepare("SELECT id, canac, nome_completo, status, 'tripulacao' AS origem FROM tripulacao WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare("SELECT id, canac, nome_completo, status, 'freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo").all(),
     db.prepare('SELECT id, designativo_icao AS designativo, nome, coordenadas FROM aerodromo ORDER BY designativo_icao').all(),
+    db.prepare('SELECT id, nome_fornecedor FROM fornecedores_combustivel ORDER BY nome_fornecedor').all(),
   ])
-  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, tripulantes: [...tripulacao.results, ...freelancers.results], aerodromos: aerodromos.results })
+  return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, tripulantes: [...tripulacao.results, ...freelancers.results], aerodromos: aerodromos.results, fornecedores_combustivel: fornecedoresCombustivel.results })
 })
 
 diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
@@ -370,6 +372,9 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/detalhes', async c => {
       (SELECT COALESCE(ca.razao_social, so.nome) FROM abastecimentos ab LEFT JOIN cliente ca ON ca.id = ab.cliente_id LEFT JOIN hold_socios so ON so.id = ab.socio_id WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_pagador_nome,
       (SELECT ab.numero_comanda FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_comanda,
       (SELECT ab.numero_nf FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_nota,
+      (SELECT ab.tipo_combustivel FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_tipo_combustivel,
+      (SELECT ab.valor_unitario FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_valor_unitario,
+      (SELECT ab.fornecedor_id FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_fornecedor_id,
       (SELECT ab.id FROM abastecimentos ab WHERE ab.lancamento_diario_id = l.id ORDER BY date(ab.data) DESC, ab.id DESC LIMIT 1) AS abastecimento_id,
       (SELECT p.id FROM pernas_jornada_voo p WHERE p.lancamento_diario_id = l.id LIMIT 1) AS perna_jornada_id
     FROM lancamentos_diario_bordo l
@@ -496,6 +501,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     if (pernaVinculada.aeronave_id !== aeronaveId || (body.jornada_id && String(body.jornada_id) !== String(pernaVinculada.jornada_id))) return c.json({ error: 'perna_nao_corresponde_a_jornada_ou_aeronave' }, 409)
     if (pernaVinculada.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   }
+  const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
   const referenciaInvalida = await validarReferenciasDiario(db, [
     { tabela: 'jornadas_voo', valor: pernaVinculada ? null : body.jornada_id, campo: 'jornada_id' },
     { tabela: 'user_profiles', valor: criadoPor, campo: 'criado_por' },
@@ -504,15 +510,16 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     { tabela: 'hold_socios', valor: body.socio_id, campo: 'socio_id' },
     { tabela: 'cliente', valor: body.cliente_tomador_emprestimo_id, campo: 'cliente_tomador_emprestimo_id' },
     { tabela: 'hold_socios', valor: body.socio_tomador_emprestimo_id, campo: 'socio_tomador_emprestimo_id' },
+    { tabela: 'fornecedores_combustivel', valor: abastecimento?.fornecedor_id, campo: 'abastecimento.fornecedor_id' },
   ])
   if (referenciaInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaInvalida.campo, valor: referenciaInvalida.valor }, 400)
   const last = await db.prepare('SELECT COALESCE(MAX(numero_sequencial), 0) AS sequencial FROM lancamentos_diario_bordo WHERE diario_mes_id = ?1').bind(diarioMesId).first<{ sequencial: number }>()
   const id = uuid()
   const perfilPic = await db.prepare('SELECT nome_completo FROM user_profiles WHERE id = ?1').bind(extractSupabaseUserId(c)).first<{ nome_completo: string | null }>()
   const [nomePic, nomeSic, trecho] = await Promise.all([nomeTripulantePorCanac(c, body.pic_canac), nomeTripulantePorCanac(c, body.sic_canac), trechoAerodromosDiario(c, body.aerodromo_partida, body.aerodromo_chegada)])
-  const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
   const abastecimentoId = String(body.abastecimento_id || '').trim()
   let abastecimentoStmt: D1PreparedStatement | null = null
+  let abastecimentoIdResposta: string | null = abastecimentoId || null
   if (abastecimentoId) {
     await garantirTabelaAbastecimentos(c)
     const existente = await db.prepare('SELECT id, aeronave_id, lancamento_diario_id FROM abastecimentos WHERE id = ?1 LIMIT 1').bind(abastecimentoId).first<{ id: string; aeronave_id: string | null; lancamento_diario_id: string | null }>()
@@ -532,7 +539,12 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     const titularAbastecimentoSocio = diarioBoolean(body.voo_emprestado) ? (body.socio_tomador_emprestimo_id || abastecimento.socio_id || null) : (abastecimento.socio_id || null)
     const abastecimentoLocal = await normalizarLocalAbastecimento(db, abastecimento.local || body.local_combustivel || String(body.aerodromo_partida || ''))
     if (!abastecimentoLocal) return c.json({ error: 'local_abastecimento_invalido' }, 400)
-    abastecimentoStmt = db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(uuid(), titularAbastecimentoCliente, titularAbastecimentoSocio, aeronaveId, abastecimento.data || data, abastecimento.tipo_combustivel || null, abastecimento.trecho || trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Criado no Diário de Bordo', extractSupabaseUserId(c), id, diarioBoolean(body.voo_emprestado), body.numero_voo || null)
+    const novoAbastecimentoId = uuid()
+    abastecimentoIdResposta = novoAbastecimentoId
+    const litrosAbastecimento = diarioNumber(abastecimento.litros)
+    const valorUnitarioAbastecimento = diarioNumber(abastecimento.valor_unitario)
+    const valorTotalAbastecimento = diarioNumber(abastecimento.valor_total, litrosAbastecimento * valorUnitarioAbastecimento)
+    abastecimentoStmt = db.prepare(`INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(novoAbastecimentoId, titularAbastecimentoCliente, titularAbastecimentoSocio, aeronaveId, abastecimento.data || data, diarioText(abastecimento.tipo_combustivel), abastecimento.trecho || trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, litrosAbastecimento, valorUnitarioAbastecimento, valorTotalAbastecimento, diarioText(abastecimento.fornecedor_id), abastecimento.status || 'pendente', abastecimento.observacao || 'Criado no Diário de Bordo', extractSupabaseUserId(c), id, diarioBoolean(body.voo_emprestado), body.numero_voo || null)
   }
   const horario = (valor: string | null) => valor ? String(valor).slice(11, 16) : null
   const dadosOperacionais = await calcularDadosOperacionais(c, pernaVinculada ? {
@@ -609,7 +621,7 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
     throw error
   }
   const inserted = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
-  return c.json({ ...inserted, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status }, 201)
+  return c.json({ ...inserted, abastecimento_id: abastecimentoIdResposta, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status }, 201)
 })
 
 diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => {
@@ -639,6 +651,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
   if (body.data_registro !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.data_registro)) || String(row.data_registro).slice(0, 7) !== `${current.diario_ano || ''}-${String(current.diario_mes || '').padStart(2, '0')}`)) return c.json({ error: 'data_fora_do_mes' }, 400)
   const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
   const abastecimentoId = body.abastecimento_id === undefined ? '' : String(body.abastecimento_id || '').trim()
+  let abastecimentoIdResposta: string | null = abastecimentoId || null
   let abastecimentoLocal: string | null = null
   if (abastecimentoId) {
     await garantirTabelaAbastecimentos(c)
@@ -667,6 +680,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
     { tabela: 'hold_socios', valor: merged.socio_id, campo: 'socio_id' },
     { tabela: 'cliente', valor: merged.cliente_tomador_emprestimo_id, campo: 'cliente_tomador_emprestimo_id' },
     { tabela: 'hold_socios', valor: merged.socio_tomador_emprestimo_id, campo: 'socio_tomador_emprestimo_id' },
+    { tabela: 'fornecedores_combustivel', valor: abastecimento?.fornecedor_id, campo: 'abastecimento.fornecedor_id' },
   ])
   if (referenciaInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaInvalida.campo, valor: referenciaInvalida.valor }, 400)
   const assignments = updates.filter(([field], index, list) => list.findIndex(([candidate]) => candidate === field) === index)
@@ -685,11 +699,15 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
     const titularAbastecimentoCliente = vooEmprestadoAtual ? (current.cliente_tomador_emprestimo_id || abastecimento.cliente_id || null) : (abastecimento.cliente_id || null)
     const titularAbastecimentoSocio = vooEmprestadoAtual ? (current.socio_tomador_emprestimo_id || abastecimento.socio_id || null) : (abastecimento.socio_id || null)
     const existente = await db.prepare('SELECT id FROM abastecimentos WHERE lancamento_diario_id = ?1 ORDER BY date(data) DESC, id DESC LIMIT 1').bind(id).first<{ id: string }>()
-    const valores = [titularAbastecimentoCliente, titularAbastecimentoSocio, current.aeronave_id, abastecimento.data || row.data_registro, abastecimento.tipo_combustivel || null, abastecimento.trecho || row.trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, diarioNumber(abastecimento.litros), diarioNumber(abastecimento.valor_unitario), diarioNumber(abastecimento.valor_total), abastecimento.status || 'pendente', abastecimento.observacao || 'Atualizado no Diário de Bordo', extractSupabaseUserId(c), diarioBoolean(body.voo_emprestado ?? current.voo_emprestado), row.numero_voo || current.numero_voo || null]
+    const litrosAbastecimento = diarioNumber(abastecimento.litros)
+    const valorUnitarioAbastecimento = diarioNumber(abastecimento.valor_unitario)
+    const valorTotalAbastecimento = diarioNumber(abastecimento.valor_total, litrosAbastecimento * valorUnitarioAbastecimento)
+    const valores = [titularAbastecimentoCliente, titularAbastecimentoSocio, current.aeronave_id, abastecimento.data || row.data_registro, diarioText(abastecimento.tipo_combustivel), abastecimento.trecho || row.trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, litrosAbastecimento, valorUnitarioAbastecimento, valorTotalAbastecimento, diarioText(abastecimento.fornecedor_id), abastecimento.status || 'pendente', abastecimento.observacao || 'Atualizado no Diário de Bordo', extractSupabaseUserId(c), diarioBoolean(body.voo_emprestado ?? current.voo_emprestado), row.numero_voo || current.numero_voo || null]
     if (existente) {
-      await db.prepare('UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, numero_nf=?, litros=?, valor_unitario=?, valor_total=?, status=?, observacao=?, criado_por=?, voo_emprestado=?, numero_voo=? WHERE id=?').bind(...valores, existente.id).run()
+      await db.prepare('UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, numero_nf=?, litros=?, valor_unitario=?, valor_total=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, voo_emprestado=?, numero_voo=? WHERE id=?').bind(...valores, existente.id).run()
     } else {
-      await db.prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(uuid(), ...valores.slice(0, 15), id, ...valores.slice(15)).run()
+      abastecimentoIdResposta = uuid()
+      await db.prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(abastecimentoIdResposta, ...valores.slice(0, 16), id, ...valores.slice(16)).run()
     }
   }
   if (pernaAtualId !== pernaDesejadaId) {
@@ -702,7 +720,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
   await recalcularCelulasLancamentos(c, current.diario_mes_id)
   await recalcularDiarioMes(c, current.diario_mes_id)
   const updated = await db.prepare('SELECT * FROM lancamentos_diario_bordo WHERE id = ?1').bind(id).first()
-  return c.json({ ...updated, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status })
+  return c.json({ ...updated, abastecimento_id: abastecimentoIdResposta, acionamento_utc: dadosOperacionais.acionamento_utc, decolagem_utc: dadosOperacionais.decolagem_utc, pouso_utc: dadosOperacionais.pouso_utc, corte_utc: dadosOperacionais.corte_utc, solar_status: dadosOperacionais.solar_status })
 })
 
 diarioBordoRoutes.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
