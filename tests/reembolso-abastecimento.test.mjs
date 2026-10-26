@@ -76,3 +76,18 @@ test("opções omitem abastecimentos já usados por recibo ou caixa cotista", ()
   assert.match(routes, /l\.abastecimentos_id = a\.id/);
   assert.match(routes, /l\.tipo_caixa = 'CLIENTE'/);
 });
+
+test("lançamentos do reembolso usam a categoria Share relacionada e preservam o ID do voo", () => {
+  const inicio = kernel.indexOf("async function createReimbursementFinance(");
+  const fim = kernel.indexOf("type ReceiptFinanceBuilder", inicio);
+  const criacao = kernel.slice(inicio, fim);
+  const programacaoInicio = kernel.indexOf("export async function programarReciboReembolso(");
+  const programacaoFim = kernel.indexOf("export async function emitirReciboColaborador(", programacaoInicio);
+  const programacao = kernel.slice(programacaoInicio, programacaoFim);
+
+  assert.match(criacao, /WHERE categoria_cliente_id = \?/);
+  assert.match(criacao, /categoria_cliente_id: categoriaClienteId/);
+  assert.match(criacao, /categoria_share_id: shareCategory\.categoria_share_id/);
+  assert.match(criacao, /numero_voo: nullableText\(input\.numero_voo\)/);
+  assert.match(programacao, /numero_voo: nullableText\(body\.numero_voo\) \|\| nullableText\(receipt\.numero_voo\)/);
+});

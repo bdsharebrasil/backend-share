@@ -282,12 +282,6 @@ export function resolveReembolsoModo(
   return { modo: quantidadeLinhas > 1 ? 'RESPONSAVEL_COM_BALANCO' : 'RESPONSAVEL_UNICO', total }
 }
 
-// Categoria padrão do lançamento de receita e da conta a pagar do recibo.
-// A categoria escolhida no formulário de recibo de pagamento pertence ao
-// Caixa Cliente e não pode ser usada em contas_apagar, cuja FK aponta para
-// categoria_movimentacao_share.
-const CATEGORIA_SHARE_RECIBO = '73355581-c479-4a5d-b90b-90b3332f198e'
-
 type SchemaCache = Map<string, Set<string>>
 type CachedSchema = { schema: SchemaCache; expiresAt: number }
 const SCHEMA_CACHE_TTL_MS = 60_000
@@ -2467,11 +2461,18 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
   const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
   const fornecedor = await buscarFornecedor(db, fornecedorId) ?? await resolverFornecedor(db, fornecedorId, command.fornecedor_nome ?? command.fornecedor)
   const abastecimentosId = await linkedAbastecimentoId(db, receiptId)
+  const categoriaClienteId = nullableText(input.categoria_movimentacao_id)
   const categoriaShare = await db.prepare(`
     SELECT id FROM categoria_movimentacao_share
-     WHERE id = ? OR upper(COALESCE(nome, '')) LIKE '%REEMBOLS%' OR upper(COALESCE(grupo_categoria, '')) LIKE '%REEMBOLS%'
-     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, nome LIMIT 1
-  `).bind(CATEGORIA_SHARE_RECIBO, CATEGORIA_SHARE_RECIBO).first<{ id: string }>()
+     WHERE categoria_cliente_id = ?
+     ORDER BY id LIMIT 1
+  `).bind(categoriaClienteId).first<{ id: string }>()
+  if (!categoriaShare?.id) {
+    throw new FinanceError(
+      'A categoria Share vinculada à categoria cliente selecionada não foi encontrada',
+      'categoria_share_vinculada_nao_encontrada',
+    )
+  }
   const shareCategory = await resolveShareLancamentoCategory(db, categoriaShare?.id)
   const cotista = await db.prepare(`
     SELECT id FROM cotista_aeronave
@@ -2493,6 +2494,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       cliente_id: clienteId,
       descricao: input.descricao,
       categoria_share_id: shareCategory.categoria_share_id,
+      categoria_cliente_id: categoriaClienteId,
       categoria_nome: shareCategory.categoria_nome,
       grupo_categoria: shareCategory.grupo_categoria,
       fluxo: 'SAIDA',
@@ -2502,6 +2504,7 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       escopo_financeiro: 'CAIXA_SHARE',
       data_emissao: input.data_emissao,
       data_vencimento: input.data_vencimento || input.data_emissao,
+      numero_voo: nullableText(input.numero_voo),
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
       pago_diretamente: 0,
@@ -3115,6 +3118,7 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       descricao: receipt.descricao || 'Reembolso de despesa', grupo_categoria: 'CAIXA CLIENTE',
       fluxo: 'SAIDA', tipo_caixa: 'CLIENTE', valor_centavos: amount,
       data_emissao: data, data_vencimento: vencimento, status: 'EM_ABERTO',
+      numero_voo: nullableText(body.numero_voo) || nullableText(receipt.numero_voo),
       escopo_financeiro: 'FINANCEIRO', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
