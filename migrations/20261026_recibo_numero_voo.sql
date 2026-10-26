@@ -1,0 +1,1 @@
+ALTER TABLE recibos ADD COLUMN numero_voo TEXT;

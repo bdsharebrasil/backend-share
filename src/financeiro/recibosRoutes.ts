@@ -8,6 +8,15 @@ type Variables = { userId: string | null }
 
 export const recibosRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
+function normalizarTipoCaixaRecibo(value: unknown, pagadorTipo?: unknown): 'SHARE' | 'CLIENTE' | 'HOLDING' {
+  const tipoCaixa = String(value ?? '').trim().toUpperCase()
+  if (tipoCaixa === 'SHARE' || tipoCaixa === 'CLIENTE' || tipoCaixa === 'HOLDING') return tipoCaixa
+  const tipoPagador = String(pagadorTipo ?? '').trim().toUpperCase()
+  if (tipoPagador === 'EMPRESA') return 'SHARE'
+  if (tipoPagador === 'HOLDING') return 'HOLDING'
+  return 'CLIENTE'
+}
+
 function storage(c: any): R2Bucket | undefined { return c.env.SHARE_FILES || c.env.FILES }
 function publicStorageUrl(c: any, key: string): string { const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, ''); if (!publicBase) throw new Error('R2_PUBLIC_URL_nao_configurada'); return `${publicBase}/${key.split('/').map((segment: string) => encodeURIComponent(segment)).join('/')}` }
 
@@ -152,6 +161,7 @@ recibosRoutes.get('/recibos', async (c) => {
       const cotista = cotistaPorId.get(String(recibo.pagador_id ?? ''))
       return {
         ...recibo,
+        tipo_caixa: normalizarTipoCaixaRecibo(recibo.tipo_caixa, recibo.pagador_tipo),
         pdf_anexo_id: pdfAnexoPorRecibo.get(String(recibo.id))?.id ?? null,
         pdf_url: recibo.url_recibo ?? null,
         nome_pagador: recibo.pagador_tipo === 'cotista_aeronave' ? cotista?.nome ?? recibo.nome_pagador ?? null : recibo.pagador_tipo === 'cliente' ? clientePorId.get(String(recibo.pagador_id))?.nome ?? recibo.nome_pagador ?? null : 'Share Brasil',

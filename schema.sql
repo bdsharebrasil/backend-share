@@ -2647,7 +2647,7 @@ CREATE TABLE recibos (
   numero_documento_anexo TEXT,
   observacoes TEXT,
   categoria_nome TEXT,
-  numero_voo TEXT REFERENCES solicitacoes_reserva_voo(id)
+  numero_voo TEXT
 , status_anterior TEXT, escopo_financeiro TEXT NOT NULL DEFAULT 'FINANCEIRO' CHECK (escopo_financeiro IN ('FINANCEIRO', 'CAIXA_SHARE')));
 CREATE TABLE checklists_planos_voo (
     id TEXT PRIMARY KEY NOT NULL,

@@ -1,12 +1,46 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { validateReceiptCommand } from "../src/financeiro/reciboAgents.ts";
+import { createReceiptRecord, validateReceiptCommand } from "../src/financeiro/reciboAgents.ts";
 
-const [kernel, routes] = await Promise.all([
+const [kernel, routes, migration, schema] = await Promise.all([
   readFile(new URL("../src/financeiro/FinanceiroKernel.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/financeiro/recibosRoutes.ts", import.meta.url), "utf8"),
+  readFile(new URL("../migrations/20261026_recibo_numero_voo.sql", import.meta.url), "utf8"),
+  readFile(new URL("../schema.sql", import.meta.url), "utf8"),
 ]);
+
+test("emissão de recibo de reembolso aceita, grava e retorna numero_voo", async () => {
+  const input = validateReceiptCommand({
+    tipo_recibo: "recibo_reembolso",
+    pagador_tipo: "cotista_aeronave",
+    pagador_id: "cotista-1",
+    valor_centavos: 350300,
+    categoria_movimentacao_id: "categoria-1",
+    descricao: "Reembolso de voo",
+    data_emissao: "2026-09-14",
+    numero_voo: "VOO-2026-001",
+  });
+  const writes = [];
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          writes.push({ sql, values });
+          return { run: async () => ({ success: true }) };
+        },
+      };
+    },
+  };
+
+  assert.equal(input.numero_voo, "VOO-2026-001");
+  await createReceiptRecord(db, input, "recibo-1", "REC-COTISTA001/26", null);
+  assert.match(writes[0].sql, /categoria_nome, numero_voo/);
+  assert.equal(writes[0].values.at(-1), "VOO-2026-001");
+  assert.match(kernel, /numero_voo: input\.numero_voo \|\| null/);
+  assert.match(migration, /ALTER TABLE recibos ADD COLUMN numero_voo TEXT;/);
+  assert.match(schema, /categoria_nome TEXT,[\s\S]*numero_voo TEXT\n/);
+});
 
 test("recibo de reembolso preserva o identificador do abastecimento selecionado", () => {
   const input = validateReceiptCommand({

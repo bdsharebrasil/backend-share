@@ -127,3 +127,9 @@ test("histórico reconhece rateio de recibo sem depender de um lançamento espel
   assert.doesNotMatch(routes, /FROM rateio_despesas WHERE origem_tipo = 'RECIBO' AND origem_id/);
   assert.match(routes, /FROM recibo_rateio/);
 });
+
+test("respostas de recibo normalizam tipo_caixa para o contrato público", () => {
+  assert.match(routes, /function normalizarTipoCaixaRecibo\(value: unknown, pagadorTipo\?: unknown\): 'SHARE' \| 'CLIENTE' \| 'HOLDING'/);
+  assert.match(routes, /tipo_caixa: normalizarTipoCaixaRecibo\(recibo\.tipo_caixa, recibo\.pagador_tipo\)/);
+  assert.match(kernel, /tipo_caixa: \['cotista_aeronave', 'cliente'\]\.includes\(input\.pagador_tipo\) \? 'CLIENTE' : 'SHARE'/);
+});
