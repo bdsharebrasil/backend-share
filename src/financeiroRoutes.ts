@@ -32,7 +32,6 @@ import { STATUS_LANCAMENTO } from './financeiro/statuses'
 import { requireCaixaShareAccess } from './financeiro/access'
 import { portalClienteRoutes } from './financeiro/portalClienteRoutes'
 import { portalBaixasRoutes } from './financeiro/portalBaixasRoutes'
-import { lancamentosUnificadosRoutes } from './financeiro/lancamentosUnificadosRoutes'
 
 type Bindings = {
   SHARE_DB: D1Database
@@ -57,7 +56,6 @@ export const financeiroRoutes = new Hono<{
 
 financeiroRoutes.route('/', pagamentosFolhaRoutes)
 financeiroRoutes.route('/', configuracoesRoutes)
-financeiroRoutes.route('/', lancamentosUnificadosRoutes)
 financeiroRoutes.route('/', contasRoutes)
 financeiroRoutes.route('/', dashboardCotistaRoutes)
 financeiroRoutes.route('/', balancoMensalRoutes)

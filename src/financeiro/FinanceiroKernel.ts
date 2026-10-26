@@ -360,7 +360,6 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
   requireTable(schema, 'lancamentos', ['id', 'descricao', 'fluxo', 'valor_centavos', 'status'])
   requireTable(schema, 'contas_apagar', ['id', 'lancamentos_id', 'valor_centavos', 'status'])
   requireTable(schema, 'contas_areceber', ['id', 'valor_centavos', 'status'])
-  requireTable(schema, 'lancamentos_unificados', ['id', 'fluxo', 'caixa', 'status', 'valor_centavos', 'origem_tipo', 'origem_id'])
   requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id', 'status'])
   requireTable(schema, 'rateio_pagamentos', ['id', 'rateio_id', 'conta_receber_id', 'valor_centavos', 'status'])
   requireTable(schema, 'rateio_hold', ['id', 'socio_id'])
