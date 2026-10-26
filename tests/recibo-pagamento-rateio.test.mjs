@@ -99,12 +99,15 @@ test("programação de reembolso vincula rateio ao lançamento cliente e transfe
   assert.match(caminho, /if \(!lancamentoClienteId\) return c\.json\(\{ error: 'lancamento_cliente_do_reembolso_nao_encontrado' \}, 409\)/);
   assert.doesNotMatch(caminho, /const lancamentoClienteRateioId = lancamentoClienteId \|\| lancamentoId/);
   assert.match(caminho, /SELECT id, lancamento_id, numero_recibo,[\s\S]*FROM recibos/);
+  assert.match(caminho, /cotista_aeronave_id, categoria_share_id/);
+  assert.match(caminho, /const cotistaIdConta = String\(lancamento\.cotista_aeronave_id/);
   assert.match(caminho, /SET lancamento_id = \?, fornecedor_id = \?, numero_recibo = \?, url_recibo = \?/);
   assert.match(caminho, /lancamentoClienteRateioId, aeronaveId/);
   assert.match(caminho, /fornecedor_id, numero_recibo, url_recibo/);
-  assert.match(caminho, /INSERT INTO contas_apagar \(id, data_vencimento, valor_centavos, categoria_id, categoria_nome, descricao, aeronave_id, lancamentos_id, boleto_url, nf_url, criado_por, origem_tipo, idempotency_key, status, fornecedor_id, escopo_financeiro\)/);
+  assert.match(caminho, /INSERT INTO contas_apagar \([^)]*fornecedor_id, cotista_id, escopo_financeiro\)/);
+  assert.match(caminho, /UPDATE contas_apagar SET[\s\S]*cotista_id = COALESCE\(cotista_id, \?\)/);
   assert.doesNotMatch(caminho, /INSERT INTO contas_apagar \([^)]*subcategoria_/);
-  assert.match(caminho, /escopo_financeiro\) VALUES[\s\S]*'CAIXA_SHARE'/);
+  assert.match(caminho, /cotista_id, escopo_financeiro\) VALUES[\s\S]*'CAIXA_SHARE'/);
 });
 
 test("baixa de reembolso transfere rateios legados Share para o lançamento cliente sem duplicá-los", () => {
