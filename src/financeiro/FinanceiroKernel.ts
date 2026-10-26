@@ -3267,7 +3267,7 @@ async function issueReceiptInternal(
   let financeiroCriado: Row | null = null
   try {
     if (!existingReceiptId) {
-      await createReceiptRecord(db, { ...input, ...body } as typeof input, reciboId, numero, userId)
+      await createReceiptRecord(db, { ...input, ...body, data_vencimento: input.data_vencimento } as typeof input, reciboId, numero, userId)
       if (abastecimentosId) {
         await db.batch([
           linkStatement(db, schema, 'RECIBO', reciboId, 'ABASTECIMENTO', abastecimentosId, 'RECIBO_ABASTECIMENTO', userId),

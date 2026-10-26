@@ -19,6 +19,8 @@ test("emissão de recibo de reembolso aceita, grava e retorna numero_voo", async
     categoria_movimentacao_id: "categoria-1",
     descricao: "Reembolso de voo",
     data_emissao: "2026-09-14",
+    data_vencimento: null,
+    vencimento: "2026-09-30",
     numero_voo: "VOO-2026-001",
   });
   const writes = [];
@@ -34,9 +36,12 @@ test("emissão de recibo de reembolso aceita, grava e retorna numero_voo", async
   };
 
   assert.equal(input.numero_voo, "VOO-2026-001");
+  assert.equal(input.data_vencimento, "2026-09-30");
   await createReceiptRecord(db, input, "recibo-1", "REC-COTISTA001/26", null);
   assert.match(writes[0].sql, /categoria_nome, numero_voo/);
   assert.equal(writes[0].values.at(-1), "VOO-2026-001");
+  assert.equal(writes[0].values[16], "2026-09-30");
+  assert.match(kernel, /createReceiptRecord\(db, \{ \.\.\.input, \.\.\.body, data_vencimento: input\.data_vencimento \}/);
   assert.match(kernel, /numero_voo: input\.numero_voo \|\| null/);
   assert.match(migration, /ALTER TABLE recibos RENAME COLUMN numero_voo TO numero_voo_id/);
   assert.match(migration, /SET numero_voo = \([\s\S]*s\.numero_voo[\s\S]*s\.id = recibos\.numero_voo_id/);

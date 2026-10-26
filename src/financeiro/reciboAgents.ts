@@ -45,6 +45,7 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
   const pagadorId = String(body.pagador_id ?? '').trim()
   const categoria = String(body.categoria_movimentacao_id ?? '').trim()
   const valor = Number(body.valor_centavos)
+  const dataVencimento = body.data_vencimento || body.vencimento
   if (!['empresa', 'cotista_aeronave', 'cliente'].includes(pagadorTipo) || !pagadorId) throw new Error('Pagador inválido')
   if (!categoria) throw new Error('categoria_movimentacao_id é obrigatória')
   if (!Number.isInteger(valor) || valor <= 0) throw new Error('valor_centavos deve ser um inteiro maior que zero')
@@ -62,7 +63,7 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     subcategoria_4: body.subcategoria_4 ? String(body.subcategoria_4) : null,
     descricao: String(body.descricao ?? body.descricao_servico ?? '').trim(),
     data_emissao: String(body.data_emissao ?? '').trim(),
-    data_vencimento: body.data_vencimento ? String(body.data_vencimento) : null,
+    data_vencimento: dataVencimento ? String(dataVencimento).trim() || null : null,
     forma_pagamento: body.forma_pagamento ? String(body.forma_pagamento) : null,
     aeronave_id: body.aeronave_id ? String(body.aeronave_id) : null,
     abastecimentos_id: body.abastecimentos_id ? String(body.abastecimentos_id) : null,
