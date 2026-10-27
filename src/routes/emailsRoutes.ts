@@ -153,7 +153,18 @@ async function marcarEmailEnviadoParaOrigens(
     let movimentoIds: string[] = []
 
     if (prefix === 'lancamento') {
-      lancamentoIds.push(rawId)
+      const lancamento = await db.prepare('SELECT id FROM lancamentos WHERE id = ?1').bind(rawId).first<{ id: string }>()
+      if (lancamento) {
+        lancamentoIds.push(lancamento.id)
+      } else {
+        const envio = await db.prepare('SELECT id, lancamento_id, movimentos_holding_id FROM envio_despesas WHERE id = ?1 OR lancamento_id = ?1 LIMIT 1').bind(rawId).first<{ id: string; lancamento_id: string | null; movimentos_holding_id: string | null }>()
+        if (envio) {
+          await db.prepare(`UPDATE envio_despesas SET email_enviado = 1, email_enviado_em = ?, email_id = ? WHERE id = ?`)
+            .bind(agora, emailId, envio.id).run()
+          if (envio.lancamento_id) lancamentoIds.push(envio.lancamento_id)
+          if (envio.movimentos_holding_id) movimentoIds.push(envio.movimentos_holding_id)
+        }
+      }
     } else if (prefix === 'movimento_holding') {
       movimentoIds.push(rawId)
     } else if (prefix === 'recibo') {

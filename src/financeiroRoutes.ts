@@ -249,20 +249,28 @@ financeiroRoutes.get('/lancamentos', async (c) => {
 async function origemRateio(db: D1Database, origemTipo: string, origemId: string) {
   if (origemTipo === 'lancamentos') {
     const lancamento = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
-    if (!lancamento) return null
-    return { kind: 'cliente' as const, source: lancamento, movimentoId: null, origemTipo }
+    if (lancamento) return { kind: 'cliente' as const, source: lancamento, movimentoId: null, origemTipo, envioConvertido: false }
+    const envio = await db.prepare('SELECT * FROM envio_despesas WHERE id = ? OR lancamento_id = ? LIMIT 1').bind(origemId, origemId).first<Record<string, unknown>>()
+    if (!envio) return null
+    const source: Record<string, unknown> = {
+      ...envio,
+      valor_centavos: Math.round(Number(envio.valor_total_despesa ?? envio.valor ?? 0) * 100),
+      data_emissao: envio.data_despesa ?? null,
+      data_vencimento: envio.vencimento ?? null,
+    }
+    return { kind: 'cliente' as const, source, movimentoId: null, origemTipo, envioConvertido: String(envio.status ?? '').toUpperCase() === 'CONVERTIDO' }
   }
   if (origemTipo === 'abastecimentos') {
     const abastecimento = await db.prepare(`SELECT a.*, f.nome_fornecedor AS fornecedor_nome
       FROM abastecimentos a LEFT JOIN fornecedores_combustivel f ON f.id = a.fornecedor_id
       WHERE a.id = ?`).bind(origemId).first<Record<string, unknown>>()
     if (!abastecimento) return null
-    return { kind: 'cliente' as const, source: { ...abastecimento, valor_centavos: Math.round(Number(abastecimento.valor_total || 0) * 100), descricao: abastecimento.observacao || 'Abastecimento', categoria_nome: 'Combustível', data_emissao: abastecimento.data }, movimentoId: null, origemTipo }
+    return { kind: 'cliente' as const, source: { ...abastecimento, valor_centavos: Math.round(Number(abastecimento.valor_total || 0) * 100), descricao: abastecimento.observacao || 'Abastecimento', categoria_nome: 'Combustível', data_emissao: abastecimento.data }, movimentoId: null, origemTipo, envioConvertido: false }
   }
   if (origemTipo === 'movimentos_holding') {
     const movimento = await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
     if (!movimento) return null
-    return { kind: 'holding' as const, source: movimento, movimentoId: origemId, origemTipo }
+    return { kind: 'holding' as const, source: movimento, movimentoId: origemId, origemTipo, envioConvertido: false }
   }
   if (origemTipo === 'rateio_hold') {
     const rateio = await db.prepare('SELECT * FROM rateio_hold WHERE id = ?').bind(origemId).first<Record<string, unknown>>()
@@ -270,7 +278,7 @@ async function origemRateio(db: D1Database, origemTipo: string, origemId: string
     const movimentoId = String(rateio.movimento_id ?? rateio.movimentos_id ?? '').trim()
     const movimento = movimentoId ? await db.prepare('SELECT * FROM movimentos_holding WHERE id = ?').bind(movimentoId).first<Record<string, unknown>>() : null
     if (!movimento) return null
-    return { kind: 'holding' as const, source: movimento, movimentoId, origemTipo }
+    return { kind: 'holding' as const, source: movimento, movimentoId, origemTipo, envioConvertido: false }
   }
   return null
 }
@@ -280,6 +288,7 @@ financeiroRoutes.get('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId/
     const db = c.env.SHARE_DB
     const origem = await origemRateio(db, c.req.param('origemTipo'), c.req.param('origemId'))
     if (!origem) return c.json({ error: 'movimentacao_nao_encontrada' }, 404)
+    if (origem.envioConvertido) return c.json({ error: 'rateio_ja_existente' }, 409)
     const aeronaveId = String(origem.source.aeronave_id ?? '').trim()
     if (!aeronaveId) return c.json({ error: 'aeronave_obrigatoria_para_rateio' }, 409)
     const rows = origem.kind === 'cliente'
@@ -301,6 +310,7 @@ financeiroRoutes.post('/dashboard/financeiro/movimentacoes/:origemTipo/:origemId
     const db = c.env.SHARE_DB
     const origem = await origemRateio(db, c.req.param('origemTipo'), c.req.param('origemId'))
     if (!origem) return c.json({ error: 'movimentacao_nao_encontrada' }, 404)
+    if (origem.envioConvertido) return c.json({ error: 'rateio_ja_existente' }, 409)
     const body = await c.req.json<Record<string, unknown>>()
     const linhas = Array.isArray(body.linhas) ? body.linhas as Array<Record<string, unknown>> : []
     const total = linhas.reduce((sum, line) => sum + Number(line.percentual ?? 0), 0)
