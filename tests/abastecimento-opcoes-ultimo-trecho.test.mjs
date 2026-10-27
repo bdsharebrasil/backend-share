@@ -13,3 +13,9 @@ test('a consulta de trechos não substitui os diários mensais usados pelo finan
   assert.match(routes, /FROM diario_mes WHERE \(\?1 IS NULL OR aeronave_id = \?1\)/);
   assert.match(routes, /diarios: diarios\.results/);
 });
+
+test('opções do Controle de Abastecimento incluem lançamentos de voo individuais para filtrar por mês', () => {
+  assert.match(routes, /SELECT l\.id, l\.aeronave_id, l\.data_registro, l\.numero_voo, l\.trecho/);
+  assert.match(routes, /FROM lancamentos_diario_bordo l[\s\S]*WHERE l\.aeronave_id = \?1[\s\S]*ORDER BY date\(l\.data_registro\) DESC/);
+  assert.match(routes, /trechos_diario: trechosDiario\.results/);
+});

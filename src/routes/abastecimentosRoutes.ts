@@ -45,13 +45,27 @@ abastecimentosRoutes.get('/api/interno/abastecimentos/opcoes', async c => {
   await garantirTabelaFornecedoresCombustivel(c)
   const db = c.env.SHARE_DB
   const aeronaveId = texto(c.req.query('aeronave_id'))
-  const [clientes, socios, aeronaves, fornecedores, aerodromos, diarios] = await Promise.all([
+  const [clientes, socios, aeronaves, fornecedores, aerodromos, diarios, trechosDiario] = await Promise.all([
     db.prepare('SELECT id, razao_social AS nome, codigo_cliente FROM cliente ORDER BY razao_social').all(),
     db.prepare('SELECT id, nome FROM hold_socios ORDER BY nome').all(),
     db.prepare('SELECT id, matricula_registro, fabricante, modelo, status FROM aeronave ORDER BY matricula_registro').all(),
     db.prepare('SELECT id, nome_fornecedor, codigo_icao, nome_cidade, pessoa_contato, telefone, preco_avgas, preco_jet FROM fornecedores_combustivel ORDER BY nome_fornecedor').all(),
     db.prepare('SELECT id, nome, designativo_icao FROM aerodromo ORDER BY designativo_icao').all(),
-    db.prepare(`SELECT id, aeronave_id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal FROM diario_mes WHERE (?1 IS NULL OR aeronave_id = ?1) ORDER BY ano DESC, mes DESC`).bind(aeronaveId).all(),
+    db.prepare('SELECT id, aeronave_id, ano, mes, fechado, celula_atual_ttotal, celula_prox_revisao_ttotal FROM diario_mes WHERE (?1 IS NULL OR aeronave_id = ?1) ORDER BY ano DESC, mes DESC').bind(aeronaveId).all(),
+    aeronaveId
+      ? db.prepare(`SELECT l.id, l.aeronave_id, l.data_registro, l.numero_voo, l.trecho, l.aerodromo_partida, l.aerodromo_chegada,
+          l.cliente_id, l.socio_id, l.holding_id, l.voo_emprestado, l.cliente_tomador_emprestimo_id, l.socio_tomador_emprestimo_id,
+          c.razao_social AS cliente_nome, s.nome AS socio_nome, h.nome AS holding_nome,
+          ct.razao_social AS cliente_tomador_nome, st.nome AS socio_tomador_nome
+        FROM lancamentos_diario_bordo l
+        LEFT JOIN cliente c ON c.id = l.cliente_id
+        LEFT JOIN hold_socios s ON s.id = l.socio_id
+        LEFT JOIN holdings h ON h.id = l.holding_id
+        LEFT JOIN cliente ct ON ct.id = l.cliente_tomador_emprestimo_id
+        LEFT JOIN hold_socios st ON st.id = l.socio_tomador_emprestimo_id
+        WHERE l.aeronave_id = ?1
+        ORDER BY date(l.data_registro) DESC, l.id DESC`).bind(aeronaveId).all()
+      : Promise.resolve({ results: [] }),
   ])
   const ultimoTrecho = aeronaveId
     ? await db.prepare(`SELECT l.id, l.aeronave_id, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada,
@@ -63,7 +77,7 @@ abastecimentosRoutes.get('/api/interno/abastecimentos/opcoes', async c => {
       ORDER BY date(l.data_registro) DESC, l.id DESC
       LIMIT 1`).bind(aeronaveId).first()
     : null
-  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, aerodromos: aerodromos.results, diarios: diarios.results, ultimo_trecho: ultimoTrecho })
+  return c.json({ clientes: clientes.results, socios: socios.results, aeronaves: aeronaves.results, fornecedores: fornecedores.results, aerodromos: aerodromos.results, diarios: diarios.results, trechos_diario: trechosDiario.results, ultimo_trecho: ultimoTrecho })
 })
 
 abastecimentosRoutes.get('/api/interno/abastecimentos', async c => {
