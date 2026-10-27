@@ -75,6 +75,29 @@ configuracoesRoutes.get('/fornecedores-combustivel', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+configuracoesRoutes.post('/fornecedores-combustivel', async (c) => {
+  try {
+    const body = await c.req.json<Record<string, unknown>>()
+    const nomeFornecedor = configText(body.nome_fornecedor ?? body.nome)
+    if (!nomeFornecedor) return c.json({ error: 'nome_fornecedor_obrigatorio' }, 400)
+    const id = configText(body.id) || configId()
+    const columns = ['id', 'nome_cidade', 'codigo_icao', 'nome_fornecedor', 'pessoa_contato', 'telefone']
+    // nome_cidade é NOT NULL no schema; quando não informado, usa o próprio nome do fornecedor.
+    const values: unknown[] = [
+      id,
+      configText(body.nome_cidade) || nomeFornecedor,
+      configText(body.codigo_icao) || null,
+      nomeFornecedor,
+      configText(body.pessoa_contato) || null,
+      configText(body.telefone) || null,
+    ]
+    const placeholders = columns.map(() => '?').join(', ')
+    await c.env.SHARE_DB.prepare(`INSERT INTO fornecedores_combustivel (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${columns.slice(1).map((column) => `${column} = excluded.${column}`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP`).bind(...values).run()
+    const saved = await c.env.SHARE_DB.prepare('SELECT * FROM fornecedores_combustivel WHERE id = ?').bind(id).first()
+    return c.json({ item: saved }, 201)
+  } catch (error) { return errorResponse(c, error) }
+})
+
 configuracoesRoutes.get('/fornecedores-favoritos', async (c) => {
   try {
     const fornecedores = await listar(c.env.SHARE_DB, 'SELECT * FROM fornecedores_favoritos ORDER BY COALESCE(apelido, nome_completo) COLLATE NOCASE, nome_completo COLLATE NOCASE')
