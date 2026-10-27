@@ -47,3 +47,25 @@ test('consulta do dashboard não libera operações financeiras', async (t) => {
   const acesso = await autorizarRequisicaoFinanceira(c, '/api/financeiro/dashboard/financeiro/movimentacoes', 'POST')
   assert.deepEqual(acesso, { autorizado: false, status: 403 })
 })
+
+test('colaborador ativo pode excluir rascunhos, mas não outros recursos por DELETE', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-colaborador' })
+  const c = contexto('DELETE')
+  c.env.SHARE_DB = {
+    prepare(sql) {
+      return {
+        bind() { return this },
+        async first() {
+          return sql.includes('SELECT status FROM user_profiles') ? { status: 'ativo' } : null
+        },
+      }
+    },
+  }
+
+  const acessoRascunho = await autorizarRequisicaoFinanceira(c, '/api/financeiro/envios-pagamento/rascunhos/rascunho-1', 'DELETE')
+  const acessoOutroRecurso = await autorizarRequisicaoFinanceira(c, '/api/financeiro/envios-pagamento/cotistas/cotista-1', 'DELETE')
+  assert.deepEqual(acessoRascunho, { autorizado: true, userId: 'user-colaborador' })
+  assert.deepEqual(acessoOutroRecurso, { autorizado: false, status: 403 })
+})

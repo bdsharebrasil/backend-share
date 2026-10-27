@@ -44,6 +44,7 @@ enviosPagamentoRoutes.get('/envios-pagamento/rascunhos', async (c) => {
     FROM envio_pagamento_rascunhos r
     LEFT JOIN envio_despesas e ON e.id = r.envio_id
     WHERE r.criado_por = ? AND r.status <> 'CONCLUIDO'
+      AND (e.id IS NULL OR UPPER(COALESCE(e.status, '')) <> 'CONCLUIDO')
     ORDER BY r.atualizado_em DESC`).bind(userId).all<Record<string, unknown>>()
   return c.json({ rascunhos: results ?? [] })
 })
@@ -57,6 +58,22 @@ enviosPagamentoRoutes.get('/envios-pagamento/rascunhos/:id', async (c) => {
   if (!rascunho) return c.json({ error: 'rascunho_nao_encontrado' }, 404)
   const { results: destinatarios } = await db.prepare('SELECT cotista_id, status, email_id, erro, atualizado_em FROM envio_pagamento_email_destinatarios WHERE rascunho_id = ? ORDER BY atualizado_em').bind(rascunho.id).all()
   return c.json({ rascunho, destinatarios: destinatarios ?? [] })
+})
+
+enviosPagamentoRoutes.delete('/envios-pagamento/rascunhos/:id', async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = c.env.SHARE_DB
+  await garantirTabelasRascunho(db)
+  const id = c.req.param('id')
+  const rascunho = await db.prepare('SELECT id FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?')
+    .bind(id, userId).first<{ id: string }>()
+  if (!rascunho) return c.json({ error: 'rascunho_nao_encontrado' }, 404)
+  await db.batch([
+    db.prepare('DELETE FROM envio_pagamento_email_destinatarios WHERE rascunho_id = ?').bind(id),
+    db.prepare('DELETE FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(id, userId),
+  ])
+  return c.json({ ok: true })
 })
 
 enviosPagamentoRoutes.post('/envios-pagamento/rascunhos', async (c) => {
