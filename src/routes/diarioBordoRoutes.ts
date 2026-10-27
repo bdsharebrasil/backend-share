@@ -674,7 +674,8 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
   if (updates.length === 0) return c.json({ error: 'nenhum_campo_informado' }, 400)
   if (body.data_registro !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.data_registro)) || String(row.data_registro).slice(0, 7) !== `${current.diario_ano || ''}-${String(current.diario_mes || '').padStart(2, '0')}`)) return c.json({ error: 'data_fora_do_mes' }, 400)
   const abastecimento = body.abastecimento && typeof body.abastecimento === 'object' ? body.abastecimento : null
-  const abastecimentoId = body.abastecimento_id === undefined ? '' : String(body.abastecimento_id || '').trim()
+  const substituindoAbastecimento = Boolean(abastecimento && diarioNumber(abastecimento.litros) > 0)
+  const abastecimentoId = substituindoAbastecimento || body.abastecimento_id === undefined ? '' : String(body.abastecimento_id || '').trim()
   let abastecimentoIdResposta: string | null = abastecimentoId || null
   let abastecimentoLocal: string | null = null
   if (abastecimentoId) {
@@ -709,7 +710,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
   if (referenciaInvalida) return c.json({ error: 'referencia_invalida', campo: referenciaInvalida.campo, valor: referenciaInvalida.valor }, 400)
   const assignments = updates.filter(([field], index, list) => list.findIndex(([candidate]) => candidate === field) === index)
   await db.prepare(`UPDATE lancamentos_diario_bordo SET ${assignments.map(([field]) => `${field} = ?`).join(', ')} WHERE id = ?`).bind(...assignments.map(([, value]) => value), id).run()
-  if (body.abastecimento_id !== undefined && !abastecimentoId) {
+  if (body.abastecimento_id !== undefined && !abastecimentoId && !substituindoAbastecimento) {
     await db.prepare('UPDATE abastecimentos SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1').bind(id).run()
   }
   if (body.abastecido === false || abastecimentoId === '' && (body.abastecimento && diarioNumber(body.abastecimento.litros) <= 0)) {
@@ -729,6 +730,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
     const valores = [titularAbastecimentoCliente, titularAbastecimentoSocio, current.aeronave_id, abastecimento.data || row.data_registro, diarioText(abastecimento.tipo_combustivel), abastecimento.trecho || row.trecho, abastecimentoLocal, abastecimento.numero_comanda || null, abastecimento.numero_nf || null, litrosAbastecimento, valorUnitarioAbastecimento, valorTotalAbastecimento, diarioText(abastecimento.fornecedor_id), abastecimento.status || 'pendente', abastecimento.observacao || 'Atualizado no Diário de Bordo', extractSupabaseUserId(c), diarioBoolean(body.voo_emprestado ?? current.voo_emprestado), row.numero_voo || current.numero_voo || null]
     if (existente) {
       await db.prepare('UPDATE abastecimentos SET cliente_id=?, socio_id=?, aeronave_id=?, data=?, tipo_combustivel=?, trecho=?, local=?, numero_comanda=?, numero_nf=?, litros=?, valor_unitario=?, valor_total=?, fornecedor_id=?, status=?, observacao=?, criado_por=?, voo_emprestado=?, numero_voo=? WHERE id=?').bind(...valores, existente.id).run()
+      abastecimentoIdResposta = existente.id
     } else {
       abastecimentoIdResposta = uuid()
       await db.prepare('INSERT INTO abastecimentos (id, cliente_id, socio_id, aeronave_id, data, tipo_combustivel, trecho, local, numero_comanda, numero_nf, litros, valor_unitario, valor_total, fornecedor_id, status, observacao, criado_por, lancamento_diario_id, voo_emprestado, numero_voo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(abastecimentoIdResposta, ...valores.slice(0, 16), id, ...valores.slice(16)).run()
