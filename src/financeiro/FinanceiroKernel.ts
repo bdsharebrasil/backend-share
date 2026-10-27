@@ -212,7 +212,21 @@ async function resolverFornecedor(
 
 async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Row> {
   const fornecedorId = nullableText(command.fornecedor_id ?? command.fornecedores_favoritos_id)
-  const fornecedor = await buscarFornecedor(db, fornecedorId)
+  let fornecedor = await buscarFornecedor(db, fornecedorId)
+  if (!fornecedor) {
+    // Envios legados podem trazer apenas o nome; reata ao fornecedor já
+    // cadastrado (favorito ou combustível) sem criar registro novo.
+    const nome = nullableText(command.fornecedor_nome ?? command.fornecedor)
+    fornecedor = nome
+      ? await db.prepare(`SELECT id, nome_completo FROM fornecedores_favoritos
+           WHERE lower(trim(COALESCE(nome_completo, ''))) = lower(trim(?1))
+              OR lower(trim(COALESCE(apelido, ''))) = lower(trim(?1))
+           LIMIT 1`).bind(nome).first<{ id: string; nome_completo: string | null }>()
+        ?? await db.prepare(`SELECT id, nome_fornecedor AS nome_completo FROM fornecedores_combustivel
+           WHERE lower(trim(nome_fornecedor)) = lower(trim(?1))
+           LIMIT 1`).bind(nome).first<{ id: string; nome_completo: string | null }>()
+      : null
+  }
   const tipoCaixa = upper(command.tipo_caixa)
   const categoriaId = nullableText(command.categoria_cliente_id ?? command.categoria_id)
   const categoriaTabela = tipoCaixa === 'CLIENTE' || tipoCaixa === 'HOLDING'
@@ -223,6 +237,7 @@ async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Ro
     : null
   return {
     ...command,
+    fornecedor_id: fornecedor?.id ?? (fornecedorId || null),
     fornecedor_nome: fornecedor?.nome_completo
       ? nullableText(fornecedor.nome_completo)
       : (fornecedorId ? null : nullableText(command.fornecedor_nome ?? command.fornecedor)),
