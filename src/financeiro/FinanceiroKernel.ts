@@ -117,35 +117,25 @@ const normalizeRateioType = (value: unknown): string => {
 }
 
 const round3 = (value: number): number => Math.round(value * 1000) / 1000
-const PERCENTUAL_TOTAL_BASIS_POINTS = 10_000
-
-function percentualBasisPoints(percentuais: number[]): number[] {
-  const brutos = percentuais.map((percentual) => percentual * 100)
-  const bases = brutos.map((bruto) => Math.floor(bruto))
-  let restante = PERCENTUAL_TOTAL_BASIS_POINTS - bases.reduce((total, base) => total + base, 0)
-  const ordemDosRestos = brutos.map((bruto, index) => ({ index, resto: bruto - bases[index] }))
-    .sort((a, b) => b.resto - a.resto || a.index - b.index)
-  for (let index = 0; index < ordemDosRestos.length && restante > 0; index += 1) {
-    bases[ordemDosRestos[index].index] += 1
-    restante -= 1
-  }
-  if (restante !== 0) throw new FinanceError('A soma dos percentuais do rateio deve ser 100%', 'rateio_percentual_invalido')
-  return bases
-}
 
 /** Distribui centavos pelo maior resto, preservando exatamente o total. */
 export function allocateCentsByPercentages(amount: number, percentuais: number[]): number[] {
   if (!Number.isInteger(amount) || amount <= 0 || !percentuais.length || percentuais.some((percentual) => !Number.isFinite(percentual) || percentual < 0)) {
     throw new FinanceError('Percentuais do rateio inválidos', 'rateio_percentual_invalido')
   }
-  const basisPoints = percentualBasisPoints(percentuais)
-  const exatos = basisPoints.map((basisPoint) => amount * basisPoint / PERCENTUAL_TOTAL_BASIS_POINTS)
+  // Normaliza pelos percentuais informados (sem quantizá-los), preservando a
+  // precisão real de percentual_sociedade (ex.: 33.333%) até o centavo.
+  const somaPercentuais = percentuais.reduce((total, percentual) => total + percentual, 0)
+  if (somaPercentuais <= 0) throw new FinanceError('Percentuais do rateio inválidos', 'rateio_percentual_invalido')
+  const exatos = percentuais.map((percentual) => amount * percentual / somaPercentuais)
   const valores = exatos.map(Math.floor)
   let restante = amount - valores.reduce((total, valor) => total + valor, 0)
   const ordemDosRestos = exatos.map((exato, index) => ({ index, resto: exato - valores[index] }))
     .sort((a, b) => b.resto - a.resto || a.index - b.index)
-  for (let index = 0; index < ordemDosRestos.length && restante > 0; index += 1) {
-    valores[ordemDosRestos[index].index] += 1
+  let cursor = 0
+  while (restante > 0 && ordemDosRestos.length) {
+    valores[ordemDosRestos[cursor % ordemDosRestos.length].index] += 1
+    cursor += 1
     restante -= 1
   }
   return valores
