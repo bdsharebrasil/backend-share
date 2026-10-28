@@ -6,7 +6,7 @@ export type DespesaTripulante = {
   data: string
   valor: number
   pago_por: 'tripulante_1' | 'tripulante_2' | 'cliente' | 'sharebrasil'
-  descricao?: string
+  descricao: string
 }
 
 export type TotaisDespesasTripulante = {
@@ -97,6 +97,7 @@ export function normalizarDespesasTripulante(
     if (!possuiSegundoTripulante && pagador === 'tripulante_2') throw new Error('segundo_tripulante_nao_escalado')
 
     const descricao = String(item.descricao ?? item.description ?? '').trim()
+    if (!descricao) throw new Error(`descricao_despesa_${indice + 1}_obrigatoria`)
     if (descricao.length > 500) throw new Error(`descricao_despesa_${indice + 1}_muito_longa`)
     return {
       id,
@@ -104,7 +105,7 @@ export function normalizarDespesasTripulante(
       data,
       valor: centavos / 100,
       pago_por: pagador,
-      ...(descricao ? { descricao } : {}),
+      descricao,
     }
   })
 }
