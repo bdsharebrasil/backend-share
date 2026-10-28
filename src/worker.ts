@@ -2106,35 +2106,64 @@ app.delete('/api/sharebrasil/senhas/:id', async c => {
   return c.json({ success: true })
 })
 
+function validarCategoriaAgenda(tipo: unknown, personalizada: unknown) {
+  const categoriaTipo = String(tipo || '').trim().toLocaleUpperCase('pt-BR')
+  const categoriaPersonalizada = String(personalizada || '').trim()
+  const normalizar = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR')
+  const reservadas = new Set(['hotel', 'hoteis', 'combustivel', 'combustiveis', 'abastecimento'])
+  const termos = normalizar(categoriaTipo === 'OUTRO' ? categoriaPersonalizada : categoriaTipo).split(/[^a-z0-9]+/).filter(Boolean)
+  if (termos.some(termo => reservadas.has(termo))) {
+    return { error: termos.some(termo => termo === 'hotel' || termo === 'hoteis')
+      ? 'ESSE FORNECEDOR DEVERÁ SER SALVO EM SHARE BRASIL -> HOTEIS'
+      : 'ESSE FORNECEDOR DEVE SER SALVO EM OPERAÇÕES -> ABASTECIMENTO -> FORNECEDORES' }
+  }
+  if (!['FORNECEDOR', 'HANGAR', 'OUTRO'].includes(categoriaTipo)) return { error: 'Selecione uma categoria válida.' }
+  if (categoriaTipo === 'OUTRO' && !categoriaPersonalizada) return { error: 'Informe a categoria para a opção OUTRO.' }
+  return { categoriaTipo, categoriaPersonalizada: categoriaTipo === 'OUTRO' ? categoriaPersonalizada : null,
+    categoria: categoriaTipo === 'OUTRO' ? categoriaPersonalizada : categoriaTipo }
+}
+async function garantirTabelaAgendaContatosFornecedores(c: Context<{ Bindings: Bindings }>) {
+  await validateWorkerSchema(c, [{ table: 'agenda_contatos_fornecedores', columns: ['contato_id', 'categoria', 'categoria_personalizada'] }])
+}
 app.get('/api/sharebrasil/contatos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  const result = await c.env.SHARE_DB.prepare('SELECT * FROM agenda_contatos ORDER BY nome').all()
+  await garantirTabelaAgendaContatosFornecedores(c)
+  const result = await c.env.SHARE_DB.prepare('SELECT a.*, f.categoria AS categoria_tipo, f.categoria_personalizada FROM agenda_contatos a LEFT JOIN agenda_contatos_fornecedores f ON f.contato_id = a.id ORDER BY a.nome').all()
   return c.json(result.results)
 })
-
 app.post('/api/sharebrasil/contatos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaAgendaContatosFornecedores(c)
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
   if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const categoria = validarCategoriaAgenda(body.categoria_tipo, body.categoria_personalizada)
+  if ('error' in categoria) return c.json({ error: categoria.error }, 400)
   const id = uuid()
-  await c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome.trim(), body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null).run()
+  await c.env.SHARE_DB.batch([
+    c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome.trim(), body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, categoria.categoria),
+    c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos_fornecedores (contato_id, categoria, categoria_personalizada) VALUES (?, ?, ?)').bind(id, categoria.categoriaTipo, categoria.categoriaPersonalizada),
+  ])
   return c.json({ id }, 201)
 })
-
 app.patch('/api/sharebrasil/contatos/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaAgendaContatosFornecedores(c)
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
-  const result = await c.env.SHARE_DB.prepare('UPDATE agenda_contatos SET nome = COALESCE(?, nome), telefone = ?, email = ?, empresa = ?, cargo = ?, observacoes = ?, endereco = ?, uf = ?, cidade = ?, categoria = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.nome?.trim() || null, body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, body.categoria || null, c.req.param('id')).run()
+  const categoria = validarCategoriaAgenda(body.categoria_tipo, body.categoria_personalizada)
+  if ('error' in categoria) return c.json({ error: categoria.error }, 400)
+  const id = c.req.param('id')
+  const result = await c.env.SHARE_DB.prepare('UPDATE agenda_contatos SET nome = COALESCE(?, nome), telefone = ?, email = ?, empresa = ?, cargo = ?, observacoes = ?, endereco = ?, uf = ?, cidade = ?, categoria = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.nome?.trim() || null, body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, categoria.categoria, id).run()
   if (!result.meta.changes) return c.notFound()
+  await c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos_fornecedores (contato_id, categoria, categoria_personalizada) VALUES (?, ?, ?) ON CONFLICT(contato_id) DO UPDATE SET categoria = excluded.categoria, categoria_personalizada = excluded.categoria_personalizada').bind(id, categoria.categoriaTipo, categoria.categoriaPersonalizada).run()
   return c.json({ success: true })
 })
-
 app.delete('/api/sharebrasil/contatos/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  await garantirTabelaAgendaContatosFornecedores(c)
   const result = await c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')).run()
   if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })

@@ -521,6 +521,16 @@ CREATE TABLE agenda_contatos (
     categoria TEXT
 
 );
+CREATE TABLE agenda_contatos_fornecedores (
+    contato_id TEXT PRIMARY KEY NOT NULL,
+    categoria TEXT NOT NULL CHECK (categoria IN ('FORNECEDOR', 'HANGAR', 'OUTRO')),
+    categoria_personalizada TEXT,
+    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (contato_id) REFERENCES agenda_contatos(id) ON DELETE CASCADE,
+    CHECK ((categoria = 'OUTRO' AND NULLIF(TRIM(categoria_personalizada), '') IS NOT NULL)
+        OR (categoria <> 'OUTRO' AND categoria_personalizada IS NULL))
+);
 CREATE TABLE documentos_internos (
     id TEXT PRIMARY KEY NOT NULL,
 
