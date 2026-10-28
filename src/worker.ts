@@ -3035,7 +3035,6 @@ app.get('/api/sharebrasil/hoteis', async c => {
 app.post('/api/sharebrasil/hoteis', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const nome = String(body.nome || '').trim()
@@ -3050,7 +3049,6 @@ app.post('/api/sharebrasil/hoteis', async c => {
 app.patch('/api/sharebrasil/hoteis/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
-  if (!await isColaboradorManager(c, user)) return c.json({ error: 'somente_admin_ou_gestor_master' }, 403)
   await garantirTabelaHoteis(c)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const current = await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
