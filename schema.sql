@@ -593,7 +593,8 @@ CREATE TABLE hoteis (
     telefone_comercial TEXT,
     email_comercial TEXT,
 
-    observacoes TEXT
+    observacoes TEXT,
+    cafe_manha TEXT
 );
 CREATE TABLE pastas_documentos (
     id TEXT PRIMARY KEY NOT NULL,

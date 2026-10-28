@@ -3005,9 +3005,18 @@ app.post('/api/sharebrasil/calendario', async c => {
 
 // ─── Hotéis Share Brasil: contatos, CRUD e reservas por email ─────────────────
 async function garantirTabelaHoteis(c: Context<{ Bindings: Bindings }>) {
-  await validateWorkerSchema(c, [{table:'hoteis',columns:['id']},{table:'reservas_hoteis',columns:['id']}])
+  await validateWorkerSchema(c, [{table:'hoteis',columns:['id','cafe_manha']},{table:'reservas_hoteis',columns:['id']}])
 }
 
+function normalizarCafeManhaHotel(value: unknown): string | null | false {
+  const texto = String(value ?? '').trim()
+  if (!texto) return null
+  const opcao = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
+  if (opcao === 'SIM') return 'SIM'
+  if (opcao === 'NAO') return 'NÃO'
+  const valor = Number(texto.replace(',', '.'))
+  return Number.isFinite(valor) && valor > 0 ? valor.toFixed(2) : false
+}
 function hotelPayload(row: Record<string, any>) {
   return { ...row, convenio: Boolean(row.convenio), estrelas: Number(row.estrelas || 0), preco_single: row.preco_single == null ? null : Number(row.preco_single), preco_duplo: row.preco_duplo == null ? null : Number(row.preco_duplo) }
 }
@@ -3031,8 +3040,10 @@ app.post('/api/sharebrasil/hoteis', async c => {
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const nome = String(body.nome || '').trim()
   if (!nome) return c.json({ error: 'nome_obrigatorio' }, 400)
+  const cafeManha = normalizarCafeManhaHotel(body.cafe_manha)
+  if (cafeManha === false) return c.json({ error: 'valor_cafe_manha_invalido' }, 400)
   const id = uuid()
-  await c.env.SHARE_DB.prepare(`INSERT INTO hoteis (id, nome, telefone, endereco, uf, cidade, preco_single, preco_duplo, estrelas, convenio, email, telefone_reservas, contato_comercial, telefone_comercial, email_comercial, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, nome, body.telefone || null, body.endereco || null, body.uf || null, body.cidade || null, body.preco_single == null || body.preco_single === '' ? null : Number(body.preco_single), body.preco_duplo == null || body.preco_duplo === '' ? null : Number(body.preco_duplo), Math.max(0, Math.min(5, Math.trunc(Number(body.estrelas) || 0))), body.convenio ? 1 : 0, body.email || null, body.telefone_reservas || null, body.contato_comercial || null, body.telefone_comercial || null, body.email_comercial || null, body.observacoes || null).run()
+  await c.env.SHARE_DB.prepare(`INSERT INTO hoteis (id, nome, telefone, endereco, uf, cidade, preco_single, preco_duplo, estrelas, convenio, email, telefone_reservas, contato_comercial, telefone_comercial, email_comercial, observacoes, cafe_manha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, nome, body.telefone || null, body.endereco || null, body.uf || null, body.cidade || null, body.preco_single == null || body.preco_single === '' ? null : Number(body.preco_single), body.preco_duplo == null || body.preco_duplo === '' ? null : Number(body.preco_duplo), Math.max(0, Math.min(5, Math.trunc(Number(body.estrelas) || 0))), body.convenio ? 1 : 0, body.email || null, body.telefone_reservas || null, body.contato_comercial || null, body.telefone_comercial || null, body.email_comercial || null, body.observacoes || null, cafeManha).run()
   return c.json(hotelPayload(await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(id).first<Record<string, any>>() || { id, nome }), 201)
 })
 
@@ -3045,7 +3056,9 @@ app.patch('/api/sharebrasil/hoteis/:id', async c => {
   const current = await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(c.req.param('id')).first<Record<string, any>>()
   if (!current) return c.notFound()
   const value = (key: string) => body[key] === undefined ? current[key] : body[key]
-  await c.env.SHARE_DB.prepare('UPDATE hoteis SET nome=?, telefone=?, endereco=?, uf=?, cidade=?, preco_single=?, preco_duplo=?, estrelas=?, convenio=?, email=?, telefone_reservas=?, contato_comercial=?, telefone_comercial=?, email_comercial=?, observacoes=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(String(value('nome') || '').trim(), value('telefone') || null, value('endereco') || null, value('uf') || null, value('cidade') || null, value('preco_single') === '' || value('preco_single') == null ? null : Number(value('preco_single')), value('preco_duplo') === '' || value('preco_duplo') == null ? null : Number(value('preco_duplo')), Math.max(0, Math.min(5, Math.trunc(Number(value('estrelas')) || 0))), value('convenio') ? 1 : 0, value('email') || null, value('telefone_reservas') || null, value('contato_comercial') || null, value('telefone_comercial') || null, value('email_comercial') || null, value('observacoes') || null, current.id).run()
+  const cafeManha = normalizarCafeManhaHotel(value('cafe_manha'))
+  if (cafeManha === false) return c.json({ error: 'valor_cafe_manha_invalido' }, 400)
+  await c.env.SHARE_DB.prepare('UPDATE hoteis SET nome=?, telefone=?, endereco=?, uf=?, cidade=?, preco_single=?, preco_duplo=?, estrelas=?, convenio=?, email=?, telefone_reservas=?, contato_comercial=?, telefone_comercial=?, email_comercial=?, observacoes=?, cafe_manha=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?').bind(String(value('nome') || '').trim(), value('telefone') || null, value('endereco') || null, value('uf') || null, value('cidade') || null, value('preco_single') === '' || value('preco_single') == null ? null : Number(value('preco_single')), value('preco_duplo') === '' || value('preco_duplo') == null ? null : Number(value('preco_duplo')), Math.max(0, Math.min(5, Math.trunc(Number(value('estrelas')) || 0))), value('convenio') ? 1 : 0, value('email') || null, value('telefone_reservas') || null, value('contato_comercial') || null, value('telefone_comercial') || null, value('email_comercial') || null, value('observacoes') || null, cafeManha, current.id).run()
   return c.json(hotelPayload(await c.env.SHARE_DB.prepare('SELECT * FROM hoteis WHERE id = ?1').bind(current.id).first<Record<string, any>>() || current))
 })
 
