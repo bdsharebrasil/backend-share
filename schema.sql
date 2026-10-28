@@ -1763,6 +1763,7 @@ CREATE TABLE relatorio_despesa_viagem (
     tripulante_id_2                 TEXT NULL,
     nome_tripulante_2               TEXT NULL,
     criado_por                      TEXT NULL,
+    origem_criacao                  TEXT NOT NULL DEFAULT 'financeiro',
     requer_aprovacao_cliente        INTEGER NULL DEFAULT 0,
     status_aprovacao_tripulante     TEXT NULL DEFAULT 'pendente',
     observacoes_aprovacao_tripulante TEXT NULL,
@@ -3178,6 +3179,11 @@ CREATE INDEX solicitacoes_reserva_voo_status_data_idx
   ON solicitacoes_reserva_voo(status, data_agendada);
 CREATE INDEX solicitacoes_reserva_voo_cliente_idx
   ON solicitacoes_reserva_voo(cliente_id, criado_em DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relatorio_viagem_voo_tripulante_unico
+  ON relatorio_despesa_viagem(numero_voo, aeronave_id, cliente_id, COALESCE(NULLIF(trim(socio_id), ''), ''))
+  WHERE origem_criacao = 'tripulante'
+    AND numero_voo IS NOT NULL
+    AND trim(numero_voo) <> '';
 CREATE INDEX idx_tarefas_criado_por
 ON tarefas (criado_por);
 CREATE INDEX idx_tarefas_comentarios_usuario

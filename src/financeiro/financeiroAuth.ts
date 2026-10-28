@@ -67,6 +67,12 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
   if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
   if (['GET', 'POST', 'PATCH', 'DELETE'].includes(method) && /^\/envios-pagamento\/rascunhos(?:\/[^/]+)?$/.test(path)) return true
   if (method === 'GET' && path === '/relatorios-despesa-viagem/minhas') return true
+  if (method === 'GET' && path === '/relatorios-despesa-viagem/meus-voos') return true
+  if (method === 'POST' && path === '/relatorios-despesa-viagem/iniciar-do-voo') return true
+  if (method === 'PUT' && /^\/relatorios-despesa-viagem\/[^/]+\/despesas-tripulante$/.test(path)) return true
+  if (method === 'POST' && /^\/relatorios-despesa-viagem\/[^/]+\/anexos-tripulante$/.test(path)) return true
+  if (method === 'DELETE' && /^\/relatorios-despesa-viagem\/[^/]+\/anexos-tripulante\/[^/]+$/.test(path)) return true
+  if (method === 'GET' && /^\/relatorios-despesa-viagem\/[^/]+\/anexos-tripulante\/[^/]+\/arquivo$/.test(path)) return true
   if (method === 'POST' && /^\/relatorios-despesa-viagem\/[^/]+\/aprovacao$/.test(path)) return true
   if (method !== 'GET') return false
   return path === '/envios-pagamento/opcoes'
