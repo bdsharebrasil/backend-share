@@ -3877,17 +3877,15 @@ app.get('/api/financeiro/relatorios-despesa-viagem/meus-voos', async c => {
           THEN COALESCE(NULLIF(hs.nome, ''), ca.codigo_cliente)
           ELSE COALESCE(NULLIF(cl.razao_social, ''), NULLIF(h.nome, ''), NULLIF(hs_holding.nome, ''), NULLIF(h_socio.nome, ''), NULLIF(h_relacao.nome, ''), NULLIF(cc.razao_social, ''), ca.codigo_cliente)
         END AS cotista_nome,
-        (SELECT r.id FROM relatorio_despesa_viagem r
-          WHERE r.numero_voo = s.numero_voo AND r.aeronave_id = s.aeronave_id
-            AND r.cliente_id = s.cliente_id
-            AND COALESCE(NULLIF(trim(r.socio_id), ''), '') = COALESCE(NULLIF(trim(s.socio_id), ''), '')
-          ORDER BY r.criado_em DESC LIMIT 1) AS relatorio_id,
-        (SELECT r.status FROM relatorio_despesa_viagem r
-          WHERE r.numero_voo = s.numero_voo AND r.aeronave_id = s.aeronave_id
-            AND r.cliente_id = s.cliente_id
-            AND COALESCE(NULLIF(trim(r.socio_id), ''), '') = COALESCE(NULLIF(trim(s.socio_id), ''), '')
-          ORDER BY r.criado_em DESC LIMIT 1) AS relatorio_status
+        relatorio_numero_voo.id AS relatorio_id,
+        relatorio_numero_voo.status AS relatorio_status
       FROM solicitacoes_reserva_voo s
+      LEFT JOIN relatorio_despesa_viagem relatorio_numero_voo ON relatorio_numero_voo.id = (
+        SELECT r.id FROM relatorio_despesa_viagem r WHERE r.numero_voo = s.numero_voo
+        ORDER BY CASE WHEN r.aeronave_id = s.aeronave_id AND r.cliente_id = s.cliente_id
+          AND COALESCE(NULLIF(trim(r.socio_id), ''), '') = COALESCE(NULLIF(trim(s.socio_id), ''), '') THEN 0 ELSE 1 END,
+          r.criado_em DESC LIMIT 1
+      )
       LEFT JOIN tripulacao t1 ON t1.id = s.piloto_id
       LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
       LEFT JOIN tripulacao_freelancer f1 ON f1.id = s.piloto_id
@@ -3910,10 +3908,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/meus-voos', async c => {
       )
       WHERE trim(COALESCE(s.numero_voo, '')) <> ''
         AND (t1.user_id = ?1 OR t2.user_id = ?1)
-        AND lower(replace(replace(trim(COALESCE(s.status, '')), ' ', '_'), '-', '_'))
-          IN ('aprovada', 'acionado', 'decolado', 'em_voo', 'em_rota', 'em_solo')
-        AND date(s.data_agendada) >= date('now', '-30 days')
-      ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC LIMIT 200`).bind(user.id).all<Record<string, any>>()
+      ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC`).bind(user.id).all<Record<string, any>>()
     const voosComRota = await Promise.all((voos.results || []).map(async (voo) => {
       const rota = await montarRotaRelatorioViagem(db, voo.solicitacao_id, voo.origem, voo.destino)
       return { ...voo, rota_nome: rota.rota_nome }
@@ -3929,9 +3924,6 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   let numeroVooSolicitado = ''
-  let clienteIdVooSolicitado: string | null = null
-  let socioIdVooSolicitado: string | null = null
-  let aeronaveIdVooSolicitada: string | null = null
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const body = await c.req.json<{ numero_voo?: string }>().catch(() => null)
@@ -3950,18 +3942,18 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
       LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       WHERE s.numero_voo = ?1 AND (t1.user_id = ?2 OR t2.user_id = ?2)
-        AND lower(replace(replace(trim(COALESCE(s.status, '')), ' ', '_'), '-', '_'))
-          IN ('aprovada', 'acionado', 'decolado', 'em_voo', 'em_rota', 'em_solo')
       ORDER BY date(s.data_agendada) DESC LIMIT 1`).bind(numeroVoo, user.id).first<Record<string, any>>()
     if (!voo) return c.json({ error: 'voo_nao_encontrado_ou_tripulante_nao_escalado' }, 403)
-    clienteIdVooSolicitado = voo.cliente_id || null
-    socioIdVooSolicitado = voo.socio_id || null
-    aeronaveIdVooSolicitada = voo.aeronave_id || null
     const tripulantePos: PosicaoTripulante = voo.user_id_tripulante_1 === user.id ? 1 : 2
-    const relatorioExistente = await db.prepare(`SELECT id FROM relatorio_despesa_viagem
-      WHERE numero_voo = ?1 AND aeronave_id = ?2 AND cliente_id = ?3
-        AND COALESCE(NULLIF(trim(socio_id), ''), '') = COALESCE(NULLIF(trim(?4), ''), '')
-      ORDER BY criado_em DESC LIMIT 1`).bind(numeroVoo, voo.aeronave_id, voo.cliente_id, voo.socio_id || null).first<{ id: string }>()
+    const relatorioExistente = await db.prepare(`SELECT r.id, r.cliente_id, r.socio_id, r.aeronave_id
+      FROM relatorio_despesa_viagem r
+      LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
+      LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
+      WHERE r.numero_voo = ?1
+      ORDER BY CASE WHEN t1.user_id = ?2 OR t2.user_id = ?2 THEN 0 ELSE 1 END,
+        CASE WHEN r.aeronave_id = ?3 AND r.cliente_id = ?4
+          AND COALESCE(NULLIF(trim(r.socio_id), ''), '') = COALESCE(NULLIF(trim(?5), ''), '') THEN 0 ELSE 1 END,
+        r.criado_em DESC LIMIT 1`).bind(numeroVoo, user.id, voo.aeronave_id, voo.cliente_id, voo.socio_id || null).first<Record<string, any>>()
     if (relatorioExistente) {
       const posicaoRelatorio = await db.prepare(`SELECT t1.user_id AS user_id_1, t2.user_id AS user_id_2
         FROM relatorio_despesa_viagem r
@@ -3999,10 +3991,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
   } catch (error: any) {
     if (String(error?.message || '').includes('UNIQUE constraint failed')) {
       const existente = numeroVooSolicitado
-        ? await c.env.SHARE_DB.prepare(`SELECT id FROM relatorio_despesa_viagem WHERE numero_voo = ?1
-          AND aeronave_id = ?2 AND cliente_id = ?3
-          AND COALESCE(NULLIF(trim(socio_id), ''), '') = COALESCE(NULLIF(trim(?4), ''), '')
-          AND origem_criacao = ?5 LIMIT 1`).bind(numeroVooSolicitado, aeronaveIdVooSolicitada, clienteIdVooSolicitado, socioIdVooSolicitado, 'tripulante').first<{ id: string }>()
+        ? await c.env.SHARE_DB.prepare('SELECT id FROM relatorio_despesa_viagem WHERE numero_voo = ?1 AND origem_criacao = ?2 LIMIT 1').bind(numeroVooSolicitado, 'tripulante').first<{ id: string }>()
         : null
       if (existente) {
         const relatorio = await buscarRelatorioViagemComNomes(c, existente.id)

@@ -3180,7 +3180,7 @@ CREATE INDEX solicitacoes_reserva_voo_status_data_idx
 CREATE INDEX solicitacoes_reserva_voo_cliente_idx
   ON solicitacoes_reserva_voo(cliente_id, criado_em DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_relatorio_viagem_voo_tripulante_unico
-  ON relatorio_despesa_viagem(numero_voo, aeronave_id, cliente_id, COALESCE(NULLIF(trim(socio_id), ''), ''))
+  ON relatorio_despesa_viagem(numero_voo)
   WHERE origem_criacao = 'tripulante'
     AND numero_voo IS NOT NULL
     AND trim(numero_voo) <> '';
