@@ -522,14 +522,24 @@ CREATE TABLE agenda_contatos (
 
 );
 CREATE TABLE agenda_contatos_fornecedores (
-    contato_id TEXT PRIMARY KEY NOT NULL,
-    categoria TEXT NOT NULL CHECK (categoria IN ('FORNECEDOR', 'HANGAR', 'OUTRO')),
-    categoria_personalizada TEXT,
-    criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (contato_id) REFERENCES agenda_contatos(id) ON DELETE CASCADE,
-    CHECK ((categoria = 'OUTRO' AND NULLIF(TRIM(categoria_personalizada), '') IS NOT NULL)
-        OR (categoria <> 'OUTRO' AND categoria_personalizada IS NULL))
+    id TEXT PRIMARY KEY NOT NULL,
+    empresa TEXT,
+    razao_social TEXT,
+    cnpj TEXT,
+    nome_contato_responsavel TEXT NOT NULL,
+    telefone TEXT,
+    email TEXT,
+    endereco TEXT,
+    uf TEXT,
+    cidade TEXT,
+    observacoes TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    categoria TEXT,
+    gpu TEXT,
+    transfer TEXT,
+    valor_gpu TEXT,
+    valor_transfer TEXT
 );
 CREATE TABLE documentos_internos (
     id TEXT PRIMARY KEY NOT NULL,

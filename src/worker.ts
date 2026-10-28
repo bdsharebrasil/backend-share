@@ -2119,17 +2119,65 @@ function validarCategoriaAgenda(tipo: unknown, personalizada: unknown) {
   }
   if (!['FORNECEDOR', 'HANGAR', 'OUTRO'].includes(categoriaTipo)) return { error: 'Selecione uma categoria válida.' }
   if (categoriaTipo === 'OUTRO' && !categoriaPersonalizada) return { error: 'Informe a categoria para a opção OUTRO.' }
-  return { categoriaTipo, categoriaPersonalizada: categoriaTipo === 'OUTRO' ? categoriaPersonalizada : null,
-    categoria: categoriaTipo === 'OUTRO' ? categoriaPersonalizada : categoriaTipo }
+  return { categoriaTipo, categoria: categoriaTipo === 'OUTRO' ? categoriaPersonalizada : categoriaTipo }
+}
+function validarServicosHangar(body: Record<string, string>, categoriaTipo: string) {
+  if (categoriaTipo !== 'HANGAR') return { gpu: null, transfer: null, valor_gpu: null, valor_transfer: null }
+  const validarServico = (disponibilidade: string, valor: string, nome: string) => {
+    const disponivel = String(disponibilidade || '').trim().toUpperCase()
+    const preco = String(valor || '').trim()
+    if (!['SIM', 'NAO'].includes(disponivel)) return `${nome}: informe se o serviço está disponível.`
+    if (disponivel === 'NAO') return null
+    if (preco.toUpperCase() === 'GRATUITO') return null
+    const numerico = Number(preco.replace(',', '.'))
+    if (!preco || !Number.isFinite(numerico) || numerico <= 0) return `${nome}: selecione gratuito ou informe um valor cobrado maior que zero.`
+    return null
+  }
+  const erroGpu = validarServico(body.gpu, body.valor_gpu, 'GPU')
+  if (erroGpu) return { error: erroGpu }
+  const erroTransfer = validarServico(body.transfer, body.valor_transfer, 'Transfer')
+  if (erroTransfer) return { error: erroTransfer }
+  const normalizar = (disponibilidade: string, valor: string) => String(disponibilidade).trim().toUpperCase() === 'NAO' ? null : String(valor).trim().toUpperCase() === 'GRATUITO' ? 'GRATUITO' : String(Number(String(valor).replace(',', '.')))
+  return {
+    gpu: String(body.gpu).trim().toUpperCase(),
+    transfer: String(body.transfer).trim().toUpperCase(),
+    valor_gpu: normalizar(body.gpu, body.valor_gpu),
+    valor_transfer: normalizar(body.transfer, body.valor_transfer),
+  }
 }
 async function garantirTabelaAgendaContatosFornecedores(c: Context<{ Bindings: Bindings }>) {
-  await validateWorkerSchema(c, [{ table: 'agenda_contatos_fornecedores', columns: ['contato_id', 'categoria', 'categoria_personalizada'] }])
+  await validateWorkerSchema(c, [{ table: 'agenda_contatos_fornecedores', columns: ['id', 'empresa', 'razao_social', 'cnpj', 'nome_contato_responsavel', 'telefone', 'email', 'endereco', 'uf', 'cidade', 'observacoes', 'categoria', 'gpu', 'transfer', 'valor_gpu', 'valor_transfer'] }])
 }
 app.get('/api/sharebrasil/contatos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaAgendaContatosFornecedores(c)
-  const result = await c.env.SHARE_DB.prepare('SELECT a.*, f.categoria AS categoria_tipo, f.categoria_personalizada FROM agenda_contatos a LEFT JOIN agenda_contatos_fornecedores f ON f.contato_id = a.id ORDER BY a.nome').all()
+  const result = await c.env.SHARE_DB.prepare(`
+    SELECT a.id, COALESCE(NULLIF(f.nome_contato_responsavel, ''), a.nome) AS nome,
+      COALESCE(NULLIF(f.telefone, ''), a.telefone) AS telefone,
+      COALESCE(NULLIF(f.email, ''), a.email) AS email,
+      COALESCE(NULLIF(f.empresa, ''), a.empresa) AS empresa,
+      a.cargo, COALESCE(NULLIF(f.observacoes, ''), a.observacoes) AS observacoes,
+      COALESCE(NULLIF(f.endereco, ''), a.endereco) AS endereco,
+      COALESCE(NULLIF(f.uf, ''), a.uf) AS uf, COALESCE(NULLIF(f.cidade, ''), a.cidade) AS cidade,
+      COALESCE(NULLIF(f.categoria, ''), a.categoria) AS categoria,
+      f.razao_social, f.cnpj, COALESCE(NULLIF(f.nome_contato_responsavel, ''), a.nome) AS nome_contato_responsavel,
+      CASE WHEN COALESCE(NULLIF(f.categoria, ''), a.categoria) IN ('FORNECEDOR', 'HANGAR') THEN COALESCE(NULLIF(f.categoria, ''), a.categoria)
+        WHEN COALESCE(NULLIF(f.categoria, ''), a.categoria) IS NOT NULL THEN 'OUTRO' ELSE NULL END AS categoria_tipo,
+      CASE WHEN COALESCE(NULLIF(f.categoria, ''), a.categoria) NOT IN ('FORNECEDOR', 'HANGAR') THEN COALESCE(NULLIF(f.categoria, ''), a.categoria) ELSE NULL END AS categoria_personalizada,
+      f.gpu, f.transfer, f.valor_gpu, f.valor_transfer
+    FROM agenda_contatos a LEFT JOIN agenda_contatos_fornecedores f ON f.id = a.id
+    UNION ALL
+    SELECT f.id, f.nome_contato_responsavel AS nome, f.telefone, f.email, f.empresa,
+      NULL AS cargo, f.observacoes, f.endereco, f.uf, f.cidade, f.categoria,
+      f.razao_social, f.cnpj, f.nome_contato_responsavel,
+      CASE WHEN f.categoria IN ('FORNECEDOR', 'HANGAR') THEN f.categoria
+        WHEN f.categoria IS NOT NULL THEN 'OUTRO' ELSE NULL END AS categoria_tipo,
+      CASE WHEN f.categoria NOT IN ('FORNECEDOR', 'HANGAR') THEN f.categoria ELSE NULL END AS categoria_personalizada,
+      f.gpu, f.transfer, f.valor_gpu, f.valor_transfer
+    FROM agenda_contatos_fornecedores f LEFT JOIN agenda_contatos a ON a.id = f.id
+    WHERE a.id IS NULL
+    ORDER BY nome`).all()
   return c.json(result.results)
 })
 app.post('/api/sharebrasil/contatos', async c => {
@@ -2140,10 +2188,14 @@ app.post('/api/sharebrasil/contatos', async c => {
   if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
   const categoria = validarCategoriaAgenda(body.categoria_tipo, body.categoria_personalizada)
   if ('error' in categoria) return c.json({ error: categoria.error }, 400)
+  const servicos = validarServicosHangar(body, categoria.categoriaTipo)
+  if ('error' in servicos) return c.json({ error: servicos.error }, 400)
   const id = uuid()
   await c.env.SHARE_DB.batch([
     c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, body.nome.trim(), body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, categoria.categoria),
-    c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos_fornecedores (contato_id, categoria, categoria_personalizada) VALUES (?, ?, ?)').bind(id, categoria.categoriaTipo, categoria.categoriaPersonalizada),
+    c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome.trim(), body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer),
   ])
   return c.json({ id }, 201)
 })
@@ -2154,18 +2206,39 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
   const categoria = validarCategoriaAgenda(body.categoria_tipo, body.categoria_personalizada)
   if ('error' in categoria) return c.json({ error: categoria.error }, 400)
+  const servicos = validarServicosHangar(body, categoria.categoriaTipo)
+  if ('error' in servicos) return c.json({ error: servicos.error }, 400)
   const id = c.req.param('id')
-  const result = await c.env.SHARE_DB.prepare('UPDATE agenda_contatos SET nome = COALESCE(?, nome), telefone = ?, email = ?, empresa = ?, cargo = ?, observacoes = ?, endereco = ?, uf = ?, cidade = ?, categoria = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(body.nome?.trim() || null, body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, categoria.categoria, id).run()
-  if (!result.meta.changes) return c.notFound()
-  await c.env.SHARE_DB.prepare('INSERT INTO agenda_contatos_fornecedores (contato_id, categoria, categoria_personalizada) VALUES (?, ?, ?) ON CONFLICT(contato_id) DO UPDATE SET categoria = excluded.categoria, categoria_personalizada = excluded.categoria_personalizada').bind(id, categoria.categoriaTipo, categoria.categoriaPersonalizada).run()
+  const existe = await c.env.SHARE_DB.prepare('SELECT id FROM agenda_contatos WHERE id = ?1 UNION SELECT id FROM agenda_contatos_fornecedores WHERE id = ?1 LIMIT 1').bind(id).first()
+  if (!existe) return c.notFound()
+  await c.env.SHARE_DB.batch([
+    c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos (id, nome, telefone, email, empresa, cargo, observacoes, endereco, uf, cidade, categoria)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET nome=excluded.nome, telefone=excluded.telefone, email=excluded.email,
+        empresa=excluded.empresa, cargo=excluded.cargo, observacoes=excluded.observacoes,
+        endereco=excluded.endereco, uf=excluded.uf, cidade=excluded.cidade,
+        categoria=excluded.categoria, atualizado_em=CURRENT_TIMESTAMP`)
+      .bind(id, body.nome?.trim() || '', body.telefone || null, body.email || null, body.empresa || null, body.cargo || null, body.observacoes || null, body.endereco || null, body.uf || null, body.cidade || null, categoria.categoria),
+    c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET empresa=excluded.empresa, razao_social=excluded.razao_social, cnpj=excluded.cnpj,
+      nome_contato_responsavel=excluded.nome_contato_responsavel, telefone=excluded.telefone, email=excluded.email,
+      endereco=excluded.endereco, uf=excluded.uf, cidade=excluded.cidade, observacoes=excluded.observacoes,
+      categoria=excluded.categoria, gpu=excluded.gpu, transfer=excluded.transfer,
+      valor_gpu=excluded.valor_gpu, valor_transfer=excluded.valor_transfer, atualizado_em=CURRENT_TIMESTAMP`)
+      .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome?.trim() || '', body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer),
+  ])
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/contatos/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaAgendaContatosFornecedores(c)
-  const result = await c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')).run()
-  if (!result.meta.changes) return c.notFound()
+  const results = await c.env.SHARE_DB.batch([
+    c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos_fornecedores WHERE id = ?1').bind(c.req.param('id')),
+    c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')),
+  ])
+  if (!results.some(result => result.meta.changes)) return c.notFound()
   return c.json({ success: true })
 })
 
