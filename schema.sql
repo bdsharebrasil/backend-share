@@ -539,7 +539,10 @@ CREATE TABLE agenda_contatos_fornecedores (
     gpu TEXT,
     transfer TEXT,
     valor_gpu TEXT,
-    valor_transfer TEXT
+    valor_transfer TEXT,
+    ar_condicionado TEXT,
+    pernoite TEXT,
+    atendimento_pista TEXT
 );
 CREATE TABLE documentos_internos (
     id TEXT PRIMARY KEY NOT NULL,

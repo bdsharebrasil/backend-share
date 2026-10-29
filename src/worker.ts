@@ -2148,8 +2148,26 @@ function validarServicosHangar(body: Record<string, string>, categoriaTipo: stri
     valor_transfer: normalizar(body.transfer, body.valor_transfer),
   }
 }
+function validarRecursosHangar(body: Record<string, string>, categoriaTipo: string) {
+  if (categoriaTipo !== 'HANGAR') return { atendimento_pista: null, ar_condicionado: null, pernoite: null }
+  const atendimento = String(body.atendimento_pista || '').trim().toUpperCase()
+  if (!['SIM', 'NAO'].includes(atendimento)) return { error: 'Informe se o hangar possui atendimento de pista.' }
+  const validarOpcional = (campo: 'ar_condicionado' | 'pernoite', nome: string) => {
+    const valor = String(body[campo] || '').trim()
+    if (!valor) return { valor: null as string | null }
+    if (valor.toUpperCase() === 'SIM') return { valor: 'SIM' }
+    const numero = Number(valor.replace(',', '.'))
+    if (!Number.isFinite(numero) || numero <= 0 || !/^\d+(?:[.,]\d{1,2})?$/.test(valor)) return { error: `${nome}: informe um preço válido, maior que zero e com até duas casas decimais.` }
+    return { valor: String(numero) }
+  }
+  const arCondicionado = validarOpcional('ar_condicionado', 'Ar condicionado')
+  if ('error' in arCondicionado) return { error: arCondicionado.error }
+  const pernoite = validarOpcional('pernoite', 'Pernoite')
+  if ('error' in pernoite) return { error: pernoite.error }
+  return { atendimento_pista: atendimento, ar_condicionado: arCondicionado.valor, pernoite: pernoite.valor }
+}
 async function garantirTabelaAgendaContatosFornecedores(c: Context<{ Bindings: Bindings }>) {
-  await validateWorkerSchema(c, [{ table: 'agenda_contatos_fornecedores', columns: ['id', 'empresa', 'razao_social', 'cnpj', 'nome_contato_responsavel', 'telefone', 'email', 'endereco', 'uf', 'cidade', 'observacoes', 'categoria', 'gpu', 'transfer', 'valor_gpu', 'valor_transfer'] }])
+  await validateWorkerSchema(c, [{ table: 'agenda_contatos_fornecedores', columns: ['id', 'empresa', 'razao_social', 'cnpj', 'nome_contato_responsavel', 'telefone', 'email', 'endereco', 'uf', 'cidade', 'observacoes', 'categoria', 'gpu', 'transfer', 'valor_gpu', 'valor_transfer', 'ar_condicionado', 'pernoite', 'atendimento_pista'] }])
 }
 app.get('/api/sharebrasil/contatos', async c => {
   const user = await shareBrasilUser(c)
@@ -2165,7 +2183,7 @@ app.get('/api/sharebrasil/contatos', async c => {
     CASE WHEN f.categoria IN ('FORNECEDOR', 'HANGAR') THEN f.categoria
       WHEN f.categoria IS NOT NULL THEN 'OUTRO' ELSE NULL END AS categoria_tipo,
     CASE WHEN f.categoria NOT IN ('FORNECEDOR', 'HANGAR') THEN f.categoria ELSE NULL END AS categoria_personalizada,
-    f.gpu, f.transfer, f.valor_gpu, f.valor_transfer
+    f.gpu, f.transfer, f.valor_gpu, f.valor_transfer, f.ar_condicionado, f.pernoite, f.atendimento_pista
     FROM agenda_contatos_fornecedores f ORDER BY f.nome_contato_responsavel`).all()
   return c.json(result.results)
 })
@@ -2179,11 +2197,13 @@ app.post('/api/sharebrasil/contatos', async c => {
   if ('error' in categoria) return c.json({ error: categoria.error }, 400)
   const servicos = validarServicosHangar(body, categoria.categoriaTipo)
   if ('error' in servicos) return c.json({ error: servicos.error }, 400)
+  const recursos = validarRecursosHangar(body, categoria.categoriaTipo)
+  if ('error' in recursos) return c.json({ error: recursos.error }, 400)
   const id = uuid()
   await c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores
-    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome.trim(), body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer).run()
+    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome.trim(), body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer, recursos.ar_condicionado, recursos.pernoite, recursos.atendimento_pista).run()
   return c.json({ id }, 201)
 })
 app.patch('/api/sharebrasil/contatos/:id', async c => {
@@ -2195,18 +2215,21 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
   if ('error' in categoria) return c.json({ error: categoria.error }, 400)
   const servicos = validarServicosHangar(body, categoria.categoriaTipo)
   if ('error' in servicos) return c.json({ error: servicos.error }, 400)
+  const recursos = validarRecursosHangar(body, categoria.categoriaTipo)
+  if ('error' in recursos) return c.json({ error: recursos.error }, 400)
   const id = c.req.param('id')
   const existe = await c.env.SHARE_DB.prepare('SELECT id FROM agenda_contatos_fornecedores WHERE id = ?1 UNION SELECT id FROM agenda_contatos WHERE id = ?1 LIMIT 1').bind(id).first()
   if (!existe) return c.notFound()
   await c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores
-    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET empresa=excluded.empresa, razao_social=excluded.razao_social, cnpj=excluded.cnpj,
       nome_contato_responsavel=excluded.nome_contato_responsavel, telefone=excluded.telefone, email=excluded.email,
       endereco=excluded.endereco, uf=excluded.uf, cidade=excluded.cidade, observacoes=excluded.observacoes,
       categoria=excluded.categoria, gpu=excluded.gpu, transfer=excluded.transfer,
-      valor_gpu=excluded.valor_gpu, valor_transfer=excluded.valor_transfer, atualizado_em=CURRENT_TIMESTAMP`)
-    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome?.trim() || '', body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer).run()
+      valor_gpu=excluded.valor_gpu, valor_transfer=excluded.valor_transfer, ar_condicionado=excluded.ar_condicionado,
+      pernoite=excluded.pernoite, atendimento_pista=excluded.atendimento_pista, atualizado_em=CURRENT_TIMESTAMP`)
+    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome?.trim() || '', body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer, recursos.ar_condicionado, recursos.pernoite, recursos.atendimento_pista).run()
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/contatos/:id', async c => {
