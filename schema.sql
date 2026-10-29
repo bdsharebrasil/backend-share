@@ -498,29 +498,6 @@ CREATE TABLE aniversarios (
 
     url_avatar TEXT
 );
-CREATE TABLE agenda_contatos (
-    id TEXT PRIMARY KEY NOT NULL,
-
-    nome TEXT NOT NULL,
-
-    telefone TEXT,
-    email TEXT,
-
-    empresa TEXT,
-    cargo TEXT,
-
-    observacoes TEXT,
-
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-
-    endereco TEXT,
-     uf TEXT,
-     cidade TEXT,
-
-    categoria TEXT
-
-);
 CREATE TABLE agenda_contatos_fornecedores (
     id TEXT PRIMARY KEY NOT NULL,
     empresa TEXT,
@@ -3202,8 +3179,6 @@ CREATE INDEX idx_cartoes_beneficios_periodo
 ON cartoes_beneficios (ano, mes);
 CREATE INDEX idx_transacoes_beneficios_data
 ON transacoes_beneficios (data_transacao);
-CREATE INDEX idx_agenda_contatos_cidade
-ON agenda_contatos (cidade);
 CREATE INDEX idx_documentos_internos_enviado_por
 ON documentos_internos (enviado_por);
 CREATE INDEX idx_hoteis_nome

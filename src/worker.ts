@@ -2173,10 +2173,6 @@ app.get('/api/sharebrasil/contatos', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaAgendaContatosFornecedores(c)
-  await c.env.SHARE_DB.prepare(`INSERT OR IGNORE INTO agenda_contatos_fornecedores
-    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer)
-    SELECT id, empresa, NULL, NULL, nome, telefone, email, endereco, uf, cidade, observacoes, categoria, NULL, NULL, NULL, NULL
-    FROM agenda_contatos WHERE NULLIF(TRIM(nome), '') IS NOT NULL`).run()
   const result = await c.env.SHARE_DB.prepare(`SELECT f.id, f.nome_contato_responsavel AS nome, f.telefone, f.email, f.empresa,
     NULL AS cargo, f.observacoes, f.endereco, f.uf, f.cidade, f.categoria,
     f.razao_social, f.cnpj, f.nome_contato_responsavel,
@@ -2218,7 +2214,7 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
   const recursos = validarRecursosHangar(body, categoria.categoriaTipo)
   if ('error' in recursos) return c.json({ error: recursos.error }, 400)
   const id = c.req.param('id')
-  const existe = await c.env.SHARE_DB.prepare('SELECT id FROM agenda_contatos_fornecedores WHERE id = ?1 UNION SELECT id FROM agenda_contatos WHERE id = ?1 LIMIT 1').bind(id).first()
+  const existe = await c.env.SHARE_DB.prepare('SELECT id FROM agenda_contatos_fornecedores WHERE id = ?1').bind(id).first()
   if (!existe) return c.notFound()
   await c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores
     (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista)
@@ -2236,11 +2232,8 @@ app.delete('/api/sharebrasil/contatos/:id', async c => {
   const user = await shareBrasilUser(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaAgendaContatosFornecedores(c)
-  const results = await c.env.SHARE_DB.batch([
-    c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos_fornecedores WHERE id = ?1').bind(c.req.param('id')),
-    c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos WHERE id = ?1').bind(c.req.param('id')),
-  ])
-  if (!results.some(result => result.meta.changes)) return c.notFound()
+  const result = await c.env.SHARE_DB.prepare('DELETE FROM agenda_contatos_fornecedores WHERE id = ?1').bind(c.req.param('id')).run()
+  if (!result.meta.changes) return c.notFound()
   return c.json({ success: true })
 })
 
