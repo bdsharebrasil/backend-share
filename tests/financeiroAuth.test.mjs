@@ -69,3 +69,56 @@ test('colaborador ativo pode excluir rascunhos, mas não outros recursos por DEL
   assert.deepEqual(acessoRascunho, { autorizado: true, userId: 'user-colaborador' })
   assert.deepEqual(acessoOutroRecurso, { autorizado: false, status: 403 })
 })
+
+test('qualquer usuário autenticado pode criar envios e manter seus rascunhos', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-inativo' })
+  const c = contexto('POST')
+  c.env.SHARE_DB = {
+    prepare() {
+      return { bind() { return this }, async first() { return { status: 'inativo' } } }
+    },
+  }
+
+  for (const [path, method] of [
+    ['/api/financeiro/envios-pagamento', 'POST'],
+    ['/api/financeiro/envios-pagamento/anexos', 'POST'],
+    ['/api/financeiro/envios-pagamento/rascunhos', 'POST'],
+    ['/api/financeiro/envios-pagamento/rascunhos/rascunho-1', 'GET'],
+    ['/api/financeiro/envios-pagamento/rascunhos/rascunho-1', 'DELETE'],
+  ]) {
+    const acesso = await autorizarRequisicaoFinanceira(c, path, method)
+    assert.deepEqual(acesso, { autorizado: true, userId: 'user-inativo' }, `${method} ${path}`)
+  }
+})
+
+test('liberação de criação não permite usuário inativo aprovar ou alterar solicitações', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-inativo-gestao' })
+  const c = contexto('POST')
+  c.env.SHARE_DB = {
+    prepare() {
+      return { bind() { return this }, async first() { return null } }
+    },
+  }
+
+  for (const [path, method] of [
+    ['/api/financeiro/envios-pagamento/envio-1/aprovar', 'POST'],
+    ['/api/financeiro/envios-pagamento/envio-1', 'PATCH'],
+    ['/api/financeiro/envios-pagamento/cotistas/cotista-1', 'DELETE'],
+  ]) {
+    const acesso = await autorizarRequisicaoFinanceira(c, path, method)
+    assert.deepEqual(acesso, { autorizado: false, status: 403 }, `${method} ${path}`)
+  }
+})
+
+test('criação de envio continua exigindo autenticação', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ message: 'invalid token' }, { status: 401 })
+
+  const acesso = await autorizarRequisicaoFinanceira(contexto('POST'), '/api/financeiro/envios-pagamento', 'POST')
+  assert.deepEqual(acesso, { autorizado: false, status: 401 })
+})

@@ -64,8 +64,6 @@ async function validarUsuarioSupabase(c: FinanceiroAuthContext): Promise<string 
   return getAuthenticatedUserId(c as Parameters<typeof getAuthenticatedUserId>[0])
 }
 function colaboradorPodeSolicitar(path: string, method: string): boolean {
-  if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
-  if (['GET', 'POST', 'PATCH', 'DELETE'].includes(method) && /^\/envios-pagamento\/rascunhos(?:\/[^/]+)?$/.test(path)) return true
   if (method === 'GET' && path === '/relatorios-despesa-viagem/minhas') return true
   if (method === 'GET' && path === '/relatorios-despesa-viagem/meus-voos') return true
   if (method === 'POST' && path === '/relatorios-despesa-viagem/iniciar-do-voo') return true
@@ -78,6 +76,11 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
   return path === '/envios-pagamento/opcoes'
     || path === '/envios-pagamento/despesas-origem'
     || /^\/envios-pagamento\/aeronave\/[^/]+\/cotistas$/.test(path)
+}
+function usuarioPodeCriarEnvioPagamento(path: string, method: string): boolean {
+  if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
+  return ['GET', 'POST', 'PATCH', 'DELETE'].includes(method)
+    && /^\/envios-pagamento\/rascunhos(?:\/[^/]+)?$/.test(path)
 }
 function usuarioPodeConsultarDashboard(path: string, method: string): boolean {
   return method === 'GET' && (
@@ -99,6 +102,9 @@ export async function autorizarRequisicaoFinanceira(
     return { autorizado: true, userId }
   }
   if (usuarioPodeConsultarDashboard(path, method)) {
+    return { autorizado: true, userId }
+  }
+  if (usuarioPodeCriarEnvioPagamento(path, method)) {
     return { autorizado: true, userId }
   }
 
