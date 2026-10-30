@@ -122,3 +122,12 @@ test('criação de envio continua exigindo autenticação', async (t) => {
   const acesso = await autorizarRequisicaoFinanceira(contexto('POST'), '/api/financeiro/envios-pagamento', 'POST')
   assert.deepEqual(acesso, { autorizado: false, status: 401 })
 })
+
+test('usuário autenticado pode consultar o histórico de envios pessoais', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-historico' })
+
+  const acesso = await autorizarRequisicaoFinanceira(contexto('GET'), '/api/financeiro/envios-pagamento', 'GET')
+  assert.deepEqual(acesso, { autorizado: true, userId: 'user-historico' })
+})

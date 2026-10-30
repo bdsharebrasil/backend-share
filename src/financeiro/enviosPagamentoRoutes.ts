@@ -3,6 +3,7 @@ import { createClientExpenseRateios, createDirectExternalExpense, createExpense,
 import { convertPaymentRequest, createPaymentRequest, validatePaymentRequest } from "./paymentAgents"
 import { mensagemFinanceiraStatements } from "./financeiroNotifications"
 import { errorResponse } from "./errorResponse"
+import { usuarioPodeGerenciarFinanceiro } from "./financeiroAuth"
 
 type Bindings = { SHARE_DB: D1Database; SHARE_FILES?: R2Bucket; FILES?: R2Bucket; R2_PUBLIC_URL?: string }
 type Variables = { userId: string | null }
@@ -123,11 +124,25 @@ enviosPagamentoRoutes.post('/envios-pagamento', async (c) => {
 })
 
 enviosPagamentoRoutes.get('/envios-pagamento', async (c) => {
+  const userId = c.get('userId')
   const tipo = c.req.query('tipo')
+  const podeConsultarTodos = userId
+    ? await usuarioPodeGerenciarFinanceiro(c.env.SHARE_DB, userId)
+    : false
+  const filtros: string[] = []
+  const parametros: string[] = []
+  if (!podeConsultarTodos) {
+    filtros.push('e.criado_por = ?')
+    parametros.push(userId ?? '')
+  }
+  if (tipo) {
+    filtros.push('e.tipo = ?')
+    parametros.push(tipo)
+  }
   const query = `SELECT e.*, COALESCE(u.nome_exibicao, u.nome_completo, u.email, e.criado_por) AS solicitante_nome
     FROM envio_despesas e LEFT JOIN user_profiles u ON u.id = e.criado_por
-    ${tipo ? 'WHERE e.tipo = ?' : ''} ORDER BY e.criado_em DESC LIMIT 200`
-  const result = tipo ? await c.env.SHARE_DB.prepare(query).bind(tipo).all() : await c.env.SHARE_DB.prepare(query).all()
+    ${filtros.length ? `WHERE ${filtros.join(' AND ')}` : ''} ORDER BY e.criado_em DESC LIMIT 200`
+  const result = await c.env.SHARE_DB.prepare(query).bind(...parametros).all()
   return c.json({ envios: result.results ?? [] })
 })
 

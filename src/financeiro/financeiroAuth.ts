@@ -47,6 +47,10 @@ export async function usuarioTemPapel(
   return Boolean(row)
 }
 
+export async function usuarioPodeGerenciarFinanceiro(db: FinanceiroAuthDb, userId: string): Promise<boolean> {
+  return usuarioTemPapel(db, userId, PAPEIS_FINANCEIROS)
+}
+
 async function usuarioAtivo(db: FinanceiroAuthDb, userId: string): Promise<boolean> {
   const profile = await db.prepare(`
     SELECT status FROM user_profiles WHERE id = ? LIMIT 1
@@ -77,7 +81,8 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
     || path === '/envios-pagamento/despesas-origem'
     || /^\/envios-pagamento\/aeronave\/[^/]+\/cotistas$/.test(path)
 }
-function usuarioPodeCriarEnvioPagamento(path: string, method: string): boolean {
+function usuarioPodeAcessarEnvioPagamento(path: string, method: string): boolean {
+  if (method === 'GET' && path === '/envios-pagamento') return true
   if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
   return ['GET', 'POST', 'PATCH', 'DELETE'].includes(method)
     && /^\/envios-pagamento\/rascunhos(?:\/[^/]+)?$/.test(path)
@@ -104,7 +109,7 @@ export async function autorizarRequisicaoFinanceira(
   if (usuarioPodeConsultarDashboard(path, method)) {
     return { autorizado: true, userId }
   }
-  if (usuarioPodeCriarEnvioPagamento(path, method)) {
+  if (usuarioPodeAcessarEnvioPagamento(path, method)) {
     return { autorizado: true, userId }
   }
 
@@ -114,7 +119,7 @@ export async function autorizarRequisicaoFinanceira(
       : { autorizado: false, status: 403 }
   }
 
-  return await usuarioTemPapel(c.env.SHARE_DB, userId, PAPEIS_FINANCEIROS)
+  return await usuarioPodeGerenciarFinanceiro(c.env.SHARE_DB, userId)
     ? { autorizado: true, userId }
     : { autorizado: false, status: 403 }
 }
