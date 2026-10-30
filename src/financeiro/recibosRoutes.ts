@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { allocateCentsByPercentages, emitirReciboColaborador, emitirReciboPagamento, emitirReciboReembolso, emitirReciboSaida, enviarReciboPagamentoParaRateio, programarReciboReembolso, validateFinanceSchema } from "./FinanceiroKernel"
 import { errorResponse } from "./errorResponse"
 import { listar } from "./repositories/d1"
+import { usuarioPodeAcessarRecibo, usuarioPodeGerenciarFinanceiro } from "./financeiroAuth"
 
 type Bindings = { SHARE_DB: D1Database; FILES?: R2Bucket; SHARE_FILES?: R2Bucket; R2_PUBLIC_URL?: string }
 type Variables = { userId: string | null }
@@ -19,6 +20,12 @@ function normalizarTipoCaixaRecibo(value: unknown, pagadorTipo?: unknown): 'SHAR
 
 function storage(c: any): R2Bucket | undefined { return c.env.SHARE_FILES || c.env.FILES }
 function publicStorageUrl(c: any, key: string): string { const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, ''); if (!publicBase) throw new Error('R2_PUBLIC_URL_nao_configurada'); return `${publicBase}/${key.split('/').map((segment: string) => encodeURIComponent(segment)).join('/')}` }
+async function requisitantePodeAcessarRecibo(c: any, reciboId: string): Promise<boolean> {
+  const userId = c.get('userId') as string | null
+  return userId
+    ? usuarioPodeAcessarRecibo(c.env.SHARE_DB, userId, reciboId)
+    : false
+}
 
 recibosRoutes.post('/recibos', async (c) => {
   try {
@@ -32,6 +39,10 @@ recibosRoutes.post('/recibos', async (c) => {
     const tipo = String(body.tipo_recibo ?? '')
     const handler = handlers[tipo]
     if (!handler) return c.json({ error: 'tipo_recibo_invalido', message: 'Tipo de recibo não suportado' }, 400)
+    const userId = c.get('userId') as string | null
+    if (tipo === 'recibo_saida' && (!userId || !await usuarioPodeGerenciarFinanceiro(c.env.SHARE_DB, userId))) {
+      return c.json({ error: 'financeiro_nao_autorizado' }, 403)
+    }
     const result = await handler(c.env.SHARE_DB, body, c.get('userId') || null)
     return c.json(result, 201)
   } catch (error) {
@@ -80,6 +91,14 @@ recibosRoutes.get('/recibos', async (c) => {
   const db = c.env.SHARE_DB
   const filtros: string[] = []
   const params: unknown[] = []
+  const userId = c.get('userId') as string | null
+  const podeConsultarTodos = userId
+    ? await usuarioPodeGerenciarFinanceiro(db, userId)
+    : false
+  if (!podeConsultarTodos) {
+    filtros.push('criado_por = ?')
+    params.push(userId ?? '')
+  }
   const status = c.req.query('status')
   const beneficiarioTipo = c.req.query('beneficiario_tipo')
   const busca = c.req.query('q')?.trim()
@@ -182,8 +201,8 @@ recibosRoutes.get('/recibos/opcoes', async (c) => {
   const read = async (sql: string) => (await db.prepare(sql).all().catch((error) => { console.warn('[financeiro/lancamentos] consulta opcional indisponível', error); return { results: [] } })).results ?? []
   const [clientes, colaboradores, freelancers, aeronaves, cotistas, categorias, categoriasCliente, abastecimentos, fornecedoresFavoritos, fornecedoresCombustivel] = await Promise.all([
     read('SELECT id, razao_social, cnpj, endereco, cidade, uf, holding, status, codigo_cliente FROM cliente ORDER BY razao_social'),
-    read("SELECT id, nome_completo, nome_exibicao, cpf, endereco, cidade, uf, email, telefone, canac, nome_banco, tipo_conta, conta_numero, agencia_numero, pix, 'user_profiles' AS origem FROM user_profiles ORDER BY nome_completo"),
-    read("SELECT id, nome_completo, cpf, endereco, cidade, uf, telefone, canac, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo"),
+    read("SELECT id, nome_completo, nome_exibicao, cpf, 'user_profiles' AS origem FROM user_profiles ORDER BY nome_completo"),
+    read("SELECT id, nome_completo, cpf, 'tripulacao_freelancer' AS origem FROM tripulacao_freelancer WHERE lower(COALESCE(status, 'ativo')) = 'ativo' ORDER BY nome_completo"),
     read('SELECT id, matricula_registro, fabricante, modelo FROM aeronave ORDER BY matricula_registro'),
     read(`SELECT ca.id, ca.aeronave_id, ca.cliente_id, ca.socio_id, ca.codigo_cliente, ca.percentual_sociedade,
                  COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente) AS nome,
@@ -237,6 +256,7 @@ recibosRoutes.patch('/recibos/:id/status', async (c) => {
     const status = String(body.status ?? '').toUpperCase()
     const permitidos = new Set(['ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMAIL_ENVIADO', 'ERRO_ANEXO', 'ERRO_PDF'])
     if (!permitidos.has(status)) return c.json({ error: 'status_recibo_invalido' }, 400)
+    if (!await requisitantePodeAcessarRecibo(c, c.req.param('id'))) return c.notFound()
     const result = await c.env.SHARE_DB.prepare('UPDATE recibos SET status = ? WHERE id = ?').bind(status, c.req.param('id')).run()
     if (!result.meta.changes) return c.json({ error: 'recibo_nao_encontrado' }, 404)
     return c.json({ ok: true, status })
@@ -530,6 +550,7 @@ recibosRoutes.post('/recibos/anexos', async (c) => {
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const reciboId = String(form.recibo_id || '')
     if (!reciboId) return c.json({ error: 'recibo_id_obrigatorio' }, 400)
+    if (!await requisitantePodeAcessarRecibo(c, reciboId)) return c.notFound()
     const id = crypto.randomUUID()
     const key = `recibos/${reciboId}/original/${id}-${arquivo.name}`
     const publicUrl = publicStorageUrl(c, key)
@@ -575,6 +596,7 @@ recibosRoutes.post('/recibos/:id/pdf', async (c) => {
     const reciboId = c.req.param('id')
     const recibo = await c.env.SHARE_DB.prepare('SELECT status FROM recibos WHERE id = ?').bind(reciboId).first<{ status: string }>()
     if (!recibo) return c.json({ error: 'recibo_nao_encontrado' }, 404)
+    if (!await requisitantePodeAcessarRecibo(c, reciboId)) return c.notFound()
     // Permite regenerar o PDF de um recibo já emitido sem criar novo recibo.
     if (!['CRIADO', 'PDF_PENDENTE', 'ANEXO_PENDENTE', 'ERRO_ANEXO', 'ERRO_PDF', 'EMITIDO'].includes(String(recibo.status).toUpperCase())) return c.json({ error: 'recibo_nao_aguarda_pdf', status_atual: recibo.status }, 409)
     const bytes = new Uint8Array(await arquivo.arrayBuffer())
@@ -601,6 +623,7 @@ recibosRoutes.post('/recibos/:id/pdf', async (c) => {
 })
 
 recibosRoutes.get('/recibos/:id/pdf/arquivo', async (c) => {
+  if (!await requisitantePodeAcessarRecibo(c, c.req.param('id'))) return c.notFound()
   const bucket = storage(c)
   if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
   const row = await c.env.SHARE_DB.prepare(`
@@ -622,13 +645,15 @@ recibosRoutes.get('/recibos/:id/pdf/arquivo', async (c) => {
 recibosRoutes.get('/recibos/anexos/:id/arquivo', async (c) => {
   const bucket = storage(c)
   if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
-  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, tipo_arquivo FROM recibo_anexos WHERE id = ?').bind(c.req.param('id')).first<{ caminho_arquivo: string; tipo_arquivo: string }>()
+  const row = await c.env.SHARE_DB.prepare('SELECT caminho_arquivo, tipo_arquivo, recibo_id FROM recibo_anexos WHERE id = ?').bind(c.req.param('id')).first<{ caminho_arquivo: string; tipo_arquivo: string; recibo_id: string | null }>()
   if (!row) return c.notFound()
+  if (!row.recibo_id || !await requisitantePodeAcessarRecibo(c, row.recibo_id)) return c.notFound()
   const object = await bucket.get(row.caminho_arquivo)
   if (!object) return c.notFound()
   return c.body(await object.arrayBuffer(), 200, { 'Content-Type': row.tipo_arquivo, 'Cache-Control': 'private, max-age=3600' })
 })
 recibosRoutes.get('/recibos/:id/anexo-original', async (c) => {
+  if (!await requisitantePodeAcessarRecibo(c, c.req.param('id'))) return c.notFound()
   const bucket = storage(c)
   if (!bucket) return c.json({ error: 'storage_nao_configurado' }, 503)
   const row = await c.env.SHARE_DB.prepare("SELECT caminho_arquivo, tipo_arquivo, nome_arquivo FROM recibo_anexos WHERE recibo_id = ? AND UPPER(COALESCE(finalidade, '')) = 'ORIGINAL' ORDER BY rowid DESC LIMIT 1").bind(c.req.param('id')).first<{ caminho_arquivo: string; tipo_arquivo: string; nome_arquivo: string }>()

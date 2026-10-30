@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { autorizarRequisicaoFinanceira } from '../src/financeiro/financeiroAuth.ts'
+import { autorizarRequisicaoFinanceira, usuarioPodeAcessarRecibo } from '../src/financeiro/financeiroAuth.ts'
 
 function contexto(method = 'GET') {
   return {
@@ -131,4 +131,67 @@ test('usuário autenticado pode consultar o histórico de envios pessoais', asyn
 
   const acesso = await autorizarRequisicaoFinanceira(contexto('GET'), '/api/financeiro/envios-pagamento', 'GET')
   assert.deepEqual(acesso, { autorizado: true, userId: 'user-historico' })
+})
+
+test('usuário autenticado pode emitir recibos próprios, mas não executar operações financeiras de gestão', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-recibo' })
+  const c = contexto('GET')
+  c.env.SHARE_DB = {
+    prepare() {
+      return { bind() { return this }, async first() { return null } }
+    },
+  }
+
+  for (const [path, method] of [
+    ['/api/financeiro/recibos/opcoes', 'GET'],
+    ['/api/financeiro/recibos', 'GET'],
+    ['/api/financeiro/recibos', 'POST'],
+    ['/api/financeiro/recibos/anexos', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/status', 'PATCH'],
+    ['/api/financeiro/recibos/recibo-1/pdf', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/pdf/arquivo', 'GET'],
+    ['/api/financeiro/recibos/anexos/anexo-1/arquivo', 'GET'],
+    ['/api/financeiro/recibos/recibo-1/anexo-original', 'GET'],
+  ]) {
+    const acesso = await autorizarRequisicaoFinanceira(c, path, method)
+    assert.deepEqual(acesso, { autorizado: true, userId: 'user-recibo' }, `${method} ${path}`)
+  }
+
+  for (const [path, method] of [
+    ['/api/financeiro/recibos/gerar-demonstrativo', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/cancelar', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/reativar', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/reembolso', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/programar-contas-apagar', 'POST'],
+    ['/api/financeiro/recibos/recibo-1/enviar-despesa-rateio', 'POST'],
+  ]) {
+    const acesso = await autorizarRequisicaoFinanceira(c, path, method)
+    assert.deepEqual(acesso, { autorizado: false, status: 403 }, `${method} ${path}`)
+  }
+})
+
+test('acesso a recibos pertence ao criador, salvo papel financeiro', async () => {
+  const criarDb = ({ dono, gestor = false }) => ({
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return {
+            async first() {
+              if (sql.includes('FROM user_profiles p')) return gestor ? { id: values[0] } : null
+              if (sql.includes('FROM recibos WHERE id = ? AND criado_por = ?')) {
+                return dono === values[1] && values[0] === 'recibo-1' ? { id: 'recibo-1' } : null
+              }
+              return null
+            },
+          }
+        },
+      }
+    },
+  })
+
+  assert.equal(await usuarioPodeAcessarRecibo(criarDb({ dono: 'user-1' }), 'user-1', 'recibo-1'), true)
+  assert.equal(await usuarioPodeAcessarRecibo(criarDb({ dono: 'user-1' }), 'user-2', 'recibo-1'), false)
+  assert.equal(await usuarioPodeAcessarRecibo(criarDb({ dono: null, gestor: true }), 'financeiro-1', 'recibo-1'), true)
 })

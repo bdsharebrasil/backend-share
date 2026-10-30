@@ -51,6 +51,19 @@ export async function usuarioPodeGerenciarFinanceiro(db: FinanceiroAuthDb, userI
   return usuarioTemPapel(db, userId, PAPEIS_FINANCEIROS)
 }
 
+export async function usuarioPodeAcessarRecibo(
+  db: FinanceiroAuthDb,
+  userId: string,
+  reciboId: string,
+): Promise<boolean> {
+  if (!userId) return false
+  if (await usuarioPodeGerenciarFinanceiro(db, userId)) return true
+  const row = await db.prepare(
+    'SELECT 1 FROM recibos WHERE id = ? AND criado_por = ? LIMIT 1',
+  ).bind(reciboId, userId).first()
+  return Boolean(row)
+}
+
 async function usuarioAtivo(db: FinanceiroAuthDb, userId: string): Promise<boolean> {
   const profile = await db.prepare(`
     SELECT status FROM user_profiles WHERE id = ? LIMIT 1
@@ -88,6 +101,18 @@ function usuarioPodeAcessarEnvioPagamento(path: string, method: string): boolean
   return ['GET', 'POST', 'PATCH', 'DELETE'].includes(method)
     && /^\/envios-pagamento\/rascunhos(?:\/[^/]+)?$/.test(path)
 }
+function usuarioPodeEmitirRecibo(path: string, method: string): boolean {
+  if (method === 'GET' && ['/recibos', '/recibos/opcoes'].includes(path)) return true
+  if (method === 'POST' && ['/recibos', '/recibos/anexos'].includes(path)) return true
+  if (method === 'PATCH' && /^\/recibos\/[^/]+\/status$/.test(path)) return true
+  if (method === 'POST' && /^\/recibos\/[^/]+\/pdf$/.test(path)) return true
+  if (method === 'GET' && (
+    /^\/recibos\/[^/]+\/pdf\/arquivo$/.test(path)
+    || /^\/recibos\/anexos\/[^/]+\/arquivo$/.test(path)
+    || /^\/recibos\/[^/]+\/anexo-original$/.test(path)
+  )) return true
+  return false
+}
 function usuarioPodeConsultarDashboard(path: string, method: string): boolean {
   return method === 'GET' && (
     path === '/dashboard/financeiro'
@@ -111,6 +136,9 @@ export async function autorizarRequisicaoFinanceira(
     return { autorizado: true, userId }
   }
   if (usuarioPodeAcessarEnvioPagamento(path, method)) {
+    return { autorizado: true, userId }
+  }
+  if (usuarioPodeEmitirRecibo(path, method)) {
     return { autorizado: true, userId }
   }
 
