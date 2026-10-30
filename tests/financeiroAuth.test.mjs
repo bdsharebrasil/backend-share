@@ -85,6 +85,8 @@ test('qualquer usuário autenticado pode usar o fluxo de criação e manter seus
     ['/api/financeiro/envios-pagamento', 'POST'],
     ['/api/financeiro/envios-pagamento/anexos-opcoes', 'GET'],
     ['/api/financeiro/envios-pagamento/anexos', 'POST'],
+    ['/api/financeiro/envios-pagamento/envio-1/converter', 'POST'],
+    ['/api/financeiro/envios-pagamento/envio-1/email-enviado', 'POST'],
     ['/api/financeiro/envios-pagamento/rascunhos', 'POST'],
     ['/api/financeiro/envios-pagamento/rascunhos/rascunho-1', 'GET'],
     ['/api/financeiro/envios-pagamento/rascunhos/rascunho-1', 'DELETE'],

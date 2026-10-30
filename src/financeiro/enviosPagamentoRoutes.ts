@@ -290,18 +290,22 @@ enviosPagamentoRoutes.delete('/envios-pagamento/cotistas/:id', async (c) => {
   return c.json({ success: true, id, status: 'inativo' })
 })
 
-enviosPagamentoRoutes.patch('/envios-pagamento/:id', async (c) => {
-  const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
-  const requested = String(body.status ?? '').toUpperCase()
-  const id = c.req.param('id')
-  const current = await c.env.SHARE_DB.prepare('SELECT id, tipo, status FROM envio_despesas WHERE id = ?').bind(id).first<{ id: string; tipo: string; status: string }>()
+async function atualizarStatusEnvioPagamento(c: any, id: string, requested: string, somenteProprietario = false) {
+  const db = c.env.SHARE_DB
+  const current = await db.prepare('SELECT id, tipo, status, criado_por FROM envio_despesas WHERE id = ?').bind(id).first() as { id: string; tipo: string; status: string; criado_por: string | null } | null
   if (!current) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+  if (somenteProprietario) {
+    const userId = c.get('userId') as string | null
+    const podeGerenciar = userId ? await usuarioPodeGerenciarFinanceiro(db, userId) : false
+    if (!podeGerenciar && current.criado_por !== userId) return c.notFound()
+    if (requested !== 'EMAIL_ENVIADO') return c.json({ error: 'transicao_status_solicitacao_invalida' }, 400)
+  }
   const currentStatus = String(current.status ?? '').toUpperCase()
   if (currentStatus === 'CONVERTIDO' && requested === 'EMAIL_ENVIADO') {
-    await c.env.SHARE_DB.prepare(`UPDATE envio_despesas
+    await db.prepare(`UPDATE envio_despesas
       SET email_enviado = 1, email_enviado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP
       WHERE id = ? AND status = 'CONVERTIDO'`).bind(id).run()
-    return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row) => c.json(row))
+    return db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row: unknown) => c.json(row))
   }
   const transitions: Record<string, string[]> = {
     PENDENTE: current.tipo === 'share' ? ['APROVADO', 'CANCELADO'] : ['EMAIL_ENVIADO', 'CANCELADO'],
@@ -313,8 +317,16 @@ enviosPagamentoRoutes.patch('/envios-pagamento/:id', async (c) => {
   if (!transitions[currentStatus]?.includes(requested)) {
     return c.json({ error: 'transicao_status_solicitacao_invalida', de: currentStatus, para: requested }, 409)
   }
-  await c.env.SHARE_DB.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = ?').bind(requested, id, current.status).run()
-  return c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row) => c.json(row))
+  await db.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = ?').bind(requested, id, current.status).run()
+  return db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row: unknown) => c.json(row))
+}
+
+enviosPagamentoRoutes.post('/envios-pagamento/:id/email-enviado', async (c) =>
+  atualizarStatusEnvioPagamento(c, c.req.param('id'), 'EMAIL_ENVIADO', true))
+
+enviosPagamentoRoutes.patch('/envios-pagamento/:id', async (c) => {
+  const body: { status?: string } = await c.req.json<{ status?: string }>().catch(() => ({} as { status?: string }))
+  return atualizarStatusEnvioPagamento(c, c.req.param('id'), String(body.status ?? '').toUpperCase())
 })
 
 enviosPagamentoRoutes.post('/envios-pagamento/:id/aprovar', async (c) => {
@@ -341,15 +353,22 @@ enviosPagamentoRoutes.post('/envios-pagamento/:id/aprovar', async (c) => {
 
 enviosPagamentoRoutes.post('/envios-pagamento/:id/converter', async (c) => {
   try {
-    const request = await c.env.SHARE_DB.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
+    const db = c.env.SHARE_DB
+    const request = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(c.req.param('id')).first<Record<string, unknown>>()
     if (!request) return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
+    const userId = c.get('userId') as string | null
+    const podeGerenciar = userId ? await usuarioPodeGerenciarFinanceiro(db, userId) : false
+    if (!podeGerenciar && (request.criado_por !== userId || !['cliente', 'reembolso'].includes(String(request.tipo)))) return c.notFound()
+    if (!podeGerenciar && request.tipo === 'reembolso' && !['EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status).toUpperCase())) {
+      return c.json({ error: 'envie_o_email_antes_de_converter' }, 409)
+    }
     if (request.tipo === 'share' && !['APROVADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
     if (request.tipo !== 'share' && !['PENDENTE', 'APROVADO', 'EMAIL_ENVIADO', 'CONVERTIDO'].includes(String(request.status))) return c.json({ error: 'solicitacao_nao_aprovada' }, 409)
     return c.json(await convertPaymentRequest(
       c.env.SHARE_DB,
       request,
       { createExpense, createReimbursement, createDirectExternalExpense, createClientExpenseRateios },
-      c.get('userId') || null,
+      userId,
     ))
   } catch (error) { return errorResponse(c, error) }
 })
