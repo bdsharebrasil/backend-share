@@ -83,6 +83,7 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
 }
 function usuarioPodeAcessarEnvioPagamento(path: string, method: string): boolean {
   if (method === 'GET' && path === '/envios-pagamento') return true
+  if (method === 'GET' && path === '/envios-pagamento/anexos-opcoes') return true
   if (method === 'POST' && ['/envios-pagamento', '/envios-pagamento/anexos'].includes(path)) return true
   return ['GET', 'POST', 'PATCH', 'DELETE'].includes(method)
     && /^\/envios-pagamento\/rascunhos(?:\/[^/]+)?$/.test(path)

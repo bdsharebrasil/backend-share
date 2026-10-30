@@ -70,7 +70,7 @@ test('colaborador ativo pode excluir rascunhos, mas não outros recursos por DEL
   assert.deepEqual(acessoOutroRecurso, { autorizado: false, status: 403 })
 })
 
-test('qualquer usuário autenticado pode criar envios e manter seus rascunhos', async (t) => {
+test('qualquer usuário autenticado pode usar o fluxo de criação e manter seus rascunhos', async (t) => {
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })
   globalThis.fetch = async () => Response.json({ id: 'user-inativo' })
@@ -83,6 +83,7 @@ test('qualquer usuário autenticado pode criar envios e manter seus rascunhos', 
 
   for (const [path, method] of [
     ['/api/financeiro/envios-pagamento', 'POST'],
+    ['/api/financeiro/envios-pagamento/anexos-opcoes', 'GET'],
     ['/api/financeiro/envios-pagamento/anexos', 'POST'],
     ['/api/financeiro/envios-pagamento/rascunhos', 'POST'],
     ['/api/financeiro/envios-pagamento/rascunhos/rascunho-1', 'GET'],
