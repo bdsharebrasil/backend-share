@@ -30,6 +30,10 @@ enabled = true
 binding = "SHARE_FILES"
 bucket_name = "share"
 
+[[r2_buckets]]
+binding = "AVATAR_AERONAVES"
+bucket_name = "avatar-aeronaves"
+
 # ── D1 principal do Portal Cliente e das reservas de voo ────────────────────
 [[d1_databases]]
 binding = "SHARE_DB"

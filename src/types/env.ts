@@ -5,6 +5,7 @@ export type Env = {
   RATE_LIMITER: DurableObjectNamespace
   FILES: R2Bucket
   SHARE_FILES?: R2Bucket
+  AVATAR_AERONAVES: R2Bucket
   SHARE_DB: D1Database
   RESEND_API_KEY: string
   INTERNAL_TOKEN: string

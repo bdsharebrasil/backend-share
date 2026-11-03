@@ -51,7 +51,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Bindings = Pick<Env, 'AISWEB_API_KEY' | 'AISWEB_API_PASS' | 'CACHE_KV' | 'RATE_LIMITER' | 'FILES' | 'SHARE_FILES' | 'SHARE_DB' | 'RESEND_API_KEY' | 'INTERNAL_TOKEN' | 'EMAIL_FROM' | 'SUPABASE_URL' | 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY' | 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'WINSOCK_VALUATION_URL' | 'WINSOCK_API_KEY' | 'WINSOCK_AUTH_HEADER' | 'WINSOCK_AUTH_PREFIX' | 'ANTHROPIC_API_KEY' | 'GEMINI_API_KEY' | 'ALLOWED_ORIGINS' | 'TELEGRAM_BOT_TOKEN' | 'CLIENT_SESSION_SECRET' | 'CLIENT_SESSION_TTL_SECONDS' | 'CLOUDFLARE_TURN_KEY_ID' | 'CLOUDFLARE_TURN_API_TOKEN' | 'MEETING_ROOMS' | 'ADSB_PROVIDER' | 'API_OPENSTREETMAP'>
+type Bindings = Pick<Env, 'AISWEB_API_KEY' | 'AISWEB_API_PASS' | 'CACHE_KV' | 'RATE_LIMITER' | 'FILES' | 'SHARE_FILES' | 'AVATAR_AERONAVES' | 'SHARE_DB' | 'RESEND_API_KEY' | 'INTERNAL_TOKEN' | 'EMAIL_FROM' | 'SUPABASE_URL' | 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY' | 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'WINSOCK_VALUATION_URL' | 'WINSOCK_API_KEY' | 'WINSOCK_AUTH_HEADER' | 'WINSOCK_AUTH_PREFIX' | 'ANTHROPIC_API_KEY' | 'GEMINI_API_KEY' | 'ALLOWED_ORIGINS' | 'TELEGRAM_BOT_TOKEN' | 'CLIENT_SESSION_SECRET' | 'CLIENT_SESSION_TTL_SECONDS' | 'CLOUDFLARE_TURN_KEY_ID' | 'CLOUDFLARE_TURN_API_TOKEN' | 'MEETING_ROOMS' | 'ADSB_PROVIDER' | 'API_OPENSTREETMAP'>
 
 interface ReservationRequest {
   hotelId: string
@@ -736,8 +736,9 @@ app.post('/api/flight-calculations', async (c) => {
 // ─── Routes: Upload de arquivos (R2 + short link) ────────────────────────────
 
 app.post('/api/upload', async (c) => {
-  if (!(await checkInternalAuth(c))) return c.json({ error: 'Unauthorized' }, 401)
-
+  const autenticacaoInterna = await checkInternalAuth(c)
+  const usuario = autenticacaoInterna ? null : await shareBrasilUser(c)
+  if (!autenticacaoInterna && !usuario) return c.json({ error: 'Unauthorized' }, 401)
   try {
     const formData = await c.req.formData()
     const file = formData.get('file') as File | null
@@ -750,15 +751,31 @@ app.post('/api/upload', async (c) => {
 
     if (!file) return c.json({ error: 'Arquivo ausente' }, 400)
 
+    const uploadAeronave = folder === 'aeronaves/images'
+    if (uploadAeronave ? !usuario : !autenticacaoInterna) return c.json({ error: 'Unauthorized' }, 401)
+
     const MAX_SIZE = 25 * 1024 * 1024 // 25MB
+    if (uploadAeronave && !file.size) return c.json({ error: 'Arquivo vazio' }, 400)
     if (file.size > MAX_SIZE) return c.json({ error: 'Arquivo excede 25MB' }, 413)
 
-    const ext = (file.name.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '')
-    const key = `${folder}/${Date.now()}-${uuid().slice(0, 8)}.${ext}`
+    const extensao = (file.name.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+    const mimePorExtensao: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }
+    const mime = file.type.toLowerCase() || mimePorExtensao[extensao] || ''
+    if (uploadAeronave && !['image/jpeg', 'image/png', 'image/webp'].includes(mime)) return c.json({ error: 'Formato inválido. Envie JPG, JPEG, PNG ou WEBP.' }, 400)
+    const ext = uploadAeronave ? (mime === 'image/jpeg' ? 'jpg' : mime === 'image/png' ? 'png' : 'webp') : extensao || 'bin'
+    const pasta = uploadAeronave ? `aeronaves/images/${usuario!.id}` : folder
+    const key = `${pasta}/${Date.now()}-${uuid().slice(0, 8)}.${ext}`
 
-    await c.env.FILES.put(key, await file.arrayBuffer(), {
-      httpMetadata: { contentType: file.type || 'application/octet-stream' },
+    const bucket = uploadAeronave ? c.env.AVATAR_AERONAVES : c.env.FILES
+    const contentType = uploadAeronave ? mimePorExtensao[ext] : file.type || 'application/octet-stream'
+    await bucket.put(key, await file.arrayBuffer(), {
+      httpMetadata: { contentType },
     })
+
+    if (uploadAeronave) {
+      const origin = new URL(c.req.url).origin
+      return c.json({ url: `${origin}/api/sharebrasil/aeronave-imagem?key=${encodeURIComponent(key)}`, key })
+    }
 
     const code = shortCode()
     await c.env.SHARE_DB.prepare('INSERT INTO short_links (code, r2_key) VALUES (?, ?)')
@@ -773,6 +790,20 @@ app.post('/api/upload', async (c) => {
     log.error('[upload]', e.message)
     throw e
   }
+})
+
+app.get('/api/sharebrasil/aeronave-imagem', async c => {
+  const key = String(c.req.query('key') || '')
+  if (!/^aeronaves\/images\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(key)) return c.notFound()
+  const object = await c.env.AVATAR_AERONAVES.get(key)
+  if (!object) return c.notFound()
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('etag', object.httpEtag)
+  headers.set('X-Content-Type-Options', 'nosniff')
+  headers.set('Cache-Control', 'public, max-age=86400, s-maxage=604800')
+  headers.set('Content-Disposition', 'inline')
+  return new Response(object.body, { headers })
 })
 
 // ─── Route: Servir arquivo via short link (público, sem auth) ───────────────
