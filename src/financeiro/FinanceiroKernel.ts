@@ -14,6 +14,7 @@ import {
 export type FinanceOperation = 'DESPESA' | 'RECEITA' | 'REEMBOLSO'
 export type FinanceFlow = 'ENTRADA' | 'SAIDA'
 export type CotistaKind = 'CLIENTE' | 'HOLDING'
+const FORNECEDOR_SHARE_ID = '3821d2f9-fe3c-4457-be1c-7b9fb5e45f77'
 
 /**
  * Modos de um reembolso, definidos pela comparação entre o valor do recibo e o
@@ -269,6 +270,44 @@ export async function resolveShareLancamentoCategory(
     categoria_share_id: category.id,
     categoria_nome: category.nome!.trim(),
     grupo_categoria: group,
+  }
+}
+type ClientCategoryMetadata = {
+  id: string
+  nome: string
+  subcategoria_1: string | null
+  subcategoria_2: string | null
+  subcategoria_3: string | null
+  subcategoria_4: string | null
+}
+async function resolveClientCategoryMetadata(
+  db: Database,
+  categoryId: unknown,
+  selectedSubcategory: unknown,
+): Promise<ClientCategoryMetadata | null> {
+  const idInformado = nullableText(categoryId)
+  if (!idInformado) return null
+  const row = await db.prepare(`
+    SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4
+      FROM categoria_movimentacao_cliente
+     WHERE id = ?
+     LIMIT 1
+  `).bind(idInformado).first<Record<string, unknown>>()
+  if (!row?.id || !nullableText(row.nome)) return null
+  const campos = ['subcategoria_1', 'subcategoria_2', 'subcategoria_3', 'subcategoria_4'] as const
+  const valores = campos.map((campo) => nullableText(row[campo]))
+  const selecionada = nullableText(selectedSubcategory)
+  const indice = selecionada ? valores.findIndex((valor) => valor === selecionada) : -1
+  if (selecionada && indice < 0) {
+    throw new FinanceError('Subcategoria cliente não pertence à categoria selecionada', 'subcategoria_cliente_invalida')
+  }
+  return {
+    id: String(row.id),
+    nome: String(row.nome).trim(),
+    subcategoria_1: indice === 0 ? valores[0] : null,
+    subcategoria_2: indice === 1 ? valores[1] : null,
+    subcategoria_3: indice === 2 ? valores[2] : null,
+    subcategoria_4: indice === 3 ? valores[3] : null,
   }
 }
 
@@ -1493,6 +1532,11 @@ export async function issueRevenue(
 
   const context = await resolveCotista(db, command)
   const documentoSaida = ['RECIBO_SAIDA', 'NF_SAIDA'].includes(upper(command.origem_tipo))
+  const categoriaCliente = await resolveClientCategoryMetadata(
+    db,
+    command.categoria_cliente_id,
+    command.categoria_despesa_subcategoria ?? command.subcategoria_1 ?? command.subcategoria_2 ?? command.subcategoria_3 ?? command.subcategoria_4,
+  )
   const shareCategory = await resolveShareLancamentoCategory(
     db,
     command.categoria_id,
@@ -1534,8 +1578,8 @@ export async function issueRevenue(
           context?.cotistaAeronaveId || command.cotista_aeronave_id,
         descricao: command.descricao,
         fornecedor_nome: documentoSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
-        fornecedores_favoritos_id: nullableText(command.fornecedor_id),
-        fluxo: notaFiscalSaida ? 'RECEITA' : 'ENTRADA',
+        fornecedores_favoritos_id: documentoSaida ? FORNECEDOR_SHARE_ID : nullableText(command.fornecedor_id),
+        fluxo: documentoSaida ? 'RECEITA' : 'ENTRADA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
         categoria_share_id: shareCategory.categoria_share_id,
@@ -1549,6 +1593,8 @@ export async function issueRevenue(
         origem_tipo: nullableText(command.origem_tipo) || 'RECEITA',
         origem_id: nullableText(command.origem_id),
         status: 'EM_ABERTO',
+        email_enviado_em: null,
+        email_enviado_id: null,
         colaborador_id: nullableText(command.colaborador_id),
         criado_por: userId,
       },
@@ -1599,14 +1645,14 @@ export async function issueRevenue(
           tipo_caixa: 'CLIENTE',
           valor_centavos: amount,
           categoria_share_id: null,
-          categoria_cliente_id: nullableText(
-            command.categoria_cliente_id,
-          ),
-          categoria_nome: nullableText(
-            command.categoria_cliente_nome ?? command.categoria_nome,
-          ),
+          categoria_cliente_id: categoriaCliente?.id ?? nullableText(command.categoria_cliente_id),
+          categoria_nome: categoriaCliente?.nome ?? nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+          subcategoria_1: categoriaCliente?.subcategoria_1,
+          subcategoria_2: categoriaCliente?.subcategoria_2,
+          subcategoria_3: categoriaCliente?.subcategoria_3,
+          subcategoria_4: categoriaCliente?.subcategoria_4,
           fornecedor_nome: documentoSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
-          fornecedores_favoritos_id: nullableText(command.fornecedor_id),
+          fornecedores_favoritos_id: documentoSaida ? FORNECEDOR_SHARE_ID : nullableText(command.fornecedor_id),
           grupo_categoria: 'CAIXA CLIENTE',
           data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
@@ -1618,6 +1664,8 @@ export async function issueRevenue(
           origem_tipo: documentoSaida ? upper(command.origem_tipo) : 'RECEITA',
           origem_id: lancamentoId,
           status: 'EM_ABERTO',
+          email_enviado_em: null,
+          email_enviado_id: null,
           criado_por: userId,
         },
         ['id', 'descricao', 'fluxo', 'valor_centavos'],
@@ -1629,16 +1677,19 @@ export async function issueRevenue(
         {
           id: clientRateioId,
           lancamento_id: clientLancamentoId,
-          categoria_id: nullableText(command.categoria_cliente_id),
-          categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
-          subcategoria_1: nullableText(command.categoria_despesa_subcategoria),
+          categoria_id: categoriaCliente?.id ?? nullableText(command.categoria_cliente_id),
+          categoria_nome: categoriaCliente?.nome ?? nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+          subcategoria_1: categoriaCliente?.subcategoria_1,
+          subcategoria_2: categoriaCliente?.subcategoria_2,
+          subcategoria_3: categoriaCliente?.subcategoria_3,
+          subcategoria_4: categoriaCliente?.subcategoria_4,
           cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
           aeronave_id: context?.aeronaveId || command.aeronave_id,
           tipo_rateio: 'FIXO',
           periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
           data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
-          fornecedor_id: nullableText(command.fornecedor_id),
+          fornecedor_id: documentoSaida ? FORNECEDOR_SHARE_ID : nullableText(command.fornecedor_id),
           descricao_despesa: command.descricao,
           pago_por: reciboSaida ? null : (context?.cotistaAeronaveId || command.cotista_aeronave_id),
           pago_diretamente: reciboSaida ? 0 : 1,
@@ -1702,8 +1753,12 @@ export async function issueRevenue(
       data_emissao: command.data,
       data_vencimento: command.data_vencimento || command.data,
       descricao: command.descricao,
-      categoria_id: nullableText(command.categoria_cliente_id),
-      categoria_nome: nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+      categoria_id: categoriaCliente?.id ?? nullableText(command.categoria_cliente_id),
+      categoria_nome: categoriaCliente?.nome ?? nullableText(command.categoria_cliente_nome ?? command.categoria_nome),
+      subcategoria_1: categoriaCliente?.subcategoria_1,
+      subcategoria_2: categoriaCliente?.subcategoria_2,
+      subcategoria_3: categoriaCliente?.subcategoria_3,
+      subcategoria_4: categoriaCliente?.subcategoria_4,
       grupo_categoria: nullableText(command.grupo_categoria_cliente) || 'ADM SHARE BRASIL',
       fornecedor_nome: 'SHARE BRASIL',
       fluxo: 'SAIDA',
@@ -1734,7 +1789,11 @@ export async function issueRevenue(
     statements.push(...holdingAllocationStatements(db, schema, {
       ...command,
       aeronave_id: context.aeronaveId || command.aeronave_id,
-      categoria_nome: command.categoria_cliente_nome ?? command.categoria_nome,
+      categoria_nome: categoriaCliente?.nome ?? command.categoria_cliente_nome ?? command.categoria_nome,
+      subcategoria_1: categoriaCliente?.subcategoria_1,
+      subcategoria_2: categoriaCliente?.subcategoria_2,
+      subcategoria_3: categoriaCliente?.subcategoria_3,
+      subcategoria_4: categoriaCliente?.subcategoria_4,
       numero_nf: command.numero_nf,
       url_nf: command.url_nf,
       origem_tipo: 'NF_SAIDA',

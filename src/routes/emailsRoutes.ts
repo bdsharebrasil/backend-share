@@ -180,7 +180,11 @@ async function marcarEmailEnviadoParaOrigens(
       if (lancamentoId) lancamentoIds.push(lancamentoId)
     } else if (prefix === 'recibo_saida') {
       const row = await db.prepare('SELECT lancamentos_id FROM recibos_saida WHERE id = ?1').bind(rawId).first<{ lancamentos_id: string | null }>()
-      if (row?.lancamentos_id) lancamentoIds.push(row.lancamentos_id)
+      if (row?.lancamentos_id) {
+        lancamentoIds.push(row.lancamentos_id)
+        const espelhos = await db.prepare("SELECT id FROM lancamentos WHERE origem_id = ?1 AND tipo_caixa = 'CLIENTE'").bind(row.lancamentos_id).all<{ id: string }>()
+        lancamentoIds.push(...(espelhos.results || []).map((item) => item.id))
+      }
     } else if (prefix === 'nf_saida') {
       const conta = await db.prepare('SELECT lancamentos_id, movimentos_id FROM contas_areceber WHERE nf_saida_id = ?1 LIMIT 1').bind(rawId).first<{ lancamentos_id: string | null; movimentos_id: string | null }>()
       if (conta?.lancamentos_id) {
