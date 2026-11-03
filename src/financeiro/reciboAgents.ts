@@ -34,6 +34,8 @@ type ReceiptInput = {
   recebedor_endereco?: string | null
   recebedor_cidade?: string | null
   recebedor_uf?: string | null
+  fornecedor_id?: string | null
+  fornecedor_nome?: string | null
 }
 
 const RECEIPT_STATUSES: readonly StatusRecibo[] = ['CRIADO', 'ANEXO_PENDENTE', 'PDF_PENDENTE', 'EMITIDO', 'EMAIL_ENVIADO', 'ERRO_ANEXO', 'ERRO_PDF', 'CANCELADO']
@@ -74,6 +76,8 @@ export function validateReceiptCommand(body: Row): ReceiptInput {
     recebedor_endereco: body.recebedor_endereco ? String(body.recebedor_endereco) : null,
     recebedor_cidade: body.recebedor_cidade ? String(body.recebedor_cidade) : null,
     recebedor_uf: body.recebedor_uf ? String(body.recebedor_uf) : null,
+    fornecedor_id: body.fornecedor_id ? String(body.fornecedor_id) : null,
+    fornecedor_nome: body.fornecedor_nome ? String(body.fornecedor_nome) : null,
     observacoes: body.observacoes ? String(body.observacoes) : null,
     grupo_categoria: body.grupo_categoria ? String(body.grupo_categoria) : null,
   }
@@ -107,8 +111,10 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
       id, numero_recibo, tipo_recibo, colaborador_id, aeronave_id, rateado,
       pagador_tipo, pagador_id, nome_pagador, documento_pagador, endereco_pagador, cidade_pagador, uf_pagador,
       valor, descricao, data_emissao, data_vencimento, forma_pagamento, tipo_caixa,
-      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, observacoes, criado_por, categoria_nome, numero_voo
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?)
+      categoria_movimentacao_id, grupo_categoria, status, recebedor_nome, recebedor_cpf, recebedor_endereco, recebedor_cidade, recebedor_uf,
+      fornecedor_id, fornecedor_nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4,
+      observacoes, criado_por, categoria_nome, numero_voo
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CRIADO', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     id, number, input.tipo_recibo, input.colaborador_id, input.aeronave_id,
     input.rateado ? 1 : 0, input.pagador_tipo, input.pagador_id,
@@ -117,7 +123,9 @@ export async function createReceiptRecord(db: D1Database, input: ReceiptInput, i
     input.data_emissao, input.data_vencimento, input.forma_pagamento,
     ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'cliente' : 'share',
     input.categoria_movimentacao_id, input.grupo_categoria, recebedorNome,
-    input.observacoes, userId, input.categoria_nome, input.numero_voo,
+    input.recebedor_cpf, input.recebedor_endereco, input.recebedor_cidade, input.recebedor_uf,
+    input.fornecedor_id, input.fornecedor_nome, input.subcategoria_1, input.subcategoria_2,
+    input.subcategoria_3, input.subcategoria_4, input.observacoes, userId, input.categoria_nome, input.numero_voo,
   ).run()
 }
 
