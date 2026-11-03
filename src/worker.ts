@@ -793,7 +793,9 @@ app.get('/r/:code', async (c) => {
     const headers = new Headers()
     object.writeHttpMetadata(headers)
     headers.set('etag', object.httpEtag)
-    headers.set('Content-Disposition', `attachment; filename="${shareBrasilFileName(row.r2_key.split('/').pop() || 'arquivo')}"`)
+    const filename = shareBrasilFileName(row.r2_key.split('/').pop() || 'arquivo')
+    const contentType = headers.get('content-type') || ''
+    headers.set('Content-Disposition', contentType.startsWith('image/') ? `inline; filename="${filename}"` : `attachment; filename="${filename}"`)
     headers.set('X-Content-Type-Options', 'nosniff')
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
 
@@ -5146,27 +5148,79 @@ app.post('/api/sharebrasil/aeronaves', async c => {
   const icaoHex = String(body.icao_hex || '').trim().toUpperCase()
   const fabricante = String(body.fabricante || '').trim()
   const modelo = String(body.modelo || '').trim()
-  if (!matricula || !fabricante || !modelo) return c.json({ error: 'matricula_fabricante_modelo_obrigatorios' }, 400)
+  const numeroSerie = String(body.numero_serie || '').trim()
+  const proprietario = String(body.nome_proprietario || '').trim()
+  if (!matricula || !fabricante || !modelo || !numeroSerie || !proprietario) return c.json({ error: 'campos_obrigatorios' }, 400)
   if (icaoHex && !/^[0-9A-F]{6}$/.test(icaoHex)) return c.json({ error: 'icao_hex_invalido' }, 400)
+  if (body.tipo_aeronave && !['PISTAO', 'TURBOELICE', 'JATO'].includes(body.tipo_aeronave)) return c.json({ error: 'tipo_aeronave_invalido' }, 400)
   const db = c.env.SHARE_DB
   const existente = await db.prepare('SELECT id FROM aeronave WHERE upper(matricula_registro) = ? LIMIT 1').bind(matricula).first()
   if (existente) return c.json({ error: 'matricula_ja_cadastrada' }, 409)
   const aeronaveId = uuid()
-  const performanceFields = ['categoria', 'modelo', 'teto_servico_ft', 'nivel_cruzeiro_min_ft', 'nivel_cruzeiro_max_ft', 'aprovado_rvsm', 'velocidade_cruzeiro_kt', 'taxa_subida_fpm', 'taxa_descida_fpm']
-  const performanceData = Object.fromEntries(performanceFields.filter((key) => body[key] !== undefined && body[key] !== '').map((key) => [key, key === 'aprovado_rvsm' ? (body[key] ? 1 : 0) : body[key]]))
+  const performanceMap: Record<string, string> = { categoria: 'performance_categoria', modelo: 'performance_modelo', teto_servico_ft: 'performance_teto_servico_ft', nivel_cruzeiro_min_ft: 'performance_nivel_cruzeiro_min_ft', nivel_cruzeiro_max_ft: 'performance_nivel_cruzeiro_max_ft', aprovado_rvsm: 'aprovado_rvsm', velocidade_cruzeiro_kt: 'performance_velocidade_cruzeiro_kt', taxa_subida_fpm: 'performance_taxa_subida_fpm', taxa_descida_fpm: 'performance_taxa_descida_fpm' }
+  const performanceData = Object.fromEntries(Object.entries(performanceMap).filter(([key, source]) => (body[source] ?? body[key]) !== undefined && (body[source] ?? body[key]) !== '').map(([key, source]) => [key, key === 'aprovado_rvsm' ? ((body[source] ?? body[key]) === true || (body[source] ?? body[key]) === 'true' || (body[source] ?? body[key]) === 1 ? 1 : 0) : key === 'categoria' || key === 'modelo' ? String(body[source] ?? body[key]) : Number(body[source] ?? body[key])]))
   let performanceId: string | null = null
   if (Object.keys(performanceData).length) {
     performanceId = uuid()
-    const cols = ['id', ...Object.keys(performanceData), 'criado_em', 'atualizado_em']
-    await db.prepare(`INSERT INTO performance_aeronave (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).bind(performanceId, ...Object.keys(performanceData).map((key) => performanceData[key]), new Date().toISOString(), new Date().toISOString()).run()
+    const agora = new Date().toISOString()
+    const dadosPerformance = { id: performanceId, categoria: '', modelo, teto_servico_ft: 0, nivel_cruzeiro_min_ft: 0, nivel_cruzeiro_max_ft: 0, aprovado_rvsm: 0, velocidade_cruzeiro_kt: null, taxa_subida_fpm: null, taxa_descida_fpm: null, ...performanceData }
+    const cols = [...Object.keys(dadosPerformance), 'criado_em', 'atualizado_em']
+    await db.prepare(`INSERT INTO performance_aeronave (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).bind(...Object.values(dadosPerformance), agora, agora).run()
   }
-  const aircraftData: Record<string, any> = { id: aeronaveId, matricula_registro: matricula, fabricante, modelo, icao_hex: icaoHex || null, numero_serie: body.numero_serie || null, nome_proprietario: body.nome_proprietario || null, status: body.status === 'inativa' ? 'inativa' : 'ativa', consumo_combustivel: body.consumo_combustivel || null, ano: body.ano || null, base: body.base || null, preco_hora: body.preco_hora || null, url_imagem: body.url_imagem || null, velocidade_cruzeiro: body.velocidade_cruzeiro || null, tipo_aeronave: body.tipo_aeronave || null, numero_motores: body.numero_motores || null, performance_aeronave_id: performanceId }
+  const aircraftData: Record<string, any> = { id: aeronaveId, matricula_registro: matricula, fabricante, modelo, icao_hex: icaoHex || null, numero_serie: numeroSerie, nome_proprietario: proprietario, status: body.status || 'ativa', consumo_combustivel: body.consumo_combustivel === '' || body.consumo_combustivel == null ? 0 : Number(body.consumo_combustivel), ano: body.ano ? String(body.ano) : null, base: body.base || null, preco_hora: body.preco_hora ? String(body.preco_hora) : null, url_imagem: body.url_imagem || null, velocidade_cruzeiro: body.velocidade_cruzeiro ? String(body.velocidade_cruzeiro) : null, tipo_aeronave: body.tipo_aeronave || null, numero_motores: body.numero_motores === '' || body.numero_motores == null ? null : Number(body.numero_motores), performance_aeronave_id: performanceId }
   const schema = await db.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
   const existentes = new Set((schema.results || []).map((item) => item.name))
   const colunas = Object.keys(aircraftData).filter((key) => existentes.has(key))
   await db.prepare(`INSERT INTO aeronave (${colunas.join(',')}) VALUES (${colunas.map(() => '?').join(',')})`).bind(...colunas.map((key) => aircraftData[key])).run()
   const criado = await db.prepare('SELECT * FROM aeronave WHERE id = ?').bind(aeronaveId).first()
   return c.json({ aeronave: criado, performance_id: performanceId }, 201)
+})
+
+app.patch('/api/sharebrasil/aeronaves/:id', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+  const db = c.env.SHARE_DB
+  const id = c.req.param('id')
+  const atual = await db.prepare('SELECT * FROM aeronave WHERE id = ?').bind(id).first<Record<string, any>>()
+  if (!atual) return c.json({ error: 'aeronave_nao_encontrada' }, 404)
+  const body: Record<string, any> = await c.req.json().catch(() => ({} as Record<string, any>))
+  const matricula = String(body.matricula_registro ?? atual.matricula_registro).trim().toUpperCase()
+  const fabricante = String(body.fabricante ?? atual.fabricante).trim()
+  const modelo = String(body.modelo ?? atual.modelo).trim()
+  const numeroSerie = String(body.numero_serie ?? atual.numero_serie).trim()
+  const proprietario = String(body.nome_proprietario ?? atual.nome_proprietario).trim()
+  if (!matricula || !fabricante || !modelo || !numeroSerie || !proprietario) return c.json({ error: 'campos_obrigatorios' }, 400)
+  if (body.tipo_aeronave && !['PISTAO', 'TURBOELICE', 'JATO'].includes(body.tipo_aeronave)) return c.json({ error: 'tipo_aeronave_invalido' }, 400)
+  const duplicada = await db.prepare('SELECT id FROM aeronave WHERE upper(matricula_registro) = ? AND id <> ? LIMIT 1').bind(matricula, id).first()
+  if (duplicada) return c.json({ error: 'matricula_ja_cadastrada' }, 409)
+  const info = await db.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
+  const colunas = new Set((info.results || []).map(item => item.name))
+  const dados: Record<string, unknown> = { matricula_registro: matricula, fabricante, modelo, numero_serie: numeroSerie, nome_proprietario: proprietario }
+  for (const campo of ['status', 'base', 'url_imagem', 'tipo_aeronave']) if (body[campo] !== undefined) dados[campo] = body[campo] || null
+  if (body.ano !== undefined) dados.ano = body.ano ? String(body.ano) : null
+  if (body.preco_hora !== undefined) dados.preco_hora = body.preco_hora === '' ? null : String(body.preco_hora)
+  if (body.velocidade_cruzeiro !== undefined) dados.velocidade_cruzeiro = body.velocidade_cruzeiro === '' ? null : String(body.velocidade_cruzeiro)
+  if (body.consumo_combustivel !== undefined) dados.consumo_combustivel = body.consumo_combustivel === '' ? 0 : Number(body.consumo_combustivel)
+  if (body.numero_motores !== undefined) dados.numero_motores = body.numero_motores === '' ? null : Number(body.numero_motores)
+  const campos = Object.keys(dados).filter(campo => colunas.has(campo))
+  await db.prepare(`UPDATE aeronave SET ${campos.map(campo => `${campo} = ?`).join(', ')} WHERE id = ?`).bind(...campos.map(campo => dados[campo]), id).run()
+
+  const mapaPerformance: Record<string, string> = { categoria: 'performance_categoria', modelo: 'performance_modelo', teto_servico_ft: 'performance_teto_servico_ft', nivel_cruzeiro_min_ft: 'performance_nivel_cruzeiro_min_ft', nivel_cruzeiro_max_ft: 'performance_nivel_cruzeiro_max_ft', aprovado_rvsm: 'aprovado_rvsm', velocidade_cruzeiro_kt: 'performance_velocidade_cruzeiro_kt', taxa_subida_fpm: 'performance_taxa_subida_fpm', taxa_descida_fpm: 'performance_taxa_descida_fpm' }
+  const perf = Object.fromEntries(Object.entries(mapaPerformance).filter(([key, frontend]) => body[frontend] !== undefined || body[key] !== undefined).map(([key, frontend]) => { const valor = body[frontend] ?? body[key]; return [key, key === 'aprovado_rvsm' ? (valor === true || valor === 'true' || valor === 1 ? 1 : 0) : ['categoria', 'modelo'].includes(key) ? String(valor ?? '') : valor === '' ? (['teto_servico_ft', 'nivel_cruzeiro_min_ft', 'nivel_cruzeiro_max_ft'].includes(key) ? 0 : null) : Number(valor)] }))
+  let performanceId = atual.performance_aeronave_id || null
+  if (Object.keys(perf).length) {
+    const agora = new Date().toISOString()
+    if (performanceId && await db.prepare('SELECT id FROM performance_aeronave WHERE id = ?').bind(performanceId).first()) {
+      await db.prepare(`UPDATE performance_aeronave SET ${Object.keys(perf).map(key => `${key} = ?`).join(', ')}, atualizado_em = ? WHERE id = ?`).bind(...Object.values(perf), agora, performanceId).run()
+    } else {
+      performanceId = uuid()
+      const dadosPerf = { id: performanceId, categoria: '', modelo, teto_servico_ft: 0, nivel_cruzeiro_min_ft: 0, nivel_cruzeiro_max_ft: 0, aprovado_rvsm: 0, velocidade_cruzeiro_kt: null, taxa_subida_fpm: null, taxa_descida_fpm: null, ...perf }
+      const keys = Object.keys(dadosPerf)
+      await db.prepare(`INSERT INTO performance_aeronave (${[...keys, 'criado_em', 'atualizado_em'].join(',')}) VALUES (${[...keys, 'criado_em', 'atualizado_em'].map(() => '?').join(',')})`).bind(...Object.values(dadosPerf), agora, agora).run()
+    }
+    if (colunas.has('performance_aeronave_id')) await db.prepare('UPDATE aeronave SET performance_aeronave_id = ? WHERE id = ?').bind(performanceId, id).run()
+  }
+  return c.json({ success: true, performance_id: performanceId })
 })
 
 export default {
