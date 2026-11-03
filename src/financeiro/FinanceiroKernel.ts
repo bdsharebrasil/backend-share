@@ -183,6 +183,8 @@ async function buscarFornecedor(db: Database, fornecedorId: unknown): Promise<{ 
     ? db.prepare(`SELECT id, nome_completo FROM fornecedores_favoritos WHERE id = ?1
        UNION ALL
        SELECT id, nome_fornecedor AS nome_completo FROM fornecedores_combustivel WHERE id = ?1
+       UNION ALL
+       SELECT id, COALESCE(NULLIF(TRIM(razao_social), ''), NULLIF(TRIM(empresa), ''), NULLIF(TRIM(nome_contato_responsavel), '')) AS nome_completo FROM agenda_contatos_fornecedores WHERE id = ?1
        LIMIT 1`).bind(idFornecedor).first<{ id: string; nome_completo: string | null }>()
     : null
 }
@@ -224,6 +226,9 @@ async function resolveLancamentoMetadata(db: Database, command: Row): Promise<Ro
            LIMIT 1`).bind(nome).first<{ id: string; nome_completo: string | null }>()
         ?? await db.prepare(`SELECT id, nome_fornecedor AS nome_completo FROM fornecedores_combustivel
            WHERE lower(trim(nome_fornecedor)) = lower(trim(?1))
+           LIMIT 1`).bind(nome).first<{ id: string; nome_completo: string | null }>()
+        ?? await db.prepare(`SELECT id, COALESCE(NULLIF(TRIM(razao_social), ''), NULLIF(TRIM(empresa), ''), NULLIF(TRIM(nome_contato_responsavel), '')) AS nome_completo FROM agenda_contatos_fornecedores
+           WHERE lower(trim(COALESCE(NULLIF(TRIM(razao_social), ''), NULLIF(TRIM(empresa), ''), NULLIF(TRIM(nome_contato_responsavel), '')))) = lower(trim(?1))
            LIMIT 1`).bind(nome).first<{ id: string; nome_completo: string | null }>()
       : null
   }
