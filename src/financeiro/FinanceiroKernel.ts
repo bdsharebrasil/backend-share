@@ -1035,7 +1035,7 @@ function holdingAllocationStatements(
         'socio_holding_obrigatorio',
       )
     }
-
+    const documentFields = buildDocumentFields(command.anexos_json, line.cotistaId)
     const values: Row = {
       id: id(),
       [holdingMovementColumn(schema)]: movimentoId,
@@ -1049,6 +1049,10 @@ function holdingAllocationStatements(
       categoria_nome: nullableText(
         command.categoria_nome ?? command.categoria,
       ),
+      subcategoria_1: nullableText(command.subcategoria_1),
+      subcategoria_2: nullableText(command.subcategoria_2),
+      subcategoria_3: nullableText(command.subcategoria_3),
+      subcategoria_4: nullableText(command.subcategoria_4),
       tipo_rateio: normalizeRateioType(command.tipo_rateio),
       percentual_sociedade: line.percentualSociedade,
       percentual_uso: line.percentual,
@@ -1066,8 +1070,10 @@ function holdingAllocationStatements(
       origem_tipo: nullableText(command.origem_tipo) || (nullableText(command.recibo_id) ? 'RECIBO' : null),
       documento_numero: nullableText(command.numero_nf) ?? nullableText(command.numero_recibo),
       documento_url: nullableText(command.url_nf) ?? nullableText(command.url_recibo),
-      numero_nf: nullableText(command.numero_nf),
-      url_nf: nullableText(command.url_nf),
+      numero_voo: nullableText(command.numero_voo),
+      ...documentFields,
+      numero_nf: nullableText(command.numero_nf) ?? nullableText(documentFields.numero_nf),
+      url_nf: nullableText(command.url_nf) ?? nullableText(documentFields.url_nf),
       email_enviado_em: null,
       criado_por: userId,
     }

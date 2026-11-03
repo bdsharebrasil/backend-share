@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { createClientExpenseRateios, createDirectExternalExpense, createExpense, createReimbursement } from "./FinanceiroKernel"
-import { convertPaymentRequest, createPaymentRequest, validatePaymentRequest } from "./paymentAgents"
+import { convertPaymentRequest, createPaymentRequest, findMatchingClientRateios, validatePaymentRequest } from "./paymentAgents"
 import { mensagemFinanceiraStatements } from "./financeiroNotifications"
 import { errorResponse } from "./errorResponse"
 import { usuarioPodeGerenciarFinanceiro } from "./financeiroAuth"
@@ -113,10 +113,16 @@ enviosPagamentoRoutes.post('/envios-pagamento/rascunhos', async (c) => {
 enviosPagamentoRoutes.post('/envios-pagamento', async (c) => {
   try {
     let input
+    let body: Record<string, unknown>
     try {
-      input = validatePaymentRequest(await c.req.json())
+      body = await c.req.json<Record<string, unknown>>()
+      input = validatePaymentRequest(body)
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'dados_de_envio_invalidos', code: 'dados_de_envio_invalidos' }, 400)
+    }
+    if (input.tipo === 'cliente' && body.confirmar_duplicidade !== true) {
+      const rateios = await findMatchingClientRateios(c.env.SHARE_DB, input)
+      if (rateios.length) return c.json({ error: 'duplicidade_rateio', rateios }, 409)
     }
     const result = await createPaymentRequest(c.env.SHARE_DB, input, c.get('userId') || null)
     return c.json(result, result.idempotent ? 200 : 201)

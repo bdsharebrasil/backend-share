@@ -1,5 +1,32 @@
 type Row = Record<string, unknown>
 
+export async function findMatchingClientRateios(db: D1Database, input: PaymentRequest): Promise<Row[]> {
+  if (input.tipo !== 'cliente') return []
+  const anexos = input.anexos
+  const numero = (...tipos: string[]) => anexos.find((anexo) => tipos.includes(anexo.tipo.toLowerCase()))?.numero.trim() || ''
+  const documentos = {
+    numero_nf: numero('nf', 'nota', 'nota_fiscal'), numero_recibo: numero('recibo'), numero_boleto: numero('boleto'),
+    numero_demonstrativo: numero('demonstrativo'), numero_voo: input.numero_voo?.trim() || '',
+  }
+  const params = [input.data_vencimento || '', input.categoria_nome || '',
+    input.valor_total_despesa_centavos ?? input.valor_centavos, ...Object.values(documentos)]
+  const matchSql = (table: 'rateio_despesas' | 'rateio_hold') => `SELECT id, data_vencimento, categoria_nome,
+      valor_total_centavos, documento_numero, documento_url, numero_nf, numero_recibo,
+      numero_boleto, numero_demonstrativo, numero_voo, url_nf, url_recibo, url_boleto,
+      url_demonstrativo, url_doc
+    FROM ${table} WHERE COALESCE(TRIM(data_vencimento), '') = ?
+      AND COALESCE(TRIM(categoria_nome), '') = ? AND valor_total_centavos = ?
+      AND COALESCE(TRIM(numero_nf), '') = ? AND COALESCE(TRIM(numero_recibo), '') = ?
+      AND COALESCE(TRIM(numero_boleto), '') = ? AND COALESCE(TRIM(numero_demonstrativo), '') = ?
+      AND COALESCE(TRIM(numero_voo), '') = ? AND COALESCE(status, '') <> 'CANCELADO' LIMIT 20`
+  const [despesas, holds] = await Promise.all([
+    db.prepare(matchSql('rateio_despesas')).bind(...params).all<Row>(),
+    db.prepare(matchSql('rateio_hold')).bind(...params).all<Row>(),
+  ])
+  return [...(despesas.results ?? []).map((row) => ({ ...row, tabela: 'rateio_despesas' })),
+    ...(holds.results ?? []).map((row) => ({ ...row, tabela: 'rateio_hold' }))]
+}
+
 export type PaymentRequest = {
   tipo: 'share' | 'cliente' | 'reembolso'
   descricao: string
@@ -12,6 +39,7 @@ export type PaymentRequest = {
   data_despesa: string
   data_vencimento: string | null
   aeronave_id: string | null
+  numero_voo: string | null
   rateio_linhas: Array<{ cotista_id: string; percentual: number; percentual_sociedade: number; valor_centavos: number }>
   anexos: Array<{ id: string; tipo: string; numero: string; url: string | null; cotista_id?: string }>
   periodicidade: string | null
@@ -77,7 +105,7 @@ export function validatePaymentRequest(body: Row): PaymentRequest {
     valor_total_despesa_centavos: totalInformado,
     cotista_pagador_id: body.cotista_pagador_id ? String(body.cotista_pagador_id) : null,
     data_despesa: String(body.data_despesa), data_vencimento: body.data_vencimento ? String(body.data_vencimento) : null,
-    aeronave_id: body.aeronave_id ? String(body.aeronave_id) : null, rateio_linhas: rateioLinhas,
+    aeronave_id: body.aeronave_id ? String(body.aeronave_id) : null, numero_voo: body.numero_voo ? String(body.numero_voo) : null, rateio_linhas: rateioLinhas,
     anexos: anexos.map((anexo) => ({ id: String(anexo.id ?? ''), tipo: String(anexo.tipo ?? 'outro'), numero: String(anexo.numero ?? ''), url: anexo.url ? String(anexo.url) : null, ...(anexo.cotista_id ? { cotista_id: String(anexo.cotista_id) } : {}) })),
     periodicidade: body.periodicidade ? String(body.periodicidade) : null, tipo_rateio: body.tipo_rateio ? String(body.tipo_rateio) : null,
     categoria_id: String(body.categoria_id), categoria_cliente_id: categoriaClienteId, colaborador_id: body.colaborador_id ? String(body.colaborador_id) : null, fornecedor_id: body.fornecedor_id ? String(body.fornecedor_id) : null,
@@ -132,6 +160,7 @@ export async function createPaymentRequest(db: D1Database, input: PaymentRequest
       .bind(solicitacaoCompraId, `ENV-${id.slice(0, 8).toUpperCase()}`, input.descricao, input.observacoes, userId, input.data_despesa, input.data_vencimento, userId))
   }
   await db.batch(statements)
+  if (input.numero_voo) await db.prepare('UPDATE envio_despesas SET numero_voo = ? WHERE id = ?').bind(input.numero_voo, id).run()
   const request = await db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first<Row>()
   if (!request) throw new Error('solicitacao_pagamento_nao_encontrada')
   return { ...request, idempotent: false }
@@ -203,6 +232,7 @@ export async function convertPaymentRequest(
     data: request.data_despesa,
     data_vencimento: request.vencimento,
     aeronave_id: request.aeronave_id || titular?.aeronave_id,
+    numero_voo: request.numero_voo,
     cotista_aeronave_id: cotistaAeronaveId,
     cotista_pagador_id: pagador,
     socio_id: titular?.socio_id || null,
