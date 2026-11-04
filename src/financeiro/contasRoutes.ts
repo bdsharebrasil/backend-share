@@ -15,6 +15,7 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const cotistaId = c.req.query('cotistaId')
   const fornecedorId = c.req.query('fornecedorId')
   const vencidasAte = c.req.query('vencidasAte')
+  const incluirReembolsos = c.req.query('incluirReembolsos') === 'true'
   const filtros: string[] = []
   const params: unknown[] = []
   const alias = table === 'contas_apagar' ? 'cp' : 'cr'
@@ -34,9 +35,13 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const nomeHolding = table === 'contas_areceber' ? 'mh.holding_id AS holding_id, hl.nome AS holding_nome' : 'NULL AS holding_id, NULL AS holding_nome'
   if (table === 'contas_apagar') {
     filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') = 'SHARE'")
-    filtros.push('COALESCE(l.reembolsavel, 0) = 0')
     filtros.push("UPPER(COALESCE(cp.origem_tipo, '')) <> 'RELATORIO_DESPESA_VIAGEM'")
-    filtros.push("UPPER(COALESCE(cp.categoria_nome, '')) NOT LIKE '%REEMBOLS%'")
+    if (incluirReembolsos) {
+      filtros.push("NULLIF(TRIM(cp.colaborador_id), '') IS NULL")
+    } else {
+      filtros.push('COALESCE(l.reembolsavel, 0) = 0')
+      filtros.push("UPPER(COALESCE(cp.categoria_nome, '')) NOT LIKE '%REEMBOLS%'")
+    }
   }
   if (status) { filtros.push(`${alias}.status = ?`); params.push(status) }
   if (cotistaId && table === 'contas_areceber') { filtros.push(`${alias}.cotista_id = ?`); params.push(cotistaId) }
