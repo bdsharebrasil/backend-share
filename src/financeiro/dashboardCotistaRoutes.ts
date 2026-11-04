@@ -211,7 +211,7 @@ dashboardCotistaRoutes.get('/cotista/dashboard', async (c) => {
         FROM movimentos_holding mh
         LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
        WHERE ${[...filtrosMovimento, movimentoHoldingSemRateio].join(' AND ')}
-      ORDER BY 4 DESC, 1 DESC
+      ORDER BY 4 ASC, 1 ASC
     `, ...paramsCliente, ...paramsHolding, ...paramsLancamentos, ...paramsMovimento)
     const dentroDoPeriodo = (row: Record<string, unknown>) => {
       const data = String(row.data ?? '').slice(0, 10)
