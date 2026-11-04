@@ -17,3 +17,21 @@ test("documentos de recibos continuam usando a URL financeira existente", () => 
   const conta = mapConta({ id: "conta-2", url_recibo: "https://example.test/recibo.pdf" });
   assert.equal(conta.documentoUrl, "https://example.test/recibo.pdf");
 });
+
+test("contas preservam cada URL de anexo para a tabela do Financeiro Share", () => {
+  const conta = mapConta({
+    id: "conta-3",
+    url_demonstrativo: "https://example.test/demonstrativo.pdf",
+    url_nf: "https://example.test/nota.png",
+    url_recibo: "https://example.test/recibo.pdf",
+    url_boleto: "https://example.test/boleto.pdf",
+    url_doc: "https://example.test/outro.jpg",
+  });
+
+  assert.equal(conta.url_demonstrativo, "https://example.test/demonstrativo.pdf");
+  assert.equal(conta.url_nf, "https://example.test/nota.png");
+  assert.equal(conta.url_recibo, "https://example.test/recibo.pdf");
+  assert.equal(conta.url_boleto, "https://example.test/boleto.pdf");
+  assert.equal(conta.url_doc, "https://example.test/outro.jpg");
+  assert.equal(conta.documentoUrl, "https://example.test/demonstrativo.pdf");
+});
