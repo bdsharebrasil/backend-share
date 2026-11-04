@@ -342,6 +342,7 @@ export async function loadSchema(db: Database): Promise<SchemaCache> {
   const tables = [
     'lancamentos',
     'abastecimentos',
+    'lancamentos_diario_bordo',
     'contas_apagar',
     'contas_areceber',
     'rateio_despesas',
