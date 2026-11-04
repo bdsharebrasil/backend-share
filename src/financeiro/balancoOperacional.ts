@@ -22,10 +22,14 @@ export async function carregarBalancoOperacional(
     abastecimentos: possui('abastecimentos', ['id', 'aeronave_id', 'data', 'litros']),
     viagens: possui('relatorio_despesa_viagem', ['id', 'aeronave_id', 'data_inicio', 'total_valor']),
     cotistas: possui('cotista_aeronave', ['id', 'aeronave_id', 'cliente_id', 'socio_id', 'percentual_sociedade']),
+    espelhos: possui('lancamentos', ['id', 'aeronave_id', 'abastecimentos_id', 'valor_centavos', 'descricao', 'fluxo', 'status', 'data_emissao', 'categoria_nome', 'cotista_aeronave_id'])
+      && possui('abastecimentos', ['id', 'aeronave_id', 'data', 'lancamento_diario_id'])
+      && possui('lancamentos_diario_bordo', ['id', 'aeronave_id', 'data_registro']),
   }
   const v = periodo('v', 'data_registro')
   const a = periodo('a', 'data')
   const r = periodo('r', 'data_inicio')
+  const d = periodo('d', 'data_registro')
   if (schema.get('abastecimentos')?.has('status')) a.where.push("UPPER(COALESCE(a.status, '')) NOT IN ('CANCELADO', 'CANCELADA')")
   // Relatórios são estatística independente; não são somados novamente ao custo financeiro.
   if (schema.get('relatorio_despesa_viagem')?.has('status')) r.where.push("UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'RASCUNHO', 'REPROVADO', 'REPROVADA')")
@@ -37,7 +41,7 @@ export async function carregarBalancoOperacional(
   const cotaAtual = schema.get('cotista_aeronave')?.has('status')
     ? "CASE WHEN LOWER(TRIM(ca.status)) IN ('ativo', 'ativa') THEN ca.percentual_sociedade ELSE NULL END"
     : 'ca.percentual_sociedade'
-  const [cotistas, voos, abastecimentos, viagens] = await Promise.all([
+  const [cotistas, voos, abastecimentos, viagens, espelhos] = await Promise.all([
     fontes.cotistas ? listarTodos(db, `SELECT ca.id, ca.cliente_id, ca.socio_id, ${cotaAtual} AS percentual_sociedade,
       COALESCE(NULLIF(cl.razao_social, ''), NULLIF(hs.nome, ''), ca.id) AS nome,
       hs.holding_id
@@ -65,6 +69,22 @@ export async function carregarBalancoOperacional(
       ${opcional('relatorio_despesa_viagem', 'r', 'numero_relatorio')} AS numero,
       ${opcional('relatorio_despesa_viagem', 'r', 'rota')} AS rota
       FROM relatorio_despesa_viagem r WHERE ${r.where.join(' AND ')} ORDER BY r.data_inicio, r.id`, ...r.params) : Promise.resolve([]),
+    fontes.espelhos ? listarTodos(db, `SELECT l.id, d.id AS voo_id, ${opcional('lancamentos_diario_bordo', 'd', 'numero_voo')} AS numero_voo,
+      COALESCE(NULLIF(l.data_emissao, ''), a.data, d.data_registro) AS data,
+      ${opcional('lancamentos', 'l', 'numero_doc')} AS numero_doc,
+      ${opcional('lancamentos', 'l', 'numero_nf')} AS numero_nf,
+      ${opcional('lancamentos', 'l', 'numero_recibo')} AS numero_recibo,
+      l.descricao, ${opcional('lancamentos', 'l', 'categoria_nome')} AS categoria,
+      l.valor_centavos, l.fluxo, l.status, l.cotista_aeronave_id,
+      COALESCE(NULLIF(TRIM(cl.razao_social), ''), NULLIF(TRIM(hs.nome), ''), NULLIF(TRIM(ca.codigo_cliente), '')) AS cotista_nome
+      FROM lancamentos l
+      JOIN abastecimentos a ON a.id = l.abastecimentos_id
+      JOIN lancamentos_diario_bordo d ON d.id = a.lancamento_diario_id
+      LEFT JOIN cotista_aeronave ca ON ca.id = l.cotista_aeronave_id
+      LEFT JOIN cliente cl ON cl.id = ca.cliente_id
+      LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
+      WHERE ${d.where.join(' AND ')}
+      ORDER BY d.data_registro, d.id, l.data_emissao, l.id`, ...d.params) : Promise.resolve([]),
   ])
   const str = (v: unknown) => v == null ? null : String(v)
   const num = (v: unknown) => v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v)
@@ -78,5 +98,8 @@ export async function carregarBalancoOperacional(
     abastecimentos: abastecimentos.map(a => ({ id: String(a.id), data: String(a.data), litros: num(a.litros), clienteId: str(a.cliente_id), socioId: str(a.socio_id) })),
     viagens: viagens.map(r => ({ id: String(r.id), data: String(r.data), numero: str(r.numero), rota: str(r.rota),
       clienteId: str(r.cliente_id), socioId: str(r.socio_id), valorCentavos: num(r.total_valor) === null ? null : Math.round(Number(r.total_valor) * 100) })),
+    espelhos: espelhos.map(l => ({ id: String(l.id), vooId: String(l.voo_id), numeroVoo: str(l.numero_voo), data: String(l.data),
+      documento: str(l.numero_nf) || str(l.numero_recibo) || str(l.numero_doc), descricao: String(l.descricao ?? ''), categoria: str(l.categoria),
+      valorCentavos: num(l.valor_centavos) ?? 0, fluxo: String(l.fluxo ?? ''), status: String(l.status ?? ''), cotistaId: str(l.cotista_aeronave_id), cotistaNome: str(l.cotista_nome) })),
   }
 }
