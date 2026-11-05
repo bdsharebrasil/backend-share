@@ -15,6 +15,15 @@ export type FinanceOperation = 'DESPESA' | 'RECEITA' | 'REEMBOLSO'
 export type FinanceFlow = 'ENTRADA' | 'SAIDA'
 export type CotistaKind = 'CLIENTE' | 'HOLDING'
 const FORNECEDOR_SHARE_ID = '3821d2f9-fe3c-4457-be1c-7b9fb5e45f77'
+const CATEGORIA_TAXAS_AEROPORTUARIAS_ID = '75865fb8-fda6-4072-adc1-7b8c075e02d8'
+
+function receiptDocumentNumberFields(categoryId: unknown, documentNumber: unknown): Row {
+  const number = nullableText(documentNumber)
+  if (!number) return {}
+  return nullableText(categoryId) === CATEGORIA_TAXAS_AEROPORTUARIAS_ID
+    ? { numero_demonstrativo: number }
+    : { numero_doc: number }
+}
 
 /**
  * Modos de um reembolso, definidos pela comparação entre o valor do recibo e o
@@ -2581,6 +2590,11 @@ async function createReimbursementFinance(db: Database, schema: SchemaCache, com
       data_emissao: input.data_emissao,
       data_vencimento: input.data_vencimento || input.data_emissao,
       numero_voo: nullableText(input.numero_voo),
+      ...receiptDocumentNumberFields(input.categoria_movimentacao_id, input.numero_documento_anexo),
+      subcategoria_1: nullableText(input.subcategoria_1),
+      subcategoria_2: nullableText(input.subcategoria_2),
+      subcategoria_3: nullableText(input.subcategoria_3),
+      subcategoria_4: nullableText(input.subcategoria_4),
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
       pago_diretamente: 0,
@@ -3113,10 +3127,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // do fluxo financeiro.
   if (!text(receiptInicial.lancamento_id)) {
     await finalizarRecibo(db, receiptId, userId, {
-      subcategoria_1: body.subcategoria_1,
-      subcategoria_2: body.subcategoria_2,
-      subcategoria_3: body.subcategoria_3,
-      subcategoria_4: body.subcategoria_4,
+      subcategoria_1: body.subcategoria_1 ?? receiptInicial.subcategoria_1,
+      subcategoria_2: body.subcategoria_2 ?? receiptInicial.subcategoria_2,
+      subcategoria_3: body.subcategoria_3 ?? receiptInicial.subcategoria_3,
+      subcategoria_4: body.subcategoria_4 ?? receiptInicial.subcategoria_4,
     })
   }
   // O e-mail pode ter sido enviado antes ou depois da criação dos lançamentos.
@@ -3199,12 +3213,13 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       escopo_financeiro: 'FINANCEIRO', pago_diretamente: 0, reembolsavel: 0, reembolso_quitado: 0,
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
-      subcategoria_1: nullableText(body.subcategoria_1),
-      subcategoria_2: nullableText(body.subcategoria_2),
-      subcategoria_3: nullableText(body.subcategoria_3),
-      subcategoria_4: nullableText(body.subcategoria_4),
-      categoria_cliente_id: nullableText(body.categoria_id),
-      categoria_nome: nullableText(body.categoria_nome ?? 'REEMBOLSO'),
+      ...receiptDocumentNumberFields(receipt.categoria_movimentacao_id, receipt.numero_documento_anexo),
+      subcategoria_1: nullableText(body.subcategoria_1 ?? receipt.subcategoria_1),
+      subcategoria_2: nullableText(body.subcategoria_2 ?? receipt.subcategoria_2),
+      subcategoria_3: nullableText(body.subcategoria_3 ?? receipt.subcategoria_3),
+      subcategoria_4: nullableText(body.subcategoria_4 ?? receipt.subcategoria_4),
+      categoria_cliente_id: nullableText(body.categoria_id ?? receipt.categoria_movimentacao_id),
+      categoria_nome: nullableText(body.categoria_nome ?? receipt.categoria_nome ?? 'REEMBOLSO'),
       periodicidade: nullableText(body.periodicidade),
       numero_recibo: nullableText(receipt.numero_recibo),
       url_recibo: nullableText(receipt.url_recibo),
@@ -3279,6 +3294,24 @@ async function issueReceiptInternal(
   }
   if (!input.descricao || !/^\d{4}-\d{2}-\d{2}/.test(input.data_emissao)) {
     throw new FinanceError('Descrição e data de emissão são obrigatórias', 'recibo_incompleto')
+  }
+  if (input.tipo_recibo === 'recibo_reembolso') {
+    const subcategoriaSelecionada = body.categoria_despesa_subcategoria
+      ?? input.subcategoria_1
+      ?? input.subcategoria_2
+      ?? input.subcategoria_3
+      ?? input.subcategoria_4
+    const categoriaCliente = await resolveClientCategoryMetadata(
+      db,
+      input.categoria_movimentacao_id,
+      subcategoriaSelecionada,
+    )
+    if (categoriaCliente) {
+      input.subcategoria_1 = categoriaCliente.subcategoria_1
+      input.subcategoria_2 = categoriaCliente.subcategoria_2
+      input.subcategoria_3 = categoriaCliente.subcategoria_3
+      input.subcategoria_4 = categoriaCliente.subcategoria_4
+    }
   }
   const abastecimentosId = nullableText(body.abastecimentos_id)
   if (abastecimentosId) {
@@ -3373,6 +3406,11 @@ async function issueReceiptInternal(
           recebedor_cidade: input.recebedor_cidade || null,
           recebedor_uf: input.recebedor_uf || null,
           aeronave_id: input.aeronave_id || null,
+          numero_documento_anexo: input.numero_documento_anexo || null,
+          subcategoria_1: input.subcategoria_1 || null,
+          subcategoria_2: input.subcategoria_2 || null,
+          subcategoria_3: input.subcategoria_3 || null,
+          subcategoria_4: input.subcategoria_4 || null,
           numero_voo: input.numero_voo || null,
           tipo_caixa: ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'CLIENTE' : 'SHARE',
           rateado: 0,
