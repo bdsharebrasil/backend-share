@@ -67,6 +67,16 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      - name: Ensure receipt supplier and recipient columns
+        run: |
+          for column in recebedor_cpf recebedor_endereco recebedor_cidade recebedor_uf fornecedor_id fornecedor_nome; do
+            if ! pnpm exec wrangler d1 execute bd_sharebrasil --remote --command "SELECT ${column} FROM recibos LIMIT 0" >/dev/null 2>&1; then
+              pnpm exec wrangler d1 execute bd_sharebrasil --remote --yes --command "ALTER TABLE recibos ADD COLUMN ${column} TEXT"
+            fi
+          done
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - name: Deploy to Cloudflare Workers
         run: pnpm run deploy
         env:
