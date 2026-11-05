@@ -1,6 +1,2 @@
--- Metadados de categoria selecionados na emissão do recibo.
--- Eles são reutilizados ao materializar o rateio posteriormente.
-ALTER TABLE recibos ADD COLUMN subcategoria_1 TEXT;
-ALTER TABLE recibos ADD COLUMN subcategoria_2 TEXT;
-ALTER TABLE recibos ADD COLUMN subcategoria_3 TEXT;
-ALTER TABLE recibos ADD COLUMN subcategoria_4 TEXT;
+-- Intencionalmente sem ALTER TABLE: as subcategorias pertencem a lancamentos,
+-- não à tabela recibos. O schema D1 de recibos não possui essas colunas.

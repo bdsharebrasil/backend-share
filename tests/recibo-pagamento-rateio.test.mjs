@@ -79,7 +79,9 @@ test("programar reembolso grava data, status, fornecedor, subcategoria e chaves 
   assert.match(caminho, /escopo_financeiro: 'FINANCEIRO'/);
   assert.match(caminho, /const fornecedor = await buscarFornecedor\(db, fornecedorId\)/);
   assert.match(caminho, /fornecedores_favoritos_id: fornecedor\?\.id/);
-  assert.match(caminho, /subcategoria_1: nullableText\(body\.subcategoria_1 \?\? receipt\.subcategoria_1\)/);
+  assert.match(caminho, /subcategoria_1: nullableText\(body\.subcategoria_1 \?\? receipt\.share_subcategoria_1\)/);
+  assert.match(caminho, /l\.subcategoria_1 AS share_subcategoria_1/);
+  assert.doesNotMatch(caminho, /receipt(?:Inicial)?\.subcategoria_[1-4]/);
   assert.match(caminho, /receiptDocumentNumberFields\(receipt\.categoria_movimentacao_id, receipt\.numero_documento_anexo\)/);
   assert.match(caminho, /categoria_cliente_id: nullableText\(body\.categoria_id \?\? receipt\.categoria_movimentacao_id\)/);
   assert.match(caminho, /idempotency_key: `recibo-reembolso-cliente:\$\{receiptId\}`/);

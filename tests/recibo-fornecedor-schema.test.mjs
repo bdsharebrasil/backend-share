@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createReceiptRecord } from "../src/financeiro/reciboAgents.ts";
 import { readFile } from "node:fs/promises";
 
-test("criação do recibo grava número do documento e subcategorias válidas sem fornecedor", async () => {
+test("INSERT de recibo usa apenas colunas do schema D1 e mantém número do documento", async () => {
   let captured;
   const db = {
     prepare(sql) {
@@ -32,22 +32,29 @@ test("criação do recibo grava número do documento e subcategorias válidas se
 
   const columns = captured.sql.match(/INSERT INTO recibos \(([\s\S]*?)\) VALUES/)[1]
     .split(",").map((column) => column.trim());
+  const schema = await readFile(new URL("../schema.sql", import.meta.url), "utf8");
+  const schemaStart = schema.indexOf("CREATE TABLE recibos (");
+  const schemaEnd = schema.indexOf("CREATE TABLE checklists_planos_voo", schemaStart);
+  const receiptSchema = schema.slice(schemaStart, schemaEnd);
+  const migration = await readFile(new URL("../migrations/20261016_recibo_metadados.sql", import.meta.url), "utf8");
   const valueForColumn = (column) => {
     const index = columns.indexOf(column);
     return captured.values[index - (index > columns.indexOf("status") ? 1 : 0)];
   };
+  const schemaColumns = new Set([...receiptSchema.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(?:TEXT|INTEGER|REAL|BLOB)\b/gm)].map((match) => match[1]));
   assert.equal(captured.sql.match(/\?/g).length, captured.values.length);
+  assert.deepEqual(columns.filter((column) => !schemaColumns.has(column)), []);
+  assert.doesNotMatch(receiptSchema, /subcategoria_[1-4]/);
+  assert.doesNotMatch(captured.sql, /subcategoria_[1-4]/);
+  assert.doesNotMatch(migration, /ALTER TABLE\s+recibos\s+ADD COLUMN\s+subcategoria_[1-4]/i);
   assert.equal(columns.includes("fornecedor_id"), false);
   assert.equal(columns.includes("fornecedor_nome"), false);
   assert.equal(valueForColumn("numero_documento_anexo"), "NF-12345");
-  for (const column of ["subcategoria_1", "subcategoria_2", "subcategoria_3", "subcategoria_4"]) {
-    assert.equal(columns.includes(column), true);
-  }
-  assert.equal(valueForColumn("subcategoria_3"), "Taxa de navegação");
 });
 
 test("a emissão do reembolso grava fornecedor e número documental no lançamento", async () => {
   const kernel = await readFile(new URL("../src/financeiro/FinanceiroKernel.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(kernel, /(?:receipt|receiptInicial)\.subcategoria_[1-4]/);
   const start = kernel.indexOf("async function createReimbursementFinance(");
   const end = kernel.indexOf("type ReceiptFinanceBuilder", start);
   const createReimbursement = kernel.slice(start, end);

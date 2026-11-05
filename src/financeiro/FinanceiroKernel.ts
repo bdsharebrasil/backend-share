@@ -2906,12 +2906,12 @@ export async function enviarReciboPagamentoParaRateio(
       categoria_nome: receipt.categoria_nome,
       fornecedor_id: fornecedorResolvido?.id ?? null,
       fornecedor_nome: fornecedorResolvido?.nome_completo ?? body.fornecedor_nome ?? body.fornecedor,
-      subcategoria_1: body.subcategoria_1 ?? receipt.subcategoria_1,
-      subcategoria_2: body.subcategoria_2 ?? receipt.subcategoria_2,
-      subcategoria_3: body.subcategoria_3 ?? receipt.subcategoria_3,
-      subcategoria_4: body.subcategoria_4 ?? receipt.subcategoria_4,
-      periodicidade: body.periodicidade ?? receipt.periodicidade ?? 'ÚNICO',
-      tipo_rateio: body.tipo_rateio ?? receipt.tipo_rateio ?? 'FIXO',
+      subcategoria_1: body.subcategoria_1,
+      subcategoria_2: body.subcategoria_2,
+      subcategoria_3: body.subcategoria_3,
+      subcategoria_4: body.subcategoria_4,
+      periodicidade: body.periodicidade ?? 'ÚNICO',
+      tipo_rateio: body.tipo_rateio ?? 'FIXO',
       numero_recibo: receipt.numero_recibo,
       url_recibo: receipt.url_recibo,
       email_enviado_em: emailInfo?.email_enviado_em ?? null,
@@ -3127,10 +3127,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   // do fluxo financeiro.
   if (!text(receiptInicial.lancamento_id)) {
     await finalizarRecibo(db, receiptId, userId, {
-      subcategoria_1: body.subcategoria_1 ?? receiptInicial.subcategoria_1,
-      subcategoria_2: body.subcategoria_2 ?? receiptInicial.subcategoria_2,
-      subcategoria_3: body.subcategoria_3 ?? receiptInicial.subcategoria_3,
-      subcategoria_4: body.subcategoria_4 ?? receiptInicial.subcategoria_4,
+      subcategoria_1: body.subcategoria_1,
+      subcategoria_2: body.subcategoria_2,
+      subcategoria_3: body.subcategoria_3,
+      subcategoria_4: body.subcategoria_4,
     })
   }
   // O e-mail pode ter sido enviado antes ou depois da criação dos lançamentos.
@@ -3147,7 +3147,9 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
   ).bind(receiptId).first<{ id: string; email_enviado_em: string | null }>().catch(() => null)
   const receipt = await db.prepare(`SELECT r.*, l.id AS share_lancamento_id, l.aeronave_id, l.cotista_aeronave_id,
       l.categoria_share_id AS share_categoria_id, l.categoria_nome AS share_categoria_nome,
-      l.fornecedores_favoritos_id AS share_fornecedor_id
+      l.fornecedores_favoritos_id AS share_fornecedor_id,
+      l.subcategoria_1 AS share_subcategoria_1, l.subcategoria_2 AS share_subcategoria_2,
+      l.subcategoria_3 AS share_subcategoria_3, l.subcategoria_4 AS share_subcategoria_4
     FROM recibos r LEFT JOIN lancamentos l ON l.id = r.lancamento_id
     WHERE r.id = ? AND r.tipo_recibo = 'recibo_reembolso' LIMIT 1`).bind(receiptId).first<Row>()
   if (!receipt || !text(receipt.share_lancamento_id)) throw new FinanceError('Recibo de reembolso não encontrado', 'recibo_reembolso_nao_encontrado', 404)
@@ -3214,10 +3216,10 @@ export async function programarReciboReembolso(db: Database, receiptId: string, 
       fornecedores_favoritos_id: fornecedor?.id ?? null,
       fornecedor_nome: nullableText(fornecedor?.nome_completo),
       ...receiptDocumentNumberFields(receipt.categoria_movimentacao_id, receipt.numero_documento_anexo),
-      subcategoria_1: nullableText(body.subcategoria_1 ?? receipt.subcategoria_1),
-      subcategoria_2: nullableText(body.subcategoria_2 ?? receipt.subcategoria_2),
-      subcategoria_3: nullableText(body.subcategoria_3 ?? receipt.subcategoria_3),
-      subcategoria_4: nullableText(body.subcategoria_4 ?? receipt.subcategoria_4),
+      subcategoria_1: nullableText(body.subcategoria_1 ?? receipt.share_subcategoria_1),
+      subcategoria_2: nullableText(body.subcategoria_2 ?? receipt.share_subcategoria_2),
+      subcategoria_3: nullableText(body.subcategoria_3 ?? receipt.share_subcategoria_3),
+      subcategoria_4: nullableText(body.subcategoria_4 ?? receipt.share_subcategoria_4),
       categoria_cliente_id: nullableText(body.categoria_id ?? receipt.categoria_movimentacao_id),
       categoria_nome: nullableText(body.categoria_nome ?? receipt.categoria_nome ?? 'REEMBOLSO'),
       periodicidade: nullableText(body.periodicidade),
@@ -3407,10 +3409,6 @@ async function issueReceiptInternal(
           recebedor_uf: input.recebedor_uf || null,
           aeronave_id: input.aeronave_id || null,
           numero_documento_anexo: input.numero_documento_anexo || null,
-          subcategoria_1: input.subcategoria_1 || null,
-          subcategoria_2: input.subcategoria_2 || null,
-          subcategoria_3: input.subcategoria_3 || null,
-          subcategoria_4: input.subcategoria_4 || null,
           numero_voo: input.numero_voo || null,
           tipo_caixa: ['cotista_aeronave', 'cliente'].includes(input.pagador_tipo) ? 'CLIENTE' : 'SHARE',
           rateado: 0,
