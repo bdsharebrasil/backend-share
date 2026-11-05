@@ -2846,8 +2846,8 @@ export async function enviarReciboPagamentoParaRateio(
   const rateioExistente = Boolean(existingClient?.id || existingHolding?.id)
   const fornecedorResolvido = await resolverFornecedor(
     db,
-    body.fornecedor_id ?? receipt.fornecedor_id,
-    body.fornecedor_nome ?? body.fornecedor ?? receipt.fornecedor_nome ?? receipt.fornecedor,
+    body.fornecedor_id,
+    body.fornecedor_nome ?? body.fornecedor,
   )
   const emailInfo = await db.prepare(
     `SELECT e.id, e.email_enviado_em FROM emails_enviados e
@@ -2891,7 +2891,7 @@ export async function enviarReciboPagamentoParaRateio(
       categoria_cliente_id: receipt.categoria_movimentacao_id,
       categoria_nome: receipt.categoria_nome,
       fornecedor_id: fornecedorResolvido?.id ?? null,
-      fornecedor_nome: fornecedorResolvido?.nome_completo ?? body.fornecedor_nome ?? body.fornecedor ?? receipt.fornecedor_nome ?? receipt.fornecedor,
+      fornecedor_nome: fornecedorResolvido?.nome_completo ?? body.fornecedor_nome ?? body.fornecedor,
       subcategoria_1: body.subcategoria_1 ?? receipt.subcategoria_1,
       subcategoria_2: body.subcategoria_2 ?? receipt.subcategoria_2,
       subcategoria_3: body.subcategoria_3 ?? receipt.subcategoria_3,

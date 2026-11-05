@@ -2650,8 +2650,6 @@ CREATE TABLE recibos (
   recebedor_endereco TEXT,
   recebedor_cidade TEXT,
   recebedor_uf TEXT,
-  fornecedor_id TEXT,
-  fornecedor_nome TEXT,
   numero_documento_anexo TEXT,
   observacoes TEXT,
   categoria_nome TEXT,
