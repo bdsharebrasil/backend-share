@@ -1550,6 +1550,7 @@ app.get('/api/interno/agendamento', async c => {
     db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, ${statusOperacionalSql} AS status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status = 'encerrada') AS jornadas_encerradas,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status <> 'encerrada') AS jornadas_abertas,
+        (SELECT CASE WHEN COUNT(*) > 0 AND SUM(CASE WHEN j.status <> 'encerrada' THEN 1 ELSE 0 END) = 0 THEN MAX(j.horario_corte) END FROM jornadas_voo j WHERE j.solicitacao_id = s.id) AS horario_corte,
         c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, (SELECT cae.codigo_cliente FROM cotista_aeronave cae WHERE (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id) AND cae.aeronave_id = s.aeronave_id ORDER BY cae.codigo_cliente LIMIT 1), (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id ORDER BY ca.codigo_cliente LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave,
         (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status,
         (SELECT cp.respostas FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_respostas
@@ -1590,20 +1591,25 @@ app.get('/api/interno/agendamento', async c => {
   })
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
   const escala = agendamentosFormatados
-    .filter((item: any) => ['aprovada', 'em_voo', 'em_rota', 'em_solo'].includes(String(item.status || '').toLowerCase()) && (item.piloto_id || item.copiloto_id))
-    .map((item: any) => ({
-      id: item.id,
-      data_agendada: item.data_agendada,
-      data_fim: item.dias_duracao > 1 ? new Date(new Date(`${item.data_agendada}T00:00:00Z`).getTime() + (item.dias_duracao - 1) * 86_400_000).toISOString().slice(0, 10) : item.data_agendada,
-      numero_voo: item.numero_voo,
-      origem: item.origem,
-      destino: item.destino,
-      piloto_id: item.piloto_id,
-      piloto_nome: item.piloto_id ? nomes.get(item.piloto_id) || 'Piloto não localizado' : null,
-      copiloto_id: item.copiloto_id,
-      copiloto_nome: item.copiloto_id ? nomes.get(item.copiloto_id) || 'Copiloto não localizado' : null,
-      status: item.status,
-    }))
+    .filter((item: any) => ['aprovada', 'em_voo', 'em_rota', 'em_solo', 'acionado', 'decolado'].includes(String(item.status || '').toLowerCase()) && (item.piloto_id || item.copiloto_id))
+    .map((item: any) => {
+      const dataAgendada = String(item.data_agendada).slice(0, 10)
+      return {
+        id: item.id,
+        data_agendada: dataAgendada,
+        data_fim: item.dias_duracao > 1 ? new Date(Date.parse(`${dataAgendada}T00:00:00Z`) + (item.dias_duracao - 1) * 86_400_000).toISOString().slice(0, 10) : dataAgendada,
+        horario_previsto_agendamento: item.horario_previsto_agendamento || null,
+        horario_corte: Number(item.dias_duracao || 1) > 1 ? null : item.horario_corte || null,
+        numero_voo: item.numero_voo,
+        origem: item.origem,
+        destino: item.destino,
+        piloto_id: item.piloto_id,
+        piloto_nome: item.piloto_id ? nomes.get(item.piloto_id) || 'Piloto não localizado' : null,
+        copiloto_id: item.copiloto_id,
+        copiloto_nome: item.copiloto_id ? nomes.get(item.copiloto_id) || 'Copiloto não localizado' : null,
+        status: item.status,
+      }
+    })
   return c.json({ inicio, fim, agendamentos: agendamentosFormatados, aeronaves: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
 })
 
