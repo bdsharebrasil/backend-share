@@ -1,9 +1,11 @@
 import { Context, Hono } from 'hono'
 import { requireShareInternal } from '../lib/auth'
 import { uuid } from '../lib/strings'
+import { buscarResumoOperacaoBanco, resumirJornada } from '../lib/resumoJornadaOperacao'
 
 type Bindings = {
   SHARE_DB: D1Database
+  JORNADA_LIMITE_DIARIO_MINUTOS?: string
   SHARE_FILES?: R2Bucket
   FILES?: R2Bucket
   CACHE_KV?: KVNamespace
@@ -34,6 +36,13 @@ function ehCma(tipo: string | null | undefined) {
   return String(tipo || '').trim().toUpperCase() === 'CMA'
 }
 
+// Relatório histórico, sem alteração das rotas de gravação ou bloqueios legais.
+tripulacaoRoutes.get('/api/interno/agendamento/:id/resumo-jornada', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const resumo = await buscarResumoOperacaoBanco(c.env.SHARE_DB, c.req.param('id'), c.env.JORNADA_LIMITE_DIARIO_MINUTOS)
+  return resumo ? c.json(resumo) : c.notFound()
+})
+
 tripulacaoRoutes.get('/api/interno/tripulacao/:id/jornadas', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const db = c.env.SHARE_DB
@@ -58,8 +67,12 @@ tripulacaoRoutes.get('/api/interno/tripulacao/:id/jornadas', async c => {
   const resultado = await Promise.all((jornadas.results || []).map(async (jornada: any) => {
     const pernas = await db.prepare(`SELECT id, jornada_id, numero, origem, destino, 0 AS numero_passageiros,
         horario_ac, horario_dep, horario_pouso, horario_corte, status, lancamento_diario_id
-      FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero`).bind(jornada.id).all<any>()
-    return { ...jornada, tripulante_nome: tripulante.nome_completo, pernas: pernas.results || [], historico: [] }
+      FROM pernas_jornada_voo
+      WHERE jornada_id = ?1 OR (jornada_id = ?2 AND NOT EXISTS (SELECT 1 FROM pernas_jornada_voo WHERE jornada_id = ?1))
+      ORDER BY numero`).bind(jornada.id, jornada.jornada_principal_id || jornada.id).all<any>()
+    const resumo = resumirJornada(jornada, pernas.results || [])
+    return { ...jornada, horario_encerramento: resumo.encerramento, minutos_reais: resumo.minutos_reais,
+      tripulante_nome: tripulante.nome_completo, pernas: pernas.results || [], historico: [] }
   }))
   return c.json({ tripulante_id: tripulanteId, tripulante_nome: tripulante.nome_completo, canac: tripulante.canac, inicio, fim, jornadas: resultado })
 })
