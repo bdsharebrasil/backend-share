@@ -1,5 +1,20 @@
 import { listarTodos } from './repositories/d1'
 
+/** Horários do diário são relógios locais/UTC no mesmo referencial, em HH:MM[:SS]. */
+export function minutosEntreHorarios(inicio: unknown, fim: unknown): number | null {
+  const segundos = (valor: unknown): number | null => {
+    const match = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(valor ?? '').trim())
+    if (!match) return null
+    const [hora, minuto, segundo] = match.slice(1).map((v) => Number(v ?? 0))
+    if (hora > 23 || minuto > 59 || segundo > 59) return null
+    return hora * 3600 + minuto * 60 + segundo
+  }
+  const a = segundos(inicio), b = segundos(fim)
+  if (a === null || b === null) return null
+  // Permite uma etapa cruzando meia-noite, sem arredondar horas por etapa.
+  return ((b - a + 86400) % 86400) / 60
+}
+
 /** Dados complementares do fechamento. Não grava, não recalcula rateios e não consulta outra aeronave. */
 export async function carregarBalancoOperacional(
   db: D1Database,
@@ -85,6 +100,7 @@ export async function carregarBalancoOperacional(
     cotistas: cotistas.map(c => ({ id: String(c.id), nome: String(c.nome), clienteId: str(c.cliente_id), socioId: str(c.socio_id), holdingId: str(c.holding_id), percentualSociedade: num(c.percentual_sociedade) })),
     voos: voos.map(v => ({ id: String(v.id), data: String(v.data), numero: str(v.numero_voo), numeroSequencial: num(v.numero_sequencial), trecho: str(v.trecho), tempoDep: str(v.tempo_dep), tempoPou: str(v.tempo_pou), clienteId: str(v.cliente_id), socioId: str(v.socio_id),
       holdingId: str(v.holding_id), tempoAc: str(v.tempo_ac), tempoCor: str(v.tempo_cor),
+      minutosTotal: minutosEntreHorarios(v.tempo_ac, v.tempo_cor), minutosVoo: minutosEntreHorarios(v.tempo_dep, v.tempo_pou),
       distanciaNm: num(v.distancia_nm), comandante: str(v.comandante), copiloto: str(v.copiloto),
       horas: num(v.tempo_total), horasVoo: num(v.tempo_voo), pousos: num(v.pousos), origem: str(v.origem), destino: str(v.destino),
       consumoEstimadoLitros: num(v.consumo_estimado_litros), emprestado: Number(v.emprestado) === 1,

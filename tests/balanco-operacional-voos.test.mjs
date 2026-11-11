@@ -35,6 +35,7 @@ test('balanço operacional carrega o resumo de voos com campos equivalentes ao m
     trecho: 'BOM FUTURO CUIABÁ X AERO JERUSALÉM', tempoDep: '14:29:00', tempoPou: '15:43:00',
     clienteId: 'client-1', socioId: null, horas: 1.23, horasVoo: 1.23, pousos: 1,
     holdingId: null, tempoAc: null, tempoCor: null, distanciaNm: null, comandante: null, copiloto: null,
+    minutosTotal: null, minutosVoo: 74,
     origem: null, destino: null, consumoEstimadoLitros: null, emprestado: false,
     clienteTomadorId: null, socioTomadorId: null, natureza: 'VOO PARTICULAR',
   }])
