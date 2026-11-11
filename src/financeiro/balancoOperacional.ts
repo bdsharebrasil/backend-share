@@ -18,7 +18,7 @@ export async function carregarBalancoOperacional(
     return { where, params }
   }
   const fontes = {
-    voos: possui('lancamentos_diario_bordo', ['id', 'aeronave_id', 'data_registro', 'tempo_total', 'cliente_id', 'socio_id']),
+    voos: possui('lancamentos_diario_bordo', ['id', 'aeronave_id', 'data_registro', 'tempo_total']),
     abastecimentos: possui('abastecimentos', ['id', 'aeronave_id', 'data', 'litros']),
     viagens: possui('relatorio_despesa_viagem', ['id', 'aeronave_id', 'data_inicio', 'total_valor']),
     cotistas: possui('cotista_aeronave', ['id', 'aeronave_id', 'cliente_id', 'socio_id', 'percentual_sociedade']),
@@ -44,7 +44,15 @@ export async function carregarBalancoOperacional(
       FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id = ca.cliente_id
       LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
       WHERE ca.aeronave_id = ? ORDER BY ca.id`, aeronaveId) : Promise.resolve([]),
-    fontes.voos ? listarTodos(db, `SELECT v.id, v.data_registro AS data, v.cliente_id, v.socio_id, v.tempo_total,
+    fontes.voos ? listarTodos(db, `SELECT v.id, v.data_registro AS data, v.tempo_total,
+      ${opcional('lancamentos_diario_bordo', 'v', 'cliente_id')} AS cliente_id,
+      ${opcional('lancamentos_diario_bordo', 'v', 'socio_id')} AS socio_id,
+      ${opcional('lancamentos_diario_bordo', 'v', 'holding_id')} AS holding_id,
+      ${opcional('lancamentos_diario_bordo', 'v', 'tempo_ac')} AS tempo_ac,
+      ${opcional('lancamentos_diario_bordo', 'v', 'tempo_cor')} AS tempo_cor,
+      ${opcional('lancamentos_diario_bordo', 'v', 'distancia_nm')} AS distancia_nm,
+      ${opcional('lancamentos_diario_bordo', 'v', 'pic_nome')} AS comandante,
+      ${opcional('lancamentos_diario_bordo', 'v', 'sic_nome')} AS copiloto,
       ${opcional('lancamentos_diario_bordo', 'v', 'numero_sequencial')} AS numero_sequencial,
       ${opcional('lancamentos_diario_bordo', 'v', 'trecho')} AS trecho,
       ${opcional('lancamentos_diario_bordo', 'v', 'tempo_dep')} AS tempo_dep,
@@ -76,6 +84,8 @@ export async function carregarBalancoOperacional(
     versao: 1 as const, aeronaveId, inicio: inicio ?? null, fim: fim ?? null, fontes,
     cotistas: cotistas.map(c => ({ id: String(c.id), nome: String(c.nome), clienteId: str(c.cliente_id), socioId: str(c.socio_id), holdingId: str(c.holding_id), percentualSociedade: num(c.percentual_sociedade) })),
     voos: voos.map(v => ({ id: String(v.id), data: String(v.data), numero: str(v.numero_voo), numeroSequencial: num(v.numero_sequencial), trecho: str(v.trecho), tempoDep: str(v.tempo_dep), tempoPou: str(v.tempo_pou), clienteId: str(v.cliente_id), socioId: str(v.socio_id),
+      holdingId: str(v.holding_id), tempoAc: str(v.tempo_ac), tempoCor: str(v.tempo_cor),
+      distanciaNm: num(v.distancia_nm), comandante: str(v.comandante), copiloto: str(v.copiloto),
       horas: num(v.tempo_total), horasVoo: num(v.tempo_voo), pousos: num(v.pousos), origem: str(v.origem), destino: str(v.destino),
       consumoEstimadoLitros: num(v.consumo_estimado_litros), emprestado: Number(v.emprestado) === 1,
       clienteTomadorId: str(v.cliente_tomador_id), socioTomadorId: str(v.socio_tomador_id), natureza: str(v.natureza) })),
@@ -84,3 +94,4 @@ export async function carregarBalancoOperacional(
       clienteId: str(r.cliente_id), socioId: str(r.socio_id), valorCentavos: num(r.total_valor) === null ? null : Math.round(Number(r.total_valor) * 100) })),
   }
 }
+

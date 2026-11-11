@@ -34,6 +34,7 @@ test('balanço operacional carrega o resumo de voos com campos equivalentes ao m
     id: 'flight-1', data: '2026-10-09', numero: null, numeroSequencial: 1,
     trecho: 'BOM FUTURO CUIABÁ X AERO JERUSALÉM', tempoDep: '14:29:00', tempoPou: '15:43:00',
     clienteId: 'client-1', socioId: null, horas: 1.23, horasVoo: 1.23, pousos: 1,
+    holdingId: null, tempoAc: null, tempoCor: null, distanciaNm: null, comandante: null, copiloto: null,
     origem: null, destino: null, consumoEstimadoLitros: null, emprestado: false,
     clienteTomadorId: null, socioTomadorId: null, natureza: 'VOO PARTICULAR',
   }])
@@ -79,3 +80,4 @@ test('schema carregado pelo dashboard inclui os registros do diário de bordo', 
   assert.equal(result.voos.length, 1)
   assert.equal(result.voos[0].trecho, 'CUIABÁ X SINOP')
 })
+
