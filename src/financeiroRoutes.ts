@@ -9,6 +9,7 @@ import {
   settlePayable,
   settleReceivable,
   contextoBaixaCotista,
+  pagamentosContextoBaixa,
   settleCotista,
   validateFinanceSchema,
 } from './financeiro/FinanceiroKernel'
@@ -613,7 +614,8 @@ financeiroRoutes.get('/lancamentos/:id/contexto-baixa', async (c) => {
   try {
     const contexto = await contextoBaixaCotista(c.env.SHARE_DB, c.req.param('id'))
     if (contexto.natureza === 'RECEBIMENTO_SHARE') { const denied = await requireCaixaShareAccess(c); if (denied) return denied }
-    return c.json(contexto)
+    const pagamentos = await pagamentosContextoBaixa(c.env.SHARE_DB, contexto)
+    return c.json({ ...contexto, pagamentos })
   }
   catch (error) { return errorResponse(c, error) }
 })
@@ -885,3 +887,4 @@ financeiroRoutes.post('/fila/processar', async (c) => {
     return errorResponse(c, error)
   }
 })
+

@@ -278,12 +278,16 @@ export function consolidarRateiosLancamentos(rows: Record<string, unknown>[]) {
 
     const rateiosAtuais = grupo.rateio_linhas as Record<string, unknown>[]
     const statusRateios = rateiosAtuais.map((rateio) => String(rateio.status ?? '').toUpperCase())
-    const todosPagos = rateiosAtuais.every((rateio) =>
-      ['PAGO', 'RECEBIDO', 'CONFIRMADO', 'LIQUIDADO'].includes(String(rateio.status ?? '').toUpperCase()),
-    )
-    grupo.status = statusRateios.includes('EM_ATRASO')
+    const liquidados = ['PAGO', 'PAGO_DIRETAMENTE', 'REEMBOLSADO', 'RECEBIDO', 'CONFIRMADO', 'LIQUIDADO'];
+    const pendentes = statusRateios.filter((status) => !liquidados.includes(status));
+    const todosPagos = pendentes.length === 0;
+    grupo.status = pendentes.includes('EM_ATRASO')
       ? 'EM_ATRASO'
-      : todosPagos ? 'PAGO' : statusRateios.find((status) => !['PAGO', 'RECEBIDO', 'CONFIRMADO', 'LIQUIDADO'].includes(status)) || 'EM_ABERTO'
+      : todosPagos ? 'PAGO' : pendentes.find(Boolean) || 'EM_ABERTO';
+    // O primeiro rateio pode estar quitado enquanto outro segue aberto.
+    grupo.data_pagamento = todosPagos
+      ? rateiosAtuais.map((rateio) => String(rateio.data_pagamento || '')).filter(Boolean).sort().slice(-1)[0] || null
+      : null;
 
     grupo.pago_por = null
     grupo.pago_diretamente = rateiosAtuais.length > 0 && rateiosAtuais.every((rateio) =>
@@ -334,3 +338,4 @@ export function buildLancamentoSemRateioPredicate(schema: Map<string, Set<string
            AND (${relacionamentosRateio.join('\n             OR ')})
       )${excluirEntradaReembolso}${excluirCobrancaRelatorio}${excluirCaixaShare}`
 }
+
