@@ -3701,6 +3701,15 @@ export async function contextoBaixaCotista(db: Database, entityId: string): Prom
   return { natureza: 'PAGAMENTO_DIRETO', conta_id: null, lancamento, rateios: rows, cotista_id: allocation?.cotista_id ?? lancamento.cotista_aeronave_id }
 }
 
+export async function pagamentosContextoBaixa(db: Database, contexto: Row): Promise<Row[]> {
+  const ids = (contexto.rateios as Row[]).map((rateio) => String(rateio.id))
+  if (!ids.length) return []
+  return (await db.prepare(`SELECT id, rateio_id, tipo_pagador, pagador_cotista_id, pagador_holding_id,
+    valor_centavos, data_pagamento, comprovante_url, forma_pagamento, observacoes FROM rateio_pagamentos
+    WHERE rateio_id IN (${ids.map(() => '?').join(',')}) AND status = 'CONFIRMADO'
+    ORDER BY data_pagamento, id`).bind(...ids).all<Row>()).results || []
+}
+
 export async function settleCotista(db: Database, entityId: string, body: Row, userId: string | null): Promise<Row> {
   const initial = await contextoBaixaCotista(db, entityId)
   if (initial.natureza === 'RECEBIMENTO_SHARE') {
@@ -3767,14 +3776,14 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
   // Parent is paid only when EVERY active allocation is settled (including allocations outside the selection).
   if (lancamentoId) statements.push(db.prepare(`UPDATE lancamentos SET status = CASE WHEN NOT EXISTS (
       SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO'
-        AND valor_pago_real_centavos < valor_rateado_centavos) THEN 'PAGO' ELSE 'EM_ABERTO' END,
-    data_pagamento = CASE WHEN NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' AND valor_pago_real_centavos < valor_rateado_centavos) THEN ? ELSE NULL END,
+        AND COALESCE(valor_pago_real_centavos, 0) < COALESCE(valor_rateado_centavos, 0)) THEN 'PAGO' ELSE 'EM_ABERTO' END,
+    data_pagamento = CASE WHEN NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' AND COALESCE(valor_pago_real_centavos, 0) < COALESCE(valor_rateado_centavos, 0)) THEN ? ELSE NULL END,
     pago_diretamente = 1, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(lancamentoId, lancamentoId, p.data_pagamento, lancamentoId))
   if (envioId && envioLancamentoId) statements.push(db.prepare(`UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP
     WHERE id = ? AND status IN ('CONVERTIDO', 'APROVADO', 'EMAIL_ENVIADO')
       AND EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO')
       AND NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO'
-        AND valor_pago_real_centavos < valor_rateado_centavos)`).bind(envioId, envioLancamentoId, envioLancamentoId))
+        AND COALESCE(valor_pago_real_centavos, 0) < COALESCE(valor_rateado_centavos, 0))`).bind(envioId, envioLancamentoId, envioLancamentoId))
   await commitSettlement(db, statements)
   return { ok: true, idempotent: false, natureza: 'PAGAMENTO_DIRETO', lancamento_id: lancamentoId, envio_id: envioId }
 }
@@ -3786,3 +3795,4 @@ function receiptReplayMatches(p: RealPayment, saved: Row[]): boolean {
   if (matches.some(r => r.tipo_pagador !== p.tipo_pagador || nullableText(r.pagador_cotista_id) !== nullableText(p.pagador_cotista_id) || nullableText(r.pagador_holding_id) !== nullableText(p.pagador_holding_id) || r.data_pagamento !== p.data_pagamento || nullableText(r.conta_bancaria_id) !== nullableText(p.conta_bancaria_id))) return false
   return !p.rateios?.length || (matches.length === p.rateios.length && p.rateios.every(a => matches.some(r => r.rateio_id === a.rateio_id && Number(r.valor_centavos) === Number(a.valor_centavos))))
 }
+
