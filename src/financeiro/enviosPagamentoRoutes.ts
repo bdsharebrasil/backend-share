@@ -1,3 +1,4 @@
+import { dadosRascunhoEmail, destinatariosSelecionadosEmail, reconciliarEmailRascunho } from "./envioPagamentoEmail"
 import { Hono } from "hono"
 import { createClientExpenseRateios, createDirectExternalExpense, createExpense, createReimbursement } from "./FinanceiroKernel"
 import { convertPaymentRequest, createPaymentRequest, findMatchingClientRateios, validatePaymentRequest } from "./paymentAgents"
@@ -47,7 +48,12 @@ enviosPagamentoRoutes.get('/envios-pagamento/rascunhos', async (c) => {
     WHERE r.criado_por = ? AND r.status <> 'CONCLUIDO'
       AND (e.id IS NULL OR UPPER(COALESCE(e.status, '')) <> 'CONCLUIDO')
     ORDER BY r.atualizado_em DESC`).bind(userId).all<Record<string, unknown>>()
-  return c.json({ rascunhos: results ?? [] })
+  const { results: registrosEmail } = await db.prepare(`SELECT ed.* FROM envio_pagamento_email_destinatarios ed
+    JOIN envio_pagamento_rascunhos r ON r.id = ed.rascunho_id WHERE r.criado_por = ? AND r.status <> 'CONCLUIDO'`).bind(userId).all<Record<string, unknown>>()
+  return c.json({ rascunhos: (results ?? []).map(r => {
+    const progresso = reconciliarEmailRascunho(r.dados_json, (registrosEmail ?? []).filter(ed => ed.rascunho_id === r.id))
+    return { ...r, dados_json: JSON.stringify(progresso.dados), emails_enviados: progresso.enviados, total_destinatarios: progresso.total, emails_falhos: progresso.falhos }
+  }) })
 })
 
 enviosPagamentoRoutes.get('/envios-pagamento/rascunhos/:id', async (c) => {
@@ -58,7 +64,8 @@ enviosPagamentoRoutes.get('/envios-pagamento/rascunhos/:id', async (c) => {
   const rascunho = await db.prepare('SELECT * FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(c.req.param('id'), userId).first<Record<string, unknown>>()
   if (!rascunho) return c.json({ error: 'rascunho_nao_encontrado' }, 404)
   const { results: destinatarios } = await db.prepare('SELECT cotista_id, status, email_id, erro, atualizado_em FROM envio_pagamento_email_destinatarios WHERE rascunho_id = ? ORDER BY atualizado_em').bind(rascunho.id).all()
-  return c.json({ rascunho, destinatarios: destinatarios ?? [] })
+  const progresso = reconciliarEmailRascunho(rascunho.dados_json, destinatarios ?? [])
+  return c.json({ rascunho: { ...rascunho, dados_json: JSON.stringify(progresso.dados) }, destinatarios: progresso.destinatarios })
 })
 
 enviosPagamentoRoutes.delete('/envios-pagamento/rascunhos/:id', async (c) => {
@@ -90,19 +97,24 @@ enviosPagamentoRoutes.post('/envios-pagamento/rascunhos', async (c) => {
   }
   const db = c.env.SHARE_DB
   await garantirTabelasRascunho(db)
-  const atual = await db.prepare('SELECT id, idempotency_key FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(id, userId).first<{ id: string; idempotency_key: string }>()
+  const atual = await db.prepare('SELECT id, idempotency_key, status, dados_json FROM envio_pagamento_rascunhos WHERE id = ? AND criado_por = ?').bind(id, userId).first<{ id: string; idempotency_key: string; status: string; dados_json: string }>()
   if (atual && atual.idempotency_key !== idempotencyKey) return c.json({ error: 'chave_de_idempotencia_nao_pode_mudar' }, 409)
   const status = String(body.status ?? 'PREENCHIMENTO')
   if (!['PREENCHIMENTO', 'EMAIL_PENDENTE', 'CONCLUIDO'].includes(status)) return c.json({ error: 'status_de_rascunho_invalido' }, 400)
+  const registrosEmail = atual ? (await db.prepare('SELECT cotista_id, status, email_id FROM envio_pagamento_email_destinatarios WHERE rascunho_id = ?').bind(id).all<Record<string, unknown>>()).results || [] : []
+  const anterior = dadosRascunhoEmail(atual?.dados_json)
+  const dados: Record<string, unknown> = reconciliarEmailRascunho(body.dados, registrosEmail).dados
+  if (anterior.envioConvertido) dados.envioConvertido = true
   if (atual) {
-    await db.prepare(`UPDATE envio_pagamento_rascunhos SET tipo_envio = ?, etapa_atual = ?, dados_json = ?, envio_id = ?, status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND criado_por = ?`)
-      .bind(tipo, etapa, JSON.stringify(body.dados), body.envio_id ? String(body.envio_id) : null, status, id, userId).run()
+    await db.prepare(`UPDATE envio_pagamento_rascunhos SET tipo_envio = ?, etapa_atual = ?, dados_json = CASE WHEN status = 'CONCLUIDO' THEN dados_json ELSE ? END, envio_id = COALESCE(?, envio_id), status = CASE WHEN status = 'CONCLUIDO' THEN status ELSE ? END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND criado_por = ?`)
+      .bind(tipo, etapa, JSON.stringify(dados), body.envio_id ? String(body.envio_id) : null, status, id, userId).run()
   } else {
     await db.prepare(`INSERT INTO envio_pagamento_rascunhos (id, criado_por, tipo_envio, etapa_atual, dados_json, idempotency_key, envio_id, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, userId, tipo, etapa, JSON.stringify(body.dados), idempotencyKey, body.envio_id ? String(body.envio_id) : null, status).run()
+      .bind(id, userId, tipo, etapa, JSON.stringify(dados), idempotencyKey, body.envio_id ? String(body.envio_id) : null, status).run()
   }
-  const cotistas = Array.isArray(body.destinatarios) ? [...new Set(body.destinatarios.map((value) => String(value ?? '').trim()).filter(Boolean))] : []
+  const selecionados = new Set(destinatariosSelecionadosEmail(dados))
+  const cotistas = Array.isArray(body.destinatarios) ? [...new Set(body.destinatarios.map(value => String(value ?? '').trim()).filter(id => selecionados.has(id)))] : []
   for (const cotistaId of cotistas) {
     await db.prepare(`INSERT OR IGNORE INTO envio_pagamento_email_destinatarios (id, rascunho_id, cotista_id, idempotency_key, status)
       VALUES (?, ?, ?, ?, 'PENDENTE')`).bind(crypto.randomUUID(), id, cotistaId, `email:${id}:${cotistaId}`).run()
@@ -307,10 +319,10 @@ async function atualizarStatusEnvioPagamento(c: any, id: string, requested: stri
     if (requested !== 'EMAIL_ENVIADO') return c.json({ error: 'transicao_status_solicitacao_invalida' }, 400)
   }
   const currentStatus = String(current.status ?? '').toUpperCase()
-  if (currentStatus === 'CONVERTIDO' && requested === 'EMAIL_ENVIADO') {
+  if (['EMAIL_ENVIADO', 'CONVERTIDO', 'CONCLUIDO'].includes(currentStatus) && requested === 'EMAIL_ENVIADO') {
     await db.prepare(`UPDATE envio_despesas
-      SET email_enviado = 1, email_enviado_em = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'CONVERTIDO'`).bind(id).run()
+      SET email_enviado = 1, email_enviado_em = COALESCE(email_enviado_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ? AND status IN ('EMAIL_ENVIADO', 'CONVERTIDO', 'CONCLUIDO')`).bind(id).run()
     return db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row: unknown) => c.json(row))
   }
   const transitions: Record<string, string[]> = {
@@ -323,7 +335,13 @@ async function atualizarStatusEnvioPagamento(c: any, id: string, requested: stri
   if (!transitions[currentStatus]?.includes(requested)) {
     return c.json({ error: 'transicao_status_solicitacao_invalida', de: currentStatus, para: requested }, 409)
   }
-  await db.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = ?').bind(requested, id, current.status).run()
+  if (requested === 'EMAIL_ENVIADO') {
+    await db.prepare(`UPDATE envio_despesas SET status = ?, email_enviado = 1,
+      email_enviado_em = COALESCE(email_enviado_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = ?`).bind(requested, id, current.status).run()
+  } else {
+    await db.prepare('UPDATE envio_despesas SET status = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status = ?').bind(requested, id, current.status).run()
+  }
   return db.prepare('SELECT * FROM envio_despesas WHERE id = ?').bind(id).first().then((row: unknown) => c.json(row))
 }
 
@@ -378,3 +396,4 @@ enviosPagamentoRoutes.post('/envios-pagamento/:id/converter', async (c) => {
     ))
   } catch (error) { return errorResponse(c, error) }
 })
+
