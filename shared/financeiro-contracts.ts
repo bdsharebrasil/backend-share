@@ -12,7 +12,7 @@ export type CotistaAeronaveRef = {
 
 
 export const TIPOS_RATEIO = ['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA'] as const;
-export const PERIODICIDADES_RATEIO = ['ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'] as const;
+export const PERIODICIDADES_RATEIO = ['ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL', 'A CADA 50 H', 'A CADA 100 H'] as const;
 export const STATUS_RATEIO_DESPESAS = ['EM_ABERTO', 'PAGO', 'PAGO_DIRETAMENTE', 'EM_ATRASO', 'ESTORNO', 'SAIDA', 'AGUARDANDO_REEMBOLSO', 'REEMBOLSADO', 'CANCELADO'] as const;
 export type RateioDespesaContract = {
   id: string;

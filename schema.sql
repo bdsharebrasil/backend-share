@@ -1235,7 +1235,7 @@ CREATE TABLE IF NOT EXISTS "envio_despesas"(
   movimentacao_id TEXT,
   rateio_id TEXT,
   cotista_id TEXT
-, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT '[]', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT, anexos_json TEXT DEFAULT '[]', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT '[]', categoria_cliente_id TEXT, colaborador_id TEXT, abastecimento_json TEXT, solicitacao_compra_id TEXT, valor_total_despesa REAL, escopo_financeiro TEXT NOT NULL DEFAULT 'FINANCEIRO' CHECK (escopo_financeiro IN ('FINANCEIRO', 'CAIXA_SHARE')));
+, lancamento_id TEXT, fornecedor_id TEXT, cotista_ids TEXT DEFAULT '[]', categoria_id TEXT, categoria_nome TEXT, email_solicitado INTEGER NOT NULL DEFAULT 0, email_enviado INTEGER NOT NULL DEFAULT 0, email_enviado_em TEXT, email_id TEXT, movimentos_holding_id TEXT, periodicidade TEXT CHECK (periodicidade IS NULL OR periodicidade IN ('ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL', 'A CADA 50 H', 'A CADA 100 H')), anexos_json TEXT DEFAULT '[]', tipo_rateio TEXT, subcategoria_1 TEXT, subcategoria_2 TEXT, subcategoria_3 TEXT, subcategoria_4 TEXT, rateio_linhas_json TEXT DEFAULT '[]', categoria_cliente_id TEXT, colaborador_id TEXT, abastecimento_json TEXT, solicitacao_compra_id TEXT, valor_total_despesa REAL, escopo_financeiro TEXT NOT NULL DEFAULT 'FINANCEIRO' CHECK (escopo_financeiro IN ('FINANCEIRO', 'CAIXA_SHARE')));
 CREATE TABLE IF NOT EXISTS "user_cliente"(
   id TEXT,
   login TEXT,
@@ -2240,7 +2240,7 @@ CREATE TABLE movimentos_holding (
   aeronave_id TEXT REFERENCES aeronave(id),
    periodicidade TEXT
     CHECK (periodicidade IN (
-      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'
+      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL', 'A CADA 50 H', 'A CADA 100 H'
     )),
   tipo_caixa TEXT NOT NULL
     CHECK (tipo_caixa IN ('SHARE', 'HOLD')),
@@ -2748,7 +2748,7 @@ CREATE TABLE rateio_despesas (
   tipo_rateio TEXT NOT NULL CHECK (tipo_rateio IN ('FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA')),
  periodicidade TEXT
     CHECK (periodicidade IN (
-      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'
+      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL', 'A CADA 50 H', 'A CADA 100 H'
     )),
   percentual_sociedade REAL,
   percentual_uso REAL,
@@ -2790,7 +2790,7 @@ CREATE TABLE rateio_hold (
     subcategoria_4 TEXT NULL,
   periodicidade TEXT
     CHECK (periodicidade IN (
-      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'
+      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL', 'A CADA 50 H', 'A CADA 100 H'
     )),
   tipo_rateio TEXT NOT NULL CHECK (tipo_rateio IN ('FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA')),
   percentual_sociedade REAL,
@@ -2936,7 +2936,7 @@ CREATE TABLE IF NOT EXISTS "lancamentos" (  id TEXT PRIMARY KEY NOT NULL,
     REFERENCES user_profiles(id),
 periodicidade TEXT
     CHECK (periodicidade IN (
-      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'
+      'ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL', 'A CADA 50 H', 'A CADA 100 H'
     )),
   
   data_emissao TEXT,

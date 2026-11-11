@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
+import { PERIODICIDADES_RATEIO } from '../shared/financeiro-contracts'
 import { financeiroRoutes } from './financeiroRoutes'
 import { abastecimentosRoutes } from './routes/abastecimentosRoutes'
 import { gestorContratosRoutes } from './routes/gestorContratosRoutes'
@@ -4711,7 +4712,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     const id = c.req.param('id'); const body = await c.req.json<{ data_vencimento?: string; periodicidade?: string; tipo_rateio?: string; email_enviado_id?: string }>().catch(() => ({} as any))
     if (!body.data_vencimento) return c.json({ error: 'data_vencimento_obrigatoria' }, 400)
     const periodicidade = String(body.periodicidade || 'EVENTUAL').trim().toUpperCase()
-    if (!['ÚNICO', 'EVENTUAL', 'MENSAL', 'BIMESTRAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'].includes(periodicidade)) return c.json({ error: 'periodicidade_invalida' }, 400)
+    if (!PERIODICIDADES_RATEIO.includes(periodicidade as typeof PERIODICIDADES_RATEIO[number])) return c.json({ error: 'periodicidade_invalida' }, 400)
     const tipoRateio = String(body.tipo_rateio || 'VARIAVEL POR VOO').trim().toUpperCase().replace(/[\s-]+/g, '_')
     if (!['FIXO', 'VARIAVEL_POR_VOO', 'VARIAVEL_POR_HORA', 'EXTRA'].includes(tipoRateio)) return c.json({ error: 'tipo_rateio_invalido' }, 400)
     const report = await c.env.SHARE_DB.prepare('SELECT * FROM relatorio_despesa_viagem WHERE id = ?').bind(id).first<any>()
