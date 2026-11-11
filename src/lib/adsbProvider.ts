@@ -30,6 +30,7 @@ export function configurarProvedor(valor: string | undefined): void {
 }
 
 function numero(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
   const parsed = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(parsed) ? parsed : null
 }
@@ -142,3 +143,4 @@ export async function buscarPosicoes(opts: { hex: string[]; matriculas: string[]
 export function provedorIndisponivel(): boolean {
   return ultimoProvedorIndisponivel
 }
+

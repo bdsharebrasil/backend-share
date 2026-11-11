@@ -18,7 +18,7 @@ import { mensagensRoutes } from './routes/mensagensRoutes'
 import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
 import { colaboradorVoosRoutes } from './routes/colaboradorVoosRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
-import { rastreioRoutes } from './routes/rastreioRoutes'
+import { rastreioRoutes, coletarRastreioAgendado } from './routes/rastreioRoutes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
@@ -5266,6 +5266,11 @@ export default {
   async scheduled(_event: any, _env: Bindings, ctx: ExecutionContext) {
     // O cron executa apenas jobs locais: chamadas HTTP ao próprio Worker
     // criavam latência e duplicavam autenticação sem garantir consistência.
-    if (_env.SHARE_DB) ctx.waitUntil(processFinanceQueue(_env.SHARE_DB, null, 50))
+    if (_env.SHARE_DB) {
+      ctx.waitUntil(coletarRastreioAgendado(_env).catch((erro) => console.warn('[rastreio/cron]', erro)))
+      // A fila financeira mantém a frequência anterior de 15 minutos.
+      if (new Date(_event.scheduledTime ?? Date.now()).getUTCMinutes() % 15 === 0) ctx.waitUntil(processFinanceQueue(_env.SHARE_DB, null, 50))
+    }
   },
 }
+

@@ -74,6 +74,7 @@ new_sqlite_classes = ["RateLimitCounter"]
 # WINSOCK_AUTH_HEADER (opcional; padrão no código: X-API-Key)
 # WINSOCK_AUTH_PREFIX (opcional; padrão no código: '' — sem prefixo)
 
-# ── Cron para pré-aquecer cache (weather/notam/nearest) ─────────────────────
+# ── Cron de rastreio a cada minuto; financeiro a cada 15 minutos ─────────────────────
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["* * * * *"]
+

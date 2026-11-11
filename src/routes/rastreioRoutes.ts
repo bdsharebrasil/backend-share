@@ -1,15 +1,15 @@
 import { Hono } from 'hono'
+import { lerHistorico, registrarSinal, LIMITE_SINAL_S } from '../lib/rastreioHistorico'
 import { requireShareInternal } from '../lib/auth'
 import { checkRateLimit, clientIp } from '../lib/cache'
 import { buscarPosicoes, configurarProvedor, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
 import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
 
-type Bindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string }
+export type RastreioBindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string }
 type Variables = Record<string, never>
-export const rastreioRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
+export const rastreioRoutes = new Hono<{ Bindings: RastreioBindings; Variables: Variables }>()
 
 type Coord = { lat: number; lon: number }
-type PontoTrilha = { lat: number; lon: number; alt_ft: number }
 type PernaOperacao = {
   id: string; numero: number; jornada_numero: number
   origem: string; destino: string; status: string
@@ -17,10 +17,6 @@ type PernaOperacao = {
   origem_coord: Coord | null; destino_coord: Coord | null
 }
 
-const INTERVALO_MIN_TRILHA_S = 15
-const MAX_PONTOS_TRILHA = 1500
-const RETENCAO_TRILHA_DIAS = 3
-// Acionado pode decolar sem que o horário DEP seja lançado; somente estados de pouso dispensam ADS-B.
 const STATUS_EM_SOLO = ['em_solo', 'em solo', 'pousado']
 
 rastreioRoutes.get('/api/rastreio/aeronave/matricula/:matricula', async (c) => {
@@ -79,17 +75,34 @@ function icao(valor: unknown): string {
 function statusRastreio(posicao: PosicaoAeronave | null, semIdentificador: boolean, indisponivel: boolean): string {
   if (semIdentificador) return 'sem_identificador'
   if (indisponivel) return 'indisponivel'
-  if (!posicao || posicao.visto_ha_s === null || posicao.visto_ha_s > 300) return 'sem_sinal'
+  if (!posicao || posicao.visto_ha_s === null || posicao.visto_ha_s > LIMITE_SINAL_S) return 'sem_sinal'
   if (posicao.visto_ha_s > 30) return 'atrasado'
   return 'ao_vivo'
 }
 
-export function statusOperacaoRastreio(statusBruto: string, rastreio: PosicaoAeronave | null): 'acionado' | 'em_voo' | 'em_solo' {
+export function statusOperacaoRastreio(statusBruto: string, rastreio: PosicaoAeronave | null): 'acionado' | 'em_voo' | 'em_solo' | 'aguardando' | 'encerrada' {
   const normalizado = String(statusBruto || '').trim().toLowerCase()
-  const confirmadoNoAr = ['aprovada', 'acionado'].includes(normalizado)
-    && Boolean(rastreio && !rastreio.no_solo && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
-  if (confirmadoNoAr || !['acionado', ...STATUS_EM_SOLO].includes(normalizado)) return 'em_voo'
-  return normalizado === 'acionado' ? 'acionado' : 'em_solo'
+  if (['encerrada', 'concluida'].includes(normalizado)) return 'encerrada'
+  // O sinal atual também vale quando a tripulação ainda não preencheu AC/DEP/POU.
+  if (rastreio && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30) {
+    if (!rastreio.no_solo) return 'em_voo'
+    return normalizado === 'aprovada' ? 'aguardando' : 'em_solo'
+  }
+  if (STATUS_EM_SOLO.includes(normalizado)) return 'em_solo'
+  if (normalizado === 'acionado') return 'acionado'
+  return ['decolado', 'em_voo'].includes(normalizado) ? 'em_voo' : 'aguardando'
+}
+
+/** Uma aeronave não pode alimentar dois agendamentos simultaneamente. Prioriza o horário mais próximo. */
+export function selecionarAgendamentosParaRastreio<T extends { id: string; aeronave_id: string | null; horario_previsto_agendamento: string | null; data_agendada: string }>(itens: T[], agora = Date.now()): T[] {
+  const escolhidos = new Map<string, T>()
+  const distancia = (item: T) => Math.abs(Date.parse(item.horario_previsto_agendamento || `${item.data_agendada.slice(0, 10)}T12:00:00Z`) - agora)
+  for (const item of itens) {
+    const chave = item.aeronave_id || item.id
+    const anterior = escolhidos.get(chave)
+    if (!anterior || distancia(item) < distancia(anterior)) escolhidos.set(chave, item)
+  }
+  return [...escolhidos.values()]
 }
 
 /** Busca as coordenadas dos aeródromos em lotes (limite de parâmetros do D1). */
@@ -129,64 +142,9 @@ async function buscarPernas(db: D1Database, solicitacaoIds: string[]): Promise<M
   return porSolicitacao
 }
 
-/**
- * Grava a posição atual de cada perna em voo (no máximo 1 ponto a cada 15 s por perna,
- * e só se a posição mudou) e devolve a trilha acumulada de cada uma.
- * Falhas aqui (ex.: tabela ainda não migrada) não derrubam o endpoint: a trilha vem vazia.
- */
-async function registrarELerTrilhas(
-  db: D1Database,
-  alvos: Array<{ solicitacaoId: string; chave: string; rastreio: PosicaoAeronave | null }>,
-): Promise<Map<string, PontoTrilha[]>> {
-  const trilhas = new Map<string, PontoTrilha[]>()
-  if (!alvos.length) return trilhas
-  try {
-    const gravaveis = alvos.filter(({ rastreio }) =>
-      rastreio && rastreio.lat != null && rastreio.lon != null
-      && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
-    if (gravaveis.length) {
-      await db.batch(gravaveis.map(({ chave, solicitacaoId, rastreio }) => db.prepare(`
-        INSERT INTO rastreio_posicoes (trilha_id, solicitacao_id, lat, lon, alt_ft, rumo_graus)
-        SELECT ?1, ?2, ?3, ?4, ?5, ?6
-        WHERE NOT EXISTS (
-          SELECT 1 FROM rastreio_posicoes
-          WHERE trilha_id = ?1 AND registrado_em > datetime('now', '-${INTERVALO_MIN_TRILHA_S} seconds')
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM (SELECT lat, lon FROM rastreio_posicoes WHERE trilha_id = ?1 ORDER BY id DESC LIMIT 1) u
-          WHERE u.lat = ?3 AND u.lon = ?4
-        )`).bind(chave, solicitacaoId, rastreio!.lat, rastreio!.lon, rastreio!.no_solo ? 0 : (rastreio!.alt_ft ?? 0), rastreio!.rumo_graus ?? null)))
-    }
-
-    const chaves = [...new Set(alvos.map(({ chave }) => chave))]
-    const pontos = await db.prepare(`
-      SELECT trilha_id, lat, lon, alt_ft FROM (
-        SELECT trilha_id, lat, lon, alt_ft, id,
-          ROW_NUMBER() OVER (PARTITION BY trilha_id ORDER BY id DESC) AS rn
-        FROM rastreio_posicoes WHERE trilha_id IN (${chaves.map(() => '?').join(', ')})
-      ) WHERE rn <= ${MAX_PONTOS_TRILHA}
-      ORDER BY trilha_id, id ASC`).bind(...chaves).all<{ trilha_id: string; lat: number; lon: number; alt_ft: number | null }>()
-    for (const ponto of pontos.results || []) {
-      const lista = trilhas.get(ponto.trilha_id) || []
-      lista.push({ lat: ponto.lat, lon: ponto.lon, alt_ft: ponto.alt_ft ?? 0 })
-      trilhas.set(ponto.trilha_id, lista)
-    }
-
-    if (Math.random() < 0.02) {
-      await db.prepare(`DELETE FROM rastreio_posicoes WHERE registrado_em < datetime('now', '-${RETENCAO_TRILHA_DIAS} days')`).run()
-    }
-  } catch (error) {
-    console.warn('[rastreio] trilha indisponível', error instanceof Error ? error.message : error)
-  }
-  return trilhas
-}
-
-rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
-  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  if (!(await checkRateLimit(c, `rastreio:${clientIp(c)}`, 120))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
-  configurarProvedor(c.env.ADSB_PROVIDER)
-  const db = c.env.SHARE_DB
-
+export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?: string) {
+  configurarProvedor(env.ADSB_PROVIDER)
+  const db = env.SHARE_DB
   const aeronaveSchema = await db.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>()
   const colunaIcaoHex = (aeronaveSchema.results || []).some((column) => column.name === 'icao_hex')
     ? 'a.icao_hex'
@@ -202,7 +160,7 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
       FROM solicitacoes_reserva_voo s
     )
     SELECT s.id, s.numero_voo, s.status_calc AS status_bruto, s.aeronave_id,
-      s.origem, s.destino, s.horario_previsto_agendamento, a.matricula_registro, a.modelo, ${colunaIcaoHex},
+      s.origem, s.destino, s.data_agendada, s.horario_previsto_agendamento, a.matricula_registro, a.modelo, ${colunaIcaoHex},
       COALESCE(hs.nome, cl.razao_social) AS cotista_nome,
       COALESCE(tp.nome_completo, fp.nome_completo) AS piloto_nome,
       COALESCE(tc.nome_completo, fc.nome_completo) AS copiloto_nome
@@ -214,14 +172,13 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
     LEFT JOIN tripulacao_freelancer fp ON fp.id = s.piloto_id
     LEFT JOIN tripulacao tc ON tc.id = s.copiloto_id
     LEFT JOIN tripulacao_freelancer fc ON fc.id = s.copiloto_id
-    WHERE s.status_calc IN ('decolado', 'acionado', 'em_solo', 'em solo', 'pousado')
-      OR (s.status_calc = 'aprovada'
-        AND datetime(COALESCE(s.horario_previsto_agendamento, s.data_agendada || 'T00:00:00Z'))
-          BETWEEN datetime('now', '-6 hours') AND datetime('now', '+2 hours'))
-    ORDER BY s.criado_em DESC`).all<any>()
+    WHERE ${solicitacaoId ? 's.id = ?' : `
+      s.status_calc IN ('aprovada', 'decolado', 'acionado', 'em_solo', 'em solo', 'pousado')
+      AND date(s.data_agendada) <= date('now')
+      AND date(s.data_agendada, '+' || max(COALESCE(s.dias_duracao, 1), 1) || ' days') >= date('now')`}
+    ORDER BY s.criado_em DESC`).bind(...(solicitacaoId ? [solicitacaoId] : [])).all<any>()
 
   const itens = rows.results || []
-  const noSolo = (status: string) => STATUS_EM_SOLO.includes(status)
 
   // Pernas reais de cada operação: a perna é a referência de rota, não a solicitação
   const pernasPorSolicitacao = jornadaDisponivel
@@ -232,27 +189,23 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
     ...[...pernasPorSolicitacao.values()].flat().flatMap((perna) => [perna.origem, perna.destino]),
   ])
 
-  const emVoo = itens.filter((item) => !noSolo(item.status_bruto))
+  const emVoo = solicitacaoId ? [] : selecionarAgendamentosParaRastreio(itens)
   const posicoes = await buscarPosicoes({
     hex: emVoo.map((item) => item.icao_hex).filter(Boolean),
     matriculas: emVoo.map((item) => item.matricula_registro).filter(Boolean),
   })
   const porChave = new Map<string, PosicaoAeronave>()
   posicoes.forEach((item) => {
-    porChave.set(item.hex, item)
-    if (item.matricula) porChave.set(item.matricula, item)
+    porChave.set(item.hex.toUpperCase(), item)
+    if (item.matricula) porChave.set(item.matricula.replace(/-/g, '').toUpperCase(), item)
   })
   const indisponivel = provedorIndisponivel()
 
+  const selecionados = new Set(emVoo.map((item) => item.id))
   const voos = itens.map((item) => {
-    const statusRegistrado = noSolo(item.status_bruto) ? 'em_solo' : item.status_bruto === 'acionado' ? 'acionado' : 'em_voo'
     const identificador = String(item.icao_hex || '').trim().toUpperCase()
     const matricula = String(item.matricula_registro || '').trim().toUpperCase()
-    const rastreio = statusRegistrado !== 'em_solo' ? (porChave.get(identificador) || porChave.get(matricula) || null) : null
-    // Reservas aprovadas sem operação e voos acionados só contam como em voo após confirmação ADS-B recente.
-    const confirmadoNoAr = ['aprovada', 'acionado'].includes(item.status_bruto)
-      && Boolean(rastreio && !rastreio.no_solo && rastreio.visto_ha_s !== null && rastreio.visto_ha_s <= 30)
-    if (item.status_bruto === 'aprovada' && !confirmadoNoAr) return null
+    const rastreio = selecionados.has(item.id) ? (porChave.get(identificador) || porChave.get(matricula.replace(/-/g, '')) || null) : null
     const status = statusOperacaoRastreio(item.status_bruto, rastreio)
     const semIdentificador = !/^[0-9A-F]{6}$/.test(identificador) && !matricula
 
@@ -261,7 +214,7 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
       origem_coord: coordenadas.get(perna.origem) ?? null,
       destino_coord: coordenadas.get(perna.destino) ?? null,
     }))
-    const pernaAtual = pernas[pernas.length - 1] ?? null
+    const pernaAtual = pernas.find((perna) => !perna.horario_corte && !['cortado', 'cancelada'].includes(perna.status)) ?? pernas[pernas.length - 1] ?? null
     const origem = pernaAtual?.origem || icao(item.origem) || null
     const destino = pernaAtual?.destino || icao(item.destino) || null
 
@@ -277,16 +230,44 @@ rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
       cotista_nome: item.cotista_nome || null, piloto_nome: item.piloto_nome || null, copiloto_nome: item.copiloto_nome || null,
       rastreio, rastreio_status: statusRastreio(rastreio, semIdentificador, indisponivel),
     }
-  }).filter((voo): voo is NonNullable<typeof voo> => voo !== null)
-
-  // Trilha por perna: cada decolagem começa um rastro novo
-  const emVooAgora = voos.filter((voo) => voo.status === 'em_voo')
-  const trilhas = await registrarELerTrilhas(db, emVooAgora.map((voo) => ({
-    solicitacaoId: voo.id, chave: voo.perna_atual?.id ?? voo.id, rastreio: voo.rastreio,
-  })))
-
-  return c.json({
-    atualizado_em: new Date().toISOString(),
-    voos: voos.map((voo) => ({ ...voo, trilha: trilhas.get(voo.perna_atual?.id ?? voo.id) ?? [] })),
   })
+
+  const completos = []
+  for (const voo of voos) {
+    const anterior = await lerHistorico(db, voo.id)
+    const apenasEstacionado = voo.status === 'aguardando' && voo.rastreio?.no_solo && !anterior.trilha.length
+    if (!solicitacaoId && selecionados.has(voo.id) && !apenasEstacionado) {
+      try {
+        await registrarSinal(db, voo.id, voo.perna_atual?.id ?? voo.id, voo.rastreio, indisponivel)
+      } catch (erro) {
+        console.warn('[rastreio] falha ao registrar sinal', erro instanceof Error ? erro.message : erro)
+      }
+    }
+    const historico = !solicitacaoId && selecionados.has(voo.id) && !apenasEstacionado ? await lerHistorico(db, voo.id) : anterior
+    completos.push({ ...voo, trilha: historico.trilha, eventos_rastreio: historico.eventos, historico_disponivel: historico.disponivel })
+  }
+  return completos
+}
+
+/** Coleta independente de páginas abertas. O cron usa a mesma seleção do painel. */
+export async function coletarRastreioAgendado(env: RastreioBindings) {
+  await carregarVoosRastreio(env)
+}
+
+rastreioRoutes.get('/api/interno/voos-em-operacao', async (c) => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await checkRateLimit(c, `rastreio:${clientIp(c)}`, 120))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+  c.header('Cache-Control', 'private, no-store')
+  const voos = await carregarVoosRastreio(c.env)
+  // Reservas sem sinal nem histórico aguardam no cronograma. Perder o sinal não remove o voo acompanhado.
+  return c.json({ atualizado_em: new Date().toISOString(), voos: voos.filter((voo) => voo.status !== 'aguardando' || (voo.rastreio_status === 'ao_vivo' && !voo.rastreio?.no_solo) || voo.trilha.length > 0) })
+})
+
+rastreioRoutes.get('/api/interno/solicitacoes/:id/rastreio', async (c) => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  if (!(await checkRateLimit(c, `rastreio-historico:${clientIp(c)}`, 120))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
+  c.header('Cache-Control', 'private, no-store')
+  const voos = await carregarVoosRastreio(c.env, c.req.param('id'))
+  if (!voos.length) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
+  return c.json(voos[0])
 })
