@@ -1,4 +1,5 @@
 import { Hono, Context } from "hono"
+import { carregarCustosPortal, mesesAte, premissasHistoricasPortal, calcularCamadasPortal } from "../financeiro/portalCustos"
 import { checkRateLimit, clientIp } from "../lib/cache"
 import { normalizarHorarioAgendamento } from "../lib/schedule"
 import { haversineKm } from "../lib/geo"
@@ -441,6 +442,25 @@ portalRoutes.get('/api/portal/financeiro', async c => {
   return c.json({ tipo: user.cliente_id ? 'CLIENTE' : 'HOLDING', despesas, resumo: { ...resumo, abertoCentavos: resumo.totalCentavos - resumo.pagoCentavos } })
 })
 
+// Indicadores financeiros consolidados: somente para a aeronave do vínculo autenticado.
+portalRoutes.get('/api/portal/financeiro/custos', async c => {
+  const user = await portalSession(c)
+  if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
+  const aeronaveId = String(c.req.query('aeronave_id') || '')
+  const meses = [...new Set(String(c.req.query('meses') || new Date().toISOString().slice(0, 7)).split(','))].sort()
+  if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !meses.length || meses.length > 36 || meses.some(m => !/^(20\d{2})-(0[1-9]|1[0-2])$/.test(m))) return c.json({ error: 'parametros_invalidos' }, 400)
+  const vinculo = await c.env.SHARE_DB.prepare(`SELECT ca.id AS cotista_id, ca.percentual_sociedade, a.matricula_registro,
+      (SELECT COUNT(*) FROM cotista_aeronave outras WHERE outras.aeronave_id = a.id AND LOWER(TRIM(COALESCE(outras.status, 'ativo'))) IN ('ativo', 'ativa')) AS quantidade_cotas
+    FROM aeronave a JOIN cotista_aeronave ca ON ca.aeronave_id = a.id
+    WHERE a.id = ?1 AND (ca.cliente_id = ?2 OR ca.socio_id = ?3)
+      AND ca.id = (SELECT cotista_id FROM user_cliente WHERE id = ?4 LIMIT 1) LIMIT 1`)
+    .bind(aeronaveId, user.cliente_id, user.socio_id, user.id).first<{ cotista_id: string; percentual_sociedade: number; matricula_registro: string; quantidade_cotas: number }>()
+  if (!vinculo) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
+  c.header('Cache-Control', 'private, no-store')
+  const dados = await carregarCustosPortal(c.env.SHARE_DB, aeronaveId, vinculo.cotista_id, user.cliente_id, user.socio_id, meses)
+  return c.json({ ...dados.resposta, vinculo, premissas: premissasHistoricasPortal(dados.rateios, dados.voos) })
+})
+
 portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
   const user = await portalSession(c)
   if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
@@ -630,21 +650,27 @@ async function resolverTipoCombustivel(db: D1Database, aircraft: Record<string, 
 portalRoutes.post('/api/portal/simulador/voo', async c => {
   const user = await portalSession(c)
   if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
-  const body = await c.req.json<{ aeronave_id?: string; origem?: string; destino?: string; ida_e_volta?: boolean; dias_fora?: number }>().catch(() => null)
+  const body = await c.req.json<{ aeronave_id?: string; origem?: string; destino?: string; ida_e_volta?: boolean; dias_fora?: number; incluir_estrutura?: boolean; horas_ano?: number; quantidade_cotas?: number; dias_jornada?: number; passageiros?: number }>().catch(() => null)
   const aeronaveId = String(body?.aeronave_id || '').trim()
   const origem = String(body?.origem || '').trim().toUpperCase()
   const destino = String(body?.destino || '').trim().toUpperCase()
   if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !/^[A-Z0-9]{4}$/.test(origem) || !/^[A-Z0-9]{4}$/.test(destino) || origem === destino) {
     return c.json({ error: 'parametros_invalidos' }, 400)
   }
+  const incluirEstrutura = body?.incluir_estrutura === true
+  if (incluirEstrutura && !portalHasFeature(user, 'financeiro')) return c.json({ error: 'portal_feature_forbidden' }, 403)
+  const horasAno = Number(body?.horas_ano), passageiros = Number(body?.passageiros), diasJornada = Number(body?.dias_jornada)
+  const cotasCenario = body?.quantidade_cotas == null ? null : Number(body.quantidade_cotas)
+  if (incluirEstrutura && (!Number.isFinite(horasAno) || horasAno < 1 || horasAno > 2000 || !Number.isInteger(passageiros) || passageiros < 1 || passageiros > MAX_RESERVATION_PASSENGERS || !Number.isInteger(diasJornada) || diasJornada < 1 || diasJornada > 31 || (cotasCenario !== null && (!Number.isInteger(cotasCenario) || cotasCenario < 1 || cotasCenario > 100)))) return c.json({ error: 'parametros_invalidos' }, 400)
   const idaVolta = body?.ida_e_volta === true
   const diasFora = idaVolta ? Math.min(30, Math.max(0, Math.trunc(Number(body?.dias_fora) || 0))) : 0
   const aircraftColumns = new Set((await c.env.SHARE_DB.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>().catch(() => ({ results: [] }))).results?.map(column => column.name) || [])
   const optionalAircraftColumn = (name: string) => aircraftColumns.has(name) ? `a.${name}` : 'NULL'
-  const aircraft = await c.env.SHARE_DB.prepare(`SELECT a.id, a.consumo_combustivel, a.velocidade_cruzeiro,
+  const aircraft = await c.env.SHARE_DB.prepare(`SELECT a.id, a.consumo_combustivel, a.velocidade_cruzeiro, ca.id AS cotista_id, ca.percentual_sociedade,
       a.tipo_aeronave, ${optionalAircraftColumn('custo_hora_complementar_centavos')} AS custo_hora_complementar_centavos,
       ${optionalAircraftColumn('taxas_trecho_centavos')} AS taxas_trecho_centavos,
       ${optionalAircraftColumn('custo_dia_pernoite_centavos')} AS custo_dia_pernoite_centavos,
+      ${optionalAircraftColumn('reserva_manutencao_hora_centavos')} AS reserva_manutencao_hora_centavos,
       p.categoria AS performance_categoria, COALESCE(p.velocidade_cruzeiro_kt,
         (SELECT p2.velocidade_cruzeiro_kt FROM performance_aeronave p2
           WHERE lower(trim(p2.modelo)) = lower(trim(a.modelo)) ORDER BY p2.atualizado_em DESC LIMIT 1)) AS velocidade_cruzeiro_kt
@@ -692,8 +718,46 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
   const taxas = Number(aircraft.taxas_trecho_centavos || 0) * trechos
   const pernoite = Number(aircraft.custo_dia_pernoite_centavos || 0) * diasFora
   const custosCompletos = aircraft.custo_hora_complementar_centavos != null
+  let projecao = null
+  if (incluirEstrutura) {
+    const calendario = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit' }).formatToParts(new Date())
+    const ano = Number(calendario.find(p => p.type === 'year')?.value)
+    const mes = Number(calendario.find(p => p.type === 'month')?.value)
+    const anterior = new Date(Date.UTC(ano, mes - 2, 1))
+    const referencia = `${anterior.getUTCFullYear()}-${String(anterior.getUTCMonth() + 1).padStart(2, '0')}`
+    const meses = mesesAte(referencia, 12)
+    const historico = await carregarCustosPortal(c.env.SHARE_DB, aeronaveId, String(aircraft.cotista_id), user.cliente_id, user.socio_id, meses)
+    const premissas = premissasHistoricasPortal(historico.rateios, historico.voos)
+    const cadastrado = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null
+    const taxaCadastrada = cadastrado(aircraft.taxas_trecho_centavos)
+    const taxaTrecho = taxaCadastrada ?? premissas.taxas_trecho_centavos
+    const pernoiteCadastrado = cadastrado(aircraft.custo_dia_pernoite_centavos)
+    const viagem = pernoiteCadastrado !== null ? pernoiteCadastrado * (diasJornada - 1) : premissas.viagem_dia_centavos !== null ? premissas.viagem_dia_centavos * diasJornada : null
+    const reservaCadastrada = cadastrado(aircraft.reserva_manutencao_hora_centavos)
+    const reservaHora = reservaCadastrada ?? cadastrado(aircraft.custo_hora_complementar_centavos) ?? premissas.reserva_hora_centavos
+    const percentual = cotasCenario === null ? Number(aircraft.percentual_sociedade) / 100 : 1 / cotasCenario
+    if (!Number.isFinite(percentual) || percentual <= 0 || percentual > 1) return c.json({ error: 'participacao_sociedade_indisponivel' }, 422)
+    const camadas = calcularCamadasPortal({ horas: tempoHoras * trechos, horasAno, participacao: percentual, passageiros, dias: diasJornada,
+      combustivel, taxas: taxaTrecho !== null ? taxaTrecho * trechos : null, viagem, fixoAnual: premissas.fixo_anual_centavos, reservaHora })
+    const pendencias = [
+      ...(taxaTrecho === null ? ['Taxas por trecho sem cadastro ou histórico.'] : []),
+      ...(viagem === null ? ['Despesas de viagem sem cadastro ou histórico.'] : []),
+      ...(premissas.fixo_anual_centavos === null ? ['Custos fixos sem histórico classificado.'] : []),
+      ...(reservaHora === null ? ['Reserva de manutenção por hora sem cadastro ou histórico.'] : []),
+      ...(premissas.nao_classificados_centavos > 0 ? ['Há despesas históricas sem natureza de custo; elas não foram projetadas.'] : []),
+    ]
+    projecao = { ...camadas, completo: camadas.completo && premissas.nao_classificados_centavos === 0,
+      total_alocado_centavos: premissas.nao_classificados_centavos === 0 ? camadas.total_alocado_centavos : null,
+      custo_hora_centavos: premissas.nao_classificados_centavos === 0 ? camadas.custo_hora_centavos : null,
+      por_passageiro_centavos: premissas.nao_classificados_centavos === 0 ? camadas.por_passageiro_centavos : null,
+      componentes: { combustivel_centavos: combustivel, taxas_centavos: taxaTrecho !== null ? taxaTrecho * trechos : null, viagem_centavos: viagem },
+      meses_base: meses, meses_observados: premissas.meses_observados, percentual_participacao: percentual * 100,
+      cotas_hipoteticas: cotasCenario, passageiros, pendencias,
+      fontes: { fixos: 'media_mensal_historica_anualizada', taxas: taxaCadastrada !== null ? 'cadastro_aeronave' : 'media_por_etapa_registrada', viagem: pernoiteCadastrado !== null ? 'pernoite_cadastrado' : 'media_por_dia_com_voo', reservas: reservaCadastrada !== null ? 'reserva_cadastrada' : cadastrado(aircraft.custo_hora_complementar_centavos) !== null ? 'manutencao_e_reservas_cadastradas' : 'reserva_historica_por_hora' } }
+  }
   return c.json({
     total_centavos: combustivel + complementar + taxas + pernoite,
+    ...(projecao ? { projecao } : {}),
     distancia_nm: Number(distanciaRotaNm.toFixed(1)),
     tempo_voo_minutos: Math.max(1, Math.round(tempoHoras * 60)) * trechos,
     ida_e_volta: idaVolta,
@@ -866,3 +930,4 @@ portalRoutes.post('/api/portal/solicitacoes', async c => {
   }
   return c.json({ success: true, solicitacao_id: id, notification_sent: notificationSent, message: 'Solicitação enviada com sucesso. Aguarde a confirmação da coordenação.' }, 201)
 })
+
