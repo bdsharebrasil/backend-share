@@ -624,26 +624,28 @@ function combustivelPorTexto(value: unknown): 'JET' | 'AVGAS' | null {
 }
 
 async function resolverTipoCombustivel(db: D1Database, aircraft: Record<string, unknown>): Promise<'JET' | 'AVGAS' | null> {
-  const direto = combustivelPorTexto(aircraft.tipo_aeronave) ?? combustivelPorTexto(aircraft.performance_categoria)
-  if (direto) return direto
-  const ultimo = await db.prepare(`SELECT tipo_combustivel FROM abastecimentos
-    WHERE aeronave_id = ?1 AND TRIM(COALESCE(tipo_combustivel, '')) <> ''
-    ORDER BY date(data) DESC, criado_em DESC LIMIT 1`).bind(String(aircraft.id)).first<{ tipo_combustivel: string | null }>().catch(() => null)
-  return combustivelPorTexto(ultimo?.tipo_combustivel)
+  if (!String(aircraft.tipo_aeronave || '').trim()) return null
+  return combustivelPorTexto(aircraft.tipo_aeronave)
 }
-
 portalRoutes.post('/api/portal/simulador/voo', async c => {
   const user = await portalSession(c)
   if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
-  const body = await c.req.json<{ aeronave_id?: string; origem?: string; destino?: string }>().catch(() => null)
+  const body = await c.req.json<{ aeronave_id?: string; origem?: string; destino?: string; ida_e_volta?: boolean; dias_fora?: number }>().catch(() => null)
   const aeronaveId = String(body?.aeronave_id || '').trim()
   const origem = String(body?.origem || '').trim().toUpperCase()
   const destino = String(body?.destino || '').trim().toUpperCase()
-  if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !/^[A-Z]{4}$/.test(origem) || !/^[A-Z]{4}$/.test(destino) || origem === destino) {
+  if (!/^[0-9a-f-]{8,}$/i.test(aeronaveId) || !/^[A-Z0-9]{4}$/.test(origem) || !/^[A-Z0-9]{4}$/.test(destino) || origem === destino) {
     return c.json({ error: 'parametros_invalidos' }, 400)
   }
+  const idaVolta = body?.ida_e_volta === true
+  const diasFora = idaVolta ? Math.min(30, Math.max(0, Math.trunc(Number(body?.dias_fora) || 0))) : 0
+  const aircraftColumns = new Set((await c.env.SHARE_DB.prepare("SELECT name FROM pragma_table_info('aeronave')").all<{ name: string }>().catch(() => ({ results: [] }))).results?.map(column => column.name) || [])
+  const optionalAircraftColumn = (name: string) => aircraftColumns.has(name) ? `a.${name}` : 'NULL'
   const aircraft = await c.env.SHARE_DB.prepare(`SELECT a.id, a.consumo_combustivel, a.velocidade_cruzeiro,
-      a.tipo_aeronave, p.categoria AS performance_categoria, COALESCE(p.velocidade_cruzeiro_kt,
+      a.tipo_aeronave, ${optionalAircraftColumn('custo_hora_complementar_centavos')} AS custo_hora_complementar_centavos,
+      ${optionalAircraftColumn('taxas_trecho_centavos')} AS taxas_trecho_centavos,
+      ${optionalAircraftColumn('custo_dia_pernoite_centavos')} AS custo_dia_pernoite_centavos,
+      p.categoria AS performance_categoria, COALESCE(p.velocidade_cruzeiro_kt,
         (SELECT p2.velocidade_cruzeiro_kt FROM performance_aeronave p2
           WHERE lower(trim(p2.modelo)) = lower(trim(a.modelo)) ORDER BY p2.atualizado_em DESC LIMIT 1)) AS velocidade_cruzeiro_kt
     FROM aeronave a LEFT JOIN performance_aeronave p ON p.id = a.performance_aeronave_id
@@ -662,8 +664,9 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
   const consumo = positiveNumber(aircraft.consumo_combustivel)
   if (!velocidade || !consumo) return c.json({ error: 'dados_aeronave_indisponiveis' }, 422)
   const distanciaNm = haversineKm(origemCoord.lat, origemCoord.lon, destinoCoord.lat, destinoCoord.lon) / 1.852
-  const tempoHoras = distanciaNm / velocidade
-  const tempoVooMinutos = Math.max(1, Math.round(tempoHoras * 60))
+  const distanciaRotaNm = distanciaNm * 1.05
+  const tempoHoras = distanciaRotaNm / velocidade + 0.15
+  const trechos = idaVolta ? 2 : 1
   const tipoCombustivel = await resolverTipoCombustivel(c.env.SHARE_DB, aircraft)
   if (!tipoCombustivel) return c.json({ error: 'tipo_combustivel_indisponivel' }, 422)
   const colunaPreco = tipoCombustivel === 'JET' ? 'preco_jet' : 'preco_avgas'
@@ -671,21 +674,33 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
     const local = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
       WHERE upper(COALESCE(codigo_icao, '')) = ?1 AND COALESCE(${colunaPreco}, 0) > 0`).bind(icao).first<{ media: number | null }>().catch(() => null)
     if (positiveNumber(local?.media)) return { price: positiveNumber(local?.media)!, source: 'fornecedores_combustivel_icao' }
-    const nacional = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
-      WHERE COALESCE(${colunaPreco}, 0) > 0`).first<{ media: number | null }>().catch(() => null)
-    if (positiveNumber(nacional?.media)) return { price: positiveNumber(nacional?.media)!, source: 'fornecedores_combustivel_media_banco' }
     const historico = await c.env.SHARE_DB.prepare(`SELECT AVG(valor_unitario) AS media FROM abastecimentos
       WHERE (upper(COALESCE(local, '')) = ?1 OR upper(COALESCE(trecho, '')) LIKE ?2)
         AND upper(COALESCE(tipo_combustivel, '')) LIKE ?3 AND COALESCE(valor_unitario, 0) > 0
         AND date(data) >= date('now', '-365 days')`).bind(icao, `%${icao}%`, tipoCombustivel === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null }>().catch(() => null)
-    return positiveNumber(historico?.media) ? { price: positiveNumber(historico?.media)!, source: 'abastecimentos_historico_12m' } : null
+    if (positiveNumber(historico?.media)) return { price: positiveNumber(historico?.media)!, source: 'abastecimentos_historico_12m' }
+    const nacional = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
+      WHERE COALESCE(${colunaPreco}, 0) > 0`).first<{ media: number | null }>().catch(() => null)
+    return positiveNumber(nacional?.media) ? { price: positiveNumber(nacional?.media)!, source: 'fornecedores_combustivel_media_banco' } : null
   }))
   const validPrices = airportPrices.filter((item): item is { price: number; source: string } => Boolean(item))
   if (!validPrices.length) return c.json({ error: 'preco_combustivel_indisponivel' }, 422)
   const precoMedio = validPrices.reduce((sum, item) => sum + item.price, 0) / validPrices.length
-  const consumoLitros = consumo * tempoHoras
-  const totalCentavos = Math.round(consumoLitros * precoMedio * 100)
-  return c.json({ total_centavos: totalCentavos, distancia_nm: Number(distanciaNm.toFixed(1)), tempo_voo_minutos: tempoVooMinutos })
+  const combustivel = Math.round(consumo * tempoHoras * precoMedio * 100) * trechos
+  const complementar = Number(aircraft.custo_hora_complementar_centavos) > 0
+    ? Math.round(Number(aircraft.custo_hora_complementar_centavos) * tempoHoras) * trechos : 0
+  const taxas = Number(aircraft.taxas_trecho_centavos || 0) * trechos
+  const pernoite = Number(aircraft.custo_dia_pernoite_centavos || 0) * diasFora
+  const custosCompletos = aircraft.custo_hora_complementar_centavos != null
+  return c.json({
+    total_centavos: combustivel + complementar + taxas + pernoite,
+    distancia_nm: Number(distanciaRotaNm.toFixed(1)),
+    tempo_voo_minutos: Math.max(1, Math.round(tempoHoras * 60)) * trechos,
+    ida_e_volta: idaVolta,
+    aviso: custosCompletos ? null : 'estimativa parcial',
+    componentes: { combustivel_centavos: combustivel, manutencao_reservas_centavos: complementar, taxas_centavos: taxas, pernoite_centavos: pernoite },
+    combustivel: { tipo: tipoCombustivel, preco_medio: precoMedio, fonte: validPrices.map(item => item.source) },
+  })
 })
 
 portalRoutes.get('/api/portal/aeronave/:aeronaveId/rastreio', async c => {

@@ -4,12 +4,19 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../src/routes/portalRoutes.ts', import.meta.url), 'utf8');
 
-test('simulador de voo possui POST autenticado e calcula custo com dados reais de rota/aeronave', () => {
+test('simulador de voo possui POST autenticado e calcula custo completo com dados reais de rota/aeronave', () => {
   assert.match(source, /portalRoutes\.post\('\/api\/portal\/simulador\/voo'/);
   assert.match(source, /ca\.id = \(SELECT cotista_id FROM user_cliente WHERE id = \?4 LIMIT 1\)/);
   assert.match(source, /haversineKm\(origemCoord\.lat, origemCoord\.lon, destinoCoord\.lat, destinoCoord\.lon\) \/ 1\.852/);
-  assert.match(source, /const consumoLitros = consumo \* tempoHoras/);
-  assert.match(source, /const totalCentavos = Math\.round\(consumoLitros \* precoMedio \* 100\)/);
+  assert.match(source, /const distanciaRotaNm = distanciaNm \* 1\.05/);
+  assert.match(source, /const tempoHoras = distanciaRotaNm \/ velocidade \+ 0\.15/);
+  assert.match(source, /const trechos = idaVolta \? 2 : 1/);
+  assert.match(source, /const combustivel = Math\.round\(consumo \* tempoHoras \* precoMedio \* 100\) \* trechos/);
+  assert.match(source, /manutencao_reservas_centavos/);
+  assert.match(source, /aviso: custosCompletos \? null : 'estimativa parcial'/);
+  assert.match(source, /\^\[A-Z0-9\]\{4\}\$/);
+  assert.match(source, /if \(!String\(aircraft\.tipo_aeronave \|\| ''\)\.trim\(\)\) return null/);
+  assert.match(source, /abastecimentos_historico_12m/);
   assert.match(source, /preco_combustivel_indisponivel/);
 });
 
