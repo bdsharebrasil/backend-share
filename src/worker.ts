@@ -1,3 +1,4 @@
+import { retornarRelatorioRascunho, CONCORRENCIA_RELATORIO_SQL, valoresConcorrenciaRelatorio } from './financeiro/relatorioRascunho'
 import { Hono, Context } from 'hono'
 import { cors } from 'hono/cors'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -4466,20 +4467,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/voltar-rascunho', async 
     await validateWorkerSchema(c, [{ table: 'relatorio_despesa_viagem', columns: ['token_aprovacao_tripulante_1', 'token_aprovacao_tripulante_2'] }])
     const id = c.req.param('id')
     const db = c.env.SHARE_DB
-    const atual = await db.prepare(`SELECT status, numero_relatorio, pdf_path, token_aprovacao_tripulante_1, token_aprovacao_tripulante_2
-      FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<any>()
-    if (!atual) return c.notFound()
-    if (statusRelatorioViagem(atual.status) !== 'finalizado') return c.json({ error: 'somente_relatorios_finalizados_podem_voltar_a_rascunho' }, 409)
-    if (atual.token_aprovacao_tripulante_1 || atual.token_aprovacao_tripulante_2) return c.json({ error: 'relatorio_com_token_de_aprovacao_nao_pode_voltar_a_rascunho' }, 409)
-    const result = await db.prepare(`UPDATE relatorio_despesa_viagem SET status = 'rascunho',
-      aprovado_tripulante_1_em = NULL, aprovado_tripulante_2_em = NULL, aprovado_tripulante_em = NULL,
-      enviado_para_tripulante_em = NULL, enviado_para_tripulante_2_em = NULL, enviado_para_cliente_em = NULL,
-      status_aprovacao_tripulante = NULL, status_aprovacao_tripulante_2 = NULL,
-      motivo_reprovacao_tripulante_1 = NULL, motivo_reprovacao_tripulante_2 = NULL,
-      pdf_url = NULL, pdf_path = NULL, atualizado_em = CURRENT_TIMESTAMP
-      WHERE id = ?1 AND lower(COALESCE(status, '')) = 'finalizado'
-        AND COALESCE(trim(token_aprovacao_tripulante_1), '') = '' AND COALESCE(trim(token_aprovacao_tripulante_2), '') = ''`).bind(id).run()
-    if (!result.meta.changes) return c.json({ error: 'relatorio_alterado_concorrente_ou_com_token_de_aprovacao' }, 409)
+    const retorno = await retornarRelatorioRascunho(db, id)
+    if (retorno.status !== 200) return c.json({ error: retorno.error }, retorno.status)
+    if (!retorno.alterado) return c.json({ relatorio: await buscarRelatorioViagemComNomes(c, id) })
+    const atual = retorno.atual
     await db.prepare(`INSERT INTO auditoria_financeira (id, entidade, entidade_id, operacao, usuario_id, motivo)
       VALUES (?1, 'relatorio_despesa_viagem', ?2, 'VOLTAR_RASCUNHO', ?3, ?4)`).bind(
       uuid(), id, user.id, JSON.stringify({ numero_relatorio: atual.numero_relatorio || null, usuario_id: user.id, alterado_em: new Date().toISOString() }),
@@ -4652,12 +4643,11 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
       ])
     }
     if (!retryApprovedSync) {
-      const updateStatement = c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = CASE WHEN ? = 'reprovado' THEN ? ELSE ${reasonColumn} END, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, decision, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, id)
-      if (decision === 'reprovado') {
-        await c.env.SHARE_DB.batch([...historicoAjusteStatements(c.env.SHARE_DB, report, pos, String(body.observacoes || '').trim(), anexoHistorico), updateStatement])
-      } else {
-        await updateStatement.run()
-      }
+      const updateStatement = c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = CASE WHEN ? = 'reprovado' THEN ? ELSE ${reasonColumn} END, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND ${CONCORRENCIA_RELATORIO_SQL}`).bind(decision, decision, pos, decision, pos, decision, body.observacoes?.trim() || null, segundoAplicavel ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, id, ...valoresConcorrenciaRelatorio(report))
+      const resultadoDecisao = decision === 'reprovado'
+        ? (await c.env.SHARE_DB.batch([...historicoAjusteStatements(c.env.SHARE_DB, report, pos, String(body.observacoes || '').trim(), anexoHistorico), updateStatement]))[2]
+        : await updateStatement.run()
+      if (!resultadoDecisao.meta.changes) return c.json({ error: 'relatorio_alterado_concorrente' }, 409)
     }
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
@@ -4908,12 +4898,11 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
       anexosRejeicaoJson = JSON.stringify([...anexosExistentes, { ...metadataAnexo, caminho_arquivo: caminho }])
     }
     if (!retryApprovedSync) {
-      const updateStatement = c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = CASE WHEN ? = 'reprovado' THEN ? ELSE ${reasonColumn} END, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?`).bind(decision, decision, pos, decision, pos, decision, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, row.id)
-      if (decision === 'reprovado') {
-        await c.env.SHARE_DB.batch([...historicoAjusteStatements(c.env.SHARE_DB, row, pos, String(body.motivo || '').trim(), anexoHistorico), updateStatement])
-      } else {
-        await updateStatement.run()
-      }
+      const updateStatement = c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${statusColumn} = ?, ${dateColumn} = CASE WHEN ? = 'aprovado' THEN COALESCE(${dateColumn}, CURRENT_TIMESTAMP) ELSE NULL END, aprovado_tripulante_em = CASE WHEN ? = 1 AND ? = 'aprovado' THEN COALESCE(aprovado_tripulante_em, CURRENT_TIMESTAMP) WHEN ? = 1 THEN NULL ELSE aprovado_tripulante_em END, ${reasonColumn} = CASE WHEN ? = 'reprovado' THEN ? ELSE ${reasonColumn} END, status_aprovacao_tripulante_2 = CASE WHEN ? = 0 AND ? = 'aprovado' THEN 'nao_aplicavel' ELSE status_aprovacao_tripulante_2 END, status = ?, anexos_rejeicao = COALESCE(?, anexos_rejeicao), atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND ${CONCORRENCIA_RELATORIO_SQL}`).bind(decision, decision, pos, decision, pos, decision, body.motivo?.trim() || null, requiredSecond ? 1 : 0, decision, nextReportStatus, anexosRejeicaoJson, row.id, ...valoresConcorrenciaRelatorio(row))
+      const resultadoDecisao = decision === 'reprovado'
+        ? (await c.env.SHARE_DB.batch([...historicoAjusteStatements(c.env.SHARE_DB, row, pos, String(body.motivo || '').trim(), anexoHistorico), updateStatement]))[2]
+        : await updateStatement.run()
+      if (!resultadoDecisao.meta.changes) return c.json({ error: 'relatorio_alterado_concorrente' }, 409)
     }
     const updatedForNotification = await buscarRelatorioViagemComNomes(c, row.id)
     if (updatedForNotification) {
@@ -5093,7 +5082,7 @@ function parseAdjustmentAttachments(value: unknown): any[] {
       : []
   } catch { return [] }
 }
-function ajusteAnteriorStatement(db: D1Database, report: any, pos: 1 | 2) {
+function ajusteAnteriorStatement(db: D1Database, report: any, pos: 1 | 2, conferirEstado = false) {
   const previousReason = String(pos === 1 ? report.motivo_reprovacao_tripulante_1 || '' : report.motivo_reprovacao_tripulante_2 || '').trim()
   const legacyId = `legacy-${report.id}-${pos}`
   const legacyAttachments = parseRejectionAttachments(report.anexos_rejeicao).map(({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }) => ({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }))
@@ -5103,14 +5092,14 @@ function ajusteAnteriorStatement(db: D1Database, report: any, pos: 1 | 2) {
     WHERE trim(?4) <> '' AND NOT EXISTS (
       SELECT 1 FROM relatorio_despesa_viagem_historico_ajustes
       WHERE relatorio_despesa_viagem_id = ?2 AND tripulante_pos = ?3
-    )`).bind(legacyId, report.id, pos, previousReason, JSON.stringify(legacyAttachments), report.atualizado_em || null)
+    )${conferirEstado ? ` AND EXISTS (SELECT 1 FROM relatorio_despesa_viagem WHERE id = ?2 AND ${CONCORRENCIA_RELATORIO_SQL})` : ''}`).bind(legacyId, report.id, pos, previousReason, JSON.stringify(legacyAttachments), report.atualizado_em || null, ...(conferirEstado ? valoresConcorrenciaRelatorio(report) : []))
 }
 function historicoAjusteStatements(db: D1Database, report: any, pos: 1 | 2, reason: string, attachments: any[]) {
   const criadoEm = new Date().toISOString()
   const currentInsert = db.prepare(`INSERT INTO relatorio_despesa_viagem_historico_ajustes
     (id, relatorio_despesa_viagem_id, tripulante_pos, motivo, anexos, criado_em)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6)`).bind(uuid(), report.id, pos, reason, JSON.stringify(attachments), criadoEm)
-  return [ajusteAnteriorStatement(db, report, pos), currentInsert]
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE EXISTS (SELECT 1 FROM relatorio_despesa_viagem WHERE id = ?2 AND ${CONCORRENCIA_RELATORIO_SQL})`).bind(uuid(), report.id, pos, reason, JSON.stringify(attachments), criadoEm, ...valoresConcorrenciaRelatorio(report))
+  return [ajusteAnteriorStatement(db, report, pos, true), currentInsert]
 }
 function rejectionAttachments(value: unknown, reportId: string): any[] {
   return parseRejectionAttachments(value).map(({ id, nome_arquivo, tipo_arquivo, tamanho_arquivo, criado_em }) => ({
@@ -5273,4 +5262,5 @@ export default {
     }
   },
 }
+
 
