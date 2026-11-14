@@ -1,4 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
+import { readFileSync } from 'node:fs'
+import { VERSAO_QUIZ, recomendar } from '../src/quiz/modelo.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { quizRoutes } from '../src/quizRoutes.ts'
@@ -10,23 +12,8 @@ const options = {
 }
 function makeEnv() {
   const sqlite = new DatabaseSync(':memory:')
-  sqlite.exec(`
-    PRAGMA foreign_keys=ON;
-    CREATE TABLE leads_quiz (
-      id TEXT PRIMARY KEY NOT NULL, protocolo TEXT NOT NULL UNIQUE, chave_reenvio TEXT NOT NULL UNIQUE,
-      resumo_envio TEXT NOT NULL, nome TEXT NOT NULL, telefone TEXT NOT NULL, cidade TEXT NOT NULL,
-      rotas TEXT, momento TEXT NOT NULL, respostas_json TEXT NOT NULL, resultado_json TEXT NOT NULL,
-      aeronave_sugerida TEXT, aeronave_alternativa TEXT, versao_quiz TEXT NOT NULL, origem_json TEXT NOT NULL,
-      duracao_segundos INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'NOVO', consentimento INTEGER NOT NULL,
-      versao_consentimento TEXT NOT NULL, consentimento_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      token_evento_hash TEXT NOT NULL, whatsapp_clicado_em TEXT,
-      criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE eventos_quiz (
-      id TEXT PRIMARY KEY NOT NULL, lead_id TEXT NOT NULL REFERENCES leads_quiz(id) ON DELETE CASCADE,
-      tipo TEXT NOT NULL, criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(lead_id,tipo)
-    );
-  `)
+  sqlite.exec('PRAGMA foreign_keys=ON')
+  sqlite.exec(readFileSync(new URL('../migrations/20261114_quiz_participacoes.sql', import.meta.url), 'utf8'))
   const db = {
     prepare(sql) {
       const make = (params = []) => ({
@@ -51,8 +38,8 @@ function makeEnv() {
   }
   const env = {
     SHARE_DB: db,
-    INTERNAL_TOKEN: 'local-only-test-secret',
-    ALLOWED_ORIGINS: origin,
+    QUIZ_HASH_SECRET: 'local-only-test-secret',
+    QUIZ_ALLOWED_ORIGINS: origin,
     RATE_LIMITER: {
       idFromName: (name) => name,
       get: () => ({ fetch: async () => Response.json({ allowed: true }) }),
@@ -69,7 +56,7 @@ function request(body, path = '/api/quiz/leads') {
 }
 function payload() {
   return {
-    chave_reenvio: crypto.randomUUID(), versao: '2026-11-v1', respostas: options, resultado: result,
+    chave_reenvio: crypto.randomUUID(), versao: VERSAO_QUIZ, respostas: options, resultado: result,
     contato: { nome: 'Cliente Teste', telefone: '(65) 99999-1234', cidade: 'Cuiabá', momento: 'EXPLORANDO', consentimento: true },
     origem: {}, duracao_segundos: 30,
   }
@@ -82,38 +69,73 @@ test('salva lead consentido e registra evento no D1, sem duplicar reenvio', asyn
   assert.equal(first.status, 201)
   const saved = await first.json()
   assert.equal(saved.resultado.principal, 'cirrus')
-  assert.equal(sqlite.prepare('SELECT telefone FROM leads_quiz').get().telefone, '5565999991234')
-  assert.equal(sqlite.prepare('SELECT tipo FROM eventos_quiz').get().tipo, 'PERFIL_SALVO')
+  assert.equal(sqlite.prepare('SELECT telefone FROM quiz_participacoes').get().telefone, '5565999991234')
+  assert.equal(sqlite.prepare('SELECT tipo FROM quiz_eventos').get().tipo, 'PERFIL_SALVO')
   const second = await quizRoutes.fetch(request(body), env)
   assert.equal(second.status, 201)
-  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM leads_quiz').get().n, 1)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM quiz_participacoes').get().n, 1)
   const event = await quizRoutes.fetch(request({ tipo: 'WHATSAPP_CLICADO', token: saved.token_evento }, `/api/quiz/leads/${saved.id}/eventos`), env)
   assert.equal(event.status, 200)
-  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM eventos_quiz').get().n, 2)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM quiz_eventos').get().n, 2)
   sqlite.close()
 })
 
 test('aceita resultado para análise personalizada sem perfil principal', async () => {
   const { env, sqlite } = makeEnv()
   const body = payload()
-  body.resultado = { principal: null, segunda: null, motivos: [], avisos: ['Análise humana'] }
+  body.respostas = { ...options, pax: '8+' }
+  body.resultado = { principal: 'cirrus' }
   const response = await quizRoutes.fetch(request(body), env)
   assert.equal(response.status, 201)
   assert.equal((await response.json()).resultado.principal, null)
-  assert.equal(sqlite.prepare('SELECT aeronave_sugerida FROM leads_quiz').get().aeronave_sugerida, null)
+  assert.equal(sqlite.prepare('SELECT aeronave_sugerida FROM quiz_participacoes').get().aeronave_sugerida, null)
   sqlite.close()
 })
 
-test('não salva sem consentimento e rejeita origem não permitida', async () => {
+test('descarta contato sem consentimento e rejeita origem não permitida', async () => {
   const { env, sqlite } = makeEnv()
   const body = payload()
   body.contato.consentimento = false
   const invalid = await quizRoutes.fetch(request(body), env)
-  assert.equal(invalid.status, 400)
+  assert.equal(invalid.status, 201)
+  assert.deepEqual({...sqlite.prepare('SELECT nome,telefone,consentimento FROM quiz_participacoes').get()}, {nome:null,telefone:null,consentimento:0})
   const forbidden = await quizRoutes.fetch(new Request('https://api.share-brasil.com/api/quiz/leads', {
     method: 'POST', headers: { Origin: 'https://fora.example', 'Content-Type': 'application/json' }, body: JSON.stringify(payload()),
   }), env)
   assert.equal(forbidden.status, 403)
-  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM leads_quiz').get().n, 0)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM quiz_participacoes').get().n, 1)
   sqlite.close()
+})
+
+
+test('recalcula no servidor para sete modelos sem confiar no cliente', async () => {
+  const {env,sqlite}=makeEnv()
+  const body=payload()
+  body.respostas={...options,pax:'7',distancia:'media',prioridade:'tempo',conforto:'sim'}
+  body.resultado={principal:'cirrus',segunda:'matrix',motivos:['adulterado'],avisos:[]}
+  const res=await quizRoutes.fetch(request(body),env)
+  assert.equal(res.status,201)
+  assert.deepEqual((await res.json()).resultado,recomendar(body.respostas))
+  assert.equal(sqlite.prepare('SELECT aeronave_sugerida FROM quiz_participacoes').get().aeronave_sugerida,'hawker400a')
+  sqlite.close()
+})
+test('aceita contato autorizado parcial e recusa versão antiga', async () => {
+  const {env,sqlite}=makeEnv()
+  for(const contato of [{nome:'Pessoa',consentimento:true},{telefone:'(65) 99999-1234',consentimento:true},{}]) {
+    assert.equal((await quizRoutes.fetch(request({...payload(),contato}),env)).status,201)
+  }
+  assert.equal((await quizRoutes.fetch(request({...payload(),versao:'2026-11-v2'}),env)).status,400)
+  sqlite.close()
+})
+test('preflight é público com origem restrita e nenhum GET expõe contatos', async () => {
+  const {env,sqlite}=makeEnv()
+  const res=await quizRoutes.fetch(new Request('https://api.share-brasil.com/api/quiz/leads',{method:'OPTIONS',headers:{Origin:origin,'Access-Control-Request-Method':'POST'}}),env)
+  assert.equal(res.status,204)
+  assert.equal(res.headers.get('Access-Control-Allow-Origin'),origin)
+  assert.equal((await quizRoutes.fetch(new Request('https://api.share-brasil.com/api/quiz/leads',{headers:{Origin:origin}}),env)).status,405)
+  sqlite.close()
+})
+test('a rota pública é montada antes do CORS interno e não altera suas origens', () => {
+  const source=readFileSync(new URL('../src/worker.ts',import.meta.url),'utf8')
+  assert.ok(source.indexOf("app.route('/', quizRoutes)") < source.indexOf("app.use('*'"))
 })
