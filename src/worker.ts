@@ -36,7 +36,7 @@ import { uuid } from './lib/strings'
 import { shareBrasilPontoRoutes } from './routes/shareBrasilPontoRoutes'
 import { createLogger } from './lib/logger'
 import type { Env } from './types/env'
-import { quizRoutes } from './quizRoutes'
+import { quizRoutes, limparContadoresQuiz } from './quizRoutes'
 import {
   authenticatedColaborador,
   authenticatedColaboradorToken,
@@ -54,7 +54,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Bindings = Pick<Env, 'AISWEB_API_KEY' | 'AISWEB_API_PASS' | 'CACHE_KV' | 'RATE_LIMITER' | 'FILES' | 'SHARE_FILES' | 'AVATAR_AERONAVES' | 'SHARE_DB' | 'RESEND_API_KEY' | 'INTERNAL_TOKEN' | 'EMAIL_FROM' | 'SUPABASE_URL' | 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY' | 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'WINSOCK_VALUATION_URL' | 'WINSOCK_API_KEY' | 'WINSOCK_AUTH_HEADER' | 'WINSOCK_AUTH_PREFIX' | 'ANTHROPIC_API_KEY' | 'GEMINI_API_KEY' | 'ALLOWED_ORIGINS' | 'TELEGRAM_BOT_TOKEN' | 'CLIENT_SESSION_SECRET' | 'CLIENT_SESSION_TTL_SECONDS' | 'CLOUDFLARE_TURN_KEY_ID' | 'CLOUDFLARE_TURN_API_TOKEN' | 'MEETING_ROOMS' | 'ADSB_PROVIDER' | 'API_OPENSTREETMAP'>
+type Bindings = Pick<Env, 'AISWEB_API_KEY' | 'AISWEB_API_PASS' | 'CACHE_KV' | 'RATE_LIMITER' | 'FILES' | 'SHARE_FILES' | 'AVATAR_AERONAVES' | 'SHARE_DB' | 'RESEND_API_KEY' | 'INTERNAL_TOKEN' | 'EMAIL_FROM' | 'SUPABASE_URL' | 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY' | 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'WINSOCK_VALUATION_URL' | 'WINSOCK_API_KEY' | 'WINSOCK_AUTH_HEADER' | 'WINSOCK_AUTH_PREFIX' | 'ANTHROPIC_API_KEY' | 'GEMINI_API_KEY' | 'ALLOWED_ORIGINS' | 'TELEGRAM_BOT_TOKEN' | 'CLIENT_SESSION_SECRET' | 'CLIENT_SESSION_TTL_SECONDS' | 'CLOUDFLARE_TURN_KEY_ID' | 'CLOUDFLARE_TURN_API_TOKEN' | 'MEETING_ROOMS' | 'ADSB_PROVIDER' | 'API_OPENSTREETMAP' | 'QUIZ_HASH_SECRET' | 'QUIZ_ALLOWED_ORIGINS'>
 
 interface ReservationRequest {
   hotelId: string
@@ -102,6 +102,9 @@ app.onError((error, c) => {
   return c.json({ error: 'erro_interno', code: 'erro_interno' }, 500)
 })
 
+// O quiz responde ao próprio preflight antes do CORS das rotas internas.
+app.route('/', quizRoutes)
+
 // CRUCIAL: O CORS precisa ser o primeiro middleware global executado
 app.use('*', async (c, next) => {
   const corsMiddleware = cors({
@@ -119,7 +122,6 @@ app.use('*', async (c, next) => {
   await next()
 })
 app.route('/', abastecimentosRoutes)
-app.route('/', quizRoutes)
 app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
 app.route('/', jornadasRoutes)
@@ -5259,9 +5261,11 @@ export default {
     // criavam latência e duplicavam autenticação sem garantir consistência.
     if (_env.SHARE_DB) {
       ctx.waitUntil(coletarRastreioAgendado(_env).catch((erro) => console.warn('[rastreio/cron]', erro)))
+      if (_env.QUIZ_HASH_SECRET && new Date(_event.scheduledTime ?? Date.now()).getUTCMinutes() === 0) ctx.waitUntil(limparContadoresQuiz(_env.SHARE_DB).catch(() => undefined))
       // A fila financeira mantém a frequência anterior de 15 minutos.
       if (new Date(_event.scheduledTime ?? Date.now()).getUTCMinutes() % 15 === 0) ctx.waitUntil(processFinanceQueue(_env.SHARE_DB, null, 50))
     }
   },
 }
+
 

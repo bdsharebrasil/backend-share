@@ -1,4 +1,6 @@
 export type Env = {
+  QUIZ_HASH_SECRET?: string
+  QUIZ_ALLOWED_ORIGINS?: string
   AISWEB_API_KEY: string
   AISWEB_API_PASS: string
   CACHE_KV: KVNamespace
@@ -31,3 +33,4 @@ export type Env = {
   ADSB_PROVIDER?: string
   API_OPENSTREETMAP?: string
 }
+
