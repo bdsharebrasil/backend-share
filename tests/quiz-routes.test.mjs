@@ -93,6 +93,17 @@ test('salva lead consentido e registra evento no D1, sem duplicar reenvio', asyn
   sqlite.close()
 })
 
+test('aceita resultado para análise personalizada sem perfil principal', async () => {
+  const { env, sqlite } = makeEnv()
+  const body = payload()
+  body.resultado = { principal: null, segunda: null, motivos: [], avisos: ['Análise humana'] }
+  const response = await quizRoutes.fetch(request(body), env)
+  assert.equal(response.status, 201)
+  assert.equal((await response.json()).resultado.principal, null)
+  assert.equal(sqlite.prepare('SELECT aeronave_sugerida FROM leads_quiz').get().aeronave_sugerida, null)
+  sqlite.close()
+})
+
 test('não salva sem consentimento e rejeita origem não permitida', async () => {
   const { env, sqlite } = makeEnv()
   const body = payload()

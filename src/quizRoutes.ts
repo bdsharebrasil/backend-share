@@ -42,7 +42,7 @@ function normalizar(body: any) {
   if (nome.length < 2 || !/^55[1-9]{2}[2-9][0-9]{7,8}$/.test(telefoneBR)) throw new Error('Confira nome e WhatsApp com DDD.')
   const momento = momentos.has(c.momento) ? c.momento : 'EXPLORANDO'
   const resultado = body.resultado
-  if (!resultado || !(resultado.principal === null || perfis.has(resultado.principal)) || !(resultado.segunda == null || perfis.has(resultado.segunda)) || !Array.isArray(resultado.motivos) || !Array.isArray(resultado.avisos)) throw new Error('Resultado inválido.')
+  if (!resultado || !(resultado.principal == null || perfis.has(resultado.principal)) || !(resultado.segunda == null || perfis.has(resultado.segunda)) || !Array.isArray(resultado.motivos) || !Array.isArray(resultado.avisos)) throw new Error('Resultado inválido.')
   const sanitizeList = (value: unknown) => (value as unknown[]).slice(0, 20).map((item) => text(item, 300))
   const resultadoSeguro = { principal: resultado.principal ?? null, segunda: resultado.segunda ?? null, motivos: sanitizeList(resultado.motivos), avisos: sanitizeList(resultado.avisos) }
   const origem: Record<string, string> = {}
