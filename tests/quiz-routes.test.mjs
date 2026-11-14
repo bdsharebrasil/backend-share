@@ -139,3 +139,57 @@ test('a rota pública é montada antes do CORS interno e não altera suas origen
   const source=readFileSync(new URL('../src/worker.ts',import.meta.url),'utf8')
   assert.ok(source.indexOf("app.route('/', quizRoutes)") < source.indexOf("app.use('*'"))
 })
+
+test('origens do domínio próprio e do Pages passam no preflight e salvam participações', async () => {
+  const { env, sqlite } = makeEnv()
+  const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8')
+  const configuradas = config.match(/^QUIZ_ALLOWED_ORIGINS\s*=\s*"([^"]+)"/m)?.[1]
+  assert.ok(configuradas)
+  try {
+    for (const configuracao of [undefined, configuradas]) {
+      env.QUIZ_ALLOWED_ORIGINS = configuracao
+      for (const origem of [origin, 'https://conheca-share.pages.dev']) {
+        const url = 'https://api.share-brasil.com/api/quiz/leads'
+        const preflight = await quizRoutes.fetch(new Request(url, {
+          method: 'OPTIONS', headers: {
+            Origin: origem, 'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'content-type',
+          },
+        }), env)
+        assert.equal(preflight.status, 204, `${origem}: preflight`)
+        assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), origem)
+        assert.equal(preflight.headers.get('Access-Control-Allow-Headers'), 'Content-Type')
+        const envio = request(payload())
+        envio.headers.set('Origin', origem)
+        const salvo = await quizRoutes.fetch(envio, env)
+        assert.equal(salvo.status, 201, `${origem}: gravação`)
+        assert.equal(salvo.headers.get('Access-Control-Allow-Origin'), origem)
+      }
+    }
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM quiz_participacoes').get().n, 4)
+  } finally {
+    sqlite.close()
+  }
+})
+
+test('CORS do Pages mantém cabeçalhos em erros e rejeita domínios parecidos', async () => {
+  const { env, sqlite } = makeEnv()
+  delete env.QUIZ_ALLOWED_ORIGINS
+  try {
+    for (const origem of ['https://conheca-share.pages.dev.evil.example', 'https://outro.pages.dev']) {
+      const envio = request(payload())
+      envio.headers.set('Origin', origem)
+      const recusado = await quizRoutes.fetch(envio, env)
+      assert.equal(recusado.status, 403)
+      assert.equal(recusado.headers.get('Access-Control-Allow-Origin'), null)
+    }
+    delete env.QUIZ_HASH_SECRET
+    const envio = request(payload())
+    envio.headers.set('Origin', 'https://conheca-share.pages.dev')
+    const erro = await quizRoutes.fetch(envio, env)
+    assert.equal(erro.status, 503)
+    assert.equal(erro.headers.get('Access-Control-Allow-Origin'), 'https://conheca-share.pages.dev')
+  } finally {
+    sqlite.close()
+  }
+})
