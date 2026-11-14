@@ -25,7 +25,7 @@ npx wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261114_quiz_
 npx wrangler secret put QUIZ_HASH_SECRET
 ```
 
-4. A origem do site está em `QUIZ_ALLOWED_ORIGINS`. Outras origens de homologação podem ser adicionadas separadas por vírgulas. O CORS dessa rota é isolado; não é necessário liberar o site nas APIs financeiras ou operacionais.
+4. As origens do site estão em `QUIZ_ALLOWED_ORIGINS`: `https://conheca.share-brasil.com,https://conheca-share.pages.dev`. Use URLs de origem exatas, sem barra final. Outras origens de homologação podem ser adicionadas separadas por vírgulas. O CORS dessa rota é isolado; não é necessário liberar o site nas APIs financeiras ou operacionais.
 5. Publique backend e site usando a mesma versão do contrato, `2026-11-v3`. O backend rejeita outras versões, evitando registrar um resultado divergente.
 
 A migração cria `quiz_participacoes`, `quiz_eventos` e os contadores técnicos, sem alterar `leads_quiz` ou `eventos_quiz` antigos. Editar um `CREATE TABLE IF NOT EXISTS` já executado não muda o CHECK ou os NOT NULL do banco existente. Por isso a evolução é aditiva. Não execute DROP de tabelas antigas.
@@ -66,6 +66,19 @@ GROUP BY aeronave_sugerida;
 Para histórico de versões anteriores, consulte também `leads_quiz`. Um clique só indica abertura do link; não comprova envio da mensagem.
 
 ## Homologação
+
+Se o site no Pages mostrar “No Access-Control-Allow-Origin”, confira a variável `QUIZ_ALLOWED_ORIGINS` no ambiente publicado do Worker `api-workers`. Ela deve incluir `https://conheca-share.pages.dev`. Uma variável personalizada substitui a lista padrão do código. A correção precisa ser publicada no backend; republicar apenas o site não muda o CORS da API.
+
+Confira o preflight sem criar um lead:
+
+```sh
+curl -i -X OPTIONS https://api.share-brasil.com/api/quiz/leads \
+  -H 'Origin: https://conheca-share.pages.dev' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type'
+```
+
+O retorno esperado é `204` com `Access-Control-Allow-Origin: https://conheca-share.pages.dev`. Depois, conclua o quiz e confirme a gravação no D1. Erros de configuração do banco/segredo também mantêm o CORS para origens autorizadas, permitindo enxergar a resposta real da API.
 
 Conclua o quiz sem contato, com nome sozinho, com telefone sozinho e com ambos autorizados. Confirme o resultado antes de qualquer clique no WhatsApp, depois o registro no D1. Verifique reenvio sem duplicação, rejeição de versão antiga e de resultado adulterado e ausência de listagem pública. Uma falha da API não pode impedir o resultado.
 
