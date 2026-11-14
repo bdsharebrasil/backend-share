@@ -36,6 +36,7 @@ import { uuid } from './lib/strings'
 import { shareBrasilPontoRoutes } from './routes/shareBrasilPontoRoutes'
 import { createLogger } from './lib/logger'
 import type { Env } from './types/env'
+import { quizRoutes } from './quizRoutes'
 import {
   authenticatedColaborador,
   authenticatedColaboradorToken,
@@ -118,6 +119,7 @@ app.use('*', async (c, next) => {
   await next()
 })
 app.route('/', abastecimentosRoutes)
+app.route('/', quizRoutes)
 app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
 app.route('/', jornadasRoutes)
@@ -5262,5 +5264,4 @@ export default {
     }
   },
 }
-
 
