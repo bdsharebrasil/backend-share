@@ -1,4 +1,4 @@
-// Regras de triagem comercial, versão compartilhada pelo navegador e pelo Worker.
+// Regras de triagem comercial utilizadas pelo navegador e pelo Worker.
 // Não são dados homologados da frota. A Share deve validar configuração e missão.
 export const VERSAO_QUIZ = "2026-11-v3";
 export const MOMENTOS = {
@@ -33,7 +33,7 @@ export const AERONAVES = {
     resumo: "Para viagens regionais, grupos menores e uma rotina que pede agilidade.",
     destaques: [
       "Uma opção para deslocamentos regionais frequentes.",
-      "Estrutura mais enxuta para começar a explorar a aviação compartilhada.",
+      "Uma opção para avaliar um plano de gestão de cotas com estrutura mais enxuta.",
     ],
     considerar: [
       "Espaço, bagagem e ocupação precisam ser avaliados juntos.",
@@ -488,7 +488,7 @@ export function recomendar(respostas) {
 }
 export function montarMensagem(respostas, resultado, contato = {}, protocolo = "") {
   return [
-    "Olá! Fiz o quiz “Descubra sua aeronave” da Share Brasil e quero conhecer as cotas.",
+    "Olá! Fiz o quiz “Descubra sua aeronave” da Share Brasil e quero conhecer a gestão de cotas de aeronaves.",
     contato.nome ? `Nome: ${contato.nome}` : "",
     contato.telefone ? `WhatsApp: ${contato.telefone}` : "",
     contato.cidade ? `Cidade/base: ${contato.cidade}` : "",
