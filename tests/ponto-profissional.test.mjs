@@ -23,11 +23,20 @@ import {
   fecharCompetenciaPonto,
   apurarBancoPonto,
   podeGerirPonto,
+  permissoesPonto,
+  listarCoordenadoresPonto,
   prepararFechamentoMensal,
 } from "../src/lib/pontoServico.ts";
 import { CCT_SINEATA_FENASCON_2025 } from "../src/lib/pontoCct.ts";
 const migration = await readFile(
   new URL("../migrations/20261116_ponto_gestao.sql", import.meta.url),
+  "utf8",
+);
+const migrationCoordenadores = await readFile(
+  new URL(
+    "../migrations/20261116_ponto_multiplos_coordenadores.sql",
+    import.meta.url,
+  ),
   "utf8",
 );
 function banco() {
@@ -40,6 +49,8 @@ function banco() {
  INSERT INTO user_profiles VALUES ('ana','Ana',NULL,'Financeiro','ativo','colaborador','MT','Cuiabá'),('bea','Bea',NULL,'Operações','ativo','colaborador','MS','Campo Grande'),('piloto','Piloto',NULL,'Tripulante','ativo','colaborador','MT','Cuiabá'),('gestor','Gestor',NULL,'Administrativo','ativo','gestor_master','MT','Cuiabá'),('dp','DP',NULL,'Administrativo','ativo','rh','MT','Cuiabá');`);
   sql.exec(migration);
   sql.exec(migration);
+  sql.exec(migrationCoordenadores);
+  sql.exec(migrationCoordenadores);
   const db = {
     prepare(query) {
       const criar = (args = []) => ({
@@ -556,9 +567,8 @@ test("referência interna de 2026 usa os parâmetros de 2025 sem estender o docu
 });
 
 test("autenticação, escopo e fluxo completo de conferência, aprovação e fechamento são verificáveis no espelho", async () => {
-  const { pontoGestaoRoutes } = await import(
-    "../src/routes/pontoGestaoRoutes.ts"
-  );
+  const { pontoGestaoRoutes } =
+    await import("../src/routes/pontoGestaoRoutes.ts");
   const { db, user, sql } = banco();
   const anterior = globalThis.fetch;
   globalThis.fetch = async (_url, init) =>
@@ -743,9 +753,8 @@ test("dia 1 prepara a competência sem forjar aprovação e fecha somente espelh
 });
 
 test("gestor vinculado não acessa marcações ou atestados posteriores à transferência da equipe", async () => {
-  const { pontoGestaoRoutes } = await import(
-    "../src/routes/pontoGestaoRoutes.ts"
-  );
+  const { pontoGestaoRoutes } =
+    await import("../src/routes/pontoGestaoRoutes.ts");
   const { db, sql, user } = banco();
   const anterior = globalThis.fetch;
   sql.exec(
@@ -793,9 +802,8 @@ test("turno aberto na virada do mês permanece disponível para o colaborador e 
     apis: ["Date"],
     now: new Date("2026-11-01T06:00:00Z"),
   });
-  const { pontoGestaoRoutes } = await import(
-    "../src/routes/pontoGestaoRoutes.ts"
-  );
+  const { pontoGestaoRoutes } =
+    await import("../src/routes/pontoGestaoRoutes.ts");
   const { db, sql, user } = banco();
   const anterior = globalThis.fetch;
   await registrarMarcacao(
@@ -860,4 +868,285 @@ test("turno aberto na virada do mês permanece disponível para o colaborador e 
     globalThis.fetch = anterior;
     sql.close();
   }
+});
+
+async function apiCoordenacao(fn) {
+  const { pontoGestaoRoutes } =
+    await import("../src/routes/pontoGestaoRoutes.ts");
+  const { db, sql, user } = banco();
+  const anterior = globalThis.fetch;
+  globalThis.fetch = async (_url, init) =>
+    Response.json({
+      id: new Headers(init.headers).get("Authorization").replace("Bearer ", ""),
+    });
+  const env = {
+    SHARE_DB: db,
+    SUPABASE_URL: "https://auth.test",
+    SUPABASE_ANON_KEY: "teste",
+  };
+  const api = (userId, path, body) =>
+    pontoGestaoRoutes.request(
+      path,
+      {
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          Authorization: `Bearer ${userId}`,
+          "Content-Type": "application/json",
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      },
+      env,
+    );
+  try {
+    await fn({ db, sql, user, api });
+  } finally {
+    globalThis.fetch = anterior;
+    sql.close();
+  }
+}
+function prepararCoordenacao(sql) {
+  sql.exec(`INSERT INTO user_profiles VALUES
+    ('admin-ponto','Admin',NULL,'Administrativo','ativo','colaborador','MT','Cuiabá'),
+    ('contabil','Contabilidade',NULL,'dep-contabil','ativo','colaborador','MT','Cuiabá'),
+    ('inativo-ponto','Admin inativo',NULL,'Administrativo','inativo','admin','MT','Cuiabá');
+    INSERT INTO departamentos_email VALUES ('dep-contabil','Contabilidade');
+    INSERT INTO usuarios_funcoes VALUES ('func-admin','admin-ponto','ADMIN');`);
+}
+const dadosVinculo = (escala) => ({
+  user_id: "ana",
+  escala_id: escala,
+  regra_id: "referencia-interna-2026-admin",
+  gestores_ids: ["gestor", "admin-ponto", "contabil"],
+  data_base: "2026-11-01",
+  vigencia_inicio: "2026-11-01",
+  comunicada_em: "2026-09-01",
+  fuso_horario: "America/Cuiaba",
+});
+
+test("configuração sem escalas oferece modelos e criar escala retorna opção real para o vínculo", async () => {
+  await apiCoordenacao(async ({ api }) => {
+    let r = await api("dp", "/configuracao");
+    assert.equal(r.status, 200);
+    let config = await r.json();
+    assert.equal(config.escalas.length, 0);
+    assert.deepEqual(
+      Object.keys(config.modelos).sort(),
+      ["12X36", "5X2", "6X1", "ROTATIVA", "SOBREAVISO"].sort(),
+    );
+    r = await api("dp", "/escalas", {
+      nome: "Administrativo 5 × 2",
+      tipo: "5X2",
+      ciclo: config.modelos["5X2"],
+    });
+    assert.equal(r.status, 201);
+    const id = (await r.json()).id;
+    config = await (await api("dp", "/configuracao")).json();
+    assert.equal(config.escalas.length, 1);
+    assert.equal(config.escalas[0].id, id);
+    assert.equal(config.escalas[0].tipo, "5X2");
+  });
+});
+
+test("vínculo aceita Gestor Master, Admin por função e Contabilidade por departamento juntos; contabilidade fica restrita à equipe", async () => {
+  await apiCoordenacao(async ({ api, db, sql, user }) => {
+    prepararCoordenacao(sql);
+    sql.exec("PRAGMA foreign_keys=ON");
+    assert.equal((await api("contabil", "/gestao?mes=2026-11")).status, 403);
+    const config = await (await api("dp", "/configuracao")).json();
+    assert.deepEqual(config.gestores.find((g) => g.id === "contabil").perfis, [
+      "Contabilidade",
+    ]);
+    assert.deepEqual(
+      config.gestores.find((g) => g.id === "admin-ponto").perfis,
+      ["Admin"],
+    );
+    assert.deepEqual(config.gestores.find((g) => g.id === "gestor").perfis, [
+      "Gestor Master",
+    ]);
+    assert(
+      !config.gestores.some((g) => ["inativo-ponto", "ana"].includes(g.id)),
+    );
+    const escala = await api("dp", "/escalas", {
+      nome: "Escala teste",
+      tipo: "5X2",
+      ciclo: config.modelos["5X2"],
+    });
+    const body = dadosVinculo((await escala.json()).id);
+    const r = await api("dp", "/vinculos", {
+      ...body,
+      gestores_ids: [...body.gestores_ids, "contabil"],
+    });
+    assert.equal(r.status, 201, JSON.stringify(await r.clone().json()));
+    const id = (await r.json()).id;
+    assert.equal(
+      sql
+        .prepare(
+          "SELECT count(*) AS n FROM ponto_vinculos_gestores WHERE vinculo_id=?",
+        )
+        .get(id).n,
+      3,
+    );
+    const c = await (await api("dp", "/configuracao")).json();
+    assert.deepEqual(
+      new Set(c.vinculos.find((v) => v.id === id).gestores_ids),
+      new Set(body.gestores_ids),
+    );
+    assert.deepEqual(await permissoesPonto(db, user("contabil")), {
+      dp: false,
+      gestor: true,
+      geral: false,
+    });
+    const equipe = await (await api("contabil", "/gestao?mes=2026-11")).json();
+    assert.deepEqual(
+      equipe.equipe.map((u) => u.id),
+      ["ana"],
+    );
+    assert.equal(
+      (await api("contabil", "/espelho?mes=2026-11&user_id=ana")).status,
+      200,
+    );
+    assert.equal(
+      (await api("contabil", "/espelho?mes=2026-11&user_id=bea")).status,
+      403,
+    );
+    assert.equal((await api("contabil", "/vinculos", body)).status, 403);
+    assert.equal(
+      await podeGerirPonto(
+        db,
+        user("contabil"),
+        "contabil",
+        false,
+        "2026-11-16",
+      ),
+      false,
+    );
+    sql.exec(
+      `INSERT INTO ponto_solicitacoes (id,user_id,data_referencia,tipo,minutos,justificativa) VALUES ('pedido-equipe','ana','2026-11-16','DISPENSA',60,'Ausência justificada'),('pedido-fora','bea','2026-11-16','DISPENSA',60,'Ausência justificada'),('pedido-proprio','contabil','2026-11-16','DISPENSA',60,'Ausência justificada')`,
+    );
+    assert.equal(
+      (
+        await api("contabil", "/solicitacoes/pedido-equipe/decisao", {
+          status: "APROVADA",
+          minutos: 60,
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      sql
+        .prepare(
+          "SELECT aprovado_por FROM ponto_solicitacoes WHERE id='pedido-equipe'",
+        )
+        .get().aprovado_por,
+      "contabil",
+    );
+    for (const id of ["pedido-fora", "pedido-proprio"])
+      assert.equal(
+        (
+          await api("contabil", `/solicitacoes/${id}/decisao`, {
+            status: "APROVADA",
+            minutos: 60,
+          })
+        ).status,
+        403,
+      );
+    const auditoria = sql
+      .prepare(
+        "SELECT dados_json FROM ponto_auditoria WHERE acao='VINCULO_DEFINIDO' AND entidade_id=?",
+      )
+      .get(id);
+    assert.deepEqual(
+      JSON.parse(auditoria.dados_json).gestores_ids,
+      body.gestores_ids,
+    );
+    sql
+      .prepare("UPDATE ponto_vinculos SET vigencia_fim='2026-11-30' WHERE id=?")
+      .run(id);
+    assert.equal(
+      await podeGerirPonto(db, user("contabil"), "ana", false, "2026-11-30"),
+      true,
+    );
+    assert.equal(
+      await podeGerirPonto(db, user("contabil"), "ana", false, "2026-12-01"),
+      false,
+    );
+    assert.equal(
+      (await api("contabil", "/espelho?mes=2026-12&user_id=ana")).status,
+      403,
+    );
+    const posterior = await (
+      await api("contabil", "/gestao?mes=2026-12")
+    ).json();
+    assert.equal(posterior.equipe.length, 0);
+  });
+});
+
+test("coordenadores precisam ser ativos e elegíveis, sem autocoordenação, com gravação atômica", async () => {
+  await apiCoordenacao(async ({ api, sql }) => {
+    prepararCoordenacao(sql);
+    const config = await (await api("dp", "/configuracao")).json();
+    const escala = await api("dp", "/escalas", {
+      nome: "Escala teste",
+      tipo: "5X2",
+      ciclo: config.modelos["5X2"],
+    });
+    const body = dadosVinculo((await escala.json()).id);
+    for (const gestores_ids of [
+      [],
+      ["ana"],
+      ["inativo-ponto"],
+      ["nao-existe"],
+      ["bea"],
+      ["gestor", "contabil", "inativo-ponto"],
+      "contabil",
+      [null],
+    ]) {
+      const r = await api("dp", "/vinculos", { ...body, gestores_ids });
+      assert.equal(
+        r.status,
+        400,
+        JSON.stringify({ gestores_ids, response: await r.clone().json() }),
+      );
+      assert.equal(
+        sql.prepare("SELECT count(*) AS n FROM ponto_vinculos").get().n,
+        0,
+      );
+      assert.equal(
+        sql.prepare("SELECT count(*) AS n FROM ponto_vinculos_gestores").get()
+          .n,
+        0,
+      );
+    }
+  });
+});
+
+test("migração de coordenadores é idempotente e preserva o gestor legado; cliente antigo pode enviar um gestor", async () => {
+  await apiCoordenacao(async ({ api, sql, db, user }) => {
+    const config = await (await api("dp", "/configuracao")).json();
+    const escala = await api("dp", "/escalas", {
+      nome: "Escala teste",
+      tipo: "5X2",
+      ciclo: config.modelos["5X2"],
+    });
+    const body = dadosVinculo((await escala.json()).id);
+    delete body.gestores_ids;
+    body.gestor_id = "gestor";
+    const r = await api("dp", "/vinculos", body);
+    assert.equal(r.status, 201);
+    const id = (await r.json()).id;
+    sql
+      .prepare("DELETE FROM ponto_vinculos_gestores WHERE vinculo_id=?")
+      .run(id);
+    sql.exec(migrationCoordenadores);
+    sql.exec(migrationCoordenadores);
+    assert.equal(
+      sql.prepare("SELECT count(*) AS n FROM ponto_vinculos_gestores").get().n,
+      1,
+    );
+    assert.equal(
+      await podeGerirPonto(db, user("gestor"), "ana", false, "2026-11-16"),
+      true,
+    );
+    assert((await listarCoordenadoresPonto(db)).some((g) => g.id === "gestor"));
+  });
 });
