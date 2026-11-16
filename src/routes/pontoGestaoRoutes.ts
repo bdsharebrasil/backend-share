@@ -19,6 +19,8 @@ import {
 } from "../lib/pontoGestao";
 import {
   auditoriaPonto,
+  escopoGestorPontoSql,
+  listarCoordenadoresPonto,
   elegivelPonto,
   espelhoPonto,
   exigir,
@@ -91,9 +93,9 @@ async function listarEquipe(db: D1Database, gestor: Colaborador, mes?: string) {
   if (!p.gestor) return [];
   const rows = await db
     .prepare(
-      `SELECT id,nome_completo,nome_exibicao,departamento,status FROM user_profiles u ${p.geral ? "" : "WHERE EXISTS (SELECT 1 FROM ponto_vinculos v WHERE v.user_id = u.id AND v.gestor_id = ?)"} ORDER BY nome_completo`,
+      `SELECT id,nome_completo,nome_exibicao,departamento,status FROM user_profiles u ${p.geral ? "" : `WHERE EXISTS (SELECT 1 FROM ponto_vinculos v WHERE v.user_id = u.id AND ${escopoGestorPontoSql()})`} ORDER BY nome_completo`,
     )
-    .bind(...(p.geral ? [] : [gestor.id]))
+    .bind(...(p.geral ? [] : [gestor.id, gestor.id]))
     .all<any>();
   const elegiveis = [];
   for (const user of rows.results) {
@@ -189,9 +191,9 @@ pontoGestaoRoutes.get("/gestao", async (c) => {
       : (
           await db
             .prepare(
-              "SELECT vigencia_inicio,vigencia_fim FROM ponto_vinculos WHERE user_id=? AND gestor_id=?",
+              `SELECT v.vigencia_inicio,v.vigencia_fim FROM ponto_vinculos v WHERE v.user_id=? AND ${escopoGestorPontoSql()}`,
             )
-            .bind(membro.id, user.id)
+            .bind(membro.id, user.id, user.id)
             .all<{ vigencia_inicio: string; vigencia_fim: string | null }>()
         ).results;
     const permitido = (data: string) =>
@@ -631,24 +633,29 @@ pontoGestaoRoutes.get("/configuracao", async (c) => {
     db.prepare("SELECT * FROM ponto_escalas ORDER BY nome").all(),
     db
       .prepare(
-        `SELECT * FROM ponto_vinculos ${permissoes.geral ? "" : "WHERE gestor_id=?"} ORDER BY vigencia_inicio DESC`,
+        `SELECT v.*, (SELECT json_group_array(vg.gestor_id) FROM ponto_vinculos_gestores vg WHERE vg.vinculo_id=v.id) AS gestores_ids_json FROM ponto_vinculos v ${permissoes.geral ? "" : `WHERE ${escopoGestorPontoSql()}`} ORDER BY v.vigencia_inicio DESC`,
       )
-      .bind(...(permissoes.geral ? [] : [user.id]))
+      .bind(...(permissoes.geral ? [] : [user.id, user.id]))
       .all(),
   ]);
-  const gestores = permissoes.dp
-    ? await db
-        .prepare(
-          "SELECT id,nome_completo FROM user_profiles WHERE lower(COALESCE(status,'ativo')) NOT IN ('inativo','inactive') ORDER BY nome_completo",
-        )
-        .all()
-    : { results: [] };
+  const gestores = permissoes.dp ? await listarCoordenadoresPonto(db) : [];
   return c.json({
     regras: regras.results,
     escalas: escalas.results,
-    vinculos: vinculos.results,
+    vinculos: vinculos.results.map((v: any) => {
+      const { gestores_ids_json, ...vinculo } = v;
+      return {
+        ...vinculo,
+        gestores_ids: [
+          ...new Set([
+            ...(v.gestor_id ? [v.gestor_id] : []),
+            ...JSON.parse(gestores_ids_json || "[]"),
+          ]),
+        ],
+      };
+    }),
     equipe: await listarEquipe(db, user),
-    gestores: gestores.results,
+    gestores,
     referencia_regras: REGRAS_REFERENCIA,
     bases_cct: [...REFERENCIAS_INTERNAS_2026, ...BASES_CCT_PONTO],
     feriados: (
@@ -835,14 +842,33 @@ pontoGestaoRoutes.post("/vinculos", async (c) => {
         b.anuencia_colaborador === true),
     "antecedencia_insuficiente_informe_forca_maior_e_anuencia",
   );
+  const idsInformados =
+    b.gestores_ids === undefined ? [b.gestor_id] : b.gestores_ids;
   exigir(
-    b.gestor_id &&
-      b.gestor_id !== b.user_id &&
-      (await db
-        .prepare("SELECT id FROM user_profiles WHERE id=?")
-        .bind(b.gestor_id)
-        .first()),
-    "defina_outro_usuario_como_gestor",
+    Array.isArray(idsInformados) &&
+      idsInformados.length > 0 &&
+      idsInformados.length <= 50,
+    "selecione_ao_menos_um_coordenador",
+  );
+  exigir(
+    idsInformados.every(
+      (id: unknown) => typeof id === "string" && id.trim().length > 0,
+    ),
+    "coordenador_invalido",
+  );
+  const gestoresIds = [
+    ...new Set<string>(idsInformados.map((id: string) => id.trim())),
+  ];
+  exigir(
+    !gestoresIds.includes(b.user_id),
+    "colaborador_nao_pode_coordenar_o_proprio_ponto",
+  );
+  const permitidos = new Set(
+    (await listarCoordenadoresPonto(db)).map((g) => g.id),
+  );
+  exigir(
+    gestoresIds.every((id) => permitidos.has(id)),
+    "coordenador_inativo_ou_perfil_nao_permitido",
   );
   exigir(
     !(await db
@@ -880,7 +906,7 @@ pontoGestaoRoutes.post("/vinculos", async (c) => {
         b.user_id,
         b.escala_id,
         b.regra_id,
-        b.gestor_id,
+        gestoresIds[0],
         b.data_base,
         b.vigencia_inicio,
         fuso,
@@ -889,7 +915,17 @@ pontoGestaoRoutes.post("/vinculos", async (c) => {
         b.justificativa_escala || null,
         b.anuencia_colaborador ? 1 : 0,
       ),
-    auditoriaPonto(db, user.id, b.user_id, "VINCULO_DEFINIDO", id, b),
+    ...gestoresIds.map((gestorId) =>
+      db
+        .prepare(
+          "INSERT INTO ponto_vinculos_gestores (vinculo_id,gestor_id) VALUES (?,?)",
+        )
+        .bind(id, gestorId),
+    ),
+    auditoriaPonto(db, user.id, b.user_id, "VINCULO_DEFINIDO", id, {
+      ...b,
+      gestores_ids: gestoresIds,
+    }),
   ]);
   return c.json({ id }, 201);
 });

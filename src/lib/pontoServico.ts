@@ -66,6 +66,80 @@ export async function elegivelPonto(
     .first<{ nome: string }>();
   return departamentoBatePonto(departamento?.nome);
 }
+// Dois parâmetros mantêm a compatibilidade com o responsável único legado.
+export const escopoGestorPontoSql = (alias = "v") =>
+  `(${alias}.gestor_id = ? OR EXISTS (SELECT 1 FROM ponto_vinculos_gestores vg WHERE vg.vinculo_id = ${alias}.id AND vg.gestor_id = ?))`;
+
+export function perfisCoordenacaoPonto(
+  tipo: unknown,
+  funcoes: string[],
+  departamento: unknown,
+) {
+  const papeis = [tipo, ...funcoes].map(normalizarPonto);
+  const perfis: string[] = [];
+  if (papeis.some((p) => ["gestor master", "gestormaster"].includes(p)))
+    perfis.push("Gestor Master");
+  if (papeis.some((p) => ["admin", "administrador"].includes(p)))
+    perfis.push("Admin");
+  if ([...papeis, normalizarPonto(departamento)].includes("contabilidade"))
+    perfis.push("Contabilidade");
+  if (papeis.some((p) => ["rh", "rh master"].includes(p))) perfis.push("RH");
+  return perfis;
+}
+
+export async function listarCoordenadoresPonto(db: D1Database) {
+  const [usuarios, funcoes, vinculados, temDepartamentos] = await Promise.all([
+    db
+      .prepare(
+        "SELECT id,nome_completo,tipo_user,departamento FROM user_profiles WHERE lower(trim(COALESCE(status,'ativo'))) NOT IN ('inativo','inactive') ORDER BY nome_completo",
+      )
+      .all<{
+        id: string;
+        nome_completo: string;
+        tipo_user: string | null;
+        departamento: string | null;
+      }>(),
+    db
+      .prepare("SELECT user_id,funcao FROM usuarios_funcoes")
+      .all<{ user_id: string; funcao: string }>(),
+    db
+      .prepare(
+        "SELECT gestor_id FROM ponto_vinculos WHERE gestor_id IS NOT NULL UNION SELECT gestor_id FROM ponto_vinculos_gestores",
+      )
+      .all<{ gestor_id: string }>(),
+    db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='departamentos_email'",
+      )
+      .first(),
+  ]);
+  const departamentos = temDepartamentos
+    ? (
+        await db
+          .prepare("SELECT id,nome FROM departamentos_email")
+          .all<{ id: string; nome: string }>()
+      ).results
+    : [];
+  const nomesDepartamentos = new Map(departamentos.map((d) => [d.id, d.nome]));
+  const porUsuario = new Map<string, string[]>();
+  for (const f of funcoes.results)
+    porUsuario.set(f.user_id, [...(porUsuario.get(f.user_id) || []), f.funcao]);
+  const existentes = new Set(vinculados.results.map((v) => v.gestor_id));
+  return usuarios.results.flatMap((u) => {
+    const perfis = perfisCoordenacaoPonto(
+      u.tipo_user,
+      porUsuario.get(u.id) || [],
+      nomesDepartamentos.get(u.departamento || "") || u.departamento,
+    );
+    // Preserva responsáveis já cadastrados, mesmo que usem outro perfil.
+    if (!perfis.length && existentes.has(u.id))
+      perfis.push("Coordenador vinculado");
+    return perfis.length
+      ? [{ id: u.id, nome_completo: u.nome_completo, perfis }]
+      : [];
+  });
+}
+
 export async function permissoesPonto(db: D1Database, user: Colaborador) {
   const funcoes = await db
     .prepare("SELECT funcao FROM usuarios_funcoes WHERE user_id = ?")
@@ -78,10 +152,13 @@ export async function permissoesPonto(db: D1Database, user: Colaborador) {
   const dp = papeis.some((x) =>
     ["admin", "administrador", "rh", "rh master"].includes(x),
   );
-  const geral = dp || papeis.includes("gestor master");
+  const geral =
+    dp || papeis.some((x) => ["gestor master", "gestormaster"].includes(x));
   const vinculo = await db
-    .prepare("SELECT id FROM ponto_vinculos WHERE gestor_id = ? LIMIT 1")
-    .bind(user.id)
+    .prepare(
+      `SELECT v.id FROM ponto_vinculos v WHERE ${escopoGestorPontoSql()} LIMIT 1`,
+    )
+    .bind(user.id, user.id)
     .first();
   return { dp, gestor: geral || Boolean(vinculo), geral };
 }
@@ -99,9 +176,9 @@ export async function podeGerirPonto(
   return Boolean(
     await db
       .prepare(
-        "SELECT id FROM ponto_vinculos WHERE user_id = ? AND gestor_id = ? AND vigencia_inicio <= ? AND (vigencia_fim IS NULL OR vigencia_fim >= ?) LIMIT 1",
+        `SELECT v.id FROM ponto_vinculos v WHERE v.user_id = ? AND ${escopoGestorPontoSql()} AND v.vigencia_inicio <= ? AND (v.vigencia_fim IS NULL OR v.vigencia_fim >= ?) LIMIT 1`,
       )
-      .bind(alvo, ator.id, inicioEscopo, fimEscopo)
+      .bind(alvo, ator.id, ator.id, inicioEscopo, fimEscopo)
       .first(),
   );
 }
@@ -579,8 +656,8 @@ export async function espelhoPonto(
       : null;
     const abrangenciaPendente = Boolean(
       regra?.ufs_abrangencia &&
-        (!perfil?.uf ||
-          !regra.ufs_abrangencia.split(",").includes(perfil.uf.toUpperCase())),
+      (!perfil?.uf ||
+        !regra.ufs_abrangencia.split(",").includes(perfil.uf.toUpperCase())),
     );
     if (abrangenciaPendente) regra = null;
     const calendario = feriados.results
