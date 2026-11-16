@@ -33,6 +33,7 @@ import { calcularDiasPeriodoAgendamento, normalizarHorarioAgendamento } from './
 import { checkRateLimit, clientIp } from './lib/cache'
 import { normalizarPastaUpload, salvarArquivoShareBrasil, shareBrasilBucket, shareBrasilFileName } from './lib/storage'
 import { uuid } from './lib/strings'
+import { prepararFechamentoMensal } from './lib/pontoServico'
 import { shareBrasilPontoRoutes } from './routes/shareBrasilPontoRoutes'
 import { createLogger } from './lib/logger'
 import type { Env } from './types/env'
@@ -5263,9 +5264,13 @@ export default {
       ctx.waitUntil(coletarRastreioAgendado(_env).catch((erro) => console.warn('[rastreio/cron]', erro)))
       if (_env.QUIZ_HASH_SECRET && new Date(_event.scheduledTime ?? Date.now()).getUTCMinutes() === 0) ctx.waitUntil(limparContadoresQuiz(_env.SHARE_DB).catch(() => undefined))
       // A fila financeira mantém a frequência anterior de 15 minutos.
-      if (new Date(_event.scheduledTime ?? Date.now()).getUTCMinutes() % 15 === 0) ctx.waitUntil(processFinanceQueue(_env.SHARE_DB, null, 50))
+      if (new Date(_event.scheduledTime ?? Date.now()).getUTCMinutes() % 15 === 0) {
+        ctx.waitUntil(processFinanceQueue(_env.SHARE_DB, null, 50))
+        ctx.waitUntil(prepararFechamentoMensal(_env.SHARE_DB, new Date(_event.scheduledTime ?? Date.now())).catch((erro) => console.warn('[ponto/cron]', erro)))
+      }
     }
   },
 }
+
 
 
