@@ -2657,7 +2657,7 @@ async function sincronizarTripulacaoColaborador(c: Context<{ Bindings: Bindings 
 app.get('/api/gestor/gestao-colaborador', async c => {
   const user = await shareBrasilUser(c)
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
-  const result = await c.env.SHARE_DB.prepare("SELECT p.id, p.email, p.nome_completo, p.nome_exibicao, p.telefone, p.cidade, p.uf, p.data_nascimento, p.data_admissao, p.cpf, p.rg, p.canac, p.status, p.tipo_user, p.departamento, p.departamentos_email, p.exame_admissional_realizado, p.exame_admissional_data, p.exame_admissional_local, p.exame_admissional_empresa, p.exame_admissional_prazo, p.exame_admissional_documento_id, p.data_criacao, p.data_atualizacao, GROUP_CONCAT(uf.funcao) AS funcoes_raw FROM user_profiles p LEFT JOIN usuarios_funcoes uf ON uf.user_id = p.id WHERE lower(COALESCE(p.tipo_user, 'colaborador')) = 'colaborador' GROUP BY p.id ORDER BY COALESCE(p.nome_exibicao, p.nome_completo), p.email").all<Record<string, any>>()
+  const result = await c.env.SHARE_DB.prepare("SELECT p.id, p.email, p.nome_completo, p.nome_exibicao, p.url_avatar, p.telefone, p.cidade, p.uf, p.data_nascimento, p.data_admissao, p.cpf, p.rg, p.canac, p.status, p.tipo_user, p.departamento, p.departamentos_email, p.exame_admissional_realizado, p.exame_admissional_data, p.exame_admissional_local, p.exame_admissional_empresa, p.exame_admissional_prazo, p.exame_admissional_documento_id, p.data_criacao, p.data_atualizacao, GROUP_CONCAT(uf.funcao) AS funcoes_raw FROM user_profiles p LEFT JOIN usuarios_funcoes uf ON uf.user_id = p.id WHERE lower(COALESCE(p.tipo_user, 'colaborador')) = 'colaborador' GROUP BY p.id ORDER BY COALESCE(p.nome_exibicao, p.nome_completo), p.email").all<Record<string, any>>()
   return c.json(result.results.map(funcoesColaborador))
 })
 
@@ -2711,6 +2711,16 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] || null), id).run()
   await sincronizarTripulacaoColaborador(c, id, body)
   return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
+})
+
+app.get('/api/gestor/gestao-colaborador/:id/foto', async c => {
+  const user = await shareBrasilUser(c)
+  if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
+  const perfil = await c.env.SHARE_DB.prepare("SELECT url_avatar FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, 'colaborador')) = 'colaborador'").bind(c.req.param('id')).first<{ url_avatar: string | null }>()
+  if (!perfil?.url_avatar) return c.notFound()
+  const object = await bucketParaChaveColaborador(c, perfil.url_avatar).get(perfil.url_avatar)
+  if (!object) return c.notFound()
+  return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'image/jpeg', 'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff' } })
 })
 
 app.post('/api/gestor/gestao-colaborador/:id/documentos', async c => {
@@ -2785,7 +2795,7 @@ app.get('/api/gestor/gestao-colaborador/:id/ficha', async c => {
   if (!user || !await isColaboradorManager(c, user)) return c.json({ error: 'permissao_necessaria' }, 403)
   const id = c.req.param('id')
   const db = c.env.SHARE_DB
-  const perfil = await db.prepare('SELECT id, email, nome_completo, nome_exibicao, telefone, endereco, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
+  const perfil = await db.prepare('SELECT id, email, nome_completo, nome_exibicao, url_avatar, telefone, endereco, cidade, uf, data_nascimento, data_admissao, cpf, rg, canac, status, tipo_user, departamento, departamentos_email, exame_admissional_realizado, exame_admissional_data, exame_admissional_local, exame_admissional_empresa, exame_admissional_prazo, exame_admissional_documento_id, data_criacao, data_atualizacao FROM user_profiles WHERE id = ?1 AND lower(COALESCE(tipo_user, \'colaborador\')) = \'colaborador\'').bind(id).first()
   if (!perfil) return c.notFound()
   const [documentos, funcoes, ferias, lancamentos] = await Promise.all([
     db.prepare('SELECT id, nome_arquivo, caminho_arquivo, tipo_arquivo, tamanho_arquivo, criado_em, categoria FROM documentos_usuarios WHERE user_id = ?1 ORDER BY criado_em DESC').bind(id).all().catch(() => ({ results: [] })),
@@ -5271,6 +5281,7 @@ export default {
     }
   },
 }
+
 
 
 
