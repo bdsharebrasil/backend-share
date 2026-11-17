@@ -713,6 +713,60 @@ test("correção aprovada preserva marcação original, altera o espelho e inval
   sql.close();
 });
 
+test("aprovação legada altera apenas o campo solicitado e alerta sequência inconsistente sem bloquear", async () => {
+  const { pontoGestaoRoutes } = await import("../src/routes/pontoGestaoRoutes.ts");
+  const { db, sql } = banco();
+  const anterior = globalThis.fetch;
+  globalThis.fetch = async (_url, init) =>
+    Response.json({
+      id: new Headers(init.headers).get("Authorization").replace("Bearer ", ""),
+    });
+  const env = {
+    SHARE_DB: db,
+    SUPABASE_URL: "https://auth.test",
+    SUPABASE_ANON_KEY: "teste",
+  };
+  const api = (userId, path, body) =>
+    pontoGestaoRoutes.request(
+      path,
+      {
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          Authorization: `Bearer ${userId}`,
+          "Content-Type": "application/json",
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      },
+      env,
+    );
+  try {
+    sql.exec(`
+      INSERT INTO ponto_escalas (id,nome,tipo,ciclo_json) VALUES ('el','Escala legado','ROTATIVA','[{"tipo":"TRABALHO","entrada":"08:00","saida":"17:00","intervalo_min":60}]');
+      INSERT INTO ponto_vinculos (id,user_id,escala_id,regra_id,gestor_id,data_base,vigencia_inicio,fuso_horario,criado_por) VALUES ('vl','ana','el','referencia-interna-2026-admin','gestor','2026-01-01','2026-01-01','America/Cuiaba','dp');
+      INSERT INTO lancamento_ponto (id,user_id,data_entrada,entrada_hora,inicio_almoco,fim_almoco,saida_hora,status) VALUES ('pl','ana','2026-08-03','13:15','99:00','13:30','17:30','finished');
+      INSERT INTO solicitacoes_correcao_ponto (id,user_id,data_entrada,tipo_correcao,tempo_original,tempo_corrigido,justificativa,status) VALUES ('leg-test','ana','2026-08-03','entrada_hora','13:15','12:30','Esqueci de bater a entrada','pending');
+    `);
+    await espelhoPonto(db, "ana", "2026-08");
+    // A rota precisa ser chamada com o identificador legado no caminho.
+    const r = await api("gestor", "/solicitacoes/legado-correcao:leg-test/decisao", {
+      status: "APROVADA",
+      motivo: "",
+      minutos: 0,
+    });
+    assert.equal(r.status, 200, JSON.stringify(await r.clone().json()));
+    assert.deepEqual((await r.json()).avisos, ["HORARIOS_INCONSISTENTES"]);
+    assert.equal(sql.prepare("SELECT status FROM ponto_solicitacoes WHERE id='legado-correcao:leg-test'").get().status, "APROVADA");
+    assert.equal(sql.prepare("SELECT status FROM solicitacoes_correcao_ponto WHERE id='leg-test'").get().status, "approved");
+    const e = await espelhoPonto(db, "ana", "2026-08");
+    const dia = e.dias.find((d) => d.data === "2026-08-03");
+    assert.equal(dia.linha.entrada_hora, "12:30");
+    assert.ok(dia.alertas.includes("HORARIOS_INCONSISTENTES"));
+  } finally {
+    globalThis.fetch = anterior;
+    sql.close();
+  }
+});
+
 test("dia 1 prepara a competência sem forjar aprovação e fecha somente espelho já conferido e aprovado", async () => {
   const { db, sql } = banco();
   sql.exec(

@@ -547,6 +547,7 @@ pontoGestaoRoutes.post("/solicitacoes/:id/decisao", async (c) => {
     body.status !== "APROVADA" || pedido.tipo === "CORRECAO" || minutos > 0,
     "informe_a_duracao_do_abono_ou_da_autorizacao",
   );
+  const avisos: string[] = [];
   if (pedido.tipo === "CORRECAO" && body.status === "APROVADA") {
     exigir(
       ["entrada_hora", "inicio_almoco", "fim_almoco", "saida_hora"].includes(
@@ -569,7 +570,10 @@ pontoGestaoRoutes.post("/solicitacoes/:id/decisao", async (c) => {
     try {
       instantesLinha(linha, dia?.fuso_horario || "America/Sao_Paulo");
     } catch {
-      throw new PontoErro("sequencia_de_horarios_corrigidos_invalida");
+      // A aprovação altera somente o campo solicitado. Uma sequência
+      // inconsistente é alerta para conferência, não motivo para impedir a
+      // decisão nem para alterar os demais horários do colaborador.
+      avisos.push("HORARIOS_INCONSISTENTES");
     }
   }
   const instante = new Date().toISOString();
@@ -646,7 +650,7 @@ pontoGestaoRoutes.post("/solicitacoes/:id/decisao", async (c) => {
         pedido.origem_id,
       )
       .run();
-  return c.json({ success: true });
+  return c.json({ success: true, avisos });
 });
 pontoGestaoRoutes.get("/configuracao", async (c) => {
   const user = usuario(c);
