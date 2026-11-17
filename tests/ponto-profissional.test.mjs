@@ -797,7 +797,7 @@ test("gestor vinculado não acessa marcações ou atestados posteriores à trans
   }
 });
 
-test("turno aberto na virada do mês permanece disponível para o colaborador e no painel ao vivo", async (t) => {
+test("turno aberto na virada do mês permanece disponível para o colaborador, mas sem vínculo não aparece na gestão", async (t) => {
   t.mock.timers.enable({
     apis: ["Date"],
     now: new Date("2026-11-01T06:00:00Z"),
@@ -844,7 +844,7 @@ test("turno aberto na virada do mês permanece disponível para o colaborador e 
     );
     assert.equal(gestao.status, 200);
     const equipe = (await gestao.json()).equipe;
-    assert.equal(equipe.find((u) => u.id === "ana").hoje.data, "2026-10-31");
+    assert.equal(equipe.find((u) => u.id === "ana"), undefined);
     await registrarMarcacao(
       db,
       user("ana"),

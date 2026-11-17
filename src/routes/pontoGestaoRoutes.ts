@@ -91,28 +91,57 @@ function competencia(c: any) {
 async function listarEquipe(db: D1Database, gestor: Colaborador, mes?: string) {
   const p = await permissoesPonto(db, gestor);
   if (!p.gestor) return [];
+  // As telas de operação ao vivo, aprovações e fechamento só podem expor
+  // colaboradores que já tenham um vínculo completo e vigente. O cadastro de
+  // colaboradores sem vínculo continua disponível na aba de configuração para
+  // que o DP possa criar o vínculo.
+  const inicio = mes ? `${mes}-01` : "0000-01-01";
+  const fim = mes ? datasMes(mes).slice(-1)[0] : "9999-12-31";
+  const vinculoAplicavel = `EXISTS (
+    SELECT 1
+      FROM ponto_vinculos v
+      JOIN ponto_escalas e ON e.id = v.escala_id
+      JOIN ponto_regras r ON r.id = v.regra_id
+     WHERE v.user_id = u.id
+       AND v.vigencia_inicio <= ?
+       AND (v.vigencia_fim IS NULL OR v.vigencia_fim >= ?)
+       AND r.status IN ('VALIDADA','REFERENCIA_INTERNA')
+       AND r.vigencia_inicio <= ?
+       AND (r.vigencia_fim IS NULL OR r.vigencia_fim >= ?)
+       ${p.geral ? "" : `AND ${escopoGestorPontoSql("v")}`}
+  )`;
+  const params = p.geral
+    ? [fim, inicio, fim, inicio]
+    : [fim, inicio, fim, inicio, gestor.id, gestor.id];
   const rows = await db
     .prepare(
-      `SELECT id,nome_completo,nome_exibicao,departamento,status FROM user_profiles u ${p.geral ? "" : `WHERE EXISTS (SELECT 1 FROM ponto_vinculos v WHERE v.user_id = u.id AND ${escopoGestorPontoSql()})`} ORDER BY nome_completo`,
+      `SELECT id,nome_completo,nome_exibicao,departamento,status
+         FROM user_profiles u
+        WHERE lower(COALESCE(u.status,'ativo')) NOT IN ('inativo','inactive')
+          AND ${vinculoAplicavel}
+        ORDER BY nome_completo`,
     )
-    .bind(...(p.geral ? [] : [gestor.id, gestor.id]))
+    .bind(...params)
     .all<any>();
   const elegiveis = [];
   for (const user of rows.results) {
-    let historico = false;
-    if (mes)
-      historico = Boolean(
-        await db
-          .prepare(
-            "SELECT id FROM lancamento_ponto WHERE user_id=? AND substr(data_entrada,1,7)=? LIMIT 1",
-          )
-          .bind(user.id, mes)
-          .first(),
-      );
-    if ((await elegivelPonto(db, user)) || historico) elegiveis.push(user);
+    if (await elegivelPonto(db, user)) elegiveis.push(user);
   }
   return elegiveis;
 }
+async function listarColaboradoresCadastro(db: D1Database) {
+  const rows = await db
+    .prepare(
+      "SELECT id,nome_completo,nome_exibicao,departamento,status FROM user_profiles WHERE lower(COALESCE(status,'ativo')) NOT IN ('inativo','inactive') ORDER BY nome_completo",
+    )
+    .all<any>();
+  const elegiveis = [];
+  for (const user of rows.results) {
+    if (await elegivelPonto(db, user)) elegiveis.push(user);
+  }
+  return elegiveis;
+}
+
 pontoGestaoRoutes.get("/contexto", async (c) => {
   const user = usuario(c);
   const db = c.env.SHARE_DB;
@@ -654,7 +683,9 @@ pontoGestaoRoutes.get("/configuracao", async (c) => {
         ],
       };
     }),
-    equipe: await listarEquipe(db, user),
+    // A configuração precisa listar também quem ainda não possui vínculo,
+    // caso contrário o DP não conseguiria criar o primeiro vínculo.
+    equipe: await listarColaboradoresCadastro(db),
     gestores,
     referencia_regras: REGRAS_REFERENCIA,
     bases_cct: [...REFERENCIAS_INTERNAS_2026, ...BASES_CCT_PONTO],
@@ -770,6 +801,28 @@ pontoGestaoRoutes.post("/escalas", async (c) => {
   ]);
   return c.json({ id }, 201);
 });
+pontoGestaoRoutes.patch("/escalas/:id", async (c) => {
+  const user = usuario(c);
+  const db = c.env.SHARE_DB;
+  exigir((await permissoesPonto(db, user)).dp, "somente_dp_configura_escalas", 403);
+  const b = await c.req.json();
+  exigir(["12X36", "6X1", "5X2", "ROTATIVA", "SOBREAVISO"].includes(b.tipo) && String(b.nome || "").trim().length >= 3, "escala_invalida");
+  let ciclo;
+  try {
+    ciclo = validarCiclo(b.ciclo);
+    validarModeloEscala(b.tipo, ciclo);
+  } catch (error) {
+    throw new PontoErro((error as Error).message);
+  }
+  const escala = await db.prepare("SELECT id FROM ponto_escalas WHERE id=?").bind(c.req.param("id")).first();
+  exigir(escala, "escala_nao_encontrada", 404);
+  await db.batch([
+    db.prepare("UPDATE ponto_escalas SET nome=?,tipo=?,ciclo_json=? WHERE id=?").bind(b.nome.trim(), b.tipo, JSON.stringify(ciclo), c.req.param("id")),
+    db.prepare("UPDATE ponto_fechamentos SET status='EM_CONFERENCIA',fonte_hash=NULL,espelho_json=NULL WHERE status<>'FECHADO_DP' AND user_id IN (SELECT user_id FROM ponto_vinculos WHERE escala_id=?)").bind(c.req.param("id")),
+    auditoriaPonto(db, user.id, user.id, "ESCALA_ATUALIZADA", c.req.param("id"), { nome: b.nome, tipo: b.tipo, ciclo }),
+  ]);
+  return c.json({ id: c.req.param("id") });
+});
 pontoGestaoRoutes.post("/vinculos", async (c) => {
   const user = usuario(c);
   const db = c.env.SHARE_DB;
@@ -880,6 +933,24 @@ pontoGestaoRoutes.post("/vinculos", async (c) => {
     "vinculo_alteraria_competencia_fechada",
     409,
   );
+  if (b.id) {
+    const id = String(b.id);
+    const existente = await db.prepare("SELECT id FROM ponto_vinculos WHERE id=? AND user_id=?").bind(id, b.user_id).first();
+    exigir(existente, "vinculo_nao_encontrado", 404);
+    exigir(
+      !(await db.prepare("SELECT id FROM ponto_vinculos WHERE user_id=? AND vigencia_inicio>=? AND id<>? LIMIT 1").bind(b.user_id, b.vigencia_inicio, id).first()),
+      "ja_existe_vinculo_nesta_vigencia_ou_posterior",
+      409,
+    );
+    await db.batch([
+      db.prepare("UPDATE ponto_vinculos SET escala_id=?,regra_id=?,gestor_id=?,data_base=?,vigencia_inicio=?,fuso_horario=?,comunicada_em=?,justificativa_escala=?,anuencia_colaborador=? WHERE id=?").bind(b.escala_id, b.regra_id, gestoresIds[0], b.data_base, b.vigencia_inicio, fuso, b.comunicada_em, b.justificativa_escala || null, b.anuencia_colaborador ? 1 : 0, id),
+      db.prepare("UPDATE ponto_fechamentos SET status='EM_CONFERENCIA',fonte_hash=NULL,espelho_json=NULL WHERE user_id=? AND status<>'FECHADO_DP'").bind(b.user_id),
+      db.prepare("DELETE FROM ponto_vinculos_gestores WHERE vinculo_id=?").bind(id),
+      ...gestoresIds.map((gestorId) => db.prepare("INSERT INTO ponto_vinculos_gestores (vinculo_id,gestor_id) VALUES (?,?)").bind(id, gestorId)),
+      auditoriaPonto(db, user.id, b.user_id, "VINCULO_ATUALIZADO", id, { escala_id: b.escala_id, regra_id: b.regra_id, gestores_ids: gestoresIds, vigencia_inicio: b.vigencia_inicio }),
+    ]);
+    return c.json({ id });
+  }
   exigir(
     !(await db
       .prepare(
