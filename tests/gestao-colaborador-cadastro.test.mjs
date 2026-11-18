@@ -8,7 +8,7 @@ const source = await readFile(
   new URL("../src/worker.ts", import.meta.url),
   "utf8",
 );
-function handler(method, path, allowed = true) {
+function handler(method, path, allowed = true, sincronizar = async () => {}) {
   const start = source.indexOf(`app.${method}('${path}',`);
   assert.notEqual(start, -1);
   const end = source.indexOf("\napp.", start + 1);
@@ -22,7 +22,7 @@ function handler(method, path, allowed = true) {
     shareBrasilUser: async () => ({ id: "gestor" }),
     isColaboradorManager: async () => allowed,
     gerarEmailEnvioColaborador: async () => "teste@share-brasil.com",
-    sincronizarTripulacaoColaborador: async () => {},
+    sincronizarTripulacaoColaborador: sincronizar,
     uuid: () => `id-${++uid}`,
     fetch: async () => ({
       ok: true,
@@ -232,4 +232,39 @@ test("criação, edição e ficha exigem permissão antes de acessar dados", asy
     )({ json: (body, status) => ({ body, status }) });
     assert.equal(result.status, 403);
   }
+});
+
+test("alterar apenas cidade ou comprovante não depende de pendências de exame ou CANAC", async () => {
+  const db = banco();
+  try {
+    // Cadastro legado incompleto, com exame realizado sem metadados e sem CANAC.
+    db.prepare("INSERT INTO user_profiles (id, nome_completo, tipo_user, departamento, cidade, exame_admissional_realizado) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("colaborador-1", "Colaborador Teste", "colaborador", "Tripulante", "Cuiabá", 1);
+    const syncNaoEsperado = async () => { throw new Error("canac_obrigatorio_para_tripulante"); };
+    const patch = handler("patch", "/api/gestor/gestao-colaborador/:id", true, syncNaoEsperado);
+    const cidade = await patch(contexto(db, { cidade: "Sinop" }));
+    assert.equal(cidade.status, 200);
+    assert.equal(cidade.body.cidade, "Sinop");
+    assert.equal(cidade.body.exame_admissional_realizado, 1);
+    assert.equal(cidade.body.exame_admissional_documento_id, null);
+    const documento = await patch(contexto(db, { exame_admissional_documento_id: "doc-imagem" }));
+    assert.equal(documento.status, 200);
+    assert.equal(documento.body.exame_admissional_documento_id, "doc-imagem");
+    assert.equal(documento.body.cidade, "Sinop");
+  } finally { db.close(); }
+});
+
+test("edição dos dados de tripulação continua sincronizando o cadastro", async () => {
+  const db = banco();
+  try {
+    await handler("post", "/api/gestor/gestao-colaborador")(contexto(db, dados));
+    let chamadas = 0;
+    const result = await handler("patch", "/api/gestor/gestao-colaborador/:id", true, async (_c, id, body) => {
+      chamadas++;
+      assert.equal(id, "colaborador-1");
+      assert.equal(body.nome_completo, "Novo nome");
+    })(contexto(db, { nome_completo: "Novo nome" }));
+    assert.equal(result.status, 200);
+    assert.equal(chamadas, 1);
+  } finally { db.close(); }
 });
