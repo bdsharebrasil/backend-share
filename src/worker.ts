@@ -2709,7 +2709,7 @@ app.patch('/api/gestor/gestao-colaborador/:id', async c => {
   if (!body.exame_admissional_realizado && body.exame_admissional_prazo !== undefined && !String(body.exame_admissional_prazo || '').trim()) return c.json({ error: 'prazo_do_exame_admissional_obrigatorio' }, 400)
   if (!updates.length) return c.json({ error: 'nenhum_campo_informado' }, 400)
   await c.env.SHARE_DB.prepare(`UPDATE user_profiles SET ${updates.map(field => `${field} = ?`).join(', ')}, data_atualizacao = CURRENT_TIMESTAMP WHERE id = ?`).bind(...updates.map(field => body[field] === '' ? null : body[field]), id).run()
-  await sincronizarTripulacaoColaborador(c, id, body)
+  if (updates.some(field => ['nome_completo', 'canac', 'status', 'departamento', 'departamentos_email'].includes(field))) await sincronizarTripulacaoColaborador(c, id, body)
   return c.json(await c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ?1').bind(id).first())
 })
 
