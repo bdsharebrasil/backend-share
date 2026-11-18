@@ -1128,6 +1128,50 @@ async function carregarMetricasColaborador(db: D1Database, colaborador: Colabora
   }
 }
 
+app.get('/api/colaborador/folha-pagamento', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  try {
+    const result = await c.env.SHARE_DB.prepare(`SELECT id, user_id, competencia_ano, competencia_mes, rotulo, tipo_pagamento,
+      valor_centavos, data_prevista, data_pagamento, status, comprovante_url, holerite_url, observacoes, criado_em
+      FROM pagamentos_folha WHERE user_id = ?1 AND status <> 'CANCELADO'
+      ORDER BY competencia_ano DESC, competencia_mes DESC, rotulo`).bind(colaborador.id).all<Record<string, any>>()
+    const pagamentos = (result.results || []).map(row => {
+      const arquivo = (value: unknown) => {
+        if (!value) return null
+        try {
+          const key = new URL(String(value), 'https://share-brasil.invalid').searchParams.get('key')
+          return key ? `/api/colaborador/folha-pagamento/anexos?key=${encodeURIComponent(key)}` : null
+        } catch { return null }
+      }
+      return { ...row, holerite_url: arquivo(row.holerite_url), comprovante_url: arquivo(row.comprovante_url) }
+    })
+    return c.json({ pagamentos })
+  } catch (error) {
+    log.error('[colaborador/folha-pagamento] consulta indisponível', error)
+    return c.json({ error: 'falha_ao_carregar_folha' }, 503)
+  }
+})
+app.get('/api/colaborador/folha-pagamento/anexos', async c => {
+  const colaborador = await authenticatedColaborador(c)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const key = String(c.req.query('key') || '')
+  const match = /^financeiro\/pagamentos-folha\/([A-Za-z0-9_-]+)\/(\d{4})\/(\d{2})\/([A-Za-z0-9_-]+)\/(?:holerite|comprovante)\/[A-Za-z0-9-]+\.(?:pdf|jpg|png|webp)$/.exec(key)
+  if (!match || match[4] !== colaborador.id) return c.notFound()
+  const result = await c.env.SHARE_DB.prepare('SELECT holerite_url, comprovante_url FROM pagamentos_folha WHERE user_id = ?1 AND status <> \'CANCELADO\'').bind(colaborador.id).all<{ holerite_url: string | null; comprovante_url: string | null }>()
+  const pertenceAoPagamento = (result.results || []).some(row => [row.holerite_url, row.comprovante_url].some(value => {
+    if (!value) return false
+    try { return new URL(value, 'https://share-brasil.invalid').searchParams.get('key') === key } catch { return false }
+  }))
+  if (!pertenceAoPagamento) return c.notFound()
+  const bucket = c.env.SHARE_FILES || c.env.FILES
+  if (!bucket) return c.json({ error: 'armazenamento_indisponivel' }, 503)
+  const object = await bucket.get(key)
+  if (!object) return c.notFound()
+  const headers = new Headers({ 'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff' })
+  if (object.httpMetadata?.contentType) headers.set('Content-Type', object.httpMetadata.contentType)
+  return new Response(object.body, { headers })
+})
 app.get('/api/colaborador/perfil', async c => {
   const colaborador = await authenticatedColaborador(c)
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
@@ -1439,9 +1483,16 @@ app.get('/api/interno/planos-voo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   await garantirTabelaPlanosVoo(c)
   await validarTabelaChecklistPlano(c)
-  const rows = await c.env.SHARE_DB.prepare(`SELECT p.id, p.numero_voo, p.adep, p.ades, p.data_voo, p.eobt, p.payload_json, p.criado_em AS created_at, cp.status AS checklist_status
-    FROM planos_voo p LEFT JOIN checklists_planos_voo cp ON cp.plano_voo_id = p.id
-    ORDER BY p.criado_em DESC`).all<any>()
+  const mine = c.req.query('mine') === 'true'
+  const userId = mine ? extractSupabaseUserId(c) : null
+  if (mine && !userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const rows = mine
+    ? await c.env.SHARE_DB.prepare(`SELECT p.id, p.numero_voo, p.adep, p.ades, p.data_voo, p.eobt, p.payload_json, p.criado_em AS created_at, cp.status AS checklist_status
+        FROM planos_voo p LEFT JOIN checklists_planos_voo cp ON cp.plano_voo_id = p.id
+        WHERE json_extract(p.payload_json, '$.created_by') = ?1 ORDER BY p.criado_em DESC`).bind(userId).all<any>()
+    : await c.env.SHARE_DB.prepare(`SELECT p.id, p.numero_voo, p.adep, p.ades, p.data_voo, p.eobt, p.payload_json, p.criado_em AS created_at, cp.status AS checklist_status
+        FROM planos_voo p LEFT JOIN checklists_planos_voo cp ON cp.plano_voo_id = p.id
+        ORDER BY p.criado_em DESC`).all<any>()
   return c.json(rows.results.map(row => ({ ...row, payload: JSON.parse(row.payload_json) })))
 })
 
@@ -1457,11 +1508,25 @@ app.post('/api/interno/planos-voo', async c => {
   const numeroVoo = body?.numero_voo ? String(body.numero_voo).trim() : null
   const dataVoo = body?.data_voo ? String(body.data_voo).trim() : null
   const eobt = body?.eobt ? String(body.eobt).trim() : null
+  const ownerId = extractSupabaseUserId(c)
+  const savedPayload = { ...body, ...(ownerId ? { created_by: ownerId } : {}) }
   await c.env.SHARE_DB.prepare(`INSERT INTO planos_voo (id, numero_voo, adep, ades, data_voo, eobt, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, numeroVoo, adep, ades, dataVoo, eobt, JSON.stringify(body)).run()
+    .bind(id, numeroVoo, adep, ades, dataVoo, eobt, JSON.stringify(savedPayload)).run()
   return c.json({ id, created_at: new Date().toISOString() }, 201)
 })
 
+app.delete('/api/interno/planos-voo/:id', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const userId = extractSupabaseUserId(c)
+  if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const row = await c.env.SHARE_DB.prepare('SELECT payload_json FROM planos_voo WHERE id = ?1').bind(c.req.param('id')).first<{ payload_json: string }>()
+  if (!row) return c.notFound()
+  let payload: Record<string, any> = {}
+  try { payload = JSON.parse(row.payload_json || '{}') } catch { payload = {} }
+  if (payload.created_by !== userId) return c.json({ error: 'sem_permissao' }, 403)
+  await c.env.SHARE_DB.prepare('DELETE FROM planos_voo WHERE id = ?1').bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
 async function validarTabelaChecklistPlano(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [{ table: 'checklists_planos_voo', columns: ['id', 'plano_voo_id', 'itens_json', 'status'] }])
 }
