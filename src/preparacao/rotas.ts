@@ -11,10 +11,11 @@ const root='/api/interno/agendamento/:id/preparacao';
 const uuid=()=>crypto.randomUUID();
 const txt=(v:unknown)=>String(v??'').trim();
 const dataValida=(v:string)=>/^\d{4}-\d{2}-\d{2}$/.test(v)&&Number.isFinite(Date.parse(v+'T12:00:00Z'))&&new Date(v+'T12:00:00Z').toISOString().slice(0,10)===v;
+function idVoo(c:any):string{const id=c.req.param('id');if(!id)throw Error('voo_nao_encontrado');return id;}
 const erro=(e:any)=>String(e?.message||'falha_preparacao');
-async function acesso(c:any){if(!await requireFlightOperationAccess(c,c.req.param('id')))return c.json({error:'sem_permissao'},403);}
+async function acesso(c:any){if(!await requireFlightOperationAccess(c,idVoo(c)))return c.json({error:'sem_permissao'},403);}
 async function usuario(c:any){const u=await authenticatedColaborador(c);if(!u)throw Error('nao_autorizado');return {id:u.id,nome:u.nome_exibicao||u.nome_completo||'Colaborador'};}
-async function estado(c:any){const s=await consultar(c.env.SHARE_DB,c.req.param('id'));if(!s)throw Error('voo_nao_encontrado');return s;}
+async function estado(c:any){const s=await consultar(c.env.SHARE_DB,idVoo(c));if(!s)throw Error('voo_nao_encontrado');return s;}
 async function extras(db:any,id:string){const [rs,an,ab]=await Promise.all([
  db.prepare('SELECT id,escala_id,servico_id,reserva_id,status,enviado_em,criado_em FROM preparacao_voo_reservas WHERE solicitacao_id=? ORDER BY criado_em DESC').bind(id).all(),
  db.prepare('SELECT id,servico_id,nome,mime,tamanho,criado_em FROM preparacao_voo_anexos WHERE solicitacao_id=? ORDER BY criado_em DESC').bind(id).all(),
@@ -28,7 +29,7 @@ preparacaoRoutes.onError((e,c)=>{
 });
 preparacaoRoutes.get(root,async c=>{
  const negado=await acesso(c);if(negado)return negado;
- const s=await estado(c);return c.json({...s,...await extras(c.env.SHARE_DB,c.req.param('id')),secoes:SECOES,estados:ESTADOS,tipos_servico:TIPOS_SERVICO});
+ const s=await estado(c);return c.json({...s,...await extras(c.env.SHARE_DB,idVoo(c)),secoes:SECOES,estados:ESTADOS,tipos_servico:TIPOS_SERVICO});
 });
 preparacaoRoutes.get(root+'/opcoes',async c=>{
  const negado=await acesso(c);if(negado)return negado;await estado(c);
@@ -38,7 +39,7 @@ preparacaoRoutes.get(root+'/opcoes',async c=>{
   db.prepare('SELECT * FROM agenda_contatos_fornecedores ORDER BY empresa,nome_contato_responsavel').all(),
   db.prepare('SELECT * FROM fornecedores_combustivel ORDER BY nome_fornecedor').all(),
   db.prepare('SELECT * FROM fornecedores_favoritos ORDER BY nome_completo').all(),
-  db.prepare('SELECT id,data_registro AS data,aerodromo_partida AS origem,aerodromo_chegada AS destino FROM lancamentos_diario_bordo WHERE aeronave_id=(SELECT aeronave_id FROM solicitacoes_reserva_voo WHERE id=?) ORDER BY data_registro DESC,numero_sequencial DESC LIMIT 1').bind(c.req.param('id')).first(),
+  db.prepare('SELECT id,data_registro AS data,aerodromo_partida AS origem,aerodromo_chegada AS destino FROM lancamentos_diario_bordo WHERE aeronave_id=(SELECT aeronave_id FROM solicitacoes_reserva_voo WHERE id=?) ORDER BY data_registro DESC,numero_sequencial DESC LIMIT 1').bind(idVoo(c)).first(),
  ]);
  // Contrato mínimo para a operação: não envia dados bancários ou fiscais dos cadastros.
  return c.json({ultimo_diario:diario,hoteis:(h.results||[]).map((x:any)=>({...x,cafe:cafeDaManha(x.cafe_manha)})),
@@ -49,26 +50,26 @@ preparacaoRoutes.get(root+'/opcoes',async c=>{
 for(const [suffix,concluir]of [['',false],['/concluir',true]] as const)preparacaoRoutes.post(root+suffix,async c=>{
  const negado=await acesso(c);if(negado)return negado;const u=await usuario(c);const body=await c.req.json<any>();
  if(JSON.stringify(body).length>250000)return c.json({error:'dados_muito_grandes'},413);
- const result=await gravar(c.env.SHARE_DB,c.req.param('id'),body,u,concluir);return c.json({...result,...await extras(c.env.SHARE_DB,c.req.param('id'))});
+ const result=await gravar(c.env.SHARE_DB,idVoo(c),body,u,concluir);return c.json({...result,...await extras(c.env.SHARE_DB,idVoo(c))});
 });
 preparacaoRoutes.get(root+'/versoes',async c=>{
  const negado=await acesso(c);if(negado)return negado;await estado(c);
- const r=await c.env.SHARE_DB.prepare('SELECT versao,tipo,criado_em FROM preparacao_voo_versoes WHERE solicitacao_id=? ORDER BY versao DESC LIMIT 100').bind(c.req.param('id')).all();return c.json(r.results||[]);
+ const r=await c.env.SHARE_DB.prepare('SELECT versao,tipo,criado_em FROM preparacao_voo_versoes WHERE solicitacao_id=? ORDER BY versao DESC LIMIT 100').bind(idVoo(c)).all();return c.json(r.results||[]);
 });
 preparacaoRoutes.post(root+'/emitir',async c=>{
  const negado=await acesso(c);if(negado)return negado;const s=await estado(c),u=await usuario(c),db=c.env.SHARE_DB;
  const body=await c.req.json<any>();
  if(body.versao!==s.versao)return c.json({error:'versao_desatualizada'},409);
  if(s.somente_leitura)return c.json({versao:s.versao});
- const novo=await gravar(db,c.req.param('id'),{versao:s.versao,dados:s.dados},u);
+ const novo=await gravar(db,idVoo(c),{versao:s.versao,dados:s.dados},u);
  return c.json({versao:novo.versao});
 });
 preparacaoRoutes.get(root+'/pdf',async c=>{
  const negado=await acesso(c);if(negado)return negado;const atual=await estado(c),db=c.env.SHARE_DB;
  const v=Number(c.req.query('versao'));if(!Number.isInteger(v)||v<0)return c.json({error:'versao_invalida'},400);
  let snapshot:any;
- if(v===0&&atual.versao===0)snapshot={...atual,...await extras(db,c.req.param('id'))};
- else {const row=await db.prepare('SELECT snapshot_json FROM preparacao_voo_versoes WHERE solicitacao_id=? AND versao=?').bind(c.req.param('id'),v).first<any>();if(!row)return c.notFound();snapshot=JSON.parse(row.snapshot_json);}
+ if(v===0&&atual.versao===0)snapshot={...atual,...await extras(db,idVoo(c))};
+ else {const row=await db.prepare('SELECT snapshot_json FROM preparacao_voo_versoes WHERE solicitacao_id=? AND versao=?').bind(idVoo(c),v).first<any>();if(!row)return c.notFound();snapshot=JSON.parse(row.snapshot_json);}
  const bytes=await gerarBriefing(snapshot,snapshot.reservas||[],snapshot.anexos||[],snapshot.abastecimentos||[]);
  return new Response(bytes as any,{headers:{'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="briefing-${String(atual.voo.numero_voo||'voo').replace(/[^a-z0-9-]/gi,'-')}-v${v}.pdf"`,'Cache-Control':'private, no-store'}});
 });
@@ -79,7 +80,7 @@ preparacaoRoutes.post(root+'/reservar-hotel',async c=>{
  const e=s.dados.escalas.find(e=>e.id===b.escala_id),serv=e?.servicos.find(x=>x.id===b.servico_id&&x.tipo==='HOTEL');
  if(!serv)return c.json({error:'servico_invalido'},400);
  let envio=await db.prepare('SELECT * FROM preparacao_voo_reservas WHERE requisicao_id=?').bind(b.requisicao_id).first<any>();
- if(envio&&(envio.solicitacao_id!==c.req.param('id')||envio.servico_id!==serv.id))return c.json({error:'requisicao_invalida'},400);
+ if(envio&&(envio.solicitacao_id!==idVoo(c)||envio.servico_id!==serv.id))return c.json({error:'requisicao_invalida'},400);
  if(envio?.status==='ENVIADO')return c.json({id:envio.reserva_id,enviado:true,repetido:true});
  if(!envio){
   if(b.versao!==s.versao)return c.json({error:'versao_desatualizada'},409);
@@ -95,8 +96,8 @@ preparacaoRoutes.post(root+'/reservar-hotel',async c=>{
   const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(canonico)));
   const assinatura=Array.from(new Uint8Array(digest)).map(n=>n.toString(16).padStart(2,'0')).join('');
   const envioId=uuid(),reservaId=uuid();
-  await db.prepare('INSERT INTO preparacao_voo_reservas(id,solicitacao_id,escala_id,servico_id,requisicao_id,assinatura,reserva_id,payload_json,criado_por) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').bind(envioId,c.req.param('id'),e!.id,serv.id,b.requisicao_id,assinatura,reservaId,JSON.stringify(payload),u.id).run();
-  envio=await db.prepare('SELECT * FROM preparacao_voo_reservas WHERE requisicao_id=? OR (solicitacao_id=? AND servico_id=? AND assinatura=?)').bind(b.requisicao_id,c.req.param('id'),serv.id,assinatura).first<any>();
+  await db.prepare('INSERT INTO preparacao_voo_reservas(id,solicitacao_id,escala_id,servico_id,requisicao_id,assinatura,reserva_id,payload_json,criado_por) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').bind(envioId,idVoo(c),e!.id,serv.id,b.requisicao_id,assinatura,reservaId,JSON.stringify(payload),u.id).run();
+  envio=await db.prepare('SELECT * FROM preparacao_voo_reservas WHERE requisicao_id=? OR (solicitacao_id=? AND servico_id=? AND assinatura=?)').bind(b.requisicao_id,idVoo(c),serv.id,assinatura).first<any>();
  }
  if(envio?.status==='ENVIADO')return c.json({id:envio.reserva_id,enviado:true,repetido:true});
  if(!c.env.RESEND_API_KEY||!c.env.EMAIL_FROM)return c.json({error:'email_indisponivel'},503);
@@ -112,38 +113,38 @@ preparacaoRoutes.post(root+'/reservar-hotel',async c=>{
 });
 preparacaoRoutes.post(root+'/anexos',async c=>{
  const negado=await acesso(c);if(negado)return negado;const u=await usuario(c),s=await estado(c);if(s.somente_leitura)return c.json({error:'voo_encerrado'},409);
- const form=await c.req.formData(),f=form.get('arquivo') as File,servico=txt(form.get('servico_id'));
+ const form=await c.req.formData(),f:unknown=form.get('arquivo'),servico=txt(form.get('servico_id'));
  if(!s.dados.escalas.some(e=>e.servicos.some(s=>s.id===servico)))return c.json({error:'servico_invalido'},400);
- if(!f||typeof f.arrayBuffer!=='function'||!f.size||f.size>10*1024*1024||!['application/pdf','image/jpeg','image/png','image/webp'].includes(f.type))return c.json({error:'anexo_invalido'},400);
- const caminho=await salvarArquivoShareBrasil(c,u.id,f,'share/preparacao_voo/'+c.req.param('id'));
- const id=uuid();try{await c.env.SHARE_DB.prepare('INSERT INTO preparacao_voo_anexos(id,solicitacao_id,servico_id,nome,caminho,mime,tamanho,criado_por) VALUES(?,?,?,?,?,?,?,?)').bind(id,c.req.param('id'),servico,f.name,caminho,f.type,f.size,u.id).run();}catch(e){await shareBrasilBucket(c).delete(caminho);throw e;}
+ if(!(f instanceof File)||!f.size||f.size>10*1024*1024||!['application/pdf','image/jpeg','image/png','image/webp'].includes(f.type))return c.json({error:'anexo_invalido'},400);
+ const caminho=await salvarArquivoShareBrasil(c,u.id,f,'share/preparacao_voo/'+idVoo(c));
+ const id=uuid();try{await c.env.SHARE_DB.prepare('INSERT INTO preparacao_voo_anexos(id,solicitacao_id,servico_id,nome,caminho,mime,tamanho,criado_por) VALUES(?,?,?,?,?,?,?,?)').bind(id,idVoo(c),servico,f.name,caminho,f.type,f.size,u.id).run();}catch(e){await shareBrasilBucket(c).delete(caminho);throw e;}
  return c.json({id,nome:f.name,servico_id:servico},201);
 });
 preparacaoRoutes.get(root+'/anexos/:anexo',async c=>{
  const negado=await acesso(c);if(negado)return negado;
- const row=await c.env.SHARE_DB.prepare('SELECT * FROM preparacao_voo_anexos WHERE id=? AND solicitacao_id=?').bind(c.req.param('anexo'),c.req.param('id')).first<any>();if(!row)return c.notFound();
+ const row=await c.env.SHARE_DB.prepare('SELECT * FROM preparacao_voo_anexos WHERE id=? AND solicitacao_id=?').bind(c.req.param('anexo'),idVoo(c)).first<any>();if(!row)return c.notFound();
  const f=await shareBrasilBucket(c).get(row.caminho);if(!f)return c.notFound();return new Response(f.body,{headers:{'Content-Type':row.mime,'Content-Disposition':`attachment; filename*=UTF-8''${encodeURIComponent(row.nome)}`,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
 });
 preparacaoRoutes.post(root+'/abastecimento-realizado',async c=>{
  const negado=await acesso(c);if(negado)return negado;const u=await usuario(c),s=await estado(c),db=c.env.SHARE_DB;
  if(s.somente_leitura)return c.json({error:'voo_encerrado'},409);
  const b=await c.req.json<any>(),e=s.dados.escalas.find(e=>e.id===b.escala_id);if(!e)return c.json({error:'escala_invalida'},400);
- const existente=await db.prepare('SELECT abastecimento_id FROM preparacao_voo_abastecimentos WHERE solicitacao_id=? AND escala_id=?').bind(c.req.param('id'),e.id).first<any>();
+ const existente=await db.prepare('SELECT abastecimento_id FROM preparacao_voo_abastecimentos WHERE solicitacao_id=? AND escala_id=?').bind(idVoo(c),e.id).first<any>();
  if(existente)return c.json({id:existente.abastecimento_id,repetido:true});
  const litros=Number(b.litros),unit=Number(b.valor_unitario),desconto=Number(b.desconto||0);
  const data=txt(b.data),valida=dataValida(data);
  if(!valida||!txt(b.valor_unitario)||!txt(b.tipo_combustivel)||!Number.isFinite(litros)||litros<=0||!Number.isFinite(unit)||unit<0||!Number.isFinite(desconto)||desconto<0||desconto>litros*unit)return c.json({error:'abastecimento_invalido'},400);
  const aeroporto=await db.prepare('SELECT designativo_icao FROM aerodromo WHERE upper(designativo_icao)=?').bind(e.icao).first<any>();if(!aeroporto)return c.json({error:'aerodromo_nao_cadastrado'},400);
  const cadastro=await db.prepare('SELECT id FROM fornecedores_combustivel WHERE id=? UNION SELECT id FROM fornecedores_favoritos WHERE id=?').bind(txt(b.fornecedor_id),txt(b.fornecedor_id)).first<any>();if(!cadastro)return c.json({error:'fornecedor_invalido'},400);
- const anterior=await db.prepare('SELECT a.id FROM abastecimentos a JOIN checklists_pre_voo c ON c.abastecimento_id=a.id WHERE c.solicitacao_id=? AND upper(a.local)=?').bind(c.req.param('id'),e.icao).first<any>();
+ const anterior=await db.prepare('SELECT a.id FROM abastecimentos a JOIN checklists_pre_voo c ON c.abastecimento_id=a.id WHERE c.solicitacao_id=? AND upper(a.local)=?').bind(idVoo(c),e.icao).first<any>();
  if(anterior)return c.json({id:anterior.id,repetido:true,legado:true});
  let pagador={cliente_id:s.voo.cliente_id||null,socio_id:s.voo.socio_id||null};
  if(b.lancamento_diario_id){const diario=await db.prepare('SELECT cliente_id,socio_id FROM lancamentos_diario_bordo WHERE id=? AND aeronave_id=?').bind(txt(b.lancamento_diario_id),s.voo.aeronave_id).first<any>();if(!diario)return c.json({error:'trecho_diario_invalido'},400);pagador=diario;}
  const id=uuid(),controle=uuid();
  try{await db.batch([
-  db.prepare('INSERT INTO preparacao_voo_abastecimentos(id,solicitacao_id,escala_id,abastecimento_id,criado_por) VALUES(?,?,?,?,?)').bind(controle,c.req.param('id'),e.id,id,u.id),
+  db.prepare('INSERT INTO preparacao_voo_abastecimentos(id,solicitacao_id,escala_id,abastecimento_id,criado_por) VALUES(?,?,?,?,?)').bind(controle,idVoo(c),e.id,id,u.id),
   db.prepare(`INSERT INTO abastecimentos(id,cliente_id,socio_id,aeronave_id,data,tipo_combustivel,trecho,local,numero_comanda,numero_nf,litros,valor_unitario,valor_total,desconto,fornecedor_id,status,criado_por,voo_emprestado,numero_voo,lancamento_diario_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,pagador.cliente_id,pagador.socio_id,s.voo.aeronave_id,b.data,b.tipo_combustivel,s.dados.trechos.map(t=>`${t.origem} X ${t.destino}`).join(' / '),aeroporto.designativo_icao,txt(b.numero_comanda)||null,txt(b.numero_nf)||null,litros,unit,litros*unit-desconto,desconto,cadastro.id,'gerado pré voo',u.id,s.voo.voo_emprestado==='sim'?1:0,s.voo.numero_voo||null,txt(b.lancamento_diario_id)||null),
- ]);}catch(error){const retry=await db.prepare('SELECT abastecimento_id FROM preparacao_voo_abastecimentos WHERE solicitacao_id=? AND escala_id=?').bind(c.req.param('id'),e.id).first<any>();if(retry)return c.json({id:retry.abastecimento_id,repetido:true});throw error;}
+ ]);}catch(error){const retry=await db.prepare('SELECT abastecimento_id FROM preparacao_voo_abastecimentos WHERE solicitacao_id=? AND escala_id=?').bind(idVoo(c),e.id).first<any>();if(retry)return c.json({id:retry.abastecimento_id,repetido:true});throw error;}
  await notifyChecklistAbastecimento(db,id,u.id,s.voo.numero_voo,e.icao).catch(error=>console.error('[preparacao] falha_notificacao_abastecimento',error));
  return c.json({id},201);
 });
