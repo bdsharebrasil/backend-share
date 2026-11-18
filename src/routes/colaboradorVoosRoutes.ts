@@ -1,3 +1,4 @@
+import { hospedagensDoVoo } from '../preparacao/hospedagens'
 import { Hono } from 'hono'
 import { authenticatedColaborador } from '../lib/auth'
 import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
@@ -85,17 +86,7 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
       WHERE j.solicitacao_id = ?1
       ORDER BY date(j.data), j.numero_jornada, j.funcao_tripulante
     `).bind(voo.id).all<Record<string, any>>(),
-    db.prepare(`
-      SELECT r.id, r.hotel_id, r.data_checkin, r.data_checkout, r.tipo_quarto,
-        r.quantidade_hospedes, r.hospede_nome, r.observacoes,
-        h.nome AS hotel_nome, h.endereco AS hotel_endereco, h.cidade AS hotel_cidade, h.uf AS hotel_uf
-      FROM reservas_hoteis r
-      LEFT JOIN hoteis h ON h.id = r.hotel_id
-      WHERE r.criado_por = ?1
-        AND date(r.data_checkin) <= date(?3)
-        AND date(r.data_checkout) >= date(?2)
-      ORDER BY date(r.data_checkin), r.criado_em
-    `).bind(user.id, voo.data_agendada, voo.data_fim).all<Record<string, any>>().catch(() => ({ results: [] })),
+    hospedagensDoVoo(db,voo as {id:string;data_agendada:string;data_fim:string},user.id),
   ])
 
   const jornadasComPernas = await Promise.all((jornadas.results || []).map(async jornada => {
@@ -116,3 +107,4 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
     hospedagens: hospedagens.results || [],
   })
 })
+
