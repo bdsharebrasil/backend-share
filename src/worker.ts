@@ -41,6 +41,7 @@ import { uuid } from './lib/strings'
 import { prepararFechamentoMensal } from './lib/pontoServico'
 import { shareBrasilPontoRoutes } from './routes/shareBrasilPontoRoutes'
 import { createLogger } from './lib/logger'
+import { excluirAgendamentoDoBanco } from './lib/agendamentoDelete'
 import type { Env } from './types/env'
 import { quizRoutes, limparContadoresQuiz } from './quizRoutes'
 import {
@@ -1928,9 +1929,14 @@ app.delete('/api/interno/agendamento/:id', async c => {
   const db = c.env.SHARE_DB
   const agendamento = await db.prepare('SELECT cliente_id, socio_id, status, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<{ cliente_id: string | null; socio_id: string | null; status: string | null; numero_voo: string | null }>()
   if (!agendamento) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
-  await db.prepare('DELETE FROM escala_tripulacao WHERE solicitacao_id = ?1').bind(id).run().catch(() => undefined)
-  const result = await db.prepare('DELETE FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).run()
-  if (!result.meta.changes) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
+  const exclusao = await excluirAgendamentoDoBanco(db, id)
+  if (!exclusao.excluido) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
+  if (exclusao.anexos.length) {
+    const bucket = shareBrasilBucket(c)
+    await Promise.all(exclusao.anexos.map(caminho => bucket.delete(caminho).catch(error => {
+      console.error('[agendamento] falha ao remover anexo do R2', caminho, error)
+    })))
+  }
   if (agendamento.numero_voo) {
     const cotistaKey = agendamento.socio_id ? `socio:${agendamento.socio_id}` : agendamento.cliente_id ? `cliente:${agendamento.cliente_id}` : null
     if (cotistaKey) {
