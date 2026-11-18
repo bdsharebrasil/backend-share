@@ -130,6 +130,9 @@ importers:
       node:
         specifier: ^25.6.0
         version: 25.9.0
+      pdf-lib:
+        specifier: 1.17.1
+        version: 1.17.1
       zod:
         specifier: ^4.5.4
         version: 4.5.4
@@ -137,6 +140,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20240117.0
         version: 4.20260702.1
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
@@ -1091,6 +1097,22 @@ packages:
   zod@4.5.4:
     resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
 
+  pdf-lib@1.17.1:
+    resolution:
+      integrity: sha512-V/mpyJAoTsN4cnP31vc0wfNA1+p20evqqnap0KLoRUN0Yk/p3wN52DOEsL4oBFcLdb76hlpKPtzJIgo67j/XLw==
+  '@pdf-lib/standard-fonts@1.0.0':
+    resolution:
+      integrity: sha512-hU30BK9IUN/su0Mn9VdlVKsWBS6GyhVfqjwl1FjZN4TxP6cCw0jP2w7V3Hf5uX7M0AZJ16vey9yE0ny7Sa59ZA==
+  '@pdf-lib/upng@1.0.1':
+    resolution:
+      integrity: sha512-dQK2FUMQtowVP00mtIksrlZhdFXQZPC+taih1q4CvPZ5vqdxR/LKBaFg0oAfzd1GlHZXXSPdQfzQnt+ViGvEIQ==
+  pako@1.0.11:
+    resolution:
+      integrity: sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==
+  tslib@1.14.1:
+    resolution:
+      integrity: sha512-Xni35NKzjgMrwevysHTCArtLDpPvye8zV/0E4EyYn43P7/7qvQwPh9BGkHewbMulVntbigmcT7rdX3BNo9wRJg==
+
 snapshots:
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
@@ -1954,3 +1976,18 @@ snapshots:
       zod: 4.5.4
 
   zod@4.5.4: {}
+
+  pdf-lib@1.17.1:
+    dependencies:
+      '@pdf-lib/standard-fonts': 1.0.0
+      '@pdf-lib/upng': 1.0.1
+      pako: 1.0.11
+      tslib: 1.14.1
+  '@pdf-lib/standard-fonts@1.0.0':
+    dependencies:
+      pako: 1.0.11
+  '@pdf-lib/upng@1.0.1':
+    dependencies:
+      pako: 1.0.11
+  pako@1.0.11: {}
+  tslib@1.14.1: {}

@@ -1,3 +1,5 @@
+import { notifyChecklistAbastecimento } from './preparacao/notificacoes'
+import { cafeDaManha } from './preparacao/dominio'
 import { retornarRelatorioRascunho, CONCORRENCIA_RELATORIO_SQL, valoresConcorrenciaRelatorio } from './financeiro/relatorioRascunho'
 import { Hono, Context } from 'hono'
 import { cors } from 'hono/cors'
@@ -10,6 +12,7 @@ import { abastecimentosRoutes } from './routes/abastecimentosRoutes'
 import { gestorContratosRoutes } from './routes/gestorContratosRoutes'
 import { diarioBordoRoutes } from './routes/diarioBordoRoutes'
 import { jornadasRoutes } from './routes/jornadasRoutes'
+import { preparacaoRoutes } from './preparacao/rotas'
 import { aiswebRoutes } from './routes/aiswebRoutes'
 import { valuationRoutes } from './routes/valuationRoutes'
 import { portalRoutes } from './routes/portalRoutes'
@@ -126,6 +129,7 @@ app.route('/', abastecimentosRoutes)
 app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
 app.route('/', jornadasRoutes)
+app.route('/', preparacaoRoutes)
 app.route('/', aiswebRoutes)
 app.route('/', valuationRoutes)
 app.route('/', portalClienteExtrasRoutes)
@@ -1586,15 +1590,17 @@ app.get('/api/interno/agendamento', async c => {
   const agendamentosFormatados = agendamentos.results.map((item: any) => {
     const { checklist_respostas: respostasJson, ...agendamento } = item
     let itensRespondidos = 0
+    let preparacaoPendencias: number | null = null
     try {
       const respostas = JSON.parse(String(respostasJson || '{}'))
+      if(respostas?._preparacao) preparacaoPendencias=Number(respostas._preparacao.pendencias||0)
       if (respostas && typeof respostas === 'object' && !Array.isArray(respostas)) {
         itensRespondidos = Object.values(respostas).filter((resposta: any) => Boolean(resposta && typeof resposta === 'object' && resposta.status)).length
       }
     } catch {
       itensRespondidos = 0
     }
-    return { ...agendamento, checklist_itens_respondidos: itensRespondidos }
+    return { ...agendamento, checklist_itens_respondidos: itensRespondidos, preparacao_pendencias: preparacaoPendencias }
   })
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
   const escala = agendamentosFormatados
@@ -1908,6 +1914,7 @@ app.get('/api/interno/agendamento/:id/checklist', async c => {
   return c.json({
     ...row,
     itens: JSON.parse(row.itens || '{}'),
+    preparacao_pendencias: JSON.parse(row.itens || '{}')._preparacao?.pendencias ?? null,
     alertas: alertasMap,
     abastecimento,
   })
@@ -2225,7 +2232,7 @@ app.get('/api/sharebrasil/contatos', async c => {
     CASE WHEN f.categoria IN ('FORNECEDOR', 'HANGAR') THEN f.categoria
       WHEN f.categoria IS NOT NULL THEN 'OUTRO' ELSE NULL END AS categoria_tipo,
     CASE WHEN f.categoria NOT IN ('FORNECEDOR', 'HANGAR') THEN f.categoria ELSE NULL END AS categoria_personalizada,
-    f.gpu, f.transfer, f.valor_gpu, f.valor_transfer, f.ar_condicionado, f.pernoite, f.atendimento_pista
+    f.gpu, f.transfer, f.valor_gpu, f.valor_transfer, f.ar_condicionado, f.pernoite, f.atendimento_pista, f.codigo_icao
     FROM agenda_contatos_fornecedores f ORDER BY f.nome_contato_responsavel`).all()
   return c.json(result.results)
 })
@@ -2235,6 +2242,7 @@ app.post('/api/sharebrasil/contatos', async c => {
   await garantirTabelaAgendaContatosFornecedores(c)
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
   if (!body.nome?.trim()) return c.json({ error: 'nome_obrigatorio' }, 400)
+  if (body.codigo_icao && !/^[A-Z0-9]{4}$/i.test(String(body.codigo_icao).trim())) return c.json({ error: 'icao_invalido' }, 400)
   const categoria = validarCategoriaAgenda(body.categoria_tipo, body.categoria_personalizada, body.categoria)
   if ('error' in categoria) return c.json({ error: categoria.error }, 400)
   const servicos = validarServicosHangar(body, categoria.categoriaTipo)
@@ -2243,9 +2251,9 @@ app.post('/api/sharebrasil/contatos', async c => {
   if ('error' in recursos) return c.json({ error: recursos.error }, 400)
   const id = uuid()
   await c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores
-    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome.trim(), body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer, recursos.ar_condicionado, recursos.pernoite, recursos.atendimento_pista).run()
+    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista, codigo_icao)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome.trim(), body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer, recursos.ar_condicionado, recursos.pernoite, recursos.atendimento_pista, String(body.codigo_icao || '').trim().toUpperCase() || null).run()
   return c.json({ id }, 201)
 })
 app.patch('/api/sharebrasil/contatos/:id', async c => {
@@ -2253,6 +2261,7 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   await garantirTabelaAgendaContatosFornecedores(c)
   const body = await c.req.json<Record<string, string>>().catch(() => ({} as Record<string, string>))
+  if (body.codigo_icao && !/^[A-Z0-9]{4}$/i.test(String(body.codigo_icao).trim())) return c.json({ error: 'icao_invalido' }, 400)
   const categoria = validarCategoriaAgenda(body.categoria_tipo, body.categoria_personalizada, body.categoria)
   if ('error' in categoria) return c.json({ error: categoria.error }, 400)
   const servicos = validarServicosHangar(body, categoria.categoriaTipo)
@@ -2260,18 +2269,18 @@ app.patch('/api/sharebrasil/contatos/:id', async c => {
   const recursos = validarRecursosHangar(body, categoria.categoriaTipo)
   if ('error' in recursos) return c.json({ error: recursos.error }, 400)
   const id = c.req.param('id')
-  const existe = await c.env.SHARE_DB.prepare('SELECT id FROM agenda_contatos_fornecedores WHERE id = ?1').bind(id).first()
+  const existe = await c.env.SHARE_DB.prepare('SELECT id, codigo_icao FROM agenda_contatos_fornecedores WHERE id = ?1').bind(id).first<{id:string;codigo_icao:string|null}>()
   if (!existe) return c.notFound()
   await c.env.SHARE_DB.prepare(`INSERT INTO agenda_contatos_fornecedores
-    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (id, empresa, razao_social, cnpj, nome_contato_responsavel, telefone, email, endereco, uf, cidade, observacoes, categoria, gpu, transfer, valor_gpu, valor_transfer, ar_condicionado, pernoite, atendimento_pista, codigo_icao)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET empresa=excluded.empresa, razao_social=excluded.razao_social, cnpj=excluded.cnpj,
       nome_contato_responsavel=excluded.nome_contato_responsavel, telefone=excluded.telefone, email=excluded.email,
       endereco=excluded.endereco, uf=excluded.uf, cidade=excluded.cidade, observacoes=excluded.observacoes,
       categoria=excluded.categoria, gpu=excluded.gpu, transfer=excluded.transfer,
       valor_gpu=excluded.valor_gpu, valor_transfer=excluded.valor_transfer, ar_condicionado=excluded.ar_condicionado,
-      pernoite=excluded.pernoite, atendimento_pista=excluded.atendimento_pista, atualizado_em=CURRENT_TIMESTAMP`)
-    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome?.trim() || '', body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer, recursos.ar_condicionado, recursos.pernoite, recursos.atendimento_pista).run()
+      pernoite=excluded.pernoite, atendimento_pista=excluded.atendimento_pista, codigo_icao=excluded.codigo_icao, atualizado_em=CURRENT_TIMESTAMP`)
+    .bind(id, body.empresa || null, body.razao_social || null, body.cnpj || null, body.nome?.trim() || '', body.telefone || null, body.email || null, body.endereco || null, body.uf || null, body.cidade || null, body.observacoes || null, categoria.categoria, servicos.gpu, servicos.transfer, servicos.valor_gpu, servicos.valor_transfer, recursos.ar_condicionado, recursos.pernoite, recursos.atendimento_pista, (body.codigo_icao === undefined ? existe.codigo_icao : String(body.codigo_icao || '').trim().toUpperCase() || null)).run()
   return c.json({ success: true })
 })
 app.delete('/api/sharebrasil/contatos/:id', async c => {
@@ -2867,19 +2876,7 @@ async function notifyUsers(db: D1Database, recipients: string[], idFrom: string,
     await db.prepare("INSERT INTO notificacoes (id, id_from, departamento_destinatario, status, mensagem) VALUES (?, ?, ?, 'nao_lida', ?)").bind(uuid(), idFrom, recipient, mensagem || null).run()
   }
 }
-async function notifyChecklistAbastecimento(db: D1Database, abastecimentoId: string, criadoPor: string | null, numeroVoo: string | null, local: string | null): Promise<void> {
-  const recipients = await db.prepare(`SELECT id FROM user_profiles
-    WHERE id <> ?1 AND (status IS NULL OR lower(status) IN ('ativo', 'active')) AND (
-      lower(replace(replace(trim(COALESCE(tipo_user, '')), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiroadmin', 'financeiro_master', 'financeiromaster', 'admin', 'administrador')
-      OR lower(replace(replace(trim(COALESCE(departamento, '')), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiroadmin', 'financeiro_master', 'financeiromaster', 'admin', 'administrador', 'administrativo')
-      OR id IN (SELECT user_id FROM usuarios_funcoes WHERE lower(replace(replace(trim(funcao), ' ', '_'), '-', '_')) IN ('financeiro', 'financeiro_admin', 'financeiroadmin', 'financeiro_master', 'financeiromaster', 'admin', 'administrador'))
-    )`).bind(criadoPor || '').all<{ id: string }>()
-  const uniqueRecipients = [...new Set((recipients.results || []).map((recipient) => recipient.id).filter(Boolean))]
-  if (!uniqueRecipients.length) return
-  const voo = numeroVoo ? ` do voo ${numeroVoo}` : ''
-  const aeroporto = local ? ` em ${local}` : ''
-  await notifyUsers(db, uniqueRecipients, `abastecimento/${abastecimentoId}`, `Novo abastecimento${voo}${aeroporto} criado pelo checklist pré-voo. É necessário completar os dados fiscais e finalizar o registro no financeiro.`)
-}
+
 function notificationDestinations(user: Colaborador): string[] {
   return [...new Set([user.id, user.departamento, ...(user.departamentos_email || '').split(',')]
     .map((value) => String(value || '').trim().toLowerCase())
@@ -3084,7 +3081,7 @@ function normalizarCafeManhaHotel(value: unknown): string | null | false {
   const texto = String(value ?? '').trim()
   if (!texto) return null
   const opcao = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
-  if (opcao === 'SIM') return 'SIM'
+  if (['SIM','INCLUIDO','A_PARTE','A_CONFIRMAR','NAO_OFERECE'].includes(opcao)) return opcao
   if (opcao === 'NAO') return 'NÃO'
   const valor = Number(texto.replace(',', '.'))
   return Number.isFinite(valor) && valor > 0 ? valor.toFixed(2) : false
@@ -3154,7 +3151,7 @@ app.post('/api/sharebrasil/hoteis/:id/reservar', async c => {
   const checkin = String(body.data_checkin || '').trim(); const checkout = String(body.data_checkout || '').trim(); const hospede = String(body.hospede_nome || '').trim(); const telefone = String(body.hospede_telefone || '').trim(); const quantidade = Number(body.quantidade_hospedes || 1)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(checkin) || !/^\d{4}-\d{2}-\d{2}$/.test(checkout) || !hospede || !telefone || !Number.isInteger(quantidade) || quantidade < 1) return c.json({ error: 'dados_da_reserva_invalidos' }, 400)
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) return c.json({ error: 'email_nao_configurado' }, 503)
-  const emailResponse = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [destinatario], reply_to: body.hospede_email || undefined, subject: `Solicitação de reserva — ${hotel.nome} (${checkin} a ${checkout})`, html: `<h2>Solicitação de reserva</h2><p><strong>Hotel:</strong> ${escapeHtml(hotel.nome)}</p><p><strong>Check-in:</strong> ${escapeHtml(checkin)}</p><p><strong>Check-out:</strong> ${escapeHtml(checkout)}</p><p><strong>Quarto:</strong> ${escapeHtml(body.tipo_quarto || 'Não informado')}</p><p><strong>Hóspede:</strong> ${escapeHtml(hospede)}</p><p><strong>Telefone:</strong> ${escapeHtml(telefone)}</p><p><strong>Quantidade:</strong> ${escapeHtml(quantidade)}</p><p><strong>Observações:</strong> ${escapeHtml(body.observacoes || '—')}</p>` }) })
+  const emailResponse = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [destinatario], reply_to: body.hospede_email || undefined, subject: `Solicitação de reserva — ${hotel.nome} (${checkin} a ${checkout})`, html: `<h2>Solicitação de reserva</h2><p><strong>Hotel:</strong> ${escapeHtml(hotel.nome)}</p><p><strong>Check-in:</strong> ${escapeHtml(checkin)}</p><p><strong>Check-out:</strong> ${escapeHtml(checkout)}</p><p><strong>Quarto:</strong> ${escapeHtml(body.tipo_quarto || 'Não informado')}</p><p><strong>Hóspede:</strong> ${escapeHtml(hospede)}</p><p><strong>Telefone:</strong> ${escapeHtml(telefone)}</p><p><strong>Quantidade:</strong> ${escapeHtml(quantidade)}</p><p><strong>Café da manhã:</strong> ${escapeHtml(({INCLUIDO:'Incluído na diária',A_PARTE:'Pago à parte',NAO_OFERECE:'Não oferece',A_CONFIRMAR:'Inclusão a confirmar'} as Record<string,string>)[cafeDaManha(hotel.cafe_manha).estado])}${cafeDaManha(hotel.cafe_manha).valor ? ' — R$ '+escapeHtml(cafeDaManha(hotel.cafe_manha).valor) : ''}</p><p><strong>Observações:</strong> ${escapeHtml(body.observacoes || '—')}</p>` }) })
   if (!emailResponse.ok) return c.json({ error: 'falha_ao_enviar_email' }, 502)
   const id = uuid()
   await c.env.SHARE_DB.prepare('INSERT INTO reservas_hoteis (id, hotel_id, criado_por, data_checkin, data_checkout, tipo_quarto, quantidade_hospedes, hospede_nome, hospede_telefone, hospede_email, observacoes, destinatario_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(id, hotel.id, user.id, checkin, checkout, body.tipo_quarto || null, quantidade, hospede, telefone, body.hospede_email || null, body.observacoes || null, destinatario).run()
