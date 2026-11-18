@@ -50,6 +50,7 @@ class_name = "MeetingRoom"
 name = "RATE_LIMITER"
 class_name = "RateLimitCounter"
 
+# Estas migrations são apenas de Durable Objects; não executam SQL nem alteram o D1.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MeetingRoom"]
