@@ -1,6 +1,7 @@
 import { retornarRelatorioRascunho, CONCORRENCIA_RELATORIO_SQL, valoresConcorrenciaRelatorio } from './financeiro/relatorioRascunho'
 import { Hono, Context } from 'hono'
 import { cors } from 'hono/cors'
+import { corsOriginFor, createInternalCorsMiddleware } from './lib/cors'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
@@ -86,12 +87,8 @@ interface HotelReservationHotel {
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-function allowedOrigins(env: Bindings): string[] {
-  return env.ALLOWED_ORIGINS?.split(',').map(origin => origin.trim()).filter(Boolean) ?? []
-}
-
 function originFor(env: Bindings, origin: string): string {
-  return allowedOrigins(env).includes(origin) ? origin : ''
+  return corsOriginFor(env.ALLOWED_ORIGINS, origin)
 }
 
 app.onError((error, c) => {
@@ -108,12 +105,7 @@ app.route('/', quizRoutes)
 
 // CRUCIAL: O CORS precisa ser o primeiro middleware global executado
 app.use('*', async (c, next) => {
-  const corsMiddleware = cors({
-    origin: origin => originFor(c.env, origin),
-    allowHeaders: ['Content-Type', 'Authorization', 'apikey', 'X-Requested-With', 'X-Request-Id'],
-    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
-  })
-  return corsMiddleware(c, next)
+  return createInternalCorsMiddleware(c.env.ALLOWED_ORIGINS)(c, next)
 })
 app.use('*', async (c, next) => {
   const recebido = c.req.header('X-Request-Id')?.trim() || ''
