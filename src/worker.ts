@@ -1,3 +1,4 @@
+import { codigoAerodromoValido } from "./lib/aerodromo"
 import { notifyChecklistAbastecimento } from './preparacao/notificacoes'
 import { cafeDaManha } from './preparacao/dominio'
 import { retornarRelatorioRascunho, CONCORRENCIA_RELATORIO_SQL, valoresConcorrenciaRelatorio } from './financeiro/relatorioRascunho'
@@ -1502,7 +1503,7 @@ app.post('/api/interno/planos-voo', async c => {
   const flightplan = body?.flightplan
   const adep = String(body?.adep ?? flightplan?.adep ?? '').trim().toUpperCase()
   const ades = String(body?.ades ?? flightplan?.ades ?? '').trim().toUpperCase()
-  if (!/^[A-Z]{4}$/.test(adep) || !/^[A-Z]{4}$/.test(ades)) return c.json({ error: 'adep_ades_obrigatorios' }, 400)
+  if (!codigoAerodromoValido(adep) || !codigoAerodromoValido(ades)) return c.json({ error: 'adep_ades_obrigatorios' }, 400)
   await garantirTabelaPlanosVoo(c)
   const id = uuid()
   const numeroVoo = body?.numero_voo ? String(body.numero_voo).trim() : null

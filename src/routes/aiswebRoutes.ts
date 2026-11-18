@@ -1,3 +1,4 @@
+import { codigoAerodromoValido } from "../lib/aerodromo"
 import { Hono, Context } from "hono"
 import { cachedFetch, checkRateLimit, clientIp } from "../lib/cache"
 import { fetchAisweb } from "../lib/aiswebClient"
@@ -168,7 +169,7 @@ function normalizeAirportList(data: any, userLat: number, userLon: number): Airp
     if (!icao) continue
     const lat = parseCoord(item?.latitude ?? item?.lat)
     const lon = parseCoord(item?.longitude ?? item?.lng ?? item?.lon)
-    if (lat == null || lon == null) continue
+    if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) continue
     list.push({ icao, name: item?.nome ?? item?.name ?? icao, lat, lon, distKm: Math.round(haversineKm(userLat, userLon, lat, lon)) })
   }
   return list
@@ -193,8 +194,8 @@ function airportCollection(value: any): any[] {
 function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, any> {
   const source = item?.aerodrome ?? item?.airport ?? item?.rotaer ?? item ?? {}
   const rawCoordinates = source.coordinates ?? source.coordenadas
-  const lat = rawCoordinates?.lat ?? rawCoordinates?.latitude ?? parseCoord(source.latitude ?? source.lat)
-  const lng = rawCoordinates?.lng ?? rawCoordinates?.lon ?? rawCoordinates?.longitude ?? parseCoord(source.longitude ?? source.lng ?? source.lon)
+  const lat = parseCoord(rawCoordinates?.lat ?? rawCoordinates?.latitude ?? source.latitude ?? source.lat)
+  const lng = parseCoord(rawCoordinates?.lng ?? rawCoordinates?.lon ?? rawCoordinates?.longitude ?? source.longitude ?? source.lng ?? source.lon)
   const runways = source.runways ?? source.pistas ?? source.runway ?? []
   const frequencies = source.frequencies ?? source.frequencias ?? source.frequency ?? []
   const restrictions = source.restrictions ?? source.restricoes ?? source.observacoes ?? []
@@ -212,7 +213,7 @@ function normalizeRotaerAirport(item: any, fallbackIcao = ''): Record<string, an
     city: source.city ?? source.cidade ?? source.municipio,
     state: source.state ?? source.uf ?? source.estado,
     elevation: source.elevation ?? source.elevacao ?? source.altitude ?? source.Elev,
-    coordinates: lat != null && lng != null ? { lat: Number(lat), lng: Number(lng) } : null,
+    coordinates: lat != null && lng != null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? { lat: Number(lat), lng: Number(lng) } : null,
     runways: Array.isArray(runways) ? runways : [runways].filter(Boolean),
     frequencies: Array.isArray(frequencies) ? frequencies : [frequencies].filter(Boolean),
     restrictions: Array.isArray(restrictions) ? restrictions : [restrictions].filter(Boolean),
@@ -301,7 +302,7 @@ aiswebRoutes.get('/api/weather/:icao', async (c) => {
 aiswebRoutes.get('/api/notam/:icao', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const icao = c.req.param('icao').trim().toUpperCase()
-  if (!/^[A-Z]{4}$/.test(icao)) return c.json({ error: 'ICAO inválido' }, 400)
+  if (!codigoAerodromoValido(icao)) return c.json({ error: 'ICAO inválido' }, 400)
   try {
     const data = await cachedFetch(c, `notam-${icao}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: icao }))
     return c.json({ icao, notams: normalizeNotamItems(data, icao), fetched_at: new Date().toISOString(), source: 'AISWEB/DECEA' })
@@ -381,8 +382,7 @@ aiswebRoutes.get('/api/routes', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
   const adep = c.req.query('adep')?.trim().toUpperCase()
   const ades = c.req.query('ades')?.trim().toUpperCase()
-  if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
-  if (!/^[A-Z]{4}$/.test(adep) || !/^[A-Z]{4}$/.test(ades)) return c.json({ error: 'adep e ades devem ser códigos ICAO válidos' }, 400)
+  if (!codigoAerodromoValido(adep) || !codigoAerodromoValido(ades)) return c.json({ error: 'Informe origem e destino com quatro letras ou números.' }, 400)
   try {
     const data = await cachedFetch(c, `routes-${adep}-${ades}`, 3600, () => fetchAisweb(c, 'routesp', { adep, ades }))
     const preferred = normalizeRouteItems(data, adep, ades)
@@ -465,14 +465,14 @@ aiswebRoutes.get('/api/geiloc/nearby', async (c) => {
 
 aiswebRoutes.get('/api/flightplan', async (c) => {
   if (!(await requireAiswebRateLimit(c))) return c.json({ error: 'Limite de requisições atingido, tente novamente em instantes' }, 429)
-  const adep = c.req.query('adep')?.toUpperCase()
-  const ades = c.req.query('ades')?.toUpperCase()
+  const adep = c.req.query('adep')?.trim().toUpperCase()
+  const ades = c.req.query('ades')?.trim().toUpperCase()
   const aircraftId = c.req.query('aeronave_id') || c.req.query('aircraft_id')
   const requestedSpeed = numericValue(c.req.query('speed'))
   const requestedBurn = numericValue(c.req.query('fuel_burn'))
   const reserveMin = numericValue(c.req.query('reserve')) || 45
 
-  if (!adep || !ades) return c.json({ error: 'adep e ades são obrigatórios' }, 400)
+  if (!codigoAerodromoValido(adep) || !codigoAerodromoValido(ades)) return c.json({ error: 'Informe origem e destino com quatro letras ou números.' }, 400)
 
   try {
     let aircraftData: any = null
@@ -495,11 +495,11 @@ aiswebRoutes.get('/api/flightplan', async (c) => {
       fetchRotaerByIcao(c, ades),
     ])
 
-    const lat1 = parseCoord(depItem.latitude ?? depItem.lat)
-    const lon1 = parseCoord(depItem.longitude ?? depItem.lng ?? depItem.lon)
-    const lat2 = parseCoord(desItem.latitude ?? desItem.lat)
-    const lon2 = parseCoord(desItem.longitude ?? desItem.lng ?? desItem.lon)
-    if (lat1 == null || lon1 == null || lat2 == null || lon2 == null)
+    const lat1 = parseCoord(depItem.coordinates?.lat ?? depItem.latitude ?? depItem.lat)
+    const lon1 = parseCoord(depItem.coordinates?.lng ?? depItem.longitude ?? depItem.lng ?? depItem.lon)
+    const lat2 = parseCoord(desItem.coordinates?.lat ?? desItem.latitude ?? desItem.lat)
+    const lon2 = parseCoord(desItem.coordinates?.lng ?? desItem.longitude ?? desItem.lng ?? desItem.lon)
+    if (lat1 == null || lon1 == null || lat2 == null || lon2 == null || Math.abs(lat1) > 90 || Math.abs(lat2) > 90 || Math.abs(lon1) > 180 || Math.abs(lon2) > 180)
       return c.json({ error: 'Coordenadas inválidas' }, 500)
 
     const distanceNm = haversineKm(lat1, lon1, lat2, lon2) * 0.539957

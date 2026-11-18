@@ -216,6 +216,29 @@ export function agruparJornadasVoo(registros: any[]) {
     || a.raizId.localeCompare(b.raizId))
 }
 
+// Consulta exclusiva para planejamento: não cria pernas nem recalcula/atualiza jornadas.
+jornadasRoutes.get('/api/interno/agendamento/:id/pernas-plano', async c => {
+  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
+  try {
+    await validateWorkerSchema(c, [
+      { table: 'jornadas_voo', columns: ['id', 'solicitacao_id', 'numero_jornada', 'data'] },
+      { table: 'pernas_jornada_voo', columns: ['id', 'jornada_id', 'numero', 'origem', 'destino', 'passageiros', 'horario_ac', 'horario_dep', 'horario_pouso', 'horario_corte', 'status'] },
+    ])
+    const resultado = await c.env.SHARE_DB.prepare(`SELECT p.id, p.jornada_id, j.numero_jornada, j.data,
+        p.numero, p.origem, p.destino, p.passageiros AS numero_passageiros,
+        p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte, p.status
+      FROM pernas_jornada_voo p
+      JOIN jornadas_voo j ON j.id = p.jornada_id
+      WHERE j.solicitacao_id = ?1
+      ORDER BY date(j.data), j.numero_jornada, p.numero, p.id`)
+      .bind(c.req.param('id')).all()
+    return c.json({ pernas: resultado.results || [] })
+  } catch (error) {
+    console.error('[pernas-plano] falha na consulta', error)
+    return c.json({ error: 'pernas_voo_indisponiveis', detail: 'Não foi possível consultar os trechos deste voo. Tente novamente.' }, 503)
+  }
+})
+
 jornadasRoutes.get('/api/interno/agendamento/:id/jornada', async c => {
   if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   try {
