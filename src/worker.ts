@@ -1621,7 +1621,14 @@ app.get('/api/interno/agendamento', async c => {
     db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, ${statusOperacionalSql} AS status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status = 'encerrada') AS jornadas_encerradas,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status <> 'encerrada') AS jornadas_abertas,
-        (SELECT CASE WHEN COUNT(*) > 0 AND SUM(CASE WHEN j.status <> 'encerrada' THEN 1 ELSE 0 END) = 0 THEN MAX(j.horario_corte) END FROM jornadas_voo j WHERE j.solicitacao_id = s.id) AS horario_corte,
+        COALESCE(perna_agendada.horario_corte,
+          (SELECT CASE WHEN COUNT(*) > 0 AND SUM(CASE WHEN j.status <> 'encerrada' THEN 1 ELSE 0 END) = 0 THEN MAX(j.horario_corte) END FROM jornadas_voo j WHERE j.solicitacao_id = s.id)
+        ) AS horario_corte,
+        perna_agendada.id AS perna_atual_id, perna_agendada.numero AS perna_atual_numero,
+        perna_agendada.origem AS perna_atual_origem, perna_agendada.destino AS perna_atual_destino,
+        perna_agendada.horario_ac AS perna_atual_horario_ac, perna_agendada.horario_dep AS perna_atual_horario_dep,
+        perna_agendada.horario_pouso AS perna_atual_horario_pouso, perna_agendada.horario_corte AS perna_atual_horario_corte,
+        perna_agendada.status AS perna_atual_status,
         c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, (SELECT cae.codigo_cliente FROM cotista_aeronave cae WHERE (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id) AND cae.aeronave_id = s.aeronave_id ORDER BY cae.codigo_cliente LIMIT 1), (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id ORDER BY ca.codigo_cliente LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave,
         (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status,
         (SELECT cp.respostas FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_respostas
@@ -1631,6 +1638,16 @@ app.get('/api/interno/agendamento', async c => {
       LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
       LEFT JOIN hold_socios se ON se.id = s.socio_emprestimo_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
+      -- Última perna efetivamente cadastrada, inclusive quando já existe COR.
+      -- A rota da solicitação permanece como alternativa quando não há jornadas/pernas.
+      LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada.id = (
+        SELECT p.id
+        FROM jornadas_voo j
+        JOIN pernas_jornada_voo p ON p.jornada_id = j.id
+        WHERE j.solicitacao_id = s.id AND j.jornada_principal_id IS NULL
+        ORDER BY j.numero_jornada DESC, p.numero DESC, p.id DESC
+        LIMIT 1
+      )
       WHERE s.excluida_em IS NULL AND date(s.data_agendada) BETWEEN ?1 AND ?2
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all().catch(error => { log.error('[agendamento] lançamentos indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
