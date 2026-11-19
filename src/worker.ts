@@ -1645,7 +1645,11 @@ app.get('/api/interno/agendamento', async c => {
         FROM jornadas_voo j
         JOIN pernas_jornada_voo p ON p.jornada_id = j.id
         WHERE j.solicitacao_id = s.id AND j.jornada_principal_id IS NULL
-        ORDER BY j.numero_jornada DESC, p.numero DESC, p.id DESC
+        ORDER BY
+          CASE WHEN p.horario_corte IS NULL AND lower(trim(COALESCE(p.status, ''))) NOT IN ('cortado', 'cancelada') THEN 0 ELSE 1 END,
+          CASE WHEN p.horario_corte IS NULL AND lower(trim(COALESCE(p.status, ''))) NOT IN ('cortado', 'cancelada') THEN j.numero_jornada END ASC,
+          CASE WHEN p.horario_corte IS NULL AND lower(trim(COALESCE(p.status, ''))) NOT IN ('cortado', 'cancelada') THEN p.numero END ASC,
+          j.numero_jornada DESC, p.numero DESC, p.id DESC
         LIMIT 1
       )
       WHERE s.excluida_em IS NULL AND date(s.data_agendada) BETWEEN ?1 AND ?2
