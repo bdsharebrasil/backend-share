@@ -319,6 +319,50 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/opcoes', async c => {
   return c.json({ clientes: clientes.results, holdings: holdings.results, socios: socios.results, tripulantes: [...tripulacao.results, ...freelancers.results], aerodromos: aerodromos.results, fornecedores_combustivel: fornecedoresCombustivel.results })
 })
 
+/** Resumo real das horas voadas; nunca usa agendamentos ou horas estimadas.
+ *  Somente aeronaves ativas, e somente lançamentos vinculados ao diário do mês correto.
+ *  Minutos inteiros são calculados por lançamento, sem arredondamentos diferentes na UI. */
+diarioBordoRoutes.get('/api/interno/diario-bordo/horas-voadas', async c => {
+  if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const ano = Number(c.req.query('ano'))
+  if (!Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'ano_invalido' }, 400)
+
+  const db = c.env.SHARE_DB
+  // O cadastro pode ter modelos sem registros no período: todos aparecem com zero hora.
+  const [aeronaves, dias] = await Promise.all([
+    db.prepare(`SELECT id, matricula_registro, fabricante, modelo
+      FROM aeronave
+      WHERE lower(trim(COALESCE(status, ''))) IN ('ativa', 'ativo', 'active')
+      ORDER BY matricula_registro`).all<{
+        id: string; matricula_registro: string; fabricante: string | null; modelo: string | null
+      }>(),
+    db.prepare(`SELECT l.aeronave_id, date(l.data_registro) AS data,
+        SUM(CASE WHEN l.tempo_voo > 0 THEN CAST(ROUND(l.tempo_voo * 60) AS INTEGER) ELSE 0 END) AS minutos,
+        SUM(CASE WHEN l.tempo_voo > 0 THEN 1 ELSE 0 END) AS trechos
+      FROM lancamentos_diario_bordo l
+      INNER JOIN diario_mes dm
+        ON dm.id = l.diario_mes_id AND dm.aeronave_id = l.aeronave_id
+      INNER JOIN aeronave a ON a.id = l.aeronave_id
+      WHERE lower(trim(COALESCE(a.status, ''))) IN ('ativa', 'ativo', 'active')
+        AND dm.ano IN (?1, ?2)
+        AND strftime('%Y-%m', l.data_registro) = printf('%04d-%02d', dm.ano, dm.mes)
+        AND l.tempo_voo > 0
+      GROUP BY l.aeronave_id, date(l.data_registro)
+      ORDER BY data DESC, l.aeronave_id`).bind(ano, ano - 1).all<{
+        aeronave_id: string; data: string; minutos: number; trechos: number
+      }>(),
+  ])
+  c.header('Cache-Control', 'private, no-store')
+  return c.json({
+    ano,
+    aeronaves: aeronaves.results || [],
+    dias: (dias.results || []).map(item => ({
+      aeronave_id: item.aeronave_id, data: item.data,
+      minutos: Number(item.minutos) || 0, trechos: Number(item.trechos) || 0,
+    })),
+  })
+})
+
 diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const ano = Number(c.req.query('ano') || new Date().getFullYear())
