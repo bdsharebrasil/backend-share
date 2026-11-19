@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { lerHistorico, registrarSinal, LIMITE_SINAL_S } from '../lib/rastreioHistorico'
 import { requireShareInternal } from '../lib/auth'
 import { checkRateLimit, clientIp } from '../lib/cache'
-import { buscarPosicoes, configurarProvedor, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
+import { buscarPosicoes, configurarProvedor, normalizarMatricula, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
 import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
 
 export type RastreioBindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string }
@@ -52,7 +52,7 @@ rastreioRoutes.get('/api/rastreio/aeronave/matricula/:matricula', async (c) => {
 
     const correspondentes = posicoes.filter((posicao) => porHex
       ? posicao.hex === identificador
-      : posicao.matricula?.replace(/-/g, '').toUpperCase() === identificador)
+      : normalizarMatricula(posicao.matricula || '') === identificador || normalizarMatricula(posicao.callsign || '') === identificador)
     return c.json({ ac: correspondentes.map((posicao) => ({
       hex: posicao.hex,
       r: posicao.matricula,
@@ -224,9 +224,14 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
     matriculas: emVoo.map((item) => item.matricula_registro).filter(Boolean),
   })
   const porChave = new Map<string, PosicaoAeronave>()
+  const matriculasEsperadas = new Set(emVoo.map((item) => normalizarMatricula(item.matricula_registro || '')).filter(Boolean))
   posicoes.forEach((item) => {
     porChave.set(item.hex.toUpperCase(), item)
-    if (item.matricula) porChave.set(item.matricula.replace(/-/g, '').toUpperCase(), item)
+    if (item.matricula) porChave.set(normalizarMatricula(item.matricula), item)
+    // Algumas estações fornecem apenas o callsign. Só associar se ele for
+    // exatamente a matrícula cadastrada, evitando vincular um voo de terceiros.
+    const callsign = normalizarMatricula(item.callsign || '')
+    if (callsign && matriculasEsperadas.has(callsign)) porChave.set(callsign, item)
   })
   const indisponivel = provedorIndisponivel()
 
@@ -258,6 +263,7 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
       horario_previsto_agendamento: item.horario_previsto_agendamento || null,
       cotista_nome: item.cotista_nome || null, piloto_nome: item.piloto_nome || null, copiloto_nome: item.copiloto_nome || null,
       rastreio, rastreio_status: statusRastreio(rastreio, semIdentificador, indisponivel),
+      fonte_rastreio: rastreio?.fonte || null,
     }
   })
 
