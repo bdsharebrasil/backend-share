@@ -31,3 +31,17 @@ test('confirmação valida e grava os dados alterados do agendamento antes de ap
   assert.match(routeSource, /cedente_nao_vinculado_a_aeronave/)
   assert.match(routeSource, /SET status = 'aprovada'.*aeronave_id = \?, cliente_emprestimo_id = \?, socio_emprestimo_id = \?, voo_emprestado = \?, data_agendada = \?, horario_previsto_agendamento = \?, dias_duracao = \?, numero_passageiros = \?/)
 })
+
+test('painel de agendamento apresenta última perna e corte mesmo sem encerrar a jornada', () => {
+  const inicio = workerSource.indexOf("app.get('/api/interno/agendamento',");
+  const fim = workerSource.indexOf("\napp.", inicio + 1);
+  assert.ok(inicio >= 0, 'rota do painel existe');
+  const painel = workerSource.slice(inicio, fim > inicio ? fim : undefined);
+  assert.match(painel, /perna_agendada\.horario_corte AS perna_atual_horario_corte/);
+  assert.match(painel, /perna_agendada\.horario_pouso AS perna_atual_horario_pouso/);
+  assert.match(painel, /perna_agendada\.origem AS perna_atual_origem/);
+  assert.match(painel, /perna_agendada\.destino AS perna_atual_destino/);
+  assert.match(painel, /LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada\.id =/);
+  assert.match(painel, /ORDER BY j\.numero_jornada DESC, p\.numero DESC/);
+  assert.match(painel, /COALESCE\(perna_agendada\.horario_corte/);
+});
