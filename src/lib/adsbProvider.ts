@@ -74,7 +74,7 @@ function normalizar(item: ReadsbAircraft, fonte: string): PosicaoAeronave | null
   }
 }
 
-function endpoint(provedor: string, tipo: 'hex' | 'reg', identificadores: string[]): string {
+function endpoint(provedor: string, tipo: 'hex' | 'reg' | 'callsign', identificadores: string[]): string {
   const base = provedor === 'airplanes_live' ? 'https://api.airplanes.live' : 'https://api.adsb.lol'
   return `${base}/v2/${tipo}/${encodeURIComponent(identificadores.join(','))}`
 }
@@ -82,15 +82,21 @@ function endpoint(provedor: string, tipo: 'hex' | 'reg', identificadores: string
 /** Faz uma consulta em lote, sem transformar 1 erro HTTP em falha de todas as aeronaves. */
 async function consultar(provedor: string, hex: string[], matriculas: string[]): Promise<ResultadoConsulta> {
   const alternativas = [...new Set(matriculas.flatMap(variantesMatricula))]
-  const consultas: Array<{ tipo: 'hex' | 'reg'; ids: string[] }> = []
+  const consultas: Array<{ tipo: 'hex' | 'reg' | 'callsign'; ids: string[] }> = []
   // A matrícula é prioritária porque o HEX informado no cadastro pode estar desatualizado.
   if (alternativas.length) consultas.push({ tipo: 'reg', ids: alternativas })
   if (hex.length) consultas.push({ tipo: 'hex', ids: hex })
+  // Quando o cadastro do provedor não associa a matrícula ao Mode-S, o transponder
+  // pode ainda anunciar PTWSR como callsign. A correspondência é validada no painel.
+  if (matriculas.length) consultas.push({ tipo: 'callsign', ids: matriculas })
   if (!consultas.length) return { posicoes: [], disponivel: true }
 
   let respondeu = false
   const unicas = new Map<string, PosicaoAeronave>()
-  for (const { tipo, ids } of consultas) {
+  for (const [indice, { tipo, ids }] of consultas.entries()) {
+    // Airplanes.live limita as consultas públicas por segundo. Não fazer
+    // tentativas consecutivas instantâneas quando a matrícula não é encontrada.
+    if (indice > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1100))
     const controlador = new AbortController()
     const timer = setTimeout(() => controlador.abort(), 6_000)
     try {
@@ -111,7 +117,7 @@ async function consultar(provedor: string, hex: string[], matriculas: string[]):
         const atual = unicas.get(item.hex)
         if (!atual || (item.visto_ha_s ?? Infinity) < (atual.visto_ha_s ?? Infinity)) unicas.set(item.hex, item)
       }
-      // Nenhuma necessidade de consultar HEX se a matrícula já identificou a aeronave.
+      // Não consultar outra rota se já identificamos a quantidade esperada.
       if (unicas.size >= Math.max(hex.length, matriculas.length)) break
     } catch (erro) {
       console.warn('[rastreio/provedor] consulta falhou', provedor, tipo, erro instanceof Error ? erro.message : erro)
