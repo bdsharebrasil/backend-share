@@ -4,6 +4,7 @@ import { requireShareInternal } from '../lib/auth'
 import { checkRateLimit, clientIp } from '../lib/cache'
 import { buscarPosicoes, configurarProvedor, normalizarMatricula, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
 import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
+import { parseCoord } from '../lib/geo'
 
 export type RastreioBindings = { SHARE_DB: D1Database; CACHE_KV: KVNamespace; RATE_LIMITER: DurableObjectNamespace; INTERNAL_TOKEN?: string; ADSB_PROVIDER?: string }
 type Variables = Record<string, never>
@@ -72,10 +73,33 @@ rastreioRoutes.get('/api/rastreio/aeronave/matricula/:matricula', async (c) => {
   }
 })
 
-function coordenada(valor: unknown): Coord | null {
-  const partes = String(valor || '').split(',').map((item) => Number(item.trim()))
-  if (partes.length !== 2 || !partes.every(Number.isFinite) || Math.abs(partes[0]!) > 90 || Math.abs(partes[1]!) > 180) return null
-  return { lat: partes[0]!, lon: partes[1]! }
+/** Coordenadas do D1 podem vir em decimais, JSON ou GMS (15° S, 56° W).
+ *  Usar o mesmo parser de coordenadas do AISWEB, em vez de Number() apenas. */
+export function coordenadaAerodromo(valor: unknown): Coord | null {
+  let latRaw: unknown
+  let lonRaw: unknown
+  if (valor && typeof valor === 'object') {
+    const objeto = valor as Record<string, unknown>
+    latRaw = objeto.lat ?? objeto.latitude
+    lonRaw = objeto.lon ?? objeto.lng ?? objeto.longitude
+  } else {
+    const texto = String(valor ?? '').trim()
+    if (texto.startsWith('{')) {
+      try { return coordenadaAerodromo(JSON.parse(texto) as unknown) } catch { return null }
+    }
+    const partes = texto.split(/\s*[,;|]\s*/)
+    if (partes.length === 2) [latRaw, lonRaw] = partes
+    else {
+      const decimalComEspaco = texto.match(/^(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/)
+      if (!decimalComEspaco) return null
+      latRaw = decimalComEspaco[1]
+      lonRaw = decimalComEspaco[2]
+    }
+  }
+  const lat = parseCoord(latRaw)
+  const lon = parseCoord(lonRaw)
+  return lat !== null && lon !== null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+    ? { lat, lon } : null
 }
 
 function icao(valor: unknown): string {
@@ -123,7 +147,7 @@ async function coordenadasPorIcao(db: D1Database, icaos: string[]): Promise<Map<
     const lote = unicos.slice(i, i + 50)
     const rows = await db.prepare(`SELECT upper(trim(designativo_icao)) AS icao, coordenadas FROM aerodromo
       WHERE upper(trim(designativo_icao)) IN (${lote.map(() => '?').join(', ')})`).bind(...lote).all<{ icao: string; coordenadas: string | null }>()
-    for (const row of rows.results || []) resultado.set(row.icao, coordenada(row.coordenadas))
+    for (const row of rows.results || []) resultado.set(row.icao, coordenadaAerodromo(row.coordenadas))
   }
   return resultado
 }
