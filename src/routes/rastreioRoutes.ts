@@ -16,10 +16,18 @@ type PernaOperacao = {
   horario_ac: string | null; horario_dep: string | null; horario_pouso: string | null; horario_corte: string | null
   horario_ac_user_id: string | null; horario_dep_user_id: string | null
   horario_pouso_user_id: string | null; horario_corte_user_id: string | null
+  horario_ac_usuario_nome: string | null; horario_dep_usuario_nome: string | null
+  horario_pouso_usuario_nome: string | null; horario_corte_usuario_nome: string | null
   origem_coord: Coord | null; destino_coord: Coord | null
 }
 
 const STATUS_EM_SOLO = ['em_solo', 'em solo', 'pousado']
+
+/** O corte da última perna encerra a exibição no painel, mas não apaga o histórico do agendamento. */
+export function vooFinalizadoPorCorte(pernas: Array<Pick<PernaOperacao, 'horario_corte' | 'status'>>): boolean {
+  const ultimaPerna = pernas[pernas.length - 1]
+  return Boolean(ultimaPerna && (ultimaPerna.horario_corte || String(ultimaPerna.status || '').trim().toLowerCase() === 'cortado'))
+}
 
 rastreioRoutes.get('/api/rastreio/aeronave/matricula/:matricula', async (c) => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
@@ -127,9 +135,17 @@ async function buscarPernas(db: D1Database, solicitacaoIds: string[]): Promise<M
   const rows = await db.prepare(`
     SELECT j.solicitacao_id, j.numero_jornada, p.id, p.numero, p.origem, p.destino, p.status,
       p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte,
-      p.horario_ac_user_id, p.horario_dep_user_id, p.horario_pouso_user_id, p.horario_corte_user_id
+      p.horario_ac_user_id, p.horario_dep_user_id, p.horario_pouso_user_id, p.horario_corte_user_id,
+      COALESCE(NULLIF(trim(u_ac.nome_exibicao), ''), NULLIF(trim(u_ac.nome_completo), '')) AS horario_ac_usuario_nome,
+      COALESCE(NULLIF(trim(u_dep.nome_exibicao), ''), NULLIF(trim(u_dep.nome_completo), '')) AS horario_dep_usuario_nome,
+      COALESCE(NULLIF(trim(u_pou.nome_exibicao), ''), NULLIF(trim(u_pou.nome_completo), '')) AS horario_pouso_usuario_nome,
+      COALESCE(NULLIF(trim(u_cor.nome_exibicao), ''), NULLIF(trim(u_cor.nome_completo), '')) AS horario_corte_usuario_nome
     FROM jornadas_voo j
     JOIN pernas_jornada_voo p ON p.jornada_id = j.id
+    LEFT JOIN user_profiles u_ac ON u_ac.id = p.horario_ac_user_id
+    LEFT JOIN user_profiles u_dep ON u_dep.id = p.horario_dep_user_id
+    LEFT JOIN user_profiles u_pou ON u_pou.id = p.horario_pouso_user_id
+    LEFT JOIN user_profiles u_cor ON u_cor.id = p.horario_corte_user_id
     WHERE j.jornada_principal_id IS NULL AND j.solicitacao_id IN (${solicitacaoIds.map(() => '?').join(', ')})
     ORDER BY j.solicitacao_id, j.numero_jornada, p.numero`).bind(...solicitacaoIds).all<any>()
   for (const row of rows.results || []) {
@@ -141,6 +157,8 @@ async function buscarPernas(db: D1Database, solicitacaoIds: string[]): Promise<M
       horario_pouso: row.horario_pouso || null, horario_corte: row.horario_corte || null,
       horario_ac_user_id: row.horario_ac_user_id || null, horario_dep_user_id: row.horario_dep_user_id || null,
       horario_pouso_user_id: row.horario_pouso_user_id || null, horario_corte_user_id: row.horario_corte_user_id || null,
+      horario_ac_usuario_nome: row.horario_ac_usuario_nome || null, horario_dep_usuario_nome: row.horario_dep_usuario_nome || null,
+      horario_pouso_usuario_nome: row.horario_pouso_usuario_nome || null, horario_corte_usuario_nome: row.horario_corte_usuario_nome || null,
     })
     porSolicitacao.set(row.solicitacao_id, lista)
   }
@@ -190,12 +208,17 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
   const pernasPorSolicitacao = jornadaDisponivel
     ? await buscarPernas(db, itens.map((item) => item.id))
     : new Map<string, Omit<PernaOperacao, 'origem_coord' | 'destino_coord'>[]>()
+  // Uma perna anterior cortada não encerra um voo com outra perna ainda aberta.
+  // O acesso por ID continua retornando todas as pernas, mesmo após o último corte.
+  const itensParaRastreio = solicitacaoId
+    ? itens
+    : itens.filter((item) => !vooFinalizadoPorCorte(pernasPorSolicitacao.get(item.id) || []))
   const coordenadas = await coordenadasPorIcao(db, [
-    ...itens.flatMap((item) => [icao(item.origem), icao(item.destino)]),
-    ...[...pernasPorSolicitacao.values()].flat().flatMap((perna) => [perna.origem, perna.destino]),
+    ...itensParaRastreio.flatMap((item) => [icao(item.origem), icao(item.destino)]),
+    ...itensParaRastreio.flatMap((item) => (pernasPorSolicitacao.get(item.id) || []).flatMap((perna) => [perna.origem, perna.destino])),
   ])
 
-  const emVoo = solicitacaoId ? [] : selecionarAgendamentosParaRastreio(itens)
+  const emVoo = solicitacaoId ? [] : selecionarAgendamentosParaRastreio(itensParaRastreio)
   const posicoes = await buscarPosicoes({
     hex: emVoo.map((item) => item.icao_hex).filter(Boolean),
     matriculas: emVoo.map((item) => item.matricula_registro).filter(Boolean),
@@ -208,7 +231,7 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
   const indisponivel = provedorIndisponivel()
 
   const selecionados = new Set(emVoo.map((item) => item.id))
-  const voos = itens.map((item) => {
+  const voos = itensParaRastreio.map((item) => {
     const identificador = String(item.icao_hex || '').trim().toUpperCase()
     const matricula = String(item.matricula_registro || '').trim().toUpperCase()
     const rastreio = selecionados.has(item.id) ? (porChave.get(identificador) || porChave.get(matricula.replace(/-/g, '')) || null) : null

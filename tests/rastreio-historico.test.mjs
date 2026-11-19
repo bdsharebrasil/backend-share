@@ -4,7 +4,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { readFile } from 'node:fs/promises'
 import { registrarSinal, lerHistorico } from '../src/lib/rastreioHistorico.ts'
-import { carregarVoosRastreio, selecionarAgendamentosParaRastreio, rastreioRoutes } from '../src/routes/rastreioRoutes.ts'
+import { carregarVoosRastreio, selecionarAgendamentosParaRastreio, vooFinalizadoPorCorte, rastreioRoutes } from '../src/routes/rastreioRoutes.ts'
 
 const migration = await readFile(new URL('../migrations/20261111_rastreio_historico.sql', import.meta.url), 'utf8')
 function banco() {
@@ -123,4 +123,90 @@ test('agendamento aprovado sem jornada e sem hex entra ao vivo pela matrícula e
     const resposta = await rastreioRoutes.request('/api/interno/solicitacoes/sem-horarios/rastreio', {}, env)
     assert.equal(resposta.status, 401)
   } finally { globalThis.fetch = fetchAnterior; crypto.subtle.timingSafeEqual = igualdadeAnterior; sqlite.close() }
+})
+
+
+test('somente o corte da última perna encerra o acompanhamento no painel', () => {
+  assert.equal(vooFinalizadoPorCorte([]), false)
+  assert.equal(vooFinalizadoPorCorte([{ horario_corte: null, status: 'em_voo' }]), false)
+  assert.equal(vooFinalizadoPorCorte([
+    { horario_corte: '2026-11-19T12:00:00Z', status: 'cortado' },
+    { horario_corte: null, status: 'em_solo' },
+  ]), false, 'a próxima perna permanece em acompanhamento')
+  assert.equal(vooFinalizadoPorCorte([
+    { horario_corte: null, status: 'em_solo' },
+    { horario_corte: '2026-11-19T13:30:00Z', status: 'em_solo' },
+  ]), true, 'o último corte encerra a exibição')
+  assert.equal(vooFinalizadoPorCorte([{ horario_corte: null, status: 'cortado' }]), true)
+})
+
+test('painel resolve nome dos autores e deixa de exibir voo cortado, mantendo o histórico', async () => {
+  const { db, sqlite } = banco()
+  sqlite.exec(`
+    CREATE TABLE solicitacoes_reserva_voo (
+      id TEXT, numero_voo TEXT, status TEXT, excluida_em TEXT, aeronave_id TEXT,
+      origem TEXT, destino TEXT, data_agendada TEXT, horario_previsto_agendamento TEXT,
+      dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT
+    );
+    CREATE TABLE aeronave (id TEXT, matricula_registro TEXT, modelo TEXT);
+    CREATE TABLE hold_socios (id TEXT, nome TEXT);
+    CREATE TABLE cliente (id TEXT, razao_social TEXT);
+    CREATE TABLE tripulacao (id TEXT, nome_completo TEXT);
+    CREATE TABLE tripulacao_freelancer (id TEXT, nome_completo TEXT);
+    CREATE TABLE aerodromo (designativo_icao TEXT, coordenadas TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, nome_exibicao TEXT, nome_completo TEXT);
+    CREATE TABLE jornadas_voo (
+      id TEXT, solicitacao_id TEXT, jornada_principal_id TEXT, numero_jornada INTEGER,
+      criado_em TEXT, horario_pouso TEXT, horario_acionamento TEXT, status TEXT
+    );
+    CREATE TABLE pernas_jornada_voo (
+      id TEXT, jornada_id TEXT, numero INTEGER, origem TEXT, destino TEXT, status TEXT,
+      horario_ac TEXT, horario_dep TEXT, horario_pouso TEXT, horario_corte TEXT,
+      horario_ac_user_id TEXT, horario_dep_user_id TEXT, horario_pouso_user_id TEXT, horario_corte_user_id TEXT
+    );
+    INSERT INTO aeronave VALUES ('a', 'PT-ZXY', 'Cheyenne II');
+    INSERT INTO user_profiles VALUES ('u1', 'Carlos', 'Carlos Silva'), ('u2', ' ', 'Maria Souza');
+    INSERT INTO solicitacoes_reserva_voo
+      (id, numero_voo, status, aeronave_id, data_agendada, dias_duracao, origem, destino)
+      VALUES ('voo-com-pernas', 'V-001', 'decolado', 'a', date('now'), 1, 'SIAQ', 'SJ39');
+    INSERT INTO jornadas_voo VALUES ('j1', 'voo-com-pernas', NULL, 1, CURRENT_TIMESTAMP, NULL, NULL, 'em_solo');
+    INSERT INTO pernas_jornada_voo
+      (id, jornada_id, numero, origem, destino, status, horario_ac, horario_dep, horario_pouso, horario_corte, horario_ac_user_id, horario_dep_user_id, horario_pouso_user_id, horario_corte_user_id)
+      VALUES
+      ('p1', 'j1', 1, 'SIAQ', 'SJ39', 'cortado', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'u1', 'u1', 'u1', 'u1'),
+      ('p2', 'j1', 2, 'SJ39', 'SIAQ', 'em_solo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, 'u1', 'u2', 'u2', NULL);
+  `)
+  const fetchAnterior = globalThis.fetch
+  const igualdadeAnterior = crypto.subtle.timingSafeEqual
+  crypto.subtle.timingSafeEqual = (a, b) => timingSafeEqual(new Uint8Array(a), new Uint8Array(b))
+  globalThis.fetch = async () => Response.json({ ac: [] })
+  const env = {
+    SHARE_DB: db, INTERNAL_TOKEN: 'teste-rastreio',
+    RATE_LIMITER: { idFromName: () => 'rastreio', get: () => ({ fetch: async () => Response.json({ allowed: true }) }) },
+  }
+  try {
+    const painel = await rastreioRoutes.request('/api/interno/voos-em-operacao', { headers: { 'x-internal-token': 'teste-rastreio' } }, env)
+    assert.equal(painel.status, 200)
+    const { voos } = await painel.json()
+    assert.equal(voos.length, 1, 'a perna seguinte aberta mantém o voo no painel')
+    assert.equal(voos[0].pernas[1].horario_ac_usuario_nome, 'Carlos')
+    assert.equal(voos[0].pernas[1].horario_dep_usuario_nome, 'Maria Souza')
+    assert.equal(voos[0].pernas[1].horario_pouso_usuario_nome, 'Maria Souza')
+
+    sqlite.exec("UPDATE pernas_jornada_voo SET horario_corte = CURRENT_TIMESTAMP, horario_corte_user_id = 'u2', status = 'cortado' WHERE id = 'p2'")
+    const terminado = await rastreioRoutes.request('/api/interno/voos-em-operacao', { headers: { 'x-internal-token': 'teste-rastreio' } }, env)
+    assert.equal(terminado.status, 200)
+    assert.equal((await terminado.json()).voos.length, 0, 'o voo cortado não fica no acompanhamento')
+
+    const historico = await rastreioRoutes.request('/api/interno/solicitacoes/voo-com-pernas/rastreio', { headers: { 'x-internal-token': 'teste-rastreio' } }, env)
+    assert.equal(historico.status, 200)
+    const concluido = await historico.json()
+    assert.equal(concluido.pernas.length, 2, 'o histórico preserva as duas pernas')
+    assert.ok(concluido.pernas[1].horario_corte)
+    assert.equal(concluido.pernas[1].horario_corte_usuario_nome, 'Maria Souza')
+  } finally {
+    globalThis.fetch = fetchAnterior
+    crypto.subtle.timingSafeEqual = igualdadeAnterior
+    sqlite.close()
+  }
 })
