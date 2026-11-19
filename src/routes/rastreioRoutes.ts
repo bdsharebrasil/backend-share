@@ -14,6 +14,8 @@ type PernaOperacao = {
   id: string; numero: number; jornada_numero: number
   origem: string; destino: string; status: string
   horario_ac: string | null; horario_dep: string | null; horario_pouso: string | null; horario_corte: string | null
+  horario_ac_user_id: string | null; horario_dep_user_id: string | null
+  horario_pouso_user_id: string | null; horario_corte_user_id: string | null
   origem_coord: Coord | null; destino_coord: Coord | null
 }
 
@@ -124,7 +126,8 @@ async function buscarPernas(db: D1Database, solicitacaoIds: string[]): Promise<M
   if (!solicitacaoIds.length) return porSolicitacao
   const rows = await db.prepare(`
     SELECT j.solicitacao_id, j.numero_jornada, p.id, p.numero, p.origem, p.destino, p.status,
-      p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte
+      p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte,
+      p.horario_ac_user_id, p.horario_dep_user_id, p.horario_pouso_user_id, p.horario_corte_user_id
     FROM jornadas_voo j
     JOIN pernas_jornada_voo p ON p.jornada_id = j.id
     WHERE j.jornada_principal_id IS NULL AND j.solicitacao_id IN (${solicitacaoIds.map(() => '?').join(', ')})
@@ -136,6 +139,8 @@ async function buscarPernas(db: D1Database, solicitacaoIds: string[]): Promise<M
       origem: icao(row.origem), destino: icao(row.destino), status: String(row.status || 'programada'),
       horario_ac: row.horario_ac || null, horario_dep: row.horario_dep || null,
       horario_pouso: row.horario_pouso || null, horario_corte: row.horario_corte || null,
+      horario_ac_user_id: row.horario_ac_user_id || null, horario_dep_user_id: row.horario_dep_user_id || null,
+      horario_pouso_user_id: row.horario_pouso_user_id || null, horario_corte_user_id: row.horario_corte_user_id || null,
     })
     porSolicitacao.set(row.solicitacao_id, lista)
   }
