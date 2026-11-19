@@ -1603,6 +1603,7 @@ app.get('/api/interno/agendamento/opcoes', async c => {
     db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
       FROM aeronave a
       LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
+      WHERE lower(trim(COALESCE(a.status, ''))) IN ('ativa', 'ativo', 'active')
       ORDER BY a.matricula_registro`).all(),
     db.prepare(`SELECT ca.id, ca.cliente_id, ca.socio_id, ca.aeronave_id, ca.codigo_cliente, a.matricula_registro, a.modelo
       FROM cotista_aeronave ca LEFT JOIN aeronave a ON a.id = ca.aeronave_id ORDER BY ca.codigo_cliente, a.matricula_registro`).all(),
@@ -1630,7 +1631,7 @@ app.get('/api/interno/agendamento', async c => {
       LEFT JOIN cliente ce ON ce.id = s.cliente_emprestimo_id
       LEFT JOIN hold_socios se ON se.id = s.socio_emprestimo_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
-      WHERE date(s.data_agendada) BETWEEN ?1 AND ?2
+      WHERE s.excluida_em IS NULL AND date(s.data_agendada) BETWEEN ?1 AND ?2
       ORDER BY date(s.data_agendada), s.horario_previsto_agendamento, s.criado_em`).bind(inicio, fim).all().catch(error => { log.error('[agendamento] lançamentos indisponíveis', error); return { results: [] } }),
     db.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.status, a.ano, a.base, a.url_imagem, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
       FROM aeronave a
@@ -1923,28 +1924,14 @@ app.post('/api/interno/solicitacoes/:id/reprovar', async c => {
 
 app.delete('/api/interno/agendamento/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
-  await garantirTabelaDisponibilidadeTripulacao(c)
   const id = c.req.param('id').trim()
   if (!id) return c.json({ error: 'agendamento_id_obrigatorio' }, 400)
   const db = c.env.SHARE_DB
-  const agendamento = await db.prepare('SELECT cliente_id, socio_id, status, numero_voo FROM solicitacoes_reserva_voo WHERE id = ?1').bind(id).first<{ cliente_id: string | null; socio_id: string | null; status: string | null; numero_voo: string | null }>()
+  const agendamento = await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE id = ?1 AND excluida_em IS NULL').bind(id).first<{ id: string }>()
   if (!agendamento) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
   const exclusao = await excluirAgendamentoDoBanco(db, id)
   if (!exclusao.excluido) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
-  if (exclusao.anexos.length) {
-    const bucket = shareBrasilBucket(c)
-    await Promise.all(exclusao.anexos.map(caminho => bucket.delete(caminho).catch(error => {
-      console.error('[agendamento] falha ao remover anexo do R2', caminho, error)
-    })))
-  }
-  if (agendamento.numero_voo) {
-    const cotistaKey = agendamento.socio_id ? `socio:${agendamento.socio_id}` : agendamento.cliente_id ? `cliente:${agendamento.cliente_id}` : null
-    if (cotistaKey) {
-      const restante = await db.prepare(`SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo IS NOT NULL AND status = 'aprovada' AND ((?1 IS NOT NULL AND socio_id = ?1) OR (?1 IS NULL AND socio_id IS NULL AND cliente_id = ?2)) LIMIT 1`).bind(agendamento.socio_id, agendamento.cliente_id).first<{ id: string }>()
-      if (!restante) await db.prepare('DELETE FROM voo_sequencia_cotista WHERE cotista_key = ?1').bind(cotistaKey).run().catch(() => undefined)
-    }
-  }
-  return c.json({ success: true, agendamento_id: id, sequencia_cotista_removida: Boolean(agendamento.numero_voo) })
+  return c.json({ success: true, agendamento_id: id, registros_vinculados_preservados: true })
 })
 
 async function garantirTabelaAbastecimentos(c: Context<{ Bindings: Bindings }>) {
@@ -5342,7 +5329,5 @@ export default {
     }
   },
 }
-
-
 
 

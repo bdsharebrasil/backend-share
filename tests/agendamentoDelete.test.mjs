@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import { excluirAgendamentoDoBanco } from '../src/lib/agendamentoDelete.ts'
 
 const migration = await readFile(new URL('../migrations/20261118_preparacao_voo.sql', import.meta.url), 'utf8')
+const migrationExclusao = await readFile(new URL('../migrations/20261119_agendamento_exclusao_logica.sql', import.meta.url), 'utf8')
 const workerSource = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8')
 
 function criarBanco() {
@@ -15,6 +16,7 @@ function criarBanco() {
     CREATE TABLE escala_tripulacao (id TEXT PRIMARY KEY, solicitacao_id TEXT, tripulacao_id TEXT, data_inicio TEXT, data_fim TEXT, status TEXT);
   `)
   banco.exec(migration)
+  banco.exec(migrationExclusao)
   banco.prepare('INSERT INTO solicitacoes_reserva_voo (id, status) VALUES (?, ?)').run('voo1', 'aprovada')
   banco.prepare('INSERT INTO solicitacoes_reserva_voo (id, status) VALUES (?, ?)').run('voo2', 'aprovada')
   banco.prepare(`INSERT INTO preparacoes_voo (solicitacao_id, versao, comando_id, dados_json, atualizado_por, atualizado_por_nome)
@@ -60,26 +62,32 @@ function criarBanco() {
   return { banco, db }
 }
 
-test('rota DELETE usa o helper de exclusão persistente do agendamento', () => {
+test('rota DELETE usa o helper sem apagar registros vinculados nem anexos', () => {
   const inicio = workerSource.indexOf("app.delete('/api/interno/agendamento/:id'")
   const fim = workerSource.indexOf('\napp.', inicio + 1)
   const rota = workerSource.slice(inicio, fim === -1 ? undefined : fim)
   assert.notEqual(inicio, -1)
   assert.match(rota, /requireShareInternal\(c\)/)
   assert.match(rota, /excluirAgendamentoDoBanco\(db, id\)/)
+  assert.doesNotMatch(rota, /bucket\.delete|DELETE FROM/)
 })
 
-test('exclusão remove o voo e dados de preparação vinculados respeitando as FKs', async () => {
+test('exclusão lógica preserva solicitação, preparação, escala e anexos', async () => {
   const { banco, db } = criarBanco()
   try {
     const resultado = await excluirAgendamentoDoBanco(db, 'voo1')
     assert.equal(resultado.excluido, true)
-    assert.deepEqual(resultado.anexos, ['share/preparacao_voo/voo1/briefing.pdf'])
-    assert.equal(banco.prepare('SELECT COUNT(*) AS total FROM solicitacoes_reserva_voo WHERE id = ?').get('voo1').total, 0)
+    assert.deepEqual(resultado.anexos, [])
+    const solicitacao = banco.prepare('SELECT status, status_antes_exclusao, excluida_em FROM solicitacoes_reserva_voo WHERE id = ?').get('voo1')
+    assert.equal(solicitacao.status, 'excluida')
+    assert.equal(solicitacao.status_antes_exclusao, 'aprovada')
+    assert.ok(solicitacao.excluida_em)
     for (const tabela of ['preparacoes_voo', 'preparacao_voo_versoes', 'preparacao_voo_reservas', 'preparacao_voo_abastecimentos', 'preparacao_voo_anexos', 'escala_tripulacao']) {
-      assert.equal(banco.prepare(`SELECT COUNT(*) AS total FROM ${tabela} WHERE solicitacao_id = ?`).get('voo1').total, 0, `${tabela} deve ser limpa`)
+      assert.equal(banco.prepare(`SELECT COUNT(*) AS total FROM ${tabela} WHERE solicitacao_id = ?`).get('voo1').total, 1, `${tabela} vinculada deve ser preservada`)
       assert.equal(banco.prepare(`SELECT COUNT(*) AS total FROM ${tabela} WHERE solicitacao_id = ?`).get('voo2').total, 1, `${tabela} de outro voo deve ser preservada`)
     }
+    assert.equal(banco.prepare('SELECT caminho FROM preparacao_voo_anexos WHERE solicitacao_id = ?').get('voo1').caminho, 'share/preparacao_voo/voo1/briefing.pdf')
+    assert.equal((await excluirAgendamentoDoBanco(db, 'voo1')).excluido, false, 'a mesma solicitação não pode ser marcada duas vezes')
   } finally {
     banco.close()
   }

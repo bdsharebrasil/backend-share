@@ -80,7 +80,7 @@ test('aeronave compartilhada não duplica o mesmo sinal entre dois agendamentos'
 test('agendamento aprovado sem jornada e sem hex entra ao vivo pela matrícula e mantém histórico depois de encerrado', async () => {
   const { db, sqlite } = banco()
   sqlite.exec(`
-    CREATE TABLE solicitacoes_reserva_voo (id TEXT, numero_voo TEXT, status TEXT, aeronave_id TEXT, origem TEXT, destino TEXT, data_agendada TEXT, horario_previsto_agendamento TEXT, dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT);
+    CREATE TABLE solicitacoes_reserva_voo (id TEXT, numero_voo TEXT, status TEXT, excluida_em TEXT, status_antes_exclusao TEXT, aeronave_id TEXT, origem TEXT, destino TEXT, data_agendada TEXT, horario_previsto_agendamento TEXT, dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT);
     CREATE TABLE aeronave (id TEXT, matricula_registro TEXT, modelo TEXT);
     CREATE TABLE hold_socios (id TEXT, nome TEXT);
     CREATE TABLE cliente (id TEXT, razao_social TEXT);
@@ -116,6 +116,10 @@ test('agendamento aprovado sem jornada e sem hex entra ao vivo pela matrícula e
     assert.equal(respostaHistorico.status, 200)
     assert.equal((await respostaHistorico.json()).trilha.length, 1)
     assert.equal((await carregarVoosRastreio(env)).length, 0)
+    sqlite.exec("UPDATE solicitacoes_reserva_voo SET status = 'excluida', status_antes_exclusao = 'encerrada', excluida_em = CURRENT_TIMESTAMP, data_agendada = date('now')")
+    assert.equal((await carregarVoosRastreio(env)).length, 0, 'solicitações removidas não entram no monitoramento ao vivo')
+    const [historicoArquivado] = await carregarVoosRastreio(env, 'sem-horarios')
+    assert.equal(historicoArquivado.trilha.length, 1, 'o histórico vinculado permanece disponível por ID')
     const resposta = await rastreioRoutes.request('/api/interno/solicitacoes/sem-horarios/rastreio', {}, env)
     assert.equal(resposta.status, 401)
   } finally { globalThis.fetch = fetchAnterior; crypto.subtle.timingSafeEqual = igualdadeAnterior; sqlite.close() }

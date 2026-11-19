@@ -178,7 +178,8 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
     LEFT JOIN tripulacao tc ON tc.id = s.copiloto_id
     LEFT JOIN tripulacao_freelancer fc ON fc.id = s.copiloto_id
     WHERE ${solicitacaoId ? 's.id = ?' : `
-      s.status_calc IN ('aprovada', 'decolado', 'acionado', 'em_solo', 'em solo', 'pousado')
+      s.excluida_em IS NULL
+      AND s.status_calc IN ('aprovada', 'decolado', 'acionado', 'em_solo', 'em solo', 'pousado')
       AND date(s.data_agendada) <= date('now')
       AND date(s.data_agendada, '+' || max(COALESCE(s.dias_duracao, 1), 1) || ' days') >= date('now')`}
     ORDER BY s.criado_em DESC`).bind(...(solicitacaoId ? [solicitacaoId] : [])).all<any>()
