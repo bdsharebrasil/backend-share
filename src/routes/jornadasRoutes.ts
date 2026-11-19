@@ -167,8 +167,9 @@ export function agendamentoPermiteIniciarJornada(status: unknown) {
 export function agendamentoPermiteCompletarHorarios(status: unknown, fasePerna?: unknown) {
   const normalizado = String(status || '').trim().toLowerCase().replace(/\s+/g, '_')
   if (['encerrada', 'concluida', 'cancelada', 'reprovada', 'pendente'].includes(normalizado)) return false
-  if (['acionado', 'decolado', 'em_rota', 'em_voo', 'em_solo', 'pousado'].includes(normalizado)) return true
   const fase = String(fasePerna || '').trim().toLowerCase().replace(/\s+/g, '_')
+  if (normalizado === 'aprovada' && fase === 'programada') return true
+  if (['acionado', 'decolado', 'em_rota', 'em_voo', 'em_solo', 'pousado'].includes(normalizado)) return true
   return ['acionado', 'em_voo', 'em_solo', 'pousado'].includes(fase)
 }
 
@@ -312,13 +313,14 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const db = c.env.SHARE_DB
   const idSolicitacao = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
+  const aguardandoHorarios = body.aguardar_horarios === true
   const voo = await db.prepare('SELECT aeronave_id, piloto_id, copiloto_id, data_agendada, numero_voo, status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
   if (!voo) return c.notFound()
   const statusVoo = String(voo.status || '').trim().toLowerCase()
   if (statusVoo === 'encerrada' || statusVoo === 'concluida') return c.json({ error: 'agendamento_encerrado', detail: 'Operações encerradas são somente leitura e não podem receber nova jornada.' }, 409)
   if (!agendamentoPermiteIniciarJornada(statusVoo)) return c.json({ error: 'agendamento_nao_aprovado', detail: 'A jornada só pode ser iniciada para um agendamento aprovado, em voo ou em solo.' }, 409)
   const checklist = await db.prepare('SELECT status FROM checklists_pre_voo WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(idSolicitacao).first<{ status: string | null }>()
-  if (!checklistPreVooConcluido(checklist?.status)) return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo antes de iniciar a jornada.' }, 409)
+  if (!aguardandoHorarios && !checklistPreVooConcluido(checklist?.status)) return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo antes de iniciar a jornada.' }, 409)
   const tripulantes = (Array.isArray(body.tripulantes) && body.tripulantes.length
     ? body.tripulantes
     : [{ tripulante_id: voo.piloto_id, funcao: 'PIC' }, { tripulante_id: voo.copiloto_id, funcao: 'SIC' }]
@@ -354,16 +356,16 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const destino = String(body.destino || body.aerodromo_chegada || '').trim().toUpperCase()
   const numeroPassageiros = normalizarNumeroPassageiros(body.numero_passageiros)
   if (numeroPassageiros === null) return c.json({ error: 'numero_passageiros_invalido' }, 400)
-  const apresentacaoInformada = normalizarHorarioJornada(data, body.horario_apresentacao || body.tripulacao_checkin_hora)
-  const acionamentoInformado = normalizarHorarioJornada(data, body.horario_acionamento || body.tempo_ac, apresentacaoInformada)
+  const apresentacaoInformada = aguardandoHorarios ? null : normalizarHorarioJornada(data, body.horario_apresentacao || body.tripulacao_checkin_hora)
+  const acionamentoInformado = aguardandoHorarios ? null : normalizarHorarioJornada(data, body.horario_acionamento || body.tempo_ac, apresentacaoInformada)
   const apresentacao = apresentacaoInformada || (acionamentoInformado ? derivarHorarioApresentacao(acionamentoInformado) : null)
   const acionamento = acionamentoInformado || (apresentacaoInformada ? new Date(new Date(apresentacaoInformada).getTime() + 30 * 60_000).toISOString() : null)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || !apresentacao || !acionamento) return c.json({ error: 'data_rota_e_acionamento_obrigatorios', detail: 'Informe a data, partida, chegada e o acionamento.' }, 400)
-  if (new Date(acionamento).getTime() - new Date(apresentacao).getTime() !== 30 * 60_000) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !origem || !destino || (!aguardandoHorarios && (!apresentacao || !acionamento))) return c.json({ error: 'data_rota_e_acionamento_obrigatorios', detail: 'Informe a data, partida e chegada; informe o acionamento ou escolha aguardar os horários.' }, 400)
+  if (!aguardandoHorarios && new Date(acionamento!).getTime() - new Date(apresentacao!).getTime() !== 30 * 60_000) {
     return c.json({ error: 'apresentacao_deve_ser_30_minutos_antes_do_acionamento' }, 400)
   }
-  const corteInicio = normalizarHorarioJornada(data, body.horario_pouso, apresentacao)
-  const horarioDep = normalizarHorarioJornada(data, body.horario_dep || body.tempo_dep, acionamento || apresentacao)
+  const corteInicio = aguardandoHorarios ? null : normalizarHorarioJornada(data, body.horario_pouso, apresentacao)
+  const horarioDep = aguardandoHorarios ? null : normalizarHorarioJornada(data, body.horario_dep || body.tempo_dep, acionamento || apresentacao)
   const numero = await db.prepare('SELECT COALESCE(MAX(numero_jornada), 0) + 1 AS proximo FROM jornadas_voo WHERE solicitacao_id = ?1').bind(idSolicitacao).first<{ proximo: number }>()
   const numeroJornada = Number(numero?.proximo || 1)
   const criadas: any[] = []
@@ -375,7 +377,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
          horario_apresentacao, horario_acionamento, horario_decolagem, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(jornadaId, idSolicitacao, voo.aeronave_id, item.tripulante_id, item.funcao, principalId, numeroJornada, data,
-         apresentacao, acionamento, horarioDep, corteInicio, posCorte, corteInicio ? 'em_solo' : horarioDep ? 'em_rota' : 'em_solo',
+         apresentacao, acionamento, horarioDep, corteInicio, posCorte, corteInicio ? 'em_solo' : horarioDep ? 'em_rota' : acionamento ? 'em_solo' : 'programada',
         body.observacoes || null, extractSupabaseUserId(c)).run()
     if (!principalId) {
       principalId = jornadaId
@@ -384,16 +386,18 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
     }
     criadas.push(await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(jornadaId).first<any>())
   }
-  await db.prepare(`UPDATE solicitacoes_reserva_voo
-    SET horario_previsto_agendamento = ?1,
-        status = CASE
-          WHEN ?3 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'acionado', 'decolado', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo', 'pousado') THEN 'em_solo'
-          WHEN ?2 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'acionado', 'decolado', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo', 'pousado') THEN 'decolado'
-          WHEN ?1 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'acionado', 'decolado', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo', 'pousado') THEN 'acionado'
-          ELSE status
-        END,
-        atualizado_em = CURRENT_TIMESTAMP
-    WHERE id = ?4`).bind(acionamento, horarioDep, corteInicio, idSolicitacao).run()
+  if (!aguardandoHorarios) {
+    await db.prepare(`UPDATE solicitacoes_reserva_voo
+      SET horario_previsto_agendamento = ?1,
+          status = CASE
+            WHEN ?3 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'acionado', 'decolado', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo', 'pousado') THEN 'em_solo'
+            WHEN ?2 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'acionado', 'decolado', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo', 'pousado') THEN 'decolado'
+            WHEN ?1 IS NOT NULL AND lower(trim(status)) IN ('aprovada', 'acionado', 'decolado', 'em_rota', 'em rota', 'em_voo', 'em voo', 'em_solo', 'pousado') THEN 'acionado'
+            ELSE status
+          END,
+          atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = ?4`).bind(acionamento, horarioDep, corteInicio, idSolicitacao).run()
+  }
   const pernas = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(principalId).all<any>()
   const principal = criadas[0]
   return c.json({

@@ -124,6 +124,21 @@ test('permite editar horários a partir do acionamento ou decolagem, mas não fo
   assert.match(endpoint, /perna\.lancamento_diario_id/)
 })
 
+test('permite completar horários de uma jornada programada sem alterar a reserva antes do AC', async () => {
+  assert.equal(agendamentoPermiteCompletarHorarios('aprovada', 'programada'), true)
+  assert.equal(agendamentoPermiteCompletarHorarios('pendente', 'programada'), false)
+
+  const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
+  const inicio = source.indexOf("jornadasRoutes.post('/api/interno/agendamento/:id/jornada'")
+  const proximaRota = source.indexOf('\njornadasRoutes.', inicio + 1)
+  const endpoint = source.slice(inicio, proximaRota === -1 ? undefined : proximaRota)
+  assert.match(endpoint, /body\.aguardar_horarios === true/)
+  assert.match(endpoint, /!aguardandoHorarios && !checklistPreVooConcluido\(checklist\?\.status\)/)
+  assert.match(endpoint, /!aguardandoHorarios && \(!apresentacao \|\| !acionamento\)/)
+  assert.match(endpoint, /acionamento \? 'em_solo' : 'programada'/)
+  assert.match(endpoint, /if \(!aguardandoHorarios\)\s*\{\s*await db\.prepare\(`UPDATE solicitacoes_reserva_voo/)
+})
+
 test('sincronização do resumo lê horario_dep antes de preservar a fase AC', async () => {
   const source = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
   assert.match(source, /SELECT horario_ac, horario_dep, horario_pouso, horario_corte, status FROM pernas_jornada_voo/)
