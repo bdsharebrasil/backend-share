@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
 
 const workerSource = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8')
 
@@ -42,6 +43,35 @@ test('painel de agendamento apresenta última perna e corte mesmo sem encerrar a
   assert.match(painel, /perna_agendada\.origem AS perna_atual_origem/);
   assert.match(painel, /perna_agendada\.destino AS perna_atual_destino/);
   assert.match(painel, /LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada\.id =/);
-  assert.match(painel, /ORDER BY j\.numero_jornada DESC, p\.numero DESC/);
+  assert.match(painel, /CASE WHEN p\.horario_corte IS NULL/);
+  assert.match(painel, /j\.numero_jornada DESC, p\.numero DESC/);
   assert.match(painel, /COALESCE\(perna_agendada\.horario_corte/);
+});
+
+test('painel escolhe a primeira perna aberta; após todos os cortes preserva a última', () => {
+  const route = workerSource.slice(workerSource.indexOf("app.get('/api/interno/agendamento',"));
+  const match = route.match(/LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada\.id = \(\s*([\s\S]*?)\n      \)\s*WHERE/);
+  assert.ok(match, 'subconsulta real da última perna deve ser extraível');
+  const consulta = match[1].replace(/s\.id/g, '?');
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`
+      CREATE TABLE jornadas_voo (id TEXT, solicitacao_id TEXT, jornada_principal_id TEXT, numero_jornada INTEGER);
+      CREATE TABLE pernas_jornada_voo (id TEXT, jornada_id TEXT, numero INTEGER, horario_corte TEXT, status TEXT);
+      INSERT INTO jornadas_voo VALUES ('j1', 'voo1', NULL, 1), ('j2', 'outro', NULL, 1);
+      INSERT INTO pernas_jornada_voo VALUES
+        ('p1','j1',1,'2026-11-19T10:00:00Z','cortado'),
+        ('p2','j1',2,NULL,'em_voo'),
+        ('p3','j1',3,NULL,'programada'),
+        ('p-outro','j2',1,NULL,'em_voo');
+    `);
+    const atual = () => db.prepare(consulta).get('voo1')?.id;
+    assert.equal(atual(), 'p2', 'não salta para a perna futura');
+    db.exec("UPDATE pernas_jornada_voo SET horario_corte='2026-11-19T11:00:00Z', status='cortado' WHERE id='p2'");
+    assert.equal(atual(), 'p3', 'avança para a próxima perna ainda aberta');
+    db.exec("UPDATE pernas_jornada_voo SET horario_corte='2026-11-19T12:00:00Z', status='cortado' WHERE id='p3'");
+    assert.equal(atual(), 'p3', 'mantém última perna registrada após o corte final');
+  } finally {
+    db.close();
+  }
 });
