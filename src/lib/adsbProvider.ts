@@ -50,6 +50,12 @@ function numero(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function correspondeAoIdentificador(posicao: PosicaoAeronave, hex: string[], matriculas: string[]): boolean {
+  return hex.includes(posicao.hex)
+    || matriculas.includes(normalizarMatricula(posicao.matricula || ''))
+    || matriculas.includes(normalizarMatricula(posicao.callsign || ''))
+}
+
 function normalizar(item: ReadsbAircraft, fonte: string): PosicaoAeronave | null {
   const lat = numero(item.lat)
   const lon = numero(item.lon)
@@ -113,7 +119,7 @@ async function consultar(provedor: string, hex: string[], matriculas: string[]):
       respondeu = true
       for (const bruto of Array.isArray(corpo.ac) ? corpo.ac : []) {
         const item = normalizar(bruto, provedor)
-        if (!item) continue
+        if (!item || !correspondeAoIdentificador(item, hex, matriculas)) continue
         const atual = unicas.get(item.hex)
         if (!atual || (item.visto_ha_s ?? Infinity) < (atual.visto_ha_s ?? Infinity)) unicas.set(item.hex, item)
       }
