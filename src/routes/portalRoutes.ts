@@ -710,11 +710,13 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
     const local = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
       WHERE upper(COALESCE(codigo_icao, '')) = ?1 AND COALESCE(${colunaPreco}, 0) > 0`).bind(icao).first<{ media: number | null }>().catch(() => null)
     if (positiveNumber(local?.media)) return { price: positiveNumber(local?.media)!, source: 'fornecedores_combustivel_icao' }
-    const historico = await c.env.SHARE_DB.prepare(`SELECT AVG(valor_unitario) AS media FROM abastecimentos
+    // Último preço real conhecido na localidade (não média dos 12 meses).
+    const historico = await c.env.SHARE_DB.prepare(`SELECT valor_unitario AS media FROM abastecimentos
       WHERE (upper(COALESCE(local, '')) = ?1 OR upper(COALESCE(trecho, '')) LIKE ?2)
         AND upper(COALESCE(tipo_combustivel, '')) LIKE ?3 AND COALESCE(valor_unitario, 0) > 0
-        AND date(data) >= date('now', '-365 days')`).bind(icao, `%${icao}%`, tipoCombustivel === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null }>().catch(() => null)
-    if (positiveNumber(historico?.media)) return { price: positiveNumber(historico?.media)!, source: 'abastecimentos_historico_12m' }
+        AND date(data) >= date('now', '-365 days')
+      ORDER BY date(data) DESC, id DESC LIMIT 1`).bind(icao, `%${icao}%`, tipoCombustivel === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null }>().catch(() => null)
+    if (positiveNumber(historico?.media)) return { price: positiveNumber(historico?.media)!, source: 'ultimo_abastecimento_local' }
     const nacional = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
       WHERE COALESCE(${colunaPreco}, 0) > 0`).first<{ media: number | null }>().catch(() => null)
     return positiveNumber(nacional?.media) ? { price: positiveNumber(nacional?.media)!, source: 'fornecedores_combustivel_media_banco' } : null
