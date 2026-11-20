@@ -328,7 +328,16 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
   if (!user) return c.json({ error: 'client_auth_required' }, 401)
   const meses = mesesDaQuery(c.req.query('meses'))
   const db = c.env.SHARE_DB
-  const mesExpr = "substr(COALESCE(NULLIF(r.data_competencia_demonstrativo, ''), r.data_emissao), 1, 7)"
+  // A emissão é a competência única do fechamento interno e do portal.
+  const mesExpr = "substr(r.data_emissao, 1, 7)"
+  // Eventos confirmados são a fonte de pagamento. Qualquer evento existente
+  // desabilita o fallback do campo agregado legado, inclusive após estorno.
+  const eventosConfirmados = `LEFT JOIN (
+    SELECT rateio_id,
+           SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CONFIRMADO' THEN valor_centavos ELSE 0 END) AS pago_centavos
+      FROM rateio_pagamentos GROUP BY rateio_id
+  ) pagamentos ON pagamentos.rateio_id = r.id`
+  const pagoEfetivo = "COALESCE(pagamentos.pago_centavos, r.valor_pago_real_centavos, 0)"
   const ph = placeholders(3, meses.length)
 
   if (user.cliente_id) {
@@ -336,11 +345,16 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
       db.prepare(`
         SELECT r.id, ${mesExpr} AS mes, r.data_emissao, r.data_vencimento, r.data_pagamento, r.descricao_despesa,
                r.categoria_nome, r.tipo_rateio, r.percentual_sociedade, r.percentual_uso,
-               r.valor_total_centavos, r.valor_rateado_centavos, r.valor_pago_real_centavos,
+               r.valor_total_centavos, r.valor_rateado_centavos, ${pagoEfetivo} AS valor_pago_real_centavos,
                COALESCE(NULLIF(TRIM(pagador_cliente.razao_social), ''), NULLIF(TRIM(pagador_socio.nome), ''),
                  NULLIF(TRIM(pagador_cliente_direto.razao_social), ''), NULLIF(TRIM(pagador_socio_direto.nome), ''),
                  CASE WHEN NULLIF(TRIM(r.pago_por), '') IS NULL THEN NULL WHEN r.pago_diretamente = 1 THEN 'Pagamento direto' ELSE 'Cotista' END) AS pago_por,
-               r.pago_diretamente, r.status, a.matricula_registro, r.aeronave_id,
+               r.pago_diretamente,
+               CASE WHEN pagamentos.rateio_id IS NULL THEN r.status
+                    WHEN ${pagoEfetivo} >= r.valor_rateado_centavos THEN 'PAGO'
+                    WHEN ${pagoEfetivo} > 0 THEN 'PAGO_PARCIAL'
+                    ELSE 'EM_ABERTO' END AS status,
+               a.matricula_registro, r.aeronave_id,
                (SELECT e.fornecedor FROM envio_despesas e WHERE e.id = r.lancamento_id LIMIT 1) AS fornecedor
           FROM rateio_despesas r
           JOIN cotista_aeronave ca ON ca.id = r.cotista_id
@@ -350,6 +364,7 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
           LEFT JOIN cliente pagador_cliente_direto ON pagador_cliente_direto.id = r.pago_por
           LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
+          ${eventosConfirmados}
          WHERE ca.cliente_id = ?1 AND ?2 IS NULL AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
            AND ${mesExpr} IN (${ph})
          ORDER BY date(r.data_emissao) DESC`).bind(user.cliente_id, null, ...meses).all<Record<string, unknown>>(),
@@ -358,13 +373,14 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
                ca.percentual_sociedade, a.matricula_registro,
                CASE WHEN ca.cliente_id = ?1 THEN 1 ELSE 0 END AS eu,
                COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos,
-               COALESCE(SUM(MIN(r.valor_pago_real_centavos, r.valor_rateado_centavos)), 0) AS pago_centavos,
+               COALESCE(SUM(MIN(MAX(${pagoEfetivo}, 0), r.valor_rateado_centavos)), 0) AS pago_centavos,
                COUNT(r.id) AS lancamentos
           FROM rateio_despesas r
           JOIN cotista_aeronave ca ON ca.id = r.cotista_id
           LEFT JOIN cliente cl ON cl.id = ca.cliente_id
           LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
+          ${eventosConfirmados}
          WHERE r.aeronave_id IN (SELECT aeronave_id FROM cotista_aeronave WHERE cliente_id = ?1 OR (?2 IS NOT NULL AND socio_id = ?2))
            AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
            AND ${mesExpr} IN (${ph})
