@@ -16,7 +16,11 @@ test('dashboard calcula horas, pousos, custo-hora, meses e categorias no ano sol
   assert.match(source, /SUM\(COALESCE\(tempo_total, tempo_voo, 0\)\)/);
   assert.match(source, /SUM\(COALESCE\((?:l\.)?tempo_voo, 0\)\), 0\) AS tempo_voo_horas/);
   assert.match(source, /SUM\(COALESCE\(pousos_total, 0\)\)/);
-  assert.match(source, /custoHoraCentavos: horas > 0/);
+  assert.match(source, /custoHoraCentavos: aeronaveResumo\.custo_hora_centavos/);
+  assert.match(source, /custoHoraCotistaCentavos: cotaResumo\.custo_hora_centavos/);
+  assert.match(source, /custoTotalAeronaveCentavos: custoCentavos/);
+  assert.match(source, /custoCotistaCentavos: cotaResumo\.total_centavos/);
+  assert.match(source, /minutos_operacionais \/ 60/);
   assert.match(source, /GROUP BY mes ORDER BY mes/);
   assert.match(source, /GROUP BY categoria ORDER BY valor_centavos DESC/);
 });
@@ -31,8 +35,11 @@ test('destinos excluem o aeródromo base e o dashboard calcula uso da participa�
 test('projeção usa categorias fixas, variáveis, extras e combustível dos rateios da cota autenticada', () => {
   assert.match(source, /const rateioOwner = user\.cliente_id \? 'ca\.id = \?2' : 'r\.socio_id = \?2'/);
   assert.match(source, /AND \$\{rateioOwner\} AND UPPER\(COALESCE\(r\.status, ''\)\) <> 'CANCELADO'/);
-  assert.match(source, /UPPER\(r\.tipo_rateio\) = 'FIXO'/);
-  assert.match(source, /UPPER\(r\.tipo_rateio\) = 'EXTRA'/);
+  assert.match(source, /cotaResumo\.grupos\.fixos\.valor_centavos/);
+  assert.match(source, /cotaResumo\.grupos\.variaveis\.valor_centavos/);
+  assert.match(source, /cotaResumo\.grupos\.extras\.valor_centavos/);
+  assert.match(source, /cotaResumo\.grupos\.nao_classificados\.valor_centavos/);
+  assert.doesNotMatch(source, /UPPER\(r\.tipo_rateio\) = 'FIXO'/);
   assert.match(source, /LIKE '%combust%'/);
 });
 
