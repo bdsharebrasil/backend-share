@@ -34,6 +34,9 @@ class FakeD1 {
       bind(...values) { this.values = values; return this },
       first: async () => {
         if (sql.includes('FROM portal_sessoes_revogadas')) return null
+        if (sql.includes('FROM user_cliente u JOIN cotista_aeronave ca')) {
+          return { id: 'cota-1', aeronave_id: 'aeronave-1' }
+        }
         if (sql.includes('FROM user_cliente u')) {
           return { id: 'usuario-1', login: 'cotista.teste', ...db.identidade }
         }
@@ -69,6 +72,9 @@ test('balanço de cliente resolve o UUID do pagador para a razão social', async
   assert.equal(body.lancamentos[0].pago_por, 'Empresa Exemplo Ltda.')
   assert.ok(queries.some(sql => sql.includes('LEFT JOIN cliente pagador_cliente') && sql.includes('pagador_cliente.razao_social')))
   assert.ok(queries.some(sql => sql.includes('LEFT JOIN cotista_aeronave ca_pagador ON ca_pagador.id = r.pago_por')))
+  assert.ok(queries.some(sql => sql.includes('r.cotista_id = ?1 AND r.aeronave_id = ?2')))
+  assert.ok(queries.some(sql => sql.includes('substr(r.data_emissao, 1, 7)')))
+  assert.equal(body.conciliacao?.status, 'PRELIMINAR')
 })
 
 test('balanço de sócio resolve o UUID do pagador para o nome', async () => {
