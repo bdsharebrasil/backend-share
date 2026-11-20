@@ -1,5 +1,5 @@
 import { obterClassificacaoNatureza } from '../../shared/natureza-custo'
-import { minutosEntreHorarios } from './balancoOperacional'
+import { temposVooPortal, voosDoCotistaPortal, type CotaVooPortal, type VooPortal } from './portalHoras'
 
 type Registro = Record<string, unknown>
 export type GrupoCustoPortal = 'fixos' | 'variaveis' | 'reservas' | 'extras' | 'nao_classificados'
@@ -15,7 +15,8 @@ export function grupoCustoPortal(r: Registro): GrupoCustoPortal {
   const classificada = obterClassificacaoNatureza(r)
   if (classificada.grupo !== 'naoClassificados') return classificada.grupo
   if (natureza) return 'nao_classificados'
-  if (/^(COMBUSTIVEIS?|ABASTECIMENTOS?|VIAGEM|DESPESAS DE VIAGEM|ALIMENTACAO|HOSPEDAGEM|TRANSPORTE|TAXAS|TARIFAS)$/.test(categoria)) return 'variaveis'
+  // Somente famílias explícitas não cobertas pela função comum do Financeiro.
+  if (/^(VIAGEM|DESPESA DE VIAGEM|ALIMENTACAO|HOSPEDAGEM|TRANSPORTE|TAXAS|TARIFAS)$/.test(categoria)) return 'variaveis'
   if (/^(SEGURO|SEGURO AERONAUTICO|SEGUROS|TRIPULACAO|TRIPULACAO E ADMINISTRACAO|ADM E TRIPULACAO)$/.test(categoria)) return 'fixos'
   return 'nao_classificados'
 }
@@ -28,9 +29,9 @@ export function mesesAte(referencia: string, quantidade: number): string[] {
   })
 }
 
-export function resumoCustosPortal(rateios: Registro[], voos: Registro[], meses: string[]) {
+export function resumoCustosPortal(rateios: Registro[], voos: VooPortal[], meses: string[]) {
   const grupos: Record<GrupoCustoPortal, number> = { fixos: 0, variaveis: 0, reservas: 0, extras: 0, nao_classificados: 0 }
-  let total = 0, minutos = 0, semHorario = 0, lancamentos = 0
+  let total = 0, operacional = 0, tempoVoo = 0, semOperacional = 0, semTempoVoo = 0, lancamentos = 0
   for (const r of rateios) {
     if (!meses.includes(competencia(r))) continue
     lancamentos++
@@ -40,14 +41,22 @@ export function resumoCustosPortal(rateios: Registro[], voos: Registro[], meses:
   }
   for (const v of voos) {
     if (!meses.includes(competencia(v))) continue
-    const registrado = minutosEntreHorarios(v.tempo_dep, v.tempo_pou)
-    const tempo = registrado ?? (numero(v.tempo_voo) > 0 ? numero(v.tempo_voo) * 60 : null)
-    if (tempo === null) semHorario++
-    else minutos += tempo
+    const { minutosOperacionais, minutosVoo } = temposVooPortal(v)
+    const fator = Number(v.percentualAtribuido ?? 100) / 100
+    if (minutosOperacionais === null) semOperacional++
+    else operacional += minutosOperacionais * fator
+    if (minutosVoo === null) semTempoVoo++
+    else tempoVoo += minutosVoo * fator
   }
-  return { total_centavos: total, minutos_voo: Math.round(minutos), etapas_sem_tempo: semHorario,
-    custo_hora_centavos: lancamentos > 0 && minutos > 0 && semHorario === 0 ? Math.round(total * 60 / minutos) : null,
-    grupos: Object.fromEntries(Object.entries(grupos).map(([grupo, valor]) => [grupo, { valor_centavos: valor, percentual: total > 0 ? valor / total * 100 : 0 }])) as Record<GrupoCustoPortal, { valor_centavos: number; percentual: number }> }
+  // Custo por hora operacional: nunca dividir a cota pelas horas de toda a aeronave.
+  return { total_centavos: total, minutos_voo: Math.round(tempoVoo),
+    minutos_operacionais: Math.round(operacional),
+    etapas_sem_tempo: semOperacional, etapas_sem_tempo_voo: semTempoVoo,
+    custo_hora_centavos: lancamentos > 0 && operacional > 0 && semOperacional === 0
+      ? Math.round(total * 60 / operacional) : null,
+    grupos: Object.fromEntries(Object.entries(grupos).map(([grupo, valor]) =>
+      [grupo, { valor_centavos: valor, percentual: total > 0 ? valor / total * 100 : 0 }])) as
+      Record<GrupoCustoPortal, { valor_centavos: number; percentual: number }> }
 }
 
 /** Somente agregados da aeronave previamente autorizada; nenhuma identidade de outro cotista é retornada. */
@@ -65,9 +74,8 @@ export async function carregarCustosPortal(db: D1Database, aeronaveId: string, c
   async function rateios(tabela: 'rateio_despesas' | 'rateio_hold', proprio: boolean) {
     const colunas = schemas.get(tabela)!
     if (!colunas.size) return []
-    const mes = colunas.has('data_competencia_demonstrativo')
-      ? "substr(COALESCE(NULLIF(TRIM(r.data_competencia_demonstrativo), ''), r.data_emissao), 1, 7)"
-      : 'substr(r.data_emissao, 1, 7)'
+    // A regra de competência é a data de emissão, igual ao Fechamento Share.
+    const mes = 'substr(r.data_emissao, 1, 7)'
     const filtro = proprio ? tabela === 'rateio_hold' ? ' AND r.socio_id = ?' : ' AND r.cotista_id = ?' : ''
     const args = proprio ? [aeronaveId, socioId && tabela === 'rateio_hold' ? socioId : cotistaId, ...consultaMeses] : [aeronaveId, ...consultaMeses]
     // SUM das parcelas representa o custo UMA vez. valor_total_centavos se repete por cotista.
@@ -78,19 +86,32 @@ export async function carregarCustosPortal(db: D1Database, aeronaveId: string, c
       AND ${mes} IN (${parametros})`).bind(...args).all<Registro>()
     return r.results || []
   }
+  // Cotas ativas entram apenas no compartilhamento de TR/VT. A referência
+  // do próprio usuário é sempre o cotista_aeronave.id validado na rota.
+  const cotasResultado = await db.prepare(
+    'SELECT id, cliente_id, socio_id, percentual_sociedade, status FROM cotista_aeronave WHERE aeronave_id = ?',
+  ).bind(aeronaveId).all<CotaVooPortal>()
+  const cotas = cotasResultado.results || []
+  const cota = cotas.find(item => item.id === cotistaId)
+  if (!cota) throw new Error('Vínculo de cotista inexistente para a aeronave')
   const [aeronave, cotista, voosResultado] = await Promise.all([
     rateios('rateio_despesas', false),
     rateios(socioId ? 'rateio_hold' : 'rateio_despesas', true),
-    schemas.get('lancamentos_diario_bordo')!.size ? db.prepare(`SELECT r.id, r.data_registro,
-      substr(r.data_registro, 1, 7) AS mes,
-      ${opcionais('lancamentos_diario_bordo', ['tempo_dep', 'tempo_pou', 'tempo_voo', 'cliente_id', 'socio_id', 'cliente_tomador_emprestimo_id', 'socio_tomador_emprestimo_id'])}
-      FROM lancamentos_diario_bordo r WHERE r.aeronave_id = ? AND substr(r.data_registro, 1, 7) IN (${parametros})`)
-      .bind(aeronaveId, ...consultaMeses).all<Registro>() : Promise.resolve({ results: [] as Registro[] }),
+    schemas.get('lancamentos_diario_bordo')!.size
+      ? db.prepare(`SELECT r.id, r.data_registro,
+        substr(r.data_registro, 1, 7) AS mes,
+        ${opcionais('lancamentos_diario_bordo', [
+          'tempo_ac', 'tempo_cor', 'tempo_total', 'tempo_dep', 'tempo_pou', 'tempo_voo',
+          'natureza_voo', 'voo_emprestado', 'cliente_id', 'socio_id',
+          'cliente_tomador_emprestimo_id', 'socio_tomador_emprestimo_id',
+        ])}
+        FROM lancamentos_diario_bordo r WHERE r.aeronave_id = ?
+          AND substr(r.data_registro, 1, 7) IN (${parametros})`)
+        .bind(aeronaveId, ...consultaMeses).all<VooPortal>()
+      : Promise.resolve({ results: [] as VooPortal[] }),
   ])
   const voos = voosResultado.results || []
-  const meusVoos = voos.filter(v => clienteId
-    ? String(v.cliente_tomador_emprestimo_id || v.cliente_id || '') === clienteId
-    : String(v.socio_tomador_emprestimo_id || v.socio_id || '') === socioId)
+  const meusVoos = voosDoCotistaPortal(voos, cota, cotas)
   return {
     resposta: { aeronave_id: aeronaveId, meses,
       resumo: { aeronave: resumoCustosPortal(aeronave, voos, meses), cotista: resumoCustosPortal(cotista, meusVoos, meses) },
