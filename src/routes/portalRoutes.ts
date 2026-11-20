@@ -527,18 +527,27 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
         AND ((COALESCE(NULLIF(l.cliente_tomador_emprestimo_id, ''), l.cliente_id) = ?4 AND ?4 IS NOT NULL)
           OR (COALESCE(NULLIF(l.socio_tomador_emprestimo_id, ''), l.socio_id) = ?5 AND ?5 IS NOT NULL))`).bind(aeronaveId, inicio, fim, user.cliente_id, user.socio_id).first<Record<string, unknown>>()
   ])
-  const horas = Number(voos?.horas || 0)
-  const custoCentavos = Number(custos?.total_centavos || 0)
-  const horasUso = Number(usoCotista?.horas || 0)
+  // As duas visões são apuradas pela mesma fonte do Balanço: rateio por
+  // emissão e horas atribuídas pelo diário (AC–COR / DEP–POU / TR/VT).
+  const mesesAno = Array.from({ length: 12 }, (_, i) => `${ano}-${String(i + 1).padStart(2, '0')}`)
+  const espelho = (await carregarCustosPortal(c.env.SHARE_DB, aeronaveId,
+    String(vinculo.cotista_id), user.cliente_id, user.socio_id, mesesAno, 12)).resposta
+  const aeronaveResumo = espelho.resumo.aeronave
+  const cotaResumo = espelho.resumo.cotista
+  const horas = aeronaveResumo.minutos_operacionais / 60
+  const custoCentavos = aeronaveResumo.total_centavos
+  const horasUso = cotaResumo.minutos_operacionais / 60
   const percentualSociedade = Number(vinculo.percentual_sociedade || 0)
   const percentualUso = horas > 0 ? Number(((horasUso / horas) * 100).toFixed(1)) : 0
-  const valoresCustosMes = new Map((custosMes.results || []).map(row => [String(row.mes), Number(row.valor_centavos || 0)]))
-  const horasVoadaMes = new Map((horasMes.results || []).map(row => [String(row.mes), Number(row.horas || 0)]))
+  const valoresCustosMes = new Map(espelho.mensal.map(row => [row.mes, row.cotista.total_centavos]))
+  const horasVoadaMes = new Map(espelho.mensal.map(row => [row.mes, row.cotista.minutos_operacionais / 60]))
   const mensal = Array.from({ length: 12 }, (_, index) => {
     const mes = `${ano}-${String(index + 1).padStart(2, '0')}`
     const valorCentavos = valoresCustosMes.get(mes) || 0
     const horasMesAtual = horasVoadaMes.get(mes) || 0
-    return { mes, valorCentavos, horas: Number(horasMesAtual.toFixed(2)), custoHoraCentavos: horasMesAtual > 0 ? Math.round(valorCentavos / horasMesAtual) : 0 }
+    const resumoMes = espelho.mensal.find(item => item.mes === mes)?.cotista
+    return { mes, valorCentavos, horas: Number(horasMesAtual.toFixed(4)),
+      custoHoraCentavos: resumoMes?.custo_hora_centavos ?? 0 }
   })
   const destinosMaisVisitados = (destinos.results || []).map(row => ({ destino: String(row.destino || 'Não informado'), quantidade: Number(row.quantidade || 0) }))
   return c.json({
@@ -546,9 +555,17 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
     ano,
     estatisticas: {
       voos: Number(voos?.voos || 0), etapasRegistradas: Number(voos?.voos || 0), pousos: Number(voos?.pousos || 0),
-      horas: Number(horas.toFixed(2)), tempoVooHoras: Number(Number(voos?.tempo_voo_horas || 0).toFixed(2)),
+      horas: Number(horas.toFixed(4)), tempoVooHoras: Number((aeronaveResumo.minutos_voo / 60).toFixed(4)),
+      horasOperacionaisAeronave: Number(horas.toFixed(4)),
+      horasOperacionaisCotista: Number(horasUso.toFixed(4)),
+      horasVooAeronave: Number((aeronaveResumo.minutos_voo / 60).toFixed(4)),
+      horasVooCotista: Number((cotaResumo.minutos_voo / 60).toFixed(4)),
+      custoTotalAeronaveCentavos: custoCentavos,
+      custoCotistaCentavos: cotaResumo.total_centavos,
+      custoHoraAeronaveCentavos: aeronaveResumo.custo_hora_centavos,
+      custoHoraCotistaCentavos: cotaResumo.custo_hora_centavos,
       destinoMaisVisitado: destinosMaisVisitados[0]?.destino || 'Não informado',
-      custoHoraCentavos: horas > 0 ? Math.round(custoCentavos / horas) : 0, custoTotalCentavos: custoCentavos,
+      custoHoraCentavos: aeronaveResumo.custo_hora_centavos ?? 0, custoTotalCentavos: custoCentavos,
       vooMaisLongo: vooMaisLongo ? {
         data: String(vooMaisLongo.data_registro || ''), origem: String(vooMaisLongo.aerodromo_partida || ''),
         destino: String(vooMaisLongo.aerodromo_chegada || ''), horas: Number(Number(vooMaisLongo.tempo_voo || 0).toFixed(2)),
@@ -557,15 +574,17 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
     destinosMaisVisitados,
     usoCota: {
       percentualSociedade, horasCotista: Number(horasUso.toFixed(2)),
-      etapasCotista: Number(usoCotista?.etapas || 0), pousosCotista: Number(usoCotista?.pousos || 0),
+      etapasCotista: cotaResumo.etapas_atribuidas, pousosCotista: Number(usoCotista?.pousos || 0),
       percentualUso, diferencaPontos: Number((percentualUso - percentualSociedade).toFixed(1)),
     },
     mensal,
     projecaoCustos: {
-      fixoCentavos: Number(custos?.fixo_centavos || 0),
-      variavelPorVooCentavos: Number(custos?.variavel_voo_centavos || 0),
-      variavelPorHoraCentavos: Number(custos?.variavel_hora_centavos || 0),
-      extraCentavos: Number(custos?.extra_centavos || 0),
+      // Natureza econômica do mesmo classificador do fechamento, nunca tipo_rateio.
+      fixoCentavos: cotaResumo.grupos.fixos.valor_centavos,
+      variavelPorVooCentavos: 0,
+      variavelPorHoraCentavos: cotaResumo.grupos.variaveis.valor_centavos,
+      extraCentavos: cotaResumo.grupos.extras.valor_centavos,
+      naoClassificadosCentavos: cotaResumo.grupos.nao_classificados.valor_centavos,
       combustivelCentavos: Number(custos?.combustivel_centavos || 0),
     },
     categorias: (categorias.results || []).map(row => ({ categoria: String(row.categoria || 'Sem categoria'), valorCentavos: Number(row.valor_centavos || 0) })),
