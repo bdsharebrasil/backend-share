@@ -1,5 +1,40 @@
 # Custos reais no Portal do Cliente
 
+## Contrato do espelho financeiro (20/11/2026)
+
+A fonte de competência é **sempre `data_emissao`**, tanto no Balanço e
+Financeiro do Portal quanto no dashboard interno e na view `vw_balanco_rateios`.
+`data_competencia_demonstrativo` permanece como informação documental legada,
+não como referência para atribuição financeira mensal.
+
+- O custo da **aeronave** é o somatório de parcelas financeiras da aeronave,
+  sem multiplicar `valor_total_centavos` por quantidade de cotistas.
+- O custo **atribuído à cota** segue o vínculo exato
+  `user_cliente.cotista_id → cotista_aeronave.id`; quando for sócio, a
+  subdivisão vem de `rateio_hold`. Custo da cota nunca pode ser dividido
+  pelas horas de toda a aeronave.
+- O custo/hora operacional utiliza **AC–COR** e, se horários ausentes,
+  o respectivo `tempo_total`. DEP–POU (fallback `tempo_voo`) é **tempo de
+  voo**, indicador separado. Sem minutos operacionais confiáveis, custo/hora é nulo.
+- Em TR/VT, divide-se a duração física por partes iguais entre cotistas
+  ativos com participação positiva. Voos particulares exigem titular explícito;
+  empréstimos pertencem apenas ao tomador identificado.
+- A natureza econômica usa o mesmo `shared/natureza-custo.ts` do
+  Financeiro Share; `tipo_rateio` não representa custo fixo/variável.
+  Custos não classificados não recebem divisão artificial na projeção.
+- O `GET /api/portal/balanco` filtra o vínculo da sessão e a aeronave
+  selecionada e expõe `conciliacao` preliminar da mesma função
+  `calcularBalancoMensal` usada internamente; não expõe o ledger de outros.
+- Os tickets de viagem e combustível são calculados por categoria e IDs
+  distintos, somando apenas parcelas atribuídas ao cotista.
+
+**Importante:** como a view legada tinha prioridade de demonstrativo, aplicar
+`migrations/20261120_balanco_competencia_emissao.sql` em homologação e testar
+as validações de ajustes antes de migrar o D1 remoto. O SQL altera somente a
+view, nunca tabelas ou rateios.
+
+
+
 O portal consulta `GET /api/portal/financeiro/custos?aeronave_id=UUID&meses=AAAA-MM,...` para os indicadores do balanço e as premissas do simulador. A sessão deve ter o módulo financeiro e o vínculo exato da aeronave em `user_cliente.cotista_id`.
 
 ## Balanço
