@@ -102,8 +102,9 @@ ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
     ? " WHERE r.aeronave_id = ? AND r.aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%')"
     : " WHERE r.aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%')"
   const params = aeronaveId ? [aeronaveId] : []
-  const [reports, aircraft, orders] = await Promise.all([
-    ctmRead(c, 'relatorios_manutencao', `${filtro} ORDER BY date(r.data_relatorio) DESC, r.id DESC`, params),
+  const [reports, mobileReports, aircraft, orders] = await Promise.all([
+    ctmRead(c, 'relatorios_manutencao r', `${filtro} ORDER BY date(r.data_relatorio) DESC, r.id DESC`, params),
+    ctmRead(c, 'ctm_reports_mobile r', `${filtro} ORDER BY date(r.data_relatorio) DESC, r.id DESC`, params),
     ctmRead(c, 'aeronave', " WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%' ORDER BY matricula_registro"),
     ctmRead(c, 'ctm_ordem_acompanhamento_servico', " WHERE aeronave_id IN (SELECT id FROM aeronave WHERE lower(COALESCE(status, 'ativa')) LIKE 'ativ%') ORDER BY data_entrada DESC"),
   ])
@@ -116,17 +117,65 @@ ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
     in_maintenance: aircraftInMaintenance.has(String(item.id)),
   }))
   const aeronavesPorId = new Map(aeronaves.map((item: any) => [String(item.id), item]))
-  const data = reports.results.map((report: any) => ({
+  const data = [...(reports.results || []), ...(mobileReports.results || [])].map((report: any) => ({
     ...report,
     aircraft: aeronavesPorId.get(String(report.aeronave_id)),
     aircraft_id: report.aeronave_id,
     report_date: report.data_relatorio,
-    description: report.observacoes || report.description || '',
-    reported_by: report.mecanico_responsavel || report.responsavel_tecnico || null,
-    severity: report.severity || 'medium',
+    description: report.descricao || report.observacoes || report.description || '',
+    reported_by: report.criado_por || report.mecanico_responsavel || report.responsavel_tecnico || null,
+    reporter: report.criado_por_nome ? { full_name: report.criado_por_nome } : undefined,
+    severity: report.severidade || report.severity || 'medium',
+    status: report.status || 'open',
     corrective_action: report.acao_corretiva || report.corrective_action || null,
-  }))
+  })).sort((a: any, b: any) => String(b.report_date).localeCompare(String(a.report_date)))
   return c.json({ data, aeronaves })
+})
+
+ctmRoutes.post('/api/ctm/relatorios-manutencao', async c => {
+  // Criação vinculada à identidade autenticada, nunca ao "reported_by" enviado pelo cliente.
+  const user = await shareBrasilUser(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
+
+  let payload: Record<string, unknown>
+  try {
+    payload = await c.req.json<Record<string, unknown>>()
+  } catch {
+    return c.json({ error: 'json_invalido' }, 400)
+  }
+  const aeronaveId = String(payload?.aeronave_id || '').trim()
+  const descricao = String(payload?.descricao || '').trim()
+  const severidade = String(payload?.severidade || 'medium').trim().toLowerCase()
+  const dataRelatorio = String(payload?.data_relatorio || new Date().toISOString().slice(0, 10)).trim()
+  if (!aeronaveId || !descricao || descricao.length > 5000) return c.json({ error: 'Informe aeronave e descrição (máximo de 5000 caracteres).' }, 400)
+  if (!['low', 'medium', 'high', 'critical'].includes(severidade)) return c.json({ error: 'severidade_invalida' }, 400)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataRelatorio) || Number.isNaN(Date.parse(dataRelatorio)) ||
+      new Date(dataRelatorio + 'T12:00:00Z').toISOString().slice(0, 10) !== dataRelatorio) {
+    return c.json({ error: 'data_relatorio_invalida' }, 400)
+  }
+
+  const aeronave = await c.env.SHARE_DB.prepare(
+    "SELECT id FROM aeronave WHERE id = ? AND lower(COALESCE(status, 'ativa')) LIKE 'ativ%' LIMIT 1",
+  ).bind(aeronaveId).first<{ id: string }>()
+  if (!aeronave) return c.json({ error: 'aeronave_nao_encontrada_ou_inativa' }, 404)
+
+  const id = uuid()
+  const nome = user.nome_completo || user.nome_exibicao || user.email || 'Colaborador'
+  try {
+    await c.env.SHARE_DB.prepare(
+      'INSERT INTO ctm_reports_mobile (id, aeronave_id, data_relatorio, descricao, severidade, status, criado_por, criado_por_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).bind(id, aeronaveId, dataRelatorio, descricao, severidade, 'open', user.id, nome).run()
+  } catch (error) {
+    console.error('[ctm] falha ao gravar report no D1', error)
+    return c.json({ error: 'falha_ao_salvar_report_verifique_migracao_d1' }, 503)
+  }
+  return c.json({
+    data: {
+      id, aircraft_id: aeronaveId, report_date: dataRelatorio,
+      description: descricao, severity: severidade, status: 'open',
+      reported_by: user.id, reporter: { full_name: nome },
+    },
+  }, 201)
 })
 
 for (const [slug, config] of Object.entries(CTM_READ_TABLES)) {
