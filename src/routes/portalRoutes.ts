@@ -568,7 +568,7 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
       variavelPorHoraCentavos: cotaResumo.grupos.variaveis.valor_centavos,
       extraCentavos: cotaResumo.grupos.extras.valor_centavos,
       naoClassificadosCentavos: cotaResumo.grupos.nao_classificados.valor_centavos,
-      combustivelCentavos: Number(custos?.combustivel_centavos || 0),
+      combustivelCentavos: espelho.combustivel_cotista_centavos,
     },
     categorias: (categorias.results || []).map(row => ({ categoria: String(row.categoria || 'Sem categoria'), valorCentavos: Number(row.valor_centavos || 0) })),
   })

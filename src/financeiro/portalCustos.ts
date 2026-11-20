@@ -115,6 +115,12 @@ export async function carregarCustosPortal(db: D1Database, aeronaveId: string, c
   const meusVoos = voosDoCotistaPortal(voos, cota, cotas)
   return {
     resposta: { aeronave_id: aeronaveId, meses,
+      // Campo auxiliar para não inferir combustível do tipo de rateio nem
+      // depender de um ranking que mostra apenas as maiores categorias.
+      combustivel_cotista_centavos: cotista.filter(r =>
+        /^(COMBUSTIVEL|COMBUSTIVEIS|ABASTECIMENTO|ABASTECIMENTOS)$/.test(normalizarCusto(r.categoria_nome))
+        && meses.includes(competencia(r))
+      ).reduce((s, r) => s + Math.round(numero(r.valor_rateado_centavos)), 0),
       resumo: { aeronave: resumoCustosPortal(aeronave, voos, meses), cotista: resumoCustosPortal(cotista, meusVoos, meses) },
       mensal: serie.map(mes => ({ mes, aeronave: resumoCustosPortal(aeronave, voos, [mes]), cotista: resumoCustosPortal(cotista, meusVoos, [mes]) })),
       fontes: { custos: schemas.get('rateio_despesas')!.size > 0, voos: schemas.get('lancamentos_diario_bordo')!.size > 0 } },

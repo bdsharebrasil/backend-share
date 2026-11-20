@@ -346,8 +346,9 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
   // Compensações e saldos pessoais vêm do mesmo motor do Financeiro Share.
   const conciliacao = async () => {
     try {
-      const inicio = limitesMes([...meses].sort()[0]).inicio
-      const fim = limitesMes([...meses].sort().at(-1)!).fim
+      const ordenados = [...meses].sort()
+      const inicio = limitesMes(ordenados[0]).inicio
+      const fim = limitesMes(ordenados[ordenados.length - 1]).fim
       const dados = await carregarDadosBalancoMensal(db, aeronaveId, fim)
       const resultado = calcularBalancoMensal(dados.participantes, dados.rateios,
         dados.pagamentos, dados.ajustes, inicio, fim, meses)
