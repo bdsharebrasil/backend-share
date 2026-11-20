@@ -397,36 +397,44 @@ portalRoutes.get('/api/portal/financeiro', async c => {
   const participantId = user.cliente_id || user.socio_id
   const ownedAircraftFilter = user.cliente_id ? 'ca.cliente_id = ?1' : 'ca.socio_id = ?1'
   const paymentTotals = `LEFT JOIN (
-    SELECT rateio_id, SUM(valor_centavos) AS valor_pago_centavos
+    SELECT rateio_id,
+           SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CONFIRMADO' THEN valor_centavos ELSE 0 END) AS valor_pago_centavos
       FROM rateio_pagamentos
-     WHERE UPPER(COALESCE(status, '')) = 'CONFIRMADO'
      GROUP BY rateio_id
   ) pagamentos ON pagamentos.rateio_id = r.id`
   const query = user.cliente_id
     ? `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
           r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
           COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) AS valor_pago_real_centavos,
-          CASE WHEN COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
-                 OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO') THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
+          CASE WHEN pagamentos.rateio_id IS NOT NULL
+                 THEN CASE WHEN pagamentos.valor_pago_centavos >= r.valor_rateado_centavos THEN 'PAGO'
+                           WHEN pagamentos.valor_pago_centavos > 0 THEN 'PAGO_PARCIAL' ELSE 'EM_ABERTO' END
+                 WHEN COALESCE(r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
+                   OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO', 'PAGO_DIRETAMENTE')
+                 THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
           'CLIENTE' AS tipo, a.matricula_registro
        FROM rateio_despesas r
        INNER JOIN cotista_aeronave ca ON ca.id = r.cotista_id
        LEFT JOIN aeronave a ON a.id = r.aeronave_id
        ${paymentTotals}
-      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
       ORDER BY date(r.data_emissao) DESC, r.id DESC`
     : `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
           r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
           COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) AS valor_pago_real_centavos,
-          CASE WHEN COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
-                 OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO') THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
+          CASE WHEN pagamentos.rateio_id IS NOT NULL
+                 THEN CASE WHEN pagamentos.valor_pago_centavos >= r.valor_rateado_centavos THEN 'PAGO'
+                           WHEN pagamentos.valor_pago_centavos > 0 THEN 'PAGO_PARCIAL' ELSE 'EM_ABERTO' END
+                 WHEN COALESCE(r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
+                   OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO', 'PAGO_DIRETAMENTE')
+                 THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
           'HOLDING' AS tipo, a.matricula_registro
        FROM rateio_hold r
        INNER JOIN hold_socios hs ON hs.id = r.socio_id
        INNER JOIN cotista_aeronave ca ON ca.socio_id = hs.id AND ca.aeronave_id = r.aeronave_id
        LEFT JOIN aeronave a ON a.id = r.aeronave_id
        ${paymentTotals}
-      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
       ORDER BY date(r.data_emissao) DESC, r.id DESC`
   const result = await c.env.SHARE_DB.prepare(query).bind(participantId).all<Record<string, unknown>>()
   const despesas = result.results || []
@@ -478,7 +486,7 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
   const rateioJoin = user.cliente_id ? 'JOIN cotista_aeronave ca ON ca.id = r.cotista_id' : ''
   const rateioOwner = user.cliente_id ? 'ca.id = ?2' : 'r.socio_id = ?2'
   const rateioOwnerId = user.cliente_id ? String(vinculo.cotista_id || '') : String(user.socio_id || '')
-  const [voos, destinos, vooMaisLongo, custos, custosMes, horasMes, categorias, usoCotista] = await Promise.all([
+  const [voos, destinos, vooMaisLongo, categorias, usoCotista] = await Promise.all([
     c.env.SHARE_DB.prepare(`SELECT COUNT(DISTINCT id) AS voos, COALESCE(SUM(COALESCE(tempo_total, tempo_voo, 0)), 0) AS horas,
         COALESCE(SUM(COALESCE(tempo_voo, 0)), 0) AS tempo_voo_horas, COALESCE(SUM(COALESCE(pousos_total, 0)), 0) AS pousos
       FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
@@ -492,26 +500,9 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
         COALESCE(NULLIF(tempo_voo, 0), tempo_total, 0) AS tempo_voo
       FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)
       ORDER BY COALESCE(NULLIF(tempo_voo, 0), tempo_total, 0) DESC, date(data_registro) DESC LIMIT 1`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
-    c.env.SHARE_DB.prepare(`SELECT COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos,
-        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'FIXO' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS fixo_centavos,
-        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'VARIAVEL_POR_VOO' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS variavel_voo_centavos,
-        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'VARIAVEL_POR_HORA' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS variavel_hora_centavos,
-        COALESCE(SUM(CASE WHEN UPPER(r.tipo_rateio) = 'EXTRA' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS extra_centavos,
-        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.categoria_nome, '')) LIKE '%combust%' THEN r.valor_rateado_centavos ELSE 0 END), 0) AS combustivel_centavos
-      FROM ${rateioTable} r ${rateioJoin}
-     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
-       AND date(r.data_emissao) BETWEEN date(?3) AND date(?4)`).bind(aeronaveId, rateioOwnerId, inicio, fim).first<Record<string, unknown>>(),
-    c.env.SHARE_DB.prepare(`SELECT substr(r.data_emissao, 1, 7) AS mes, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
-      FROM ${rateioTable} r ${rateioJoin}
-     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
-       AND date(r.data_emissao) BETWEEN date(?3) AND date(?4) GROUP BY mes ORDER BY mes`).bind(aeronaveId, rateioOwnerId, inicio, fim).all<Record<string, unknown>>(),
-    c.env.SHARE_DB.prepare(`SELECT substr(data_registro, 1, 7) AS mes,
-        COALESCE(SUM(COALESCE(tempo_total, tempo_voo, 0)), 0) AS horas
-      FROM lancamentos_diario_bordo WHERE aeronave_id = ?1 AND date(data_registro) BETWEEN date(?2) AND date(?3)
-      GROUP BY mes ORDER BY mes`).bind(aeronaveId, inicio, fim).all<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(r.categoria_nome), ''), 'Sem categoria') AS categoria, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
       FROM ${rateioTable} r ${rateioJoin}
-     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
        AND date(r.data_emissao) BETWEEN date(?3) AND date(?4) GROUP BY categoria ORDER BY valor_centavos DESC LIMIT 5`).bind(aeronaveId, rateioOwnerId, inicio, fim).all<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT COUNT(DISTINCT l.id) AS etapas, COALESCE(SUM(COALESCE(l.tempo_total, l.tempo_voo, 0)), 0) AS horas,
         COALESCE(SUM(COALESCE(l.pousos_total, 0)), 0) AS pousos
@@ -519,18 +510,27 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
         AND ((COALESCE(NULLIF(l.cliente_tomador_emprestimo_id, ''), l.cliente_id) = ?4 AND ?4 IS NOT NULL)
           OR (COALESCE(NULLIF(l.socio_tomador_emprestimo_id, ''), l.socio_id) = ?5 AND ?5 IS NOT NULL))`).bind(aeronaveId, inicio, fim, user.cliente_id, user.socio_id).first<Record<string, unknown>>()
   ])
-  const horas = Number(voos?.horas || 0)
-  const custoCentavos = Number(custos?.total_centavos || 0)
-  const horasUso = Number(usoCotista?.horas || 0)
+  // As duas visões são apuradas pela mesma fonte do Balanço: rateio por
+  // emissão e horas atribuídas pelo diário (AC–COR / DEP–POU / TR/VT).
+  const mesesAno = Array.from({ length: 12 }, (_, i) => `${ano}-${String(i + 1).padStart(2, '0')}`)
+  const espelho = (await carregarCustosPortal(c.env.SHARE_DB, aeronaveId,
+    String(vinculo.cotista_id), user.cliente_id, user.socio_id, mesesAno, 12)).resposta
+  const aeronaveResumo = espelho.resumo.aeronave
+  const cotaResumo = espelho.resumo.cotista
+  const horas = aeronaveResumo.minutos_operacionais / 60
+  const custoCentavos = aeronaveResumo.total_centavos
+  const horasUso = cotaResumo.minutos_operacionais / 60
   const percentualSociedade = Number(vinculo.percentual_sociedade || 0)
   const percentualUso = horas > 0 ? Number(((horasUso / horas) * 100).toFixed(1)) : 0
-  const valoresCustosMes = new Map((custosMes.results || []).map(row => [String(row.mes), Number(row.valor_centavos || 0)]))
-  const horasVoadaMes = new Map((horasMes.results || []).map(row => [String(row.mes), Number(row.horas || 0)]))
+  const valoresCustosMes = new Map(espelho.mensal.map(row => [row.mes, row.cotista.total_centavos]))
+  const horasVoadaMes = new Map(espelho.mensal.map(row => [row.mes, row.cotista.minutos_operacionais / 60]))
   const mensal = Array.from({ length: 12 }, (_, index) => {
     const mes = `${ano}-${String(index + 1).padStart(2, '0')}`
     const valorCentavos = valoresCustosMes.get(mes) || 0
     const horasMesAtual = horasVoadaMes.get(mes) || 0
-    return { mes, valorCentavos, horas: Number(horasMesAtual.toFixed(2)), custoHoraCentavos: horasMesAtual > 0 ? Math.round(valorCentavos / horasMesAtual) : 0 }
+    const resumoMes = espelho.mensal.find(item => item.mes === mes)?.cotista
+    return { mes, valorCentavos, horas: Number(horasMesAtual.toFixed(4)),
+      custoHoraCentavos: resumoMes?.custo_hora_centavos ?? 0 }
   })
   const destinosMaisVisitados = (destinos.results || []).map(row => ({ destino: String(row.destino || 'Não informado'), quantidade: Number(row.quantidade || 0) }))
   return c.json({
@@ -538,9 +538,17 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
     ano,
     estatisticas: {
       voos: Number(voos?.voos || 0), etapasRegistradas: Number(voos?.voos || 0), pousos: Number(voos?.pousos || 0),
-      horas: Number(horas.toFixed(2)), tempoVooHoras: Number(Number(voos?.tempo_voo_horas || 0).toFixed(2)),
+      horas: Number(horas.toFixed(4)), tempoVooHoras: Number((aeronaveResumo.minutos_voo / 60).toFixed(4)),
+      horasOperacionaisAeronave: Number(horas.toFixed(4)),
+      horasOperacionaisCotista: Number(horasUso.toFixed(4)),
+      horasVooAeronave: Number((aeronaveResumo.minutos_voo / 60).toFixed(4)),
+      horasVooCotista: Number((cotaResumo.minutos_voo / 60).toFixed(4)),
+      custoTotalAeronaveCentavos: custoCentavos,
+      custoCotistaCentavos: cotaResumo.total_centavos,
+      custoHoraAeronaveCentavos: aeronaveResumo.custo_hora_centavos,
+      custoHoraCotistaCentavos: cotaResumo.custo_hora_centavos,
       destinoMaisVisitado: destinosMaisVisitados[0]?.destino || 'Não informado',
-      custoHoraCentavos: horas > 0 ? Math.round(custoCentavos / horas) : 0, custoTotalCentavos: custoCentavos,
+      custoHoraCentavos: aeronaveResumo.custo_hora_centavos ?? 0, custoTotalCentavos: custoCentavos,
       vooMaisLongo: vooMaisLongo ? {
         data: String(vooMaisLongo.data_registro || ''), origem: String(vooMaisLongo.aerodromo_partida || ''),
         destino: String(vooMaisLongo.aerodromo_chegada || ''), horas: Number(Number(vooMaisLongo.tempo_voo || 0).toFixed(2)),
@@ -549,15 +557,17 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
     destinosMaisVisitados,
     usoCota: {
       percentualSociedade, horasCotista: Number(horasUso.toFixed(2)),
-      etapasCotista: Number(usoCotista?.etapas || 0), pousosCotista: Number(usoCotista?.pousos || 0),
+      etapasCotista: cotaResumo.etapas_atribuidas, pousosCotista: Number(usoCotista?.pousos || 0),
       percentualUso, diferencaPontos: Number((percentualUso - percentualSociedade).toFixed(1)),
     },
     mensal,
     projecaoCustos: {
-      fixoCentavos: Number(custos?.fixo_centavos || 0),
-      variavelPorVooCentavos: Number(custos?.variavel_voo_centavos || 0),
-      variavelPorHoraCentavos: Number(custos?.variavel_hora_centavos || 0),
-      extraCentavos: Number(custos?.extra_centavos || 0),
+      // Natureza econômica do mesmo classificador do fechamento, nunca tipo_rateio.
+      fixoCentavos: cotaResumo.grupos.fixos.valor_centavos,
+      variavelPorVooCentavos: 0,
+      variavelPorHoraCentavos: cotaResumo.grupos.variaveis.valor_centavos,
+      extraCentavos: cotaResumo.grupos.extras.valor_centavos,
+      naoClassificadosCentavos: cotaResumo.grupos.nao_classificados.valor_centavos,
       combustivelCentavos: Number(custos?.combustivel_centavos || 0),
     },
     categorias: (categorias.results || []).map(row => ({ categoria: String(row.categoria || 'Sem categoria'), valorCentavos: Number(row.valor_centavos || 0) })),
@@ -583,13 +593,13 @@ portalRoutes.get('/api/portal/overview', async c => {
      ORDER BY date(s.data_agendada), s.horario_previsto_agendamento LIMIT 1`).bind(user.cliente_id, user.socio_id, today).first<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT DISTINCT l.id, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada, l.tempo_total, l.tempo_voo, a.matricula_registro,
         COALESCE((SELECT SUM(r.valor_rateado_centavos) FROM ${rateioTable} r ${recenteRateioJoin}
-          WHERE r.aeronave_id = l.aeronave_id AND date(r.data_emissao) = date(l.data_registro) AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+          WHERE r.aeronave_id = l.aeronave_id AND date(r.data_emissao) = date(l.data_registro) AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
             AND ${recenteRateioOwner}), 0) AS custo_centavos
       FROM lancamentos_diario_bordo l JOIN cotista_aeronave ca ON ca.aeronave_id = l.aeronave_id LEFT JOIN aeronave a ON a.id = l.aeronave_id
      WHERE (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 3`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT r.valor_rateado_centavos, r.valor_pago_real_centavos, r.status, r.data_emissao
       FROM ${rateioTable} r ${rateioJoin}
-     WHERE ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>()
+     WHERE ${rateioOwner} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>()
   ])
   const resumo = (rateios.results || []).reduce<{ totalCentavos: number; pagoCentavos: number; mesCentavos: number; abertas: number; pagas: number }>((acc, row) => {
     const esperado = Number(row.valor_rateado_centavos || 0)

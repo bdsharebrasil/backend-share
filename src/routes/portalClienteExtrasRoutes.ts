@@ -1,5 +1,7 @@
 import { Hono, Context } from 'hono'
 import { portalCreatePasswordHash, portalFeatureForPath, portalHasFeature, portalSession, portalTelegram, type PortalFeature } from './portalRoutes'
+import { carregarDadosBalancoMensal, limitesMes } from '../financeiro/balancoMensalRoutes'
+import { calcularBalancoMensal } from '../financeiro/balancoMensal'
 
 // Rotas complementares do Portal Cliente (Fase 1):
 // diário de bordo do cliente, balanço multi-mês, abastecimentos,
@@ -328,7 +330,51 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
   if (!user) return c.json({ error: 'client_auth_required' }, 401)
   const meses = mesesDaQuery(c.req.query('meses'))
   const db = c.env.SHARE_DB
-  const mesExpr = "substr(COALESCE(NULLIF(r.data_competencia_demonstrativo, ''), r.data_emissao), 1, 7)"
+  const aeronaveSolicitada = String(c.req.query('aeronave_id') ?? '').trim()
+  // Consulta vinculada ao user_cliente.cotista_id: não inferir autorização
+  // apenas por cliente_id/socio_id, que podem possuir várias aeronaves.
+  const vinculo = await db.prepare(`SELECT ca.id, ca.aeronave_id
+      FROM user_cliente u JOIN cotista_aeronave ca ON ca.id = u.cotista_id
+     WHERE u.id = ?1 AND (?2 = '' OR ca.aeronave_id = ?2)
+       AND (ca.cliente_id = ?3 OR ca.socio_id = ?4) LIMIT 1`)
+    .bind(user.id, aeronaveSolicitada, user.cliente_id, user.socio_id)
+    .first<{ id: string; aeronave_id: string }>()
+  if (!vinculo?.id || !vinculo.aeronave_id) return c.json({ error: 'aeronave_nao_vinculada' }, 404)
+  const aeronaveId = String(vinculo.aeronave_id)
+  const cotistaId = String(vinculo.id)
+  c.header('Cache-Control', 'private, no-store')
+  // Compensações e saldos pessoais vêm do mesmo motor do Financeiro Share.
+  const conciliacao = async () => {
+    try {
+      const inicio = limitesMes([...meses].sort()[0]).inicio
+      const fim = limitesMes([...meses].sort().at(-1)!).fim
+      const dados = await carregarDadosBalancoMensal(db, aeronaveId, fim)
+      const resultado = calcularBalancoMensal(dados.participantes, dados.rateios,
+        dados.pagamentos, dados.ajustes, inicio, fim, meses)
+      const minhaConta = resultado.saldos.find(row => row.id === cotistaId)
+      const holding = dados.holdings.flatMap(h => h.socios).find(row => row.id === cotistaId)
+      return { status: resultado.status, avisos: resultado.avisos,
+        custoTotalCentavos: resultado.custoTotalCentavos,
+        devidoCentavos: minhaConta?.devidoCentavos ?? 0,
+        pagoPessoalCentavos: minhaConta?.pagoCentavos ?? 0,
+        saldoPessoalCentavos: minhaConta?.saldoCentavos ?? 0,
+        aporteCentavos: holding?.aporteCentavos ?? 0,
+        posicaoHoldingCentavos: holding?.posicaoCentavos ?? null }
+    } catch (error) {
+      console.warn('[portal/balanco] conciliação indisponível', error)
+      return null
+    }
+  }
+  // A emissão é a competência única do fechamento interno e do portal.
+  const mesExpr = "substr(r.data_emissao, 1, 7)"
+  // Eventos confirmados são a fonte de pagamento. Qualquer evento existente
+  // desabilita o fallback do campo agregado legado, inclusive após estorno.
+  const eventosConfirmados = `LEFT JOIN (
+    SELECT rateio_id,
+           SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CONFIRMADO' THEN valor_centavos ELSE 0 END) AS pago_centavos
+      FROM rateio_pagamentos GROUP BY rateio_id
+  ) pagamentos ON pagamentos.rateio_id = r.id`
+  const pagoEfetivo = "COALESCE(pagamentos.pago_centavos, r.valor_pago_real_centavos, 0)"
   const ph = placeholders(3, meses.length)
 
   if (user.cliente_id) {
@@ -336,11 +382,16 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
       db.prepare(`
         SELECT r.id, ${mesExpr} AS mes, r.data_emissao, r.data_vencimento, r.data_pagamento, r.descricao_despesa,
                r.categoria_nome, r.tipo_rateio, r.percentual_sociedade, r.percentual_uso,
-               r.valor_total_centavos, r.valor_rateado_centavos, r.valor_pago_real_centavos,
+               r.valor_total_centavos, r.valor_rateado_centavos, ${pagoEfetivo} AS valor_pago_real_centavos,
                COALESCE(NULLIF(TRIM(pagador_cliente.razao_social), ''), NULLIF(TRIM(pagador_socio.nome), ''),
                  NULLIF(TRIM(pagador_cliente_direto.razao_social), ''), NULLIF(TRIM(pagador_socio_direto.nome), ''),
                  CASE WHEN NULLIF(TRIM(r.pago_por), '') IS NULL THEN NULL WHEN r.pago_diretamente = 1 THEN 'Pagamento direto' ELSE 'Cotista' END) AS pago_por,
-               r.pago_diretamente, r.status, a.matricula_registro, r.aeronave_id,
+               r.pago_diretamente,
+               CASE WHEN pagamentos.rateio_id IS NULL THEN r.status
+                    WHEN ${pagoEfetivo} >= r.valor_rateado_centavos THEN 'PAGO'
+                    WHEN ${pagoEfetivo} > 0 THEN 'PAGO_PARCIAL'
+                    ELSE 'EM_ABERTO' END AS status,
+               a.matricula_registro, r.aeronave_id,
                (SELECT e.fornecedor FROM envio_despesas e WHERE e.id = r.lancamento_id LIMIT 1) AS fornecedor
           FROM rateio_despesas r
           JOIN cotista_aeronave ca ON ca.id = r.cotista_id
@@ -350,28 +401,30 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
           LEFT JOIN cliente pagador_cliente_direto ON pagador_cliente_direto.id = r.pago_por
           LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
-         WHERE ca.cliente_id = ?1 AND ?2 IS NULL AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+          ${eventosConfirmados}
+         WHERE r.cotista_id = ?1 AND r.aeronave_id = ?2 AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
            AND ${mesExpr} IN (${ph})
-         ORDER BY date(r.data_emissao) DESC`).bind(user.cliente_id, null, ...meses).all<Record<string, unknown>>(),
+         ORDER BY date(r.data_emissao) DESC`).bind(cotistaId, aeronaveId, ...meses).all<Record<string, unknown>>(),
       db.prepare(`
         SELECT ca.id AS cotista_id, COALESCE(cl.razao_social, hs.nome, 'Cotista') AS nome,
                ca.percentual_sociedade, a.matricula_registro,
-               CASE WHEN ca.cliente_id = ?1 THEN 1 ELSE 0 END AS eu,
+               CASE WHEN ca.id = ?1 THEN 1 ELSE 0 END AS eu,
                COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos,
-               COALESCE(SUM(MIN(r.valor_pago_real_centavos, r.valor_rateado_centavos)), 0) AS pago_centavos,
+               COALESCE(SUM(MIN(MAX(${pagoEfetivo}, 0), r.valor_rateado_centavos)), 0) AS pago_centavos,
                COUNT(r.id) AS lancamentos
           FROM rateio_despesas r
           JOIN cotista_aeronave ca ON ca.id = r.cotista_id
           LEFT JOIN cliente cl ON cl.id = ca.cliente_id
           LEFT JOIN hold_socios hs ON hs.id = ca.socio_id
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
-         WHERE r.aeronave_id IN (SELECT aeronave_id FROM cotista_aeronave WHERE cliente_id = ?1 OR (?2 IS NOT NULL AND socio_id = ?2))
-           AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+          ${eventosConfirmados}
+         WHERE r.aeronave_id = ?2
+           AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
            AND ${mesExpr} IN (${ph})
          GROUP BY ca.id
-         ORDER BY eu DESC, total_centavos DESC`).bind(user.cliente_id, null, ...meses).all<Record<string, unknown>>(),
+         ORDER BY eu DESC, total_centavos DESC`).bind(cotistaId, aeronaveId, ...meses).all<Record<string, unknown>>(),
     ])
-    return c.json({ tipo: 'CLIENTE', meses, lancamentos: lancamentos.results || [], cotistas: cotistas.results || [] })
+    return c.json({ tipo: 'CLIENTE', meses, lancamentos: lancamentos.results || [], cotistas: cotistas.results || [], conciliacao: await conciliacao() })
   }
 
   const [lancamentos, cotistas] = await Promise.all([
@@ -390,12 +443,12 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
         LEFT JOIN cliente pagador_cliente_direto ON pagador_cliente_direto.id = r.pago_por
         LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
         LEFT JOIN aeronave a ON a.id = r.aeronave_id
-       WHERE r.socio_id = ?1 AND ?2 IS NULL AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+       WHERE r.socio_id = ?1 AND r.aeronave_id = ?2 AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
          AND ${mesExpr} IN (${ph})
-       ORDER BY date(r.data_emissao) DESC`).bind(user.socio_id, null, ...meses).all<Record<string, unknown>>(),
+       ORDER BY date(r.data_emissao) DESC`).bind(user.socio_id, aeronaveId, ...meses).all<Record<string, unknown>>(),
     db.prepare(`
       SELECT hs.id AS cotista_id, hs.nome AS nome,
-             (SELECT ca.percentual_sociedade FROM cotista_aeronave ca WHERE ca.socio_id = hs.id LIMIT 1) AS percentual_sociedade,
+             (SELECT ca.percentual_sociedade FROM cotista_aeronave ca WHERE ca.socio_id = hs.id AND ca.aeronave_id = r.aeronave_id LIMIT 1) AS percentual_sociedade,
              a.matricula_registro,
              CASE WHEN hs.id = ?1 THEN 1 ELSE 0 END AS eu,
              COALESCE(SUM(r.valor_rateado_centavos), 0) AS total_centavos,
@@ -404,13 +457,13 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
         FROM rateio_hold r
         JOIN hold_socios hs ON hs.id = r.socio_id
         LEFT JOIN aeronave a ON a.id = r.aeronave_id
-       WHERE r.aeronave_id IN (SELECT aeronave_id FROM cotista_aeronave WHERE socio_id = ?1)
-         AND ?2 IS NULL AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+       WHERE r.aeronave_id = ?2
+         AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
          AND ${mesExpr} IN (${ph})
        GROUP BY hs.id
-       ORDER BY eu DESC, total_centavos DESC`).bind(user.socio_id, null, ...meses).all<Record<string, unknown>>(),
+       ORDER BY eu DESC, total_centavos DESC`).bind(user.socio_id, aeronaveId, ...meses).all<Record<string, unknown>>(),
   ])
-  return c.json({ tipo: 'HOLDING', meses, lancamentos: lancamentos.results || [], cotistas: cotistas.results || [] })
+  return c.json({ tipo: 'HOLDING', meses, lancamentos: lancamentos.results || [], cotistas: cotistas.results || [], conciliacao: await conciliacao() })
 })
 
 // ── Abastecimentos do cliente ──────────────────────────────────────────────
