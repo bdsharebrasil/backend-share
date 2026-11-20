@@ -5,8 +5,25 @@ export type ClassificacaoNatureza = { grupo: GrupoNaturezaCusto; origem: "inform
 
 const normalizar = (valor: unknown) => String(valor ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
 const primeiroPreenchido = (...valores: unknown[]) => valores.find((valor) => String(valor ?? "").trim());
-const CATEGORIAS_FIXAS = new Set(["TRIPULACAO ADM", "ADM E TRIP SHARE", "TRIPULACAO E ADM", "HANGARAGEM", "HANGARAGENS", "HANGARAREM"]);
-const CATEGORIAS_VARIAVEIS = new Set(["MANUTENCAO", "TAXAS AEROPORTUARIAS", "TARIFAS AEROPORTUARIAS"]);
+/*
+ * Classificação econômica padronizada a partir das categorias de lançamento.
+ * A presença da categoria não significa que ela descreva a natureza do custo,
+ * mas nomes conhecidos têm equivalência confiável. Não converter tipoRateio
+ * (inclusive EXTRA/FIXO) em natureza: ele define apenas a distribuição.
+ */
+const CATEGORIAS_FIXAS = new Set([
+  "TRIPULACAO ADM", "TRIPULACAO E ADM", "ADM E TRIP SHARE",
+  "ADM E TRIP SHARE BRASIL", "ADM SHARE BRASIL",
+  "HANGARAGEM", "HANGARAGENS", "HANGARAREM",
+]);
+const CATEGORIAS_VARIAVEIS = new Set([
+  "MANUTENCAO", "MANUTENCAO AERONAVE", "MANUTENCAO DE AERONAVE",
+  "COMBUSTIVEL", "COMBUSTIVEIS", "ABASTECIMENTO", "ABASTECIMENTOS",
+  "DESPESAS DE VIAGEM",
+  "TAXAS AEROPORTUARIAS", "TARIFAS AEROPORTUARIAS",
+  "TAXAS AEROPORTUARIAS E NAVEGACAO AEREA",
+  "TARIFAS AEROPORTUARIAS E NAVEGACAO AEREA",
+]);
 
 export function obterClassificacaoNatureza(registro: Record<string, unknown>): ClassificacaoNatureza {
   // O cadastro explícito tem prioridade, inclusive para exceções às regras abaixo.
@@ -24,7 +41,12 @@ export function obterClassificacaoNatureza(registro: Record<string, unknown>): C
   const descricao = normalizar(primeiroPreenchido(registro.descricao, registro.descricao_despesa));
   const porCategoria = CATEGORIAS_FIXAS.has(categoria) ? "fixos" : CATEGORIAS_VARIAVEIS.has(categoria) ? "variaveis" : null;
   const descricaoFixa = /\bHANGARAGEM\b/.test(descricao) || /\bADM(?:INISTRACAO)?\b.*\b(?:PILOT(?:AGEM)?|TRIP(?:ULACAO)?)\b/.test(descricao);
-  const descricaoVariavel = /\bDECEA\b/.test(descricao) || /\b(?:TROCA|SUBSTITUICAO)\b.*\bPNEUS?\b/.test(descricao) || /\bPECAS?\b.*\bMANUT(?:ENCAO)?\b/.test(descricao);
+  const descricaoVariavel = /\bDECEA\b/.test(descricao)
+    || /\b(?:TROCA|SUBSTITUICAO)\b.*\bPNEUS?\b/.test(descricao)
+    || /\bPECAS?\b.*\bMANUT(?:ENCAO)?\b/.test(descricao)
+    // Impostos genéricos não determinam a natureza; taxa de importação
+    // depende da operação de importação, não de uma mensalidade fixa.
+    || /\b(?:TAXA|TAXAS|IMPOSTO|IMPOSTOS)\b.*\bIMPORTACAO\b/.test(descricao);
   const porDescricao = descricaoFixa === descricaoVariavel ? null : descricaoFixa ? "fixos" : "variaveis";
 
   // Categorias mistas (ex.: HANGARAGENS & TAXAS) precisam de descrição específica.
