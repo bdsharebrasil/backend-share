@@ -19,17 +19,21 @@ function banco() {
     CREATE TABLE portal_sessoes_revogadas (token_hash TEXT, expires_at INTEGER);
     CREATE TABLE rateio_despesas (id TEXT, aeronave_id TEXT, cotista_id TEXT, data_emissao TEXT, data_competencia_demonstrativo TEXT, valor_rateado_centavos INTEGER, valor_total_centavos INTEGER, natureza_custo TEXT, categoria_nome TEXT, descricao_despesa TEXT, status TEXT);
     CREATE TABLE rateio_hold (id TEXT, aeronave_id TEXT, socio_id TEXT, data_emissao TEXT, data_competencia_demonstrativo TEXT, valor_rateado_centavos INTEGER, natureza_custo TEXT, categoria_nome TEXT, descricao_despesa TEXT, status TEXT);
-    CREATE TABLE lancamentos_diario_bordo (id TEXT, aeronave_id TEXT, data_registro TEXT, tempo_dep TEXT, tempo_pou TEXT, tempo_voo REAL, cliente_id TEXT, socio_id TEXT, cliente_tomador_emprestimo_id TEXT, socio_tomador_emprestimo_id TEXT);
+    CREATE TABLE lancamentos_diario_bordo (id TEXT, aeronave_id TEXT, data_registro TEXT, tempo_dep TEXT, tempo_pou TEXT, tempo_voo REAL, cliente_id TEXT, socio_id TEXT, cliente_tomador_emprestimo_id TEXT, socio_tomador_emprestimo_id TEXT, tempo_total REAL, tempo_ac TEXT, tempo_cor TEXT, natureza_voo TEXT, voo_emprestado INTEGER);
     INSERT INTO aeronave VALUES ('${aeronave}', 'PT-TESTE', 240, '200', 'TURBOELICE', 'MODELO', NULL, 90000, 30000, 40000), ('${outra}', 'PT-OUTRA', 100, '150', 'PISTAO', 'OUTRO', NULL, 0, 0, 0);
     INSERT INTO aerodromo VALUES ('SBCY', '-15.65,-56.12'), ('SBSI', '-11.89,-55.59');
     INSERT INTO fornecedores_combustivel VALUES ('SBCY', 8.5, 12), ('SBSI', 8.5, 12);
     INSERT INTO cotista_aeronave VALUES ('cota-a', '${aeronave}', 'cliente-a', NULL, 60, 'ativo'), ('cota-b', '${aeronave}', 'cliente-b', NULL, 40, 'ativo'), ('cota-socio', '${aeronave}', NULL, 'socio-a', 20, 'inativo');
     INSERT INTO user_cliente VALUES ('user-a', 'login-a', 'cota-a', 'Teste', NULL, NULL, NULL);
-    INSERT INTO rateio_hold VALUES ('hold-1', '${aeronave}', 'socio-a', '2026-11-05', '2026-10-01', 2000, 'FIXO', 'TRIPULAÇÃO', 'Subdivisão holding', 'PAGO');
-    INSERT INTO lancamentos_diario_bordo VALUES ('v1', '${aeronave}', '2026-10-01', '23:30', '00:30', 999, 'cliente-a', NULL, NULL, NULL), ('v2', '${aeronave}', '2026-10-04', '12:00', '12:30', 999, 'cliente-b', NULL, 'cliente-a', NULL), ('v3', '${aeronave}', '2026-10-05', NULL, NULL, 0.25, 'cliente-b', 'socio-a', NULL, NULL), ('outra', '${outra}', '2026-10-01', '00:00', '20:00', 20, 'cliente-a', NULL, NULL, NULL);
+    INSERT INTO rateio_hold VALUES ('hold-1', '${aeronave}', 'socio-a', '2026-10-05', '2026-11-01', 2000, 'FIXO', 'TRIPULAÇÃO', 'Subdivisão holding', 'PAGO');
+    INSERT INTO lancamentos_diario_bordo VALUES
+      ('v1', '${aeronave}', '2026-10-01', '23:30', '00:30', 999, 'cliente-a', NULL, NULL, NULL, 1.33, '23:20', '00:40', NULL, 0),
+      ('v2', '${aeronave}', '2026-10-04', '12:00', '12:30', 999, 'cliente-b', NULL, 'cliente-a', NULL, 0.83, '11:50', '12:40', NULL, 1),
+      ('v3', '${aeronave}', '2026-10-05', NULL, NULL, 0.25, 'cliente-b', 'socio-a', NULL, NULL, 0.4, NULL, NULL, NULL, 0),
+      ('outra', '${outra}', '2026-10-01', '00:00', '20:00', 20, 'cliente-a', NULL, NULL, NULL, 20, NULL, NULL, NULL, 0);
   `)
   for (const [id, total, categoria, natureza] of [['fixo', 10000, 'TRIPULAÇÃO', 'FIXO'], ['gas', 5000, 'COMBUSTÍVEIS', null], ['reserva', 1000, 'RESERVA', null], ['sem', 300, 'DESCONHECIDA', null]]) {
-    for (const [cota, fator] of [['cota-a', .6], ['cota-b', .4]]) sqlite.prepare('INSERT INTO rateio_despesas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`${id}-${cota}`, aeronave, cota, '2026-11-05', '2026-10-01', Math.round(total * fator), total, natureza, categoria, id, 'EM_ABERTO')
+    for (const [cota, fator] of [['cota-a', .6], ['cota-b', .4]]) sqlite.prepare('INSERT INTO rateio_despesas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`${id}-${cota}`, aeronave, cota, '2026-10-05', '2026-11-01', Math.round(total * fator), total, natureza, categoria, id, 'EM_ABERTO')
   }
   sqlite.prepare('INSERT INTO rateio_despesas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('cancelado', aeronave, 'cota-a', '2026-10-01', '', 500, 500, null, 'VIAGEM', 'Cancelado', 'CANCELADO')
   sqlite.prepare('INSERT INTO rateio_despesas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('outra', outra, 'cota-a', '2026-10-01', '', 900000, 900000, null, 'VIAGEM', 'Outra aeronave', 'PAGO')
@@ -47,14 +51,19 @@ async function token() {
 }
 const chamar = async (db, path, body) => portalRoutes.request(path, { headers: { Authorization: `Bearer ${await token()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}) }, { SHARE_DB: db, CLIENT_SESSION_SECRET: segredo })
 
-test('consolidação soma parcelas uma vez e usa competência, aeronave e tomador do empréstimo', async () => {
+test('consolidação soma parcelas uma vez e usa emissão, aeronave e tomador do empréstimo', async () => {
   const db = banco()
   const r = await carregarCustosPortal(db, aeronave, 'cota-a', 'cliente-a', null, ['2026-10'])
   assert.equal(r.resposta.resumo.aeronave.total_centavos, 16300)
   assert.equal(r.resposta.resumo.cotista.total_centavos, 9780)
+  assert.equal(r.resposta.resumo.aeronave.etapas_atribuidas, 3)
+  // Compete em outubro pela emissão; data_competencia_demonstrativo diz novembro.
   assert.equal(r.resposta.resumo.aeronave.minutos_voo, 105)
   assert.equal(r.resposta.resumo.cotista.minutos_voo, 90)
-  assert.equal(r.resposta.resumo.aeronave.custo_hora_centavos, Math.round(16300 / 1.75))
+  assert.equal(r.resposta.resumo.aeronave.minutos_operacionais, 154)
+  assert.equal(r.resposta.resumo.cotista.minutos_operacionais, 130)
+  assert.equal(r.resposta.resumo.aeronave.custo_hora_centavos, Math.round(16300 * 60 / 154))
+  assert.equal(r.resposta.resumo.cotista.custo_hora_centavos, Math.round(9780 * 60 / 130))
   assert.equal(r.resposta.resumo.aeronave.grupos.fixos.valor_centavos, 10000)
   assert.equal(r.resposta.resumo.aeronave.grupos.reservas.valor_centavos, 1000)
   assert.equal(r.resposta.resumo.aeronave.grupos.nao_classificados.valor_centavos, 300)
