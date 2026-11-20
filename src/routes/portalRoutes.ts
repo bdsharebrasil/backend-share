@@ -417,7 +417,7 @@ portalRoutes.get('/api/portal/financeiro', async c => {
        INNER JOIN cotista_aeronave ca ON ca.id = r.cotista_id
        LEFT JOIN aeronave a ON a.id = r.aeronave_id
        ${paymentTotals}
-      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
       ORDER BY date(r.data_emissao) DESC, r.id DESC`
     : `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
           r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
@@ -434,7 +434,7 @@ portalRoutes.get('/api/portal/financeiro', async c => {
        INNER JOIN cotista_aeronave ca ON ca.socio_id = hs.id AND ca.aeronave_id = r.aeronave_id
        LEFT JOIN aeronave a ON a.id = r.aeronave_id
        ${paymentTotals}
-      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+      WHERE ${ownedAircraftFilter} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
       ORDER BY date(r.data_emissao) DESC, r.id DESC`
   const result = await c.env.SHARE_DB.prepare(query).bind(participantId).all<Record<string, unknown>>()
   const despesas = result.results || []
@@ -502,7 +502,7 @@ portalRoutes.get('/api/portal/aeronave/:aeronaveId/dashboard', async c => {
       ORDER BY COALESCE(NULLIF(tempo_voo, 0), tempo_total, 0) DESC, date(data_registro) DESC LIMIT 1`).bind(aeronaveId, inicio, fim).first<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT COALESCE(NULLIF(TRIM(r.categoria_nome), ''), 'Sem categoria') AS categoria, COALESCE(SUM(r.valor_rateado_centavos), 0) AS valor_centavos
       FROM ${rateioTable} r ${rateioJoin}
-     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+     WHERE r.aeronave_id = ?1 AND ${rateioOwner} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
        AND date(r.data_emissao) BETWEEN date(?3) AND date(?4) GROUP BY categoria ORDER BY valor_centavos DESC LIMIT 5`).bind(aeronaveId, rateioOwnerId, inicio, fim).all<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT COUNT(DISTINCT l.id) AS etapas, COALESCE(SUM(COALESCE(l.tempo_total, l.tempo_voo, 0)), 0) AS horas,
         COALESCE(SUM(COALESCE(l.pousos_total, 0)), 0) AS pousos
@@ -593,13 +593,13 @@ portalRoutes.get('/api/portal/overview', async c => {
      ORDER BY date(s.data_agendada), s.horario_previsto_agendamento LIMIT 1`).bind(user.cliente_id, user.socio_id, today).first<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT DISTINCT l.id, l.data_registro, l.aerodromo_partida, l.aerodromo_chegada, l.tempo_total, l.tempo_voo, a.matricula_registro,
         COALESCE((SELECT SUM(r.valor_rateado_centavos) FROM ${rateioTable} r ${recenteRateioJoin}
-          WHERE r.aeronave_id = l.aeronave_id AND date(r.data_emissao) = date(l.data_registro) AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+          WHERE r.aeronave_id = l.aeronave_id AND date(r.data_emissao) = date(l.data_registro) AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
             AND ${recenteRateioOwner}), 0) AS custo_centavos
       FROM lancamentos_diario_bordo l JOIN cotista_aeronave ca ON ca.aeronave_id = l.aeronave_id LEFT JOIN aeronave a ON a.id = l.aeronave_id
      WHERE (ca.cliente_id = ?1 OR ca.socio_id = ?2) ORDER BY date(l.data_registro) DESC, l.id DESC LIMIT 3`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>(),
     c.env.SHARE_DB.prepare(`SELECT r.valor_rateado_centavos, r.valor_pago_real_centavos, r.status, r.data_emissao
       FROM ${rateioTable} r ${rateioJoin}
-     WHERE ${rateioOwner} AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>()
+     WHERE ${rateioOwner} AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')`).bind(user.cliente_id, user.socio_id).all<Record<string, unknown>>()
   ])
   const resumo = (rateios.results || []).reduce<{ totalCentavos: number; pagoCentavos: number; mesCentavos: number; abertas: number; pagas: number }>((acc, row) => {
     const esperado = Number(row.valor_rateado_centavos || 0)
