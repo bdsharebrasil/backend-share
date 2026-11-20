@@ -34,13 +34,13 @@ test('destinos excluem o aeródromo base e o dashboard calcula uso da participa�
 
 test('projeção usa categorias fixas, variáveis, extras e combustível dos rateios da cota autenticada', () => {
   assert.match(source, /const rateioOwner = user\.cliente_id \? 'ca\.id = \?2' : 'r\.socio_id = \?2'/);
-  assert.match(source, /AND \$\{rateioOwner\} AND UPPER\(COALESCE\(r\.status, ''\)\) <> 'CANCELADO'/);
+  assert.match(source, /AND \$\{rateioOwner\} AND UPPER\(COALESCE\(r\.status, ''\)\) NOT IN/);
   assert.match(source, /cotaResumo\.grupos\.fixos\.valor_centavos/);
   assert.match(source, /cotaResumo\.grupos\.variaveis\.valor_centavos/);
   assert.match(source, /cotaResumo\.grupos\.extras\.valor_centavos/);
   assert.match(source, /cotaResumo\.grupos\.nao_classificados\.valor_centavos/);
   assert.doesNotMatch(source, /UPPER\(r\.tipo_rateio\) = 'FIXO'/);
-  assert.match(source, /LIKE '%combust%'/);
+  assert.match(source, /combustivelCentavos: espelho\.combustivel_cotista_centavos/);
 });
 
 test('dashboard rejeita aeronave não vinculada', () => {
