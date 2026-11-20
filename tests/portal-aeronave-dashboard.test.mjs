@@ -21,7 +21,7 @@ test('dashboard calcula horas, pousos, custo-hora, meses e categorias no ano sol
   assert.match(source, /custoTotalAeronaveCentavos: custoCentavos/);
   assert.match(source, /custoCotistaCentavos: cotaResumo\.total_centavos/);
   assert.match(source, /minutos_operacionais \/ 60/);
-  assert.match(source, /GROUP BY mes ORDER BY mes/);
+  assert.match(source, /const valoresCustosMes = new Map\(espelho\.mensal/);
   assert.match(source, /GROUP BY categoria ORDER BY valor_centavos DESC/);
 });
 
