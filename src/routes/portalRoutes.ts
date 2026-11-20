@@ -723,11 +723,21 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
   if (!validPrices.length) return c.json({ error: 'preco_combustivel_indisponivel' }, 422)
   const precoMedio = validPrices.reduce((sum, item) => sum + item.price, 0) / validPrices.length
   const combustivel = Math.round(consumo * tempoHoras * precoMedio * 100) * trechos
-  const complementar = Number(aircraft.custo_hora_complementar_centavos) > 0
-    ? Math.round(Number(aircraft.custo_hora_complementar_centavos) * tempoHoras) * trechos : 0
-  const taxas = Number(aircraft.taxas_trecho_centavos || 0) * trechos
-  const pernoite = Number(aircraft.custo_dia_pernoite_centavos || 0) * diasFora
-  const custosCompletos = aircraft.custo_hora_complementar_centavos != null
+  // Voo INDIVIDUAL: apenas gastos estimáveis por rota/tempo real de voo.
+  // A reserva de manutenção por hora, quando cadastrada, prevalece sobre
+  // o campo complementar para não somar duas estimativas do mesmo componente.
+  // Não incluir aqui rateio de administração, mensalidade ou média anual.
+  const valorCadastrado = (v: unknown) =>
+    v != null && v !== '' && Number.isSafeInteger(Number(v)) && Number(v) >= 0 ? Number(v) : null
+  const custoHoraManutencao = valorCadastrado(aircraft.reserva_manutencao_hora_centavos)
+    ?? valorCadastrado(aircraft.custo_hora_complementar_centavos)
+  const custoTaxaTrecho = valorCadastrado(aircraft.taxas_trecho_centavos)
+  const complementar = custoHoraManutencao === null ? 0 : Math.round(custoHoraManutencao * tempoHoras * trechos)
+  const taxas = custoTaxaTrecho === null ? 0 : custoTaxaTrecho * trechos
+  const pernoite = valorCadastrado(aircraft.custo_dia_pernoite_centavos) === null ? 0
+    : valorCadastrado(aircraft.custo_dia_pernoite_centavos)! * diasFora
+  const custosCompletos = custoHoraManutencao !== null && custoTaxaTrecho !== null
+    && (diasFora === 0 || valorCadastrado(aircraft.custo_dia_pernoite_centavos) !== null)
   let projecao = null
   if (incluirEstrutura) {
     const calendario = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit' }).formatToParts(new Date())
@@ -773,6 +783,15 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
     ida_e_volta: idaVolta,
     aviso: custosCompletos ? null : 'estimativa parcial',
     componentes: { combustivel_centavos: combustivel, manutencao_reservas_centavos: complementar, taxas_centavos: taxas, pernoite_centavos: pernoite },
+    componentes_disponiveis: {
+      combustivel: true,
+      manutencao_reservas: custoHoraManutencao !== null,
+      taxas: custoTaxaTrecho !== null,
+      pernoite: diasFora === 0 || valorCadastrado(aircraft.custo_dia_pernoite_centavos) !== null,
+    },
+    modelo_estimativa: 'voo_individual',
+    // Custo integral da rota; nenhuma parcela fixa mensal ou anual foi alocada.
+    inclui_estrutura_fixa_mensal: false,
     combustivel: { tipo: tipoCombustivel, preco_medio: precoMedio, fonte: validPrices.map(item => item.source) },
   })
 })
