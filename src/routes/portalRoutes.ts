@@ -710,11 +710,13 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
     const local = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
       WHERE upper(COALESCE(codigo_icao, '')) = ?1 AND COALESCE(${colunaPreco}, 0) > 0`).bind(icao).first<{ media: number | null }>().catch(() => null)
     if (positiveNumber(local?.media)) return { price: positiveNumber(local?.media)!, source: 'fornecedores_combustivel_icao' }
-    const historico = await c.env.SHARE_DB.prepare(`SELECT AVG(valor_unitario) AS media FROM abastecimentos
+    // Último preço real conhecido na localidade (não média dos 12 meses).
+    const historico = await c.env.SHARE_DB.prepare(`SELECT valor_unitario AS media FROM abastecimentos
       WHERE (upper(COALESCE(local, '')) = ?1 OR upper(COALESCE(trecho, '')) LIKE ?2)
         AND upper(COALESCE(tipo_combustivel, '')) LIKE ?3 AND COALESCE(valor_unitario, 0) > 0
-        AND date(data) >= date('now', '-365 days')`).bind(icao, `%${icao}%`, tipoCombustivel === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null }>().catch(() => null)
-    if (positiveNumber(historico?.media)) return { price: positiveNumber(historico?.media)!, source: 'abastecimentos_historico_12m' }
+        AND date(data) >= date('now', '-365 days')
+      ORDER BY date(data) DESC, id DESC LIMIT 1`).bind(icao, `%${icao}%`, tipoCombustivel === 'JET' ? '%JET%' : '%AVGAS%').first<{ media: number | null }>().catch(() => null)
+    if (positiveNumber(historico?.media)) return { price: positiveNumber(historico?.media)!, source: 'ultimo_abastecimento_local' }
     const nacional = await c.env.SHARE_DB.prepare(`SELECT AVG(${colunaPreco}) AS media FROM fornecedores_combustivel
       WHERE COALESCE(${colunaPreco}, 0) > 0`).first<{ media: number | null }>().catch(() => null)
     return positiveNumber(nacional?.media) ? { price: positiveNumber(nacional?.media)!, source: 'fornecedores_combustivel_media_banco' } : null
@@ -723,11 +725,21 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
   if (!validPrices.length) return c.json({ error: 'preco_combustivel_indisponivel' }, 422)
   const precoMedio = validPrices.reduce((sum, item) => sum + item.price, 0) / validPrices.length
   const combustivel = Math.round(consumo * tempoHoras * precoMedio * 100) * trechos
-  const complementar = Number(aircraft.custo_hora_complementar_centavos) > 0
-    ? Math.round(Number(aircraft.custo_hora_complementar_centavos) * tempoHoras) * trechos : 0
-  const taxas = Number(aircraft.taxas_trecho_centavos || 0) * trechos
-  const pernoite = Number(aircraft.custo_dia_pernoite_centavos || 0) * diasFora
-  const custosCompletos = aircraft.custo_hora_complementar_centavos != null
+  // Voo INDIVIDUAL: apenas gastos estimáveis por rota/tempo real de voo.
+  // A reserva de manutenção por hora, quando cadastrada, prevalece sobre
+  // o campo complementar para não somar duas estimativas do mesmo componente.
+  // Não incluir aqui rateio de administração, mensalidade ou média anual.
+  const valorCadastrado = (v: unknown) =>
+    v != null && v !== '' && Number.isSafeInteger(Number(v)) && Number(v) >= 0 ? Number(v) : null
+  const custoHoraManutencao = valorCadastrado(aircraft.reserva_manutencao_hora_centavos)
+    ?? valorCadastrado(aircraft.custo_hora_complementar_centavos)
+  const custoTaxaTrecho = valorCadastrado(aircraft.taxas_trecho_centavos)
+  const complementar = custoHoraManutencao === null ? 0 : Math.round(custoHoraManutencao * tempoHoras * trechos)
+  const taxas = custoTaxaTrecho === null ? 0 : custoTaxaTrecho * trechos
+  const pernoite = valorCadastrado(aircraft.custo_dia_pernoite_centavos) === null ? 0
+    : valorCadastrado(aircraft.custo_dia_pernoite_centavos)! * diasFora
+  const custosCompletos = custoHoraManutencao !== null && custoTaxaTrecho !== null
+    && (diasFora === 0 || valorCadastrado(aircraft.custo_dia_pernoite_centavos) !== null)
   let projecao = null
   if (incluirEstrutura) {
     const calendario = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit' }).formatToParts(new Date())
@@ -773,6 +785,15 @@ portalRoutes.post('/api/portal/simulador/voo', async c => {
     ida_e_volta: idaVolta,
     aviso: custosCompletos ? null : 'estimativa parcial',
     componentes: { combustivel_centavos: combustivel, manutencao_reservas_centavos: complementar, taxas_centavos: taxas, pernoite_centavos: pernoite },
+    componentes_disponiveis: {
+      combustivel: true,
+      manutencao_reservas: custoHoraManutencao !== null,
+      taxas: custoTaxaTrecho !== null,
+      pernoite: diasFora === 0 || valorCadastrado(aircraft.custo_dia_pernoite_centavos) !== null,
+    },
+    modelo_estimativa: 'voo_individual',
+    // Custo integral da rota; nenhuma parcela fixa mensal ou anual foi alocada.
+    inclui_estrutura_fixa_mensal: false,
     combustivel: { tipo: tipoCombustivel, preco_medio: precoMedio, fonte: validPrices.map(item => item.source) },
   })
 })
