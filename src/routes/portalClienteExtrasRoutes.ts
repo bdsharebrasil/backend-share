@@ -402,7 +402,7 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
           LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
           ${eventosConfirmados}
-         WHERE r.cotista_id = ?1 AND r.aeronave_id = ?2 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+         WHERE r.cotista_id = ?1 AND r.aeronave_id = ?2 AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
            AND ${mesExpr} IN (${ph})
          ORDER BY date(r.data_emissao) DESC`).bind(cotistaId, aeronaveId, ...meses).all<Record<string, unknown>>(),
       db.prepare(`
@@ -419,7 +419,7 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
           LEFT JOIN aeronave a ON a.id = r.aeronave_id
           ${eventosConfirmados}
          WHERE r.aeronave_id = ?2
-           AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+           AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
            AND ${mesExpr} IN (${ph})
          GROUP BY ca.id
          ORDER BY eu DESC, total_centavos DESC`).bind(cotistaId, aeronaveId, ...meses).all<Record<string, unknown>>(),
@@ -443,7 +443,7 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
         LEFT JOIN cliente pagador_cliente_direto ON pagador_cliente_direto.id = r.pago_por
         LEFT JOIN hold_socios pagador_socio_direto ON pagador_socio_direto.id = r.pago_por
         LEFT JOIN aeronave a ON a.id = r.aeronave_id
-       WHERE r.socio_id = ?1 AND r.aeronave_id = ?2 AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+       WHERE r.socio_id = ?1 AND r.aeronave_id = ?2 AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
          AND ${mesExpr} IN (${ph})
        ORDER BY date(r.data_emissao) DESC`).bind(user.socio_id, aeronaveId, ...meses).all<Record<string, unknown>>(),
     db.prepare(`
@@ -458,7 +458,7 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
         JOIN hold_socios hs ON hs.id = r.socio_id
         LEFT JOIN aeronave a ON a.id = r.aeronave_id
        WHERE r.aeronave_id = ?2
-         AND UPPER(COALESCE(r.status, '')) <> 'CANCELADO'
+         AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELADO', 'CANCELADA', 'ESTORNO', 'ESTORNADO')
          AND ${mesExpr} IN (${ph})
        GROUP BY hs.id
        ORDER BY eu DESC, total_centavos DESC`).bind(user.socio_id, aeronaveId, ...meses).all<Record<string, unknown>>(),
