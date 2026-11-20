@@ -159,3 +159,45 @@ test('simulação real mantém contrato legado e não apresenta projeção incom
   assert.equal('projecao' in await legado.json(), false)
   db.sqlite.close()
 })
+
+test('estimativa de ida e volta é custo de um voo, sem ratear custo anual de cotista', async () => {
+  const db = banco()
+  const rota = { aeronave_id: aeronave, origem: 'SBCY', destino: 'SBSI', ida_e_volta: true }
+  const resp = await chamar(db, '/api/portal/simulador/voo', rota)
+  assert.equal(resp.status, 200)
+  const v = await resp.json()
+  assert.equal(v.modelo_estimativa, 'voo_individual')
+  assert.equal(v.inclui_estrutura_fixa_mensal, false)
+  assert.equal(v.ida_e_volta, true)
+  assert.equal(v.projecao, undefined)
+  assert.equal(v.componentes.pernoite_centavos, 0)
+  assert.equal(v.componentes_disponiveis.combustivel, true)
+  assert.equal(v.componentes_disponiveis.taxas, true)
+  assert.equal(v.componentes_disponiveis.manutencao_reservas, true)
+  assert.equal(v.total_centavos,
+    v.componentes.combustivel_centavos +
+    v.componentes.manutencao_reservas_centavos +
+    v.componentes.taxas_centavos)
+  const ida = await chamar(db, '/api/portal/simulador/voo', { ...rota, ida_e_volta: false })
+  assert.equal(ida.status, 200)
+  const soIda = await ida.json()
+  assert.equal(v.tempo_voo_minutos, soIda.tempo_voo_minutos * 2)
+  assert.equal(v.componentes.combustivel_centavos, soIda.componentes.combustivel_centavos * 2)
+  assert.equal(v.componentes.taxas_centavos, soIda.componentes.taxas_centavos * 2)
+  db.sqlite.close()
+})
+
+test('simulador sinaliza taxa ou manutenção ausentes sem inventar que custam zero', async () => {
+  const db = banco()
+  db.sqlite.exec('UPDATE aeronave SET custo_hora_complementar_centavos = NULL, taxas_trecho_centavos = NULL')
+  const resp = await chamar(db, '/api/portal/simulador/voo', {
+    aeronave_id: aeronave, origem: 'SBCY', destino: 'SBSI', ida_e_volta: true,
+  })
+  assert.equal(resp.status, 200)
+  const sim = await resp.json()
+  assert.equal(sim.aviso, 'estimativa parcial')
+  assert.equal(sim.componentes_disponiveis.manutencao_reservas, false)
+  assert.equal(sim.componentes_disponiveis.taxas, false)
+  assert.equal(sim.total_centavos, sim.componentes.combustivel_centavos)
+  db.sqlite.close()
+})
