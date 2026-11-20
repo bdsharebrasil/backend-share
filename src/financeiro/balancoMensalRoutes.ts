@@ -18,7 +18,12 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
       CASE WHEN ca.socio_id IS NULL THEN 'CLIENTES' ELSE 'HOLD:' || hs.holding_id END AS dominio
       FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id
       LEFT JOIN hold_socios hs ON hs.id=ca.socio_id WHERE ca.aeronave_id=? ORDER BY ca.id`, aeronaveId),
-    listarTodos(db, 'SELECT * FROM vw_balanco_rateios WHERE aeronave_id=? ORDER BY id', aeronaveId),
+    // Data de emissão é a competência do fechamento, inclusive antes de
+    // migrar a view legada que ainda pode conter data do demonstrativo.
+    listarTodos(db, `SELECT v.*, COALESCE(
+      (SELECT r.data_emissao FROM rateio_despesas r WHERE v.id = 'CLIENTE:' || r.id),
+      (SELECT h.data_emissao FROM rateio_hold h WHERE v.id = 'HOLD:' || h.id)
+    ) AS emissao FROM vw_balanco_rateios v WHERE v.aeronave_id=? ORDER BY v.id`, aeronaveId),
     listarTodos(db, `SELECT p.* FROM rateio_pagamentos p JOIN rateio_despesas r ON r.id=p.rateio_id
       WHERE r.aeronave_id=? ORDER BY p.id`, aeronaveId),
     listarTodos(db, 'SELECT * FROM balanco_ajustes WHERE aeronave_id=? ORDER BY rowid', aeronaveId),
@@ -35,7 +40,7 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
   }
   const rateios: RateioBalanco[] = rows.map(r => ({
     id: String(r.id), participanteId: String(r.participante_id), dominio: String(r.dominio), origemChave: String(r.origem_chave),
-    competencia: competencia(r.competencia), categoria: String(r.categoria_nome || 'Sem categoria'), descricao: String(r.descricao_despesa || ''),
+    competencia: competencia(r.emissao), categoria: String(r.categoria_nome || 'Sem categoria'), descricao: String(r.descricao_despesa || ''),
     tipo: String(r.tipo_rateio), devido: Number(r.valor_rateado_centavos), pagoReal: Number(r.valor_pago_real_centavos),
     pagadorId: aliases.get(String(r.pago_por || '')) || null, direto: Number(r.pago_diretamente) === 1,
     dataPagamento: r.data_pagamento ? String(r.data_pagamento).slice(0,10) : null, status: String(r.status || ''),
