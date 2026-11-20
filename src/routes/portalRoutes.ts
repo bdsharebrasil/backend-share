@@ -397,17 +397,21 @@ portalRoutes.get('/api/portal/financeiro', async c => {
   const participantId = user.cliente_id || user.socio_id
   const ownedAircraftFilter = user.cliente_id ? 'ca.cliente_id = ?1' : 'ca.socio_id = ?1'
   const paymentTotals = `LEFT JOIN (
-    SELECT rateio_id, SUM(valor_centavos) AS valor_pago_centavos
+    SELECT rateio_id,
+           SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CONFIRMADO' THEN valor_centavos ELSE 0 END) AS valor_pago_centavos
       FROM rateio_pagamentos
-     WHERE UPPER(COALESCE(status, '')) = 'CONFIRMADO'
      GROUP BY rateio_id
   ) pagamentos ON pagamentos.rateio_id = r.id`
   const query = user.cliente_id
     ? `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
           r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
           COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) AS valor_pago_real_centavos,
-          CASE WHEN COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
-                 OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO') THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
+          CASE WHEN pagamentos.rateio_id IS NOT NULL
+                 THEN CASE WHEN pagamentos.valor_pago_centavos >= r.valor_rateado_centavos THEN 'PAGO'
+                           WHEN pagamentos.valor_pago_centavos > 0 THEN 'PAGO_PARCIAL' ELSE 'EM_ABERTO' END
+                 WHEN COALESCE(r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
+                   OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO', 'PAGO_DIRETAMENTE')
+                 THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
           'CLIENTE' AS tipo, a.matricula_registro
        FROM rateio_despesas r
        INNER JOIN cotista_aeronave ca ON ca.id = r.cotista_id
@@ -418,8 +422,12 @@ portalRoutes.get('/api/portal/financeiro', async c => {
     : `SELECT r.id, r.aeronave_id, r.data_emissao, r.data_vencimento, r.data_pagamento,
           r.descricao_despesa, r.categoria_nome, r.valor_rateado_centavos,
           COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) AS valor_pago_real_centavos,
-          CASE WHEN COALESCE(pagamentos.valor_pago_centavos, r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
-                 OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO') THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
+          CASE WHEN pagamentos.rateio_id IS NOT NULL
+                 THEN CASE WHEN pagamentos.valor_pago_centavos >= r.valor_rateado_centavos THEN 'PAGO'
+                           WHEN pagamentos.valor_pago_centavos > 0 THEN 'PAGO_PARCIAL' ELSE 'EM_ABERTO' END
+                 WHEN COALESCE(r.valor_pago_real_centavos, 0) >= r.valor_rateado_centavos
+                   OR UPPER(COALESCE(r.status, '')) IN ('PAGO', 'REEMBOLSADO', 'PAGO_DIRETAMENTE')
+                 THEN 'PAGO' ELSE 'EM_ABERTO' END AS status,
           'HOLDING' AS tipo, a.matricula_registro
        FROM rateio_hold r
        INNER JOIN hold_socios hs ON hs.id = r.socio_id
