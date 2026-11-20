@@ -31,7 +31,7 @@ export function mesesAte(referencia: string, quantidade: number): string[] {
 
 export function resumoCustosPortal(rateios: Registro[], voos: VooPortal[], meses: string[]) {
   const grupos: Record<GrupoCustoPortal, number> = { fixos: 0, variaveis: 0, reservas: 0, extras: 0, nao_classificados: 0 }
-  let total = 0, operacional = 0, tempoVoo = 0, semOperacional = 0, semTempoVoo = 0, lancamentos = 0
+  let total = 0, operacional = 0, tempoVoo = 0, semOperacional = 0, semTempoVoo = 0, lancamentos = 0, etapas = 0
   for (const r of rateios) {
     if (!meses.includes(competencia(r))) continue
     lancamentos++
@@ -41,6 +41,7 @@ export function resumoCustosPortal(rateios: Registro[], voos: VooPortal[], meses
   }
   for (const v of voos) {
     if (!meses.includes(competencia(v))) continue
+    etapas++
     const { minutosOperacionais, minutosVoo } = temposVooPortal(v)
     const fator = Number(v.percentualAtribuido ?? 100) / 100
     if (minutosOperacionais === null) semOperacional++
@@ -49,7 +50,7 @@ export function resumoCustosPortal(rateios: Registro[], voos: VooPortal[], meses
     else tempoVoo += minutosVoo * fator
   }
   // Custo por hora operacional: nunca dividir a cota pelas horas de toda a aeronave.
-  return { total_centavos: total, minutos_voo: Math.round(tempoVoo),
+  return { total_centavos: total, etapas_atribuidas: etapas, minutos_voo: Math.round(tempoVoo),
     minutos_operacionais: Math.round(operacional),
     etapas_sem_tempo: semOperacional, etapas_sem_tempo_voo: semTempoVoo,
     custo_hora_centavos: lancamentos > 0 && operacional > 0 && semOperacional === 0
@@ -60,7 +61,7 @@ export function resumoCustosPortal(rateios: Registro[], voos: VooPortal[], meses
 }
 
 /** Somente agregados da aeronave previamente autorizada; nenhuma identidade de outro cotista é retornada. */
-export async function carregarCustosPortal(db: D1Database, aeronaveId: string, cotistaId: string, clienteId: string | null, socioId: string | null, meses: string[]) {
+export async function carregarCustosPortal(db: D1Database, aeronaveId: string, cotistaId: string, clienteId: string | null, socioId: string | null, meses: string[], quantidadeSerie = 6) {
   const tabelas = ['rateio_despesas', 'rateio_hold', 'lancamentos_diario_bordo']
   const schemas = new Map(await Promise.all(tabelas.map(async tabela => {
     const r = await db.prepare('SELECT name FROM pragma_table_info(?1)').bind(tabela).all<{ name: string }>()
@@ -68,7 +69,7 @@ export async function carregarCustosPortal(db: D1Database, aeronaveId: string, c
   })))
   const opcionais = (t: string, cols: string[]) => cols.map(col => `${schemas.get(t)?.has(col) ? `r.${col}` : 'NULL'} AS ${col}`).join(', ')
   const ordenados = [...meses].sort()
-  const serie = mesesAte(ordenados[ordenados.length - 1], 6)
+  const serie = mesesAte(ordenados[ordenados.length - 1], quantidadeSerie)
   const consultaMeses = [...new Set([...meses, ...serie])].sort()
   const parametros = consultaMeses.map(() => '?').join(', ')
   async function rateios(tabela: 'rateio_despesas' | 'rateio_hold', proprio: boolean) {
@@ -132,7 +133,7 @@ export function premissasHistoricasPortal(rateios: Registro[], voos: Registro[])
   const taxas = rateios.filter(eTaxa).reduce((s, r) => s + numero(r.valor_rateado_centavos), 0)
   const viagem = rateios.filter(r => !eTaxa(r) && !eCombustivel(r) && /^(VIAGEM|DESPESAS DE VIAGEM|ALIMENTACAO|HOSPEDAGEM|TRANSPORTE)$/.test(normalizarCusto(r.categoria_nome))).reduce((s, r) => s + numero(r.valor_rateado_centavos), 0)
   const dias = new Set(voos.map(v => String(v.data_registro).slice(0, 10))).size
-  const horas = resumo.minutos_voo / 60
+  const horas = resumo.minutos_operacionais / 60
   return {
     meses_observados: meses.length,
     fixo_anual_centavos: fixos > 0 && meses.length ? Math.round(fixos * 12 / meses.length) : null,
