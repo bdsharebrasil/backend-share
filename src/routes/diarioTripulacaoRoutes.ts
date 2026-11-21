@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { consultarHoras, filtrosHoras, pdfHoras } from '../lib/horasTripulante'
 import type { Env } from '../types/env'
 import { authenticatedColaborador, requireFlightCrewOrOperationsWriteAccess } from '../lib/auth'
 import { sincronizarDiarioDaPerna } from '../lib/diarioAutomatico'
@@ -209,3 +210,21 @@ diarioTripulacaoRoutes.post('/api/colaborador/diario-bordo/pernas/:id/assinar', 
     assinado_em: momento,
   })
 })
+
+// Consulta e exportação utilizam o mesmo filtro e o mesmo conjunto de registros.
+for (const caminho of ['/api/colaborador/minhas-horas', '/api/colaborador/minhas-horas/pdf']) {
+  diarioTripulacaoRoutes.get(caminho, async c => {
+    const usuario = await authenticatedColaborador(c)
+    if (!usuario) return c.json({ error: 'nao_autorizado' }, 401)
+    let filtros
+    try { filtros = filtrosHoras(c.req.query()) }
+    catch (e) { return c.json({ error: e instanceof Error ? e.message : 'Período inválido.' }, 400) }
+    const dados = await consultarHoras(c.env.SHARE_DB, usuario, filtros)
+    if (!c.req.path.endsWith('/pdf')) {
+      c.header('Cache-Control', 'private, no-store')
+      return c.json(dados)
+    }
+    const bytes = await pdfHoras(dados, usuario.nome_completo || usuario.nome_exibicao || 'Tripulante')
+    return new Response(bytes, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="minhas-horas.pdf"', 'Cache-Control': 'private, no-store' } })
+  })
+}
