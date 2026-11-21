@@ -51,6 +51,11 @@ diarioTripulacaoRoutes.get('/api/colaborador/diario-bordo/voos/:vooId', async c 
     || (!pic.user_id && pic.canac && user.canac &&
       pic.canac.trim().toLowerCase() === user.canac.trim().toLowerCase())
   ))
+  // A migração de auditoria pode ainda não ter sido aplicada no D1 remoto.
+  // As consultas continuam funcionando e a assinatura usa o campo legado.
+  const colunaAuditoria = await db.prepare("SELECT name FROM pragma_table_info('lancamentos_diario_bordo') WHERE name = 'assinado_pic_user_id'")
+    .first<{ name: string }>()
+  const campoAuditoria = colunaAuditoria ? 'l.assinado_pic_user_id' : 'NULL AS assinado_pic_user_id'
   const rows = await db.prepare(`
     SELECT p.id AS perna_id, p.jornada_id, p.numero AS numero_perna,
       p.origem, p.destino, p.horario_ac, p.horario_dep, p.horario_pouso,
@@ -65,7 +70,7 @@ diarioTripulacaoRoutes.get('/api/colaborador/diario-bordo/voos/:vooId', async c 
       l.ocorrencias, l.discrepancias, l.acoes_corretivas,
       l.tipo_manutencao_ultima, l.tipo_manutencao_proxima,
       l.responsavel_aprovacao_manutencao, l.detectado_por,
-      l.confirmado, l.assinado_pic, l.assinado_pic_user_id, l.data_assinatura,
+      l.confirmado, l.assinado_pic, ${campoAuditoria}, l.data_assinatura,
       dm.ano AS diario_ano, dm.mes AS diario_mes, dm.fechado AS diario_fechado
     FROM jornadas_voo j JOIN pernas_jornada_voo p ON p.jornada_id = j.id
     LEFT JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
@@ -178,13 +183,24 @@ diarioTripulacaoRoutes.post('/api/colaborador/diario-bordo/pernas/:id/assinar', 
   const body = await c.req.json<{ confirmar_assinatura?: boolean }>().catch(() => null)
   if (body?.confirmar_assinatura !== true) return c.json({ error: 'confirmacao_expressa_obrigatoria' }, 400)
   const momento = new Date().toISOString()
-  const result = await db.prepare(`
-    UPDATE lancamentos_diario_bordo
-    SET assinado_pic = ?1, data_assinatura = ?2, assinado_pic_user_id = ?3,
-        confirmado = 1, confirmado_em = ?2
-    WHERE id = ?4 AND COALESCE(confirmado, 0) = 0
-      AND NULLIF(TRIM(COALESCE(assinado_pic, '')), '') IS NULL
-  `).bind(user.nome_completo || user.nome_exibicao || user.id, momento, user.id, info.lancamento_diario_id).run()
+  const nomeComandante = user.nome_completo || user.nome_exibicao || user.id
+  const colunaAuditoria = await db.prepare("SELECT name FROM pragma_table_info('lancamentos_diario_bordo') WHERE name = 'assinado_pic_user_id'")
+    .first<{ name: string }>()
+  const result = colunaAuditoria
+    ? await db.prepare(`
+        UPDATE lancamentos_diario_bordo
+        SET assinado_pic = ?1, data_assinatura = ?2, assinado_pic_user_id = ?3,
+            confirmado = 1, confirmado_em = ?2
+        WHERE id = ?4 AND COALESCE(confirmado, 0) = 0
+          AND NULLIF(TRIM(COALESCE(assinado_pic, '')), '') IS NULL
+      `).bind(nomeComandante, momento, user.id, info.lancamento_diario_id).run()
+    : await db.prepare(`
+        UPDATE lancamentos_diario_bordo
+        SET assinado_pic = ?1, data_assinatura = ?2,
+            confirmado = 1, confirmado_em = ?2
+        WHERE id = ?3 AND COALESCE(confirmado, 0) = 0
+          AND NULLIF(TRIM(COALESCE(assinado_pic, '')), '') IS NULL
+      `).bind(`${nomeComandante} [usuário ${user.id}]`, momento, info.lancamento_diario_id).run()
   if (!result.meta.changes) return c.json({ error: 'diario_ja_assinado' }, 409)
   return c.json({
     status_lancamento: 'ASSINADO',
