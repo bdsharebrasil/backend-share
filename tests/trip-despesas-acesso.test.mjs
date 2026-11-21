@@ -13,6 +13,16 @@ function route(source, start, end) {
   return source.slice(a, b);
 }
 
+test("criação por voo respeita o ID exato do agendamento e o vínculo do tripulante", () => {
+  const create = route(worker,
+    "app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo'",
+    "app.get('/api/financeiro/relatorios-despesa-viagem/:id'");
+  assert.match(create, /solicitacao_id\?: string/);
+  assert.match(create, /AND \(\?3 IS NULL OR s\.id = \?3\)/);
+  assert.match(create, /t1\.user_id = \?2 OR t2\.user_id = \?2/);
+  assert.match(create, /AND \(\?6 IS NULL OR/);
+});
+
 test("finalização da tripulação é autorizada no middleware e protegida por vínculo ao relatório", () => {
   assert.match(auth, /relatorios-despesa-viagem.*finalizar/);
   const finalize = route(worker,
