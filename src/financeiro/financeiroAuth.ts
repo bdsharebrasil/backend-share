@@ -84,6 +84,8 @@ function colaboradorPodeSolicitar(path: string, method: string): boolean {
   if (method === 'GET' && path === '/relatorios-despesa-viagem/minhas') return true
   if (method === 'GET' && path === '/relatorios-despesa-viagem/meus-voos') return true
   if (method === 'POST' && path === '/relatorios-despesa-viagem/iniciar-do-voo') return true
+  if (method === 'POST' && /^\/relatorios-despesa-viagem\/[^/]+\/finalizar$/.test(path)) return true
+  if (method === 'GET' && /^\/relatorios-despesa-viagem\/[^/]+\/pdf$/.test(path)) return true
   if (method === 'PUT' && /^\/relatorios-despesa-viagem\/[^/]+\/despesas-tripulante$/.test(path)) return true
   if (method === 'POST' && /^\/relatorios-despesa-viagem\/[^/]+\/anexos-tripulante$/.test(path)) return true
   if (method === 'DELETE' && /^\/relatorios-despesa-viagem\/[^/]+\/anexos-tripulante\/[^/]+$/.test(path)) return true
