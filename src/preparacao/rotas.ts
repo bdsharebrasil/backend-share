@@ -1,7 +1,7 @@
 import { notifyChecklistAbastecimento } from './notificacoes';
 import { Hono } from 'hono';
 import type { Env } from '../types/env';
-import { authenticatedColaborador, requireFlightOperationAccess } from '../lib/auth';
+import { authenticatedColaborador, requireFlightOperationAccess, requireFlightCrewOrOperationsWriteAccess } from '../lib/auth';
 import { salvarArquivoShareBrasil, shareBrasilBucket } from '../lib/storage';
 import { consultar, gravar, abastecimentosDoVoo } from './servico';
 import { cafeDaManha, SECOES, ESTADOS, TIPOS_SERVICO } from './dominio';
@@ -65,7 +65,10 @@ preparacaoRoutes.post(root+'/emitir',async c=>{
  return c.json({versao:novo.versao});
 });
 preparacaoRoutes.get(root+'/pdf',async c=>{
- const negado=await acesso(c);if(negado)return negado;const atual=await estado(c),db=c.env.SHARE_DB;
+ // PDF contém dados privados de tripulação e fornecedores: acesso restrito
+ // à equipe operacional ou à tripulação vinculada ao voo.
+ if (!(await requireFlightCrewOrOperationsWriteAccess(c, idVoo(c)))) return c.json({error:'sem_permissao'},403);
+ const atual=await estado(c),db=c.env.SHARE_DB;
  const v=Number(c.req.query('versao'));if(!Number.isInteger(v)||v<0)return c.json({error:'versao_invalida'},400);
  let snapshot:any;
  if(v===0&&atual.versao===0)snapshot={...atual,...await extras(db,idVoo(c))};
