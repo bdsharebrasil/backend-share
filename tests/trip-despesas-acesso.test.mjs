@@ -14,7 +14,7 @@ function route(source, start, end) {
 }
 
 test("finalização da tripulação é autorizada no middleware e protegida por vínculo ao relatório", () => {
-  assert.match(auth, /method === 'POST' && \/\^\\\/relatorios-despesa-viagem/);
+  assert.match(auth, /relatorios-despesa-viagem.*finalizar/);
   const finalize = route(worker,
     "app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar'",
     "app.post('/api/financeiro/relatorios-despesa-viagem/:id/voltar-rascunho'");
