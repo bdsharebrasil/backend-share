@@ -52,14 +52,15 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
       a.matricula_registro, a.modelo, a.fabricante,
       CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL THEN 'Cotista' ELSE 'Cliente' END AS cliente_tipo,
       CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL
-        THEN COALESCE(NULLIF(trim(hs.nome), ''), NULLIF(trim(c.razao_social), ''))
-        ELSE COALESCE(NULLIF(trim(c.razao_social), ''), NULLIF(trim(hs.nome), ''))
+        THEN COALESCE(NULLIF(trim(hs.nome), ''), NULLIF(trim(c.razao_social), ''), NULLIF(trim(h.nome), ''))
+        ELSE COALESCE(NULLIF(trim(c.razao_social), ''), NULLIF(trim(h.nome), ''), NULLIF(trim(hs.nome), ''))
       END AS cliente_razao_social,
       COALESCE(p.nome_completo, pf.nome_completo) AS piloto_nome,
       COALESCE(cp.nome_completo, cpf.nome_completo) AS copiloto_nome
     FROM solicitacoes_reserva_voo s
     LEFT JOIN aeronave a ON a.id = s.aeronave_id
     LEFT JOIN cliente c ON c.id = s.cliente_id
+    LEFT JOIN holdings h ON h.id = s.cliente_id
     LEFT JOIN hold_socios hs ON hs.id = s.socio_id
     LEFT JOIN tripulacao p ON p.id = s.piloto_id
     LEFT JOIN tripulacao_freelancer pf ON pf.id = s.piloto_id
