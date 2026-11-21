@@ -16,7 +16,7 @@ function context(profile, allowed = []) {
           return {
             async first() {
               calls.push({ sql, params })
-              if (sql.includes('FROM user_profiles')) return profile
+              if (sql.includes('FROM user_profiles')) return profile?.id === params[0] ? profile : null
               if (sql.includes('FROM solicitacoes_reserva_voo s')) {
                 return allowed.includes(params[0]) && params[1] === profile?.id ? { ok: 1 } : null
               }
