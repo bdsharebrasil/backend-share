@@ -13,6 +13,7 @@ import { financeiroRoutes } from './financeiroRoutes'
 import { abastecimentosRoutes } from './routes/abastecimentosRoutes'
 import { gestorContratosRoutes } from './routes/gestorContratosRoutes'
 import { diarioBordoRoutes } from './routes/diarioBordoRoutes'
+import { diarioTripulacaoRoutes } from './routes/diarioTripulacaoRoutes'
 import { jornadasRoutes } from './routes/jornadasRoutes'
 import { preparacaoRoutes } from './preparacao/rotas'
 import { aiswebRoutes } from './routes/aiswebRoutes'
@@ -123,6 +124,7 @@ app.use('*', async (c, next) => {
 app.route('/', abastecimentosRoutes)
 app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
+app.route('/', diarioTripulacaoRoutes)
 app.route('/', jornadasRoutes)
 app.route('/', preparacaoRoutes)
 app.route('/', aiswebRoutes)
