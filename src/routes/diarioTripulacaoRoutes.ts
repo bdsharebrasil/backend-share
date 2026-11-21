@@ -151,6 +151,7 @@ diarioTripulacaoRoutes.post('/api/colaborador/diario-bordo/pernas/:id/assinar', 
   const db = c.env.SHARE_DB
   const info = await pernaComLancamento(db, c.req.param('id'))
   if (!info) return c.notFound()
+  if (!(await requireFlightCrewOrOperationsWriteAccess(c, info.solicitacao_id))) return c.json({ error: 'diario_acesso_negado' }, 403)
   // Não basta ter permissão operacional ou ser copiloto: o usuário deve ser
   // exatamente o comandante da solicitação. Fallback CANAC só sem user_id.
   const picValido = (info.pic_user_id && info.pic_user_id === user.id)
