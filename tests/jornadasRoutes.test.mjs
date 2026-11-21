@@ -116,7 +116,7 @@ test('permite editar horários a partir do acionamento ou decolagem, mas não fo
   const proximaRota = source.indexOf('\njornadasRoutes.', inicio + 1)
   const endpoint = source.slice(inicio, proximaRota === -1 ? undefined : proximaRota)
   assert.notEqual(inicio, -1)
-  assert.match(endpoint, /requireFlightOperationAccess\(c, jornadaAcesso\.solicitacao_id\)/)
+  assert.match(endpoint, /requireFlightCrewOrOperationsWriteAccess\(c, jornadaAcesso\.solicitacao_id\)/)
   assert.match(endpoint, /agendamentoPermiteCompletarHorarios\(jornadaAcesso\.status_agendamento, statusPerna\(perna\)\)/)
   assert.match(endpoint, /!body \|\| typeof body !== 'object' \|\| Array\.isArray\(body\)/)
   assert.doesNotMatch(endpoint, /campos_restritos/)

@@ -138,6 +138,40 @@ export async function requireFlightOperationAccess(c: AuthContext, solicitacaoId
   // devem depender do usuário estar escalado como piloto/copiloto.
   return Boolean(user)
 }
+/**
+ * Permissão de escrita operacional para o Trip Share:
+ * - integração máquina autenticada pelo token interno;
+ * - gestores e departamentos Operações/CTM (operações administrativas);
+ * - piloto ou copiloto vinculado a ESTA solicitação.
+ *
+ * A validação do CANAC somente é usada se o cadastro de tripulação não tiver
+ * user_id, seguindo o mesmo vínculo usado em /api/colaborador/meus-voos.
+ * Nunca aceite IDs de tripulante enviados pelo cliente como prova de acesso.
+ */
+export async function requireFlightCrewOrOperationsWriteAccess(c: AuthContext, solicitacaoId: string): Promise<boolean> {
+  if (!solicitacaoId) return false
+  if (await checkInternalAuth(c)) return true
+  const user = await authenticatedColaborador(c)
+  if (!user) return false
+  if (['INATIVO', 'DESATIVADO', 'BLOQUEADO'].includes(String(user.status || '').trim().toUpperCase())) return false
+  const departamento = String(user.departamento || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
+  if (isTaskManager(user) || ['operacoes', 'ctm'].includes(departamento)) return true
+
+  const tripulante = await c.env.SHARE_DB.prepare(`
+    SELECT 1
+    FROM solicitacoes_reserva_voo s
+    JOIN tripulacao t ON (s.piloto_id = t.id OR s.copiloto_id = t.id)
+    WHERE s.id = ?1
+      AND (t.user_id = ?2 OR (
+        t.user_id IS NULL
+        AND NULLIF(TRIM(?3), '') IS NOT NULL
+        AND LOWER(TRIM(t.canac)) = LOWER(TRIM(?3))
+      ))
+    LIMIT 1
+  `).bind(solicitacaoId, user.id, user.canac || '').first()
+  return Boolean(tripulante)
+}
+
 export async function authenticatedColaboradorToken(c: AuthContext, token: string): Promise<Colaborador | null> {
   const userId = await getAuthenticatedUserId(c, token)
   return userId ? c.env.SHARE_DB.prepare('SELECT * FROM user_profiles WHERE id = ? LIMIT 1').bind(userId).first<Colaborador>() : null

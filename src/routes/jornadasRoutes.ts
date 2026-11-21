@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono'
-import { requireFlightOperationAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
+import { requireFlightOperationAccess, requireFlightCrewOrOperationsWriteAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
 import { calcularMinutosJornada, LIMITES_SISTEMA_JORNADA, referenciaJornada, somarAcumuladosRegistrados } from '../lib/calculoJornada'
@@ -309,7 +309,7 @@ jornadasRoutes.get('/api/interno/jornadas/:id/limites', async c => {
 })
 
 jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
-  if (!(await requireFlightOperationAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
+  if (!(await requireFlightCrewOrOperationsWriteAccess(c, c.req.param('id')))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   await garantirTabelaJornadas(c)
   const db = c.env.SHARE_DB
   const idSolicitacao = c.req.param('id')
@@ -420,6 +420,7 @@ jornadasRoutes.patch('/api/interno/jornadas/:id', async c => {
   const db = c.env.SHARE_DB
   const atual = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(c.req.param('id')).first<any>()
   if (!atual) return c.notFound()
+  if (!(await requireFlightCrewOrOperationsWriteAccess(c, atual.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const data = String(body.data || atual.data)
   const apresentacao = body.horario_apresentacao !== undefined ? normalizarHorarioJornada(data, body.horario_apresentacao) : atual.horario_apresentacao
@@ -537,7 +538,7 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
     jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(raiz).first<any>()
     if (!jornada) return c.notFound()
   }
-  if (!(await requireFlightOperationAccess(c, jornada.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
+  if (!(await requireFlightCrewOrOperationsWriteAccess(c, jornada.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   if (jornada.status === 'encerrada') return c.json({ error: 'jornada_encerrada' }, 409)
   const emVoo = await db.prepare("SELECT id FROM pernas_jornada_voo WHERE jornada_id = ?1 AND status = 'em_voo' LIMIT 1").bind(jornada.id).first()
   if (emVoo) return c.json({ error: 'perna_anterior_em_voo', detail: 'Registre o pouso da perna anterior antes de abrir uma nova.' }, 409)
@@ -591,7 +592,7 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
   const jornadaAcesso = await db.prepare(`SELECT j.solicitacao_id, s.status AS status_agendamento
     FROM jornadas_voo j LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id
     WHERE j.id = ?1`).bind(perna.jornada_id).first<{ solicitacao_id: string; status_agendamento: string | null }>()
-  if (!jornadaAcesso || !(await requireFlightOperationAccess(c, jornadaAcesso.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
+  if (!jornadaAcesso || !(await requireFlightCrewOrOperationsWriteAccess(c, jornadaAcesso.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   if (!agendamentoPermiteCompletarHorarios(jornadaAcesso.status_agendamento, statusPerna(perna))) return c.json({ error: 'agendamento_fora_da_operacao', detail: 'Os horários da perna podem ser completados somente enquanto o agendamento estiver em voo ou em solo.' }, 409)
   if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
