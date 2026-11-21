@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../types/env'
 import { authenticatedColaborador, requireFlightCrewOrOperationsWriteAccess } from '../lib/auth'
-import { recalcularTotaisDiarioAutomatico, sincronizarDiarioDaPerna } from '../lib/diarioAutomatico'
+import { sincronizarDiarioDaPerna } from '../lib/diarioAutomatico'
 
 type Bindings = Env
 export const diarioTripulacaoRoutes = new Hono<{ Bindings: Bindings }>()
