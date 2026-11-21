@@ -538,6 +538,9 @@ diarioBordoRoutes.post('/api/interno/diario-bordo/lancamentos', async c => {
   if (Number(diario.fechado)) return c.json({ error: 'diario_fechado' }, 409)
   if (data.slice(0, 7) !== `${diario.ano}-${String(diario.mes).padStart(2, '0')}`) return c.json({ error: 'data_fora_do_mes' }, 400)
   const pernaId = String(body.perna_jornada_id || '').trim()
+  if (pernaId && (diarioBoolean(body.confirmado) || String(body.assinado_pic || '').trim()) && !(await checkInternalAuth(c))) {
+    return c.json({ error: 'assinatura_exclusiva_comandante', detail: 'Crie o rascunho e assine pelo fluxo autenticado do comandante.' }, 403)
+  }
   let pernaVinculada: any = null
   if (pernaId) {
     pernaVinculada = await db.prepare(`SELECT p.id, p.lancamento_diario_id, p.jornada_id, p.origem, p.destino, p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte, COALESCE(j.aeronave_id, s.aeronave_id) AS aeronave_id FROM pernas_jornada_voo p JOIN jornadas_voo j ON j.id = p.jornada_id LEFT JOIN solicitacoes_reserva_voo s ON s.id = j.solicitacao_id WHERE p.id = ?1`).bind(pernaId).first<any>()
