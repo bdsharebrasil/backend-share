@@ -168,7 +168,8 @@ export async function sincronizarDiarioDaPerna(db: D1Database, pernaId: string, 
       aerodromo_chegada = ?8, trecho = ?9, pic_canac = ?10, pic_nome = ?11,
       sic_canac = ?12, sic_nome = ?13, tripulacao_checkin_hora = ?14,
       tempo_ac = ?15, tempo_dep = ?16, tempo_pou = ?17, tempo_cor = ?18,
-      tempo_voo = ?19, tempo_total = ?20
+      tempo_voo = ?19, tempo_total = ?20,
+      pousos_total = CASE WHEN ?22 = 1 AND COALESCE(pousos_total, 0) = 0 THEN 1 ELSE pousos_total END
     WHERE id = ?21 AND COALESCE(confirmado, 0) = 0 AND NULLIF(TRIM(COALESCE(assinado_pic, '')), '') IS NULL
   `).bind(
     p.numero_voo || null, p.jornada_id, clienteId, holdingId, socioId, dia,
@@ -176,6 +177,7 @@ export async function sincronizarDiarioDaPerna(db: D1Database, pernaId: string, 
     p.pic_canac || '', p.pic_nome || null, p.sic_canac || null, p.sic_nome || null,
     hhmm(p.horario_apresentacao), hhmm(p.horario_ac), hhmm(p.horario_dep),
     hhmm(p.horario_pouso), hhmm(p.horario_corte), tempoVoo, tempoTotal, lancamentoId,
+    p.horario_pouso ? 1 : 0,
   ).run()
   await recalcularTotaisDiarioAutomatico(db, diarioMesId)
   return { status: 'rascunho', lancamento_id: lancamentoId, diario_mes_id: diarioMesId }
