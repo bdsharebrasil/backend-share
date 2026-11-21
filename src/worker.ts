@@ -1,3 +1,5 @@
+import { importarAvatarLegado } from './lib/avatarLegado'
+import { tripAuthRoutes } from './routes/tripAuthRoutes'
 import { carregarCredenciaisTripulante } from './lib/credenciaisTripulante'
 import { codigoAerodromoValido } from "./lib/aerodromo"
 import { notifyChecklistAbastecimento } from './preparacao/notificacoes'
@@ -122,6 +124,7 @@ app.use('*', async (c, next) => {
   c.header('X-Request-Id', requestId)
   await next()
 })
+app.route('/', tripAuthRoutes)
 app.route('/', abastecimentosRoutes)
 app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
@@ -1268,8 +1271,12 @@ app.get('/api/colaborador/foto', async c => {
   if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
   const avatar = colaborador.url_avatar?.trim()
   if (!avatar) return c.notFound()
-  // Cadastros legados também guardam URLs públicas do Storage, além de chaves R2.
-  if (/^https?:\/\//i.test(avatar)) return c.redirect(avatar, 302)
+  if (/^https?:\/\//i.test(avatar)) {
+    try {
+      const {bytes,mime}=await importarAvatarLegado(c.env.SHARE_DB,bucketColaborador(c),colaborador.id,avatar,c.env.SUPABASE_URL);
+      return new Response(bytes,{headers:{'Content-Type':mime,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}})
+    } catch { return c.json({error:'nao_foi_possivel_importar_avatar_atualize_a_foto'},422) }
+  }
   const object = await bucketParaChaveColaborador(c, avatar).get(avatar)
   if (!object) return c.notFound()
   const headers = new Headers()
