@@ -4082,11 +4082,13 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   let numeroVooSolicitado = ''
+  let solicitacaoIdSolicitado: string | null = null
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
     const body = await c.req.json<{ numero_voo?: string; solicitacao_id?: string }>().catch(() => null)
     const numeroVoo = String(body?.numero_voo || '').trim()
     const solicitacaoId = String(body?.solicitacao_id || '').trim() || null
+    solicitacaoIdSolicitado = solicitacaoId
     numeroVooSolicitado = numeroVoo
     if (!numeroVoo) return c.json({ error: 'numero_voo_obrigatorio' }, 400)
     const db = c.env.SHARE_DB
@@ -4154,6 +4156,10 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
     return c.json({ relatorio: { ...relatorio, tripulante_pos: tripulantePos } }, 201)
   } catch (error: any) {
     if (String(error?.message || '').includes('UNIQUE constraint failed')) {
+      // O banco legado mantém índice UNIQUE(numero_voo). Para dois clientes
+      // com o mesmo número, nunca devolva o relatório alheio ou de outro
+      // agendamento: o modelo deve ser migrado antes dessa duplicidade.
+      if (solicitacaoIdSolicitado) return c.json({ error: 'numero_voo_ja_vinculado_a_outro_relatorio', detail: 'Existe um relatório com este número de voo. Contate o Financeiro para conciliar os registros.' }, 409)
       const existente = numeroVooSolicitado
         ? await c.env.SHARE_DB.prepare('SELECT id FROM relatorio_despesa_viagem WHERE numero_voo = ?1 AND origem_criacao = ?2 LIMIT 1').bind(numeroVooSolicitado, 'tripulante').first<{ id: string }>()
         : null
