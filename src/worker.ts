@@ -25,6 +25,7 @@ import { tripulacaoRoutes } from './routes/tripulacaoRoutes'
 import { colaboradorVoosRoutes } from './routes/colaboradorVoosRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
 import { rastreioRoutes, coletarRastreioAgendado } from './routes/rastreioRoutes'
+import { criarV1Routes } from './routes/v1Routes'
 import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
@@ -135,6 +136,11 @@ app.route('/', colaboradorVoosRoutes)
 app.route('/', ctmRoutes)
 app.route('/', rastreioRoutes)
 app.route('/api/sharebrasil/ponto', shareBrasilPontoRoutes)
+// ─── API versionada do app mobile (Expo) ─────────────────────────────────────
+// Contrato estável para apps já instalados: /api/v1 não muda de forma
+// incompatível. Clima e plano de voo reencaminham para as implementações
+// legadas, que seguem atendendo o painel web sem alteração.
+app.route('/api/v1', criarV1Routes(app))
 // ─── Financeiro: único ponto de entrada para comandos financeiros ────────────
 // As rotas legadas de escrita foram removidas abaixo para evitar dois fluxos
 // gravando diretamente no mesmo D1. O kernel é o único dono dessas operações.
@@ -5350,5 +5356,4 @@ export default {
     }
   },
 }
-
 
