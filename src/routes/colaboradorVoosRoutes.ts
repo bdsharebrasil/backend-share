@@ -2,6 +2,7 @@ import { hospedagensDoVoo } from '../preparacao/hospedagens'
 import { Hono } from 'hono'
 import { authenticatedColaborador } from '../lib/auth'
 import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
+import { parseNomesPassageiros } from '../lib/pesoBalanceamento'
 
 type Bindings = { SHARE_DB: D1Database }
 type Variables = Record<string, never>
@@ -20,7 +21,7 @@ async function tripulanteDoUsuario(c: Parameters<typeof authenticatedColaborador
 
 const VOOS_COLABORADOR_SQL = `
   SELECT s.id, s.numero_voo, __STATUS_OPERACIONAL__ AS status, s.aeronave_id, s.origem, s.destino,
-    s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros,
+    s.data_agendada, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.passageiros_json,
     s.piloto_id, s.copiloto_id, a.matricula_registro, a.modelo
   FROM solicitacoes_reserva_voo s
   LEFT JOIN aeronave a ON a.id = s.aeronave_id
@@ -36,7 +37,7 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos', async c => {
   if (!tripulante) return c.json({ tripulante: null, voos: [] })
   const statusSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(c.env.SHARE_DB))
   const result = await c.env.SHARE_DB.prepare(VOOS_COLABORADOR_SQL.replace('__STATUS_OPERACIONAL__', statusSql)).bind(tripulante.id).all()
-  return c.json({ tripulante, voos: result.results || [] })
+  return c.json({ tripulante, voos: (result.results || []).map((voo: any) => ({ ...voo, passageiros: parseNomesPassageiros(voo.passageiros_json) })) })
 })
 
 colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
@@ -71,6 +72,7 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
   `).bind(c.req.param('id'), tripulante.id).first<Record<string, any>>()
   if (!voo) return c.notFound()
   voo.status = voo.status_operacional || voo.status
+  voo.passageiros = parseNomesPassageiros(voo.passageiros_json)
   delete voo.status_operacional
 
   const [jornadas, hospedagens] = await Promise.all([
