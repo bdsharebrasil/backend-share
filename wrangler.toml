@@ -23,7 +23,22 @@ id = "83a861dc2e27486e86eb23909fbb9861"
 # ============= OBSERVABILITY =============
 [observability]
 enabled = true
+head_sampling_rate = 1
+redact_query_string = false
 
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
+[observability.issue_detection]
+enabled = true
 
 
 # ── R2 do portal Share: avatares e documentos de colaboradores ───────────────
