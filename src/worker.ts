@@ -26,7 +26,7 @@ import { colaboradorVoosRoutes } from './routes/colaboradorVoosRoutes'
 import { ctmRoutes } from './routes/ctmRoutes'
 import { rastreioRoutes, coletarRastreioAgendado } from './routes/rastreioRoutes'
 import { criarV1Routes } from './routes/v1Routes'
-import { autorizarRequisicaoFinanceira, usuarioTemPapel } from './financeiro/financeiroAuth'
+import { autorizarRequisicaoFinanceira, usuarioPodeGerenciarFinanceiro, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
 import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
 import { ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements } from './financeiro/relatorioContaReceber'
@@ -3935,7 +3935,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
         const lista = anexosPorRelatorio.get(anexo.relatorio_despesa_viagem_id) || []
         lista.push({
           ...anexo,
-          url_arquivo: `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(anexo.relatorio_despesa_viagem_id)}/anexos/${encodeURIComponent(anexo.id)}/arquivo`,
+          url_arquivo: `/api/financeiro/relatorios-despesa-viagem/${encodeURIComponent(anexo.relatorio_despesa_viagem_id)}/anexos-tripulante/${encodeURIComponent(anexo.id)}/arquivo`,
         })
         anexosPorRelatorio.set(anexo.relatorio_despesa_viagem_id, lista)
       }
@@ -4519,6 +4519,13 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar', async c => {
     await garantirTabelaRelatorioDespesaViagem(c)
     const id = c.req.param('id')
     const db = c.env.SHARE_DB
+    // Colaborador comum só finaliza o relatório do qual é tripulante.
+    // O middleware financeiro libera a rota para o tripulante ativo, e a
+    // verificação aqui protege contra IDs de outros voos.
+    const posicao = await buscarPosicaoTripulanteRelatorio(db, id, user.id)
+    if (!posicao && !(await usuarioPodeGerenciarFinanceiro(db, user.id))) {
+      return c.json({ error: 'relatorio_nao_pertence_ao_tripulante' }, 403)
+    }
     const relatorio = await buscarRelatorioViagemComNomes(c, id)
     if (!relatorio) return c.notFound()
     if (!['rascunho', 'ajuste_necessario'].includes(statusRelatorioViagem(relatorio.status))) return c.json({ error: 'relatorio_ja_finalizado' }, 409)
@@ -5140,7 +5147,14 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
 })
 
 app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
+  const user = await authenticatedColaborador(c)
+  if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
+    const id = c.req.param('id')
+    const posicao = await buscarPosicaoTripulanteRelatorio(c.env.SHARE_DB, id, user.id)
+    if (!posicao && !(await usuarioPodeGerenciarFinanceiro(c.env.SHARE_DB, user.id))) {
+      return c.json({ error: 'relatorio_nao_pertence_ao_tripulante' }, 403)
+    }
     await garantirTabelaRelatorioDespesaViagem(c)
     const row = await c.env.SHARE_DB.prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(c.req.param('id')).first<{ pdf_path: string | null; numero_relatorio: string }>()
     if (!row?.pdf_path) return c.notFound()
@@ -5149,6 +5163,8 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
     return new Response(object.body, {
       headers: {
         'Content-Type': 'application/pdf',
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
         'Content-Disposition': `inline; filename="${shareBrasilFileName(row.numero_relatorio || 'relatorio')}.pdf"`,
       },
     })
