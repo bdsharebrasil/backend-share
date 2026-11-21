@@ -1,3 +1,4 @@
+import { carregarCredenciaisTripulante } from './lib/credenciaisTripulante'
 import { codigoAerodromoValido } from "./lib/aerodromo"
 import { notifyChecklistAbastecimento } from './preparacao/notificacoes'
 import { cafeDaManha } from './preparacao/dominio'
@@ -1088,7 +1089,7 @@ type ColaboradorPerfilMetricas = { horas_totais: number; voos_escalados: number;
 
 async function buscarTripulanteColaborador(db: D1Database, colaborador: Colaborador) {
   return db.prepare(`SELECT id, user_id, canac, nome_completo, status, tipo_licenca FROM tripulacao
-    WHERE user_id = ?1 OR (NULLIF(trim(?2), '') IS NOT NULL AND lower(trim(canac)) = lower(trim(?2)))
+    WHERE user_id = ?1 OR (user_id IS NULL AND NULLIF(trim(?2), '') IS NOT NULL AND lower(trim(canac)) = lower(trim(?2)))
     ORDER BY CASE WHEN user_id = ?1 THEN 0 ELSE 1 END LIMIT 1`).bind(colaborador.id, colaborador.canac).first<any>()
 }
 
@@ -1205,13 +1206,17 @@ app.get('/api/colaborador/perfil', async c => {
       ORDER BY r.atualizado_em DESC`).bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] aprovações de relatório indisponíveis', error); return { results: [] } }),
   ])
 
-  const metricas = await carregarMetricasColaborador(db, colaborador, tripulante)
+  const [metricas, credenciais] = await Promise.all([
+    carregarMetricasColaborador(db, colaborador, tripulante),
+    carregarCredenciaisTripulante(db, tripulante?.id),
+  ])
   const diasUtilizados = (ferias.results as Array<{ quantidade_dias: number; status: string }>)
     .filter(item => item.status === 'aprovada')
     .reduce((total, item) => total + item.quantidade_dias, 0)
   return c.json({
     perfil: { ...colaborador, foto_url: colaborador.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 },
     tripulante,
+    ...credenciais,
     metricas,
     pagamentos: pagamentos.results,
     documentos: documentos.results.map(row => documentoColaborador(row as Record<string, unknown>)),
@@ -1260,12 +1265,17 @@ app.patch('/api/colaborador/perfil', async c => {
 
 app.get('/api/colaborador/foto', async c => {
   const colaborador = await authenticatedColaborador(c)
-  if (!colaborador?.url_avatar) return c.notFound()
-  const object = await bucketParaChaveColaborador(c, colaborador.url_avatar).get(colaborador.url_avatar)
+  if (!colaborador) return c.json({ error: 'nao_autorizado' }, 401)
+  const avatar = colaborador.url_avatar?.trim()
+  if (!avatar) return c.notFound()
+  // Cadastros legados também guardam URLs públicas do Storage, além de chaves R2.
+  if (/^https?:\/\//i.test(avatar)) return c.redirect(avatar, 302)
+  const object = await bucketParaChaveColaborador(c, avatar).get(avatar)
   if (!object) return c.notFound()
   const headers = new Headers()
   object.writeHttpMetadata(headers)
-  headers.set('Cache-Control', 'private, max-age=300')
+  headers.set('Cache-Control', 'private, no-store')
+  headers.set('X-Content-Type-Options', 'nosniff')
   return new Response(object.body, { headers })
 })
 
