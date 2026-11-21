@@ -52,14 +52,15 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
       a.matricula_registro, a.modelo, a.fabricante,
       CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL THEN 'Cotista' ELSE 'Cliente' END AS cliente_tipo,
       CASE WHEN NULLIF(trim(s.socio_id), '') IS NOT NULL
-        THEN COALESCE(NULLIF(trim(hs.nome), ''), NULLIF(trim(c.razao_social), ''))
-        ELSE COALESCE(NULLIF(trim(c.razao_social), ''), NULLIF(trim(hs.nome), ''))
+        THEN COALESCE(NULLIF(trim(hs.nome), ''), NULLIF(trim(c.razao_social), ''), NULLIF(trim(h.nome), ''))
+        ELSE COALESCE(NULLIF(trim(c.razao_social), ''), NULLIF(trim(h.nome), ''), NULLIF(trim(hs.nome), ''))
       END AS cliente_razao_social,
       COALESCE(p.nome_completo, pf.nome_completo) AS piloto_nome,
       COALESCE(cp.nome_completo, cpf.nome_completo) AS copiloto_nome
     FROM solicitacoes_reserva_voo s
     LEFT JOIN aeronave a ON a.id = s.aeronave_id
     LEFT JOIN cliente c ON c.id = s.cliente_id
+    LEFT JOIN holdings h ON h.id = s.cliente_id
     LEFT JOIN hold_socios hs ON hs.id = s.socio_id
     LEFT JOIN tripulacao p ON p.id = s.piloto_id
     LEFT JOIN tripulacao_freelancer pf ON pf.id = s.piloto_id
@@ -91,11 +92,15 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
 
   const jornadasComPernas = await Promise.all((jornadas.results || []).map(async jornada => {
     const pernas = await db.prepare(`
-      SELECT id, jornada_id, numero, origem, destino, passageiros AS numero_passageiros,
-        horario_ac, horario_dep, horario_pouso, horario_corte, status, lancamento_diario_id
-      FROM pernas_jornada_voo
-      WHERE jornada_id = ?1
-      ORDER BY numero
+      SELECT p.id, p.jornada_id, p.numero, p.origem, p.destino, p.passageiros AS numero_passageiros,
+        p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte, p.status, p.lancamento_diario_id,
+        COALESCE(l.confirmado, 0) AS diario_confirmado,
+        l.assinado_pic AS diario_assinado_pic, COALESCE(dm.fechado, 0) AS diario_fechado
+      FROM pernas_jornada_voo p
+      LEFT JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
+      LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id
+      WHERE p.jornada_id = ?1
+      ORDER BY p.numero
     `).bind(jornada.id).all()
     return { ...jornada, pernas: pernas.results || [] }
   }))

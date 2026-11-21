@@ -41,6 +41,9 @@ jobs:
       - name: Testes do balanço e custos do portal
         run: node --import tsx --test tests/portal-horas-espelho.test.mjs tests/portal-custos-reais.test.mjs tests/portal-balanco-pagador.test.mjs tests/portal-aeronave-dashboard.test.mjs
 
+      - name: Testes Diário de Bordo automático
+        run: node --import tsx --test tests/diario-automatico-tripapp.test.mjs
+
   deploy:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'))
     needs: check
