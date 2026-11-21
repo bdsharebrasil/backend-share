@@ -4084,8 +4084,9 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
   let numeroVooSolicitado = ''
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const body = await c.req.json<{ numero_voo?: string }>().catch(() => null)
+    const body = await c.req.json<{ numero_voo?: string; solicitacao_id?: string }>().catch(() => null)
     const numeroVoo = String(body?.numero_voo || '').trim()
+    const solicitacaoId = String(body?.solicitacao_id || '').trim() || null
     numeroVooSolicitado = numeroVoo
     if (!numeroVoo) return c.json({ error: 'numero_voo_obrigatorio' }, 400)
     const db = c.env.SHARE_DB
@@ -4100,7 +4101,8 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
       LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       WHERE s.numero_voo = ?1 AND (t1.user_id = ?2 OR t2.user_id = ?2)
-      ORDER BY date(s.data_agendada) DESC LIMIT 1`).bind(numeroVoo, user.id).first<Record<string, any>>()
+        AND (?3 IS NULL OR s.id = ?3)
+      ORDER BY date(s.data_agendada) DESC LIMIT 1`).bind(numeroVoo, user.id, solicitacaoId).first<Record<string, any>>()
     if (!voo) return c.json({ error: 'voo_nao_encontrado_ou_tripulante_nao_escalado' }, 403)
     const tripulantePos: PosicaoTripulante = voo.user_id_tripulante_1 === user.id ? 1 : 2
     const relatorioExistente = await db.prepare(`SELECT r.id, r.cliente_id, r.socio_id, r.aeronave_id
@@ -4108,10 +4110,14 @@ app.post('/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo', async c => 
       LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
       LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
       WHERE r.numero_voo = ?1
+        AND (?6 IS NULL OR (
+          r.aeronave_id = ?3 AND r.cliente_id = ?4
+          AND COALESCE(NULLIF(trim(r.socio_id), ''), '') = COALESCE(NULLIF(trim(?5), ''), '')
+        ))
       ORDER BY CASE WHEN t1.user_id = ?2 OR t2.user_id = ?2 THEN 0 ELSE 1 END,
         CASE WHEN r.aeronave_id = ?3 AND r.cliente_id = ?4
           AND COALESCE(NULLIF(trim(r.socio_id), ''), '') = COALESCE(NULLIF(trim(?5), ''), '') THEN 0 ELSE 1 END,
-        r.criado_em DESC LIMIT 1`).bind(numeroVoo, user.id, voo.aeronave_id, voo.cliente_id, voo.socio_id || null).first<Record<string, any>>()
+        r.criado_em DESC LIMIT 1`).bind(numeroVoo, user.id, voo.aeronave_id, voo.cliente_id, voo.socio_id || null, solicitacaoId).first<Record<string, any>>()
     if (relatorioExistente) {
       const posicaoRelatorio = await db.prepare(`SELECT t1.user_id AS user_id_1, t2.user_id AS user_id_2
         FROM relatorio_despesa_viagem r
