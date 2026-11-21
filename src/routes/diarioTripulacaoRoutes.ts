@@ -41,6 +41,16 @@ diarioTripulacaoRoutes.get('/api/colaborador/diario-bordo/voos/:vooId', async c 
   const vooId = c.req.param('vooId')
   if (!(await requireFlightCrewOrOperationsWriteAccess(c, vooId))) return c.json({ error: 'diario_acesso_negado' }, 403)
   const db = c.env.SHARE_DB
+  const user = await authenticatedColaborador(c)
+  const pic = await db.prepare(`
+    SELECT t.user_id, t.canac FROM solicitacoes_reserva_voo s
+    LEFT JOIN tripulacao t ON t.id = s.piloto_id WHERE s.id = ?1
+  `).bind(vooId).first<{ user_id: string | null; canac: string | null }>()
+  const podeAssinar = Boolean(user && pic && (
+    (pic.user_id && pic.user_id === user.id)
+    || (!pic.user_id && pic.canac && user.canac &&
+      pic.canac.trim().toLowerCase() === user.canac.trim().toLowerCase())
+  ))
   const rows = await db.prepare(`
     SELECT p.id AS perna_id, p.jornada_id, p.numero AS numero_perna,
       p.origem, p.destino, p.horario_ac, p.horario_dep, p.horario_pouso,
@@ -63,7 +73,7 @@ diarioTripulacaoRoutes.get('/api/colaborador/diario-bordo/voos/:vooId', async c 
     WHERE j.solicitacao_id = ?1 AND j.jornada_principal_id IS NULL
     ORDER BY date(j.data), j.numero_jornada, p.numero
   `).bind(vooId).all<Record<string, any>>()
-  return c.json({ lancamentos: (rows.results || []).map(r => ({ ...r, status_lancamento: status(r) })) })
+  return c.json({ pode_assinar: podeAssinar, lancamentos: (rows.results || []).map(r => ({ ...r, status_lancamento: status(r) })) })
 })
 
 // Reexecutar para pernas já existentes antes da instalação da automação.
