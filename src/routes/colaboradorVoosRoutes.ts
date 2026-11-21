@@ -91,11 +91,15 @@ colaboradorVoosRoutes.get('/api/colaborador/meus-voos/:id', async c => {
 
   const jornadasComPernas = await Promise.all((jornadas.results || []).map(async jornada => {
     const pernas = await db.prepare(`
-      SELECT id, jornada_id, numero, origem, destino, passageiros AS numero_passageiros,
-        horario_ac, horario_dep, horario_pouso, horario_corte, status, lancamento_diario_id
-      FROM pernas_jornada_voo
-      WHERE jornada_id = ?1
-      ORDER BY numero
+      SELECT p.id, p.jornada_id, p.numero, p.origem, p.destino, p.passageiros AS numero_passageiros,
+        p.horario_ac, p.horario_dep, p.horario_pouso, p.horario_corte, p.status, p.lancamento_diario_id,
+        COALESCE(l.confirmado, 0) AS diario_confirmado,
+        l.assinado_pic AS diario_assinado_pic, COALESCE(dm.fechado, 0) AS diario_fechado
+      FROM pernas_jornada_voo p
+      LEFT JOIN lancamentos_diario_bordo l ON l.id = p.lancamento_diario_id
+      LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id
+      WHERE p.jornada_id = ?1
+      ORDER BY p.numero
     `).bind(jornada.id).all()
     return { ...jornada, pernas: pernas.results || [] }
   }))
