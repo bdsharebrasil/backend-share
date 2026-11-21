@@ -20,6 +20,8 @@ test('colaborador ativo acessa somente os novos caminhos próprios do lançament
   const caminhosPermitidos = [
     ['GET', '/api/financeiro/relatorios-despesa-viagem/meus-voos'],
     ['POST', '/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo'],
+    ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/finalizar'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/pdf'],
     ['PUT', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/despesas-tripulante'],
     ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos-tripulante'],
     ['DELETE', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos-tripulante/anexo-1'],
@@ -38,7 +40,6 @@ test('a nova permissão não libera rotas financeiras anteriores para colaborado
   for (const [metodo, caminho] of [
     ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1'],
     ['PATCH', '/api/financeiro/relatorios-despesa-viagem/relatorio-1'],
-    ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/finalizar'],
     ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos'],
   ]) {
     const acesso = await autorizarRequisicaoFinanceira(contextoAtivo(), caminho, metodo)
