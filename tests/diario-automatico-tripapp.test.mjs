@@ -93,7 +93,7 @@ test('primeiro AC gera rascunho na aeronave, cliente, competência e rota exatos
     assert.equal(row.confirmado, 0)
     assert.equal(row.assinado_pic, null)
     const month = sqlite.prepare('SELECT aeronave_id, ano, mes, fechado, modo_celula FROM diario_mes').get()
-    assert.deepEqual(month, { aeronave_id: 'a1', ano: 2026, mes: 11, fechado: 0, modo_celula: 'tempo_total' })
+    assert.deepEqual({ ...month }, { aeronave_id: 'a1', ano: 2026, mes: 11, fechado: 0, modo_celula: 'tempo_total' })
     assert.equal(sqlite.prepare('SELECT lancamento_diario_id FROM pernas_jornada_voo').get().lancamento_diario_id, 'perna1')
   } finally { sqlite.close() }
 })
