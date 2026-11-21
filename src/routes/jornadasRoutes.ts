@@ -2,6 +2,8 @@ import { Hono, type Context } from 'hono'
 import { requireFlightOperationAccess, requireFlightCrewOrOperationsWriteAccess, requireShareInternal, extractSupabaseUserId } from '../lib/auth'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
+import { sincronizarDiarioDaPerna, type ResultadoDiarioAutomatico } from '../lib/diarioAutomatico'
+import { getAuthenticatedUserId } from '../lib/auth'
 import { calcularMinutosJornada, LIMITES_SISTEMA_JORNADA, referenciaJornada, somarAcumuladosRegistrados } from '../lib/calculoJornada'
 import { instanteUtc, limiteDiarioConfigurado } from '../lib/jornadaTempo'
 import type { Env } from '../types/env'
@@ -9,6 +11,18 @@ import type { Env } from '../types/env'
 type Bindings = Env & { JORNADA_LIMITE_DIARIO_MINUTOS?: string }
 type Variables = Record<string, never>
 export const jornadasRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
+/** Falha de sincronização não apaga horários já registrados; a API informa a
+ * pendência e oferece sincronização retroativa no Diário do colaborador. */
+async function sincronizarRascunhoSemPerderHorarios(
+  db: D1Database, pernaId: string, userId: string | null,
+): Promise<ResultadoDiarioAutomatico> {
+  try { return await sincronizarDiarioDaPerna(db, pernaId, userId) }
+  catch (e) {
+    console.error('[jornada:diario-automatico]', e)
+    return { status: 'dados_incompletos', detalhe: 'Horários registrados; o rascunho do Diário requer revisão. Abra o Diário e tente sincronizar.' }
+  }
+}
+
 
 async function garantirTabelaJornadas(c: Context<{ Bindings: Bindings; Variables: Variables }>) {
   await validateWorkerSchema(c, [
@@ -372,6 +386,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const numeroJornada = Number(numero?.proximo || 1)
   const criadas: any[] = []
   let principalId: string | null = null
+  let primeiraPernaId: string | null = null
   for (const item of tripulantes.sort((a: any) => (a.funcao === 'PIC' ? -1 : 1))) {
     const jornadaId = uuid()
     await db.prepare(`INSERT INTO jornadas_voo
@@ -383,10 +398,11 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
         body.observacoes || null, extractSupabaseUserId(c)).run()
     if (!principalId) {
       principalId = jornadaId
+      primeiraPernaId = uuid()
       await db.prepare(`INSERT INTO pernas_jornada_voo
         (id, jornada_id, numero, origem, destino, passageiros, horario_ac, horario_dep, horario_ac_user_id, horario_dep_user_id, status)
         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(uuid(), jornadaId, origem, destino, numeroPassageiros, acionamento, horarioDep,
+        .bind(primeiraPernaId, jornadaId, origem, destino, numeroPassageiros, acionamento, horarioDep,
           acionamento ? userId : null, horarioDep ? userId : null,
           statusPerna({ horario_ac: acionamento, horario_dep: horarioDep })).run()
     }
@@ -406,8 +422,12 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   }
   const pernas = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero').bind(principalId).all<any>()
   const principal = criadas[0]
+  const diarioBordo = primeiraPernaId && acionamento
+    ? await sincronizarRascunhoSemPerderHorarios(db, primeiraPernaId, await getAuthenticatedUserId(c))
+    : { status: 'aguardando_ac' as const }
   return c.json({
     ...principal,
+    diario_bordo: diarioBordo,
     pernas: (pernas.results || []).map(normalizarPernaJornada),
     limites: await avaliarLimitesJornada(c, { ...principal, pernas: (pernas.results || []).map(normalizarPernaJornada) }),
     tripulantes: await Promise.all(criadas.map(async (item) => ({ ...item, pernas: (pernas.results || []).map(normalizarPernaJornada), limites: await avaliarLimitesJornada(c, { ...item, pernas: (pernas.results || []).map(normalizarPernaJornada) }) }))),
@@ -580,7 +600,8 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
       horarioAc ? userId : null, horarioDep ? userId : null, horarioPouso ? userId : null, horarioCorte ? userId : null, status).run()
   const pernas = await sincronizarResumoJornada(db, jornada.id)
   const statusAgendamento = await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id)
-  return c.json({ id: pernaId, jornada_id: jornada.id, numero, origem, destino, numero_passageiros: numeroPassageiros, horario_ac: horarioAc, horario_dep: horarioDep, horario_pouso: horarioPouso, horario_corte: horarioCorte, status, status_agendamento: statusAgendamento, limites: await avaliarLimitesJornada(c, { ...jornada, pernas }) }, 201)
+  const diarioBordo = await sincronizarRascunhoSemPerderHorarios(db, pernaId, await getAuthenticatedUserId(c))
+  return c.json({ diario_bordo: diarioBordo, id: pernaId, jornada_id: jornada.id, numero, origem, destino, numero_passageiros: numeroPassageiros, horario_ac: horarioAc, horario_dep: horarioDep, horario_pouso: horarioPouso, horario_corte: horarioCorte, status, status_agendamento: statusAgendamento, limites: await avaliarLimitesJornada(c, { ...jornada, pernas }) }, 201)
 })
 
 jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c => {
@@ -594,7 +615,14 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
     WHERE j.id = ?1`).bind(perna.jornada_id).first<{ solicitacao_id: string; status_agendamento: string | null }>()
   if (!jornadaAcesso || !(await requireFlightCrewOrOperationsWriteAccess(c, jornadaAcesso.solicitacao_id))) return c.json({ error: 'flight_operation_forbidden' }, 403)
   if (!agendamentoPermiteCompletarHorarios(jornadaAcesso.status_agendamento, statusPerna(perna))) return c.json({ error: 'agendamento_fora_da_operacao', detail: 'Os horários da perna podem ser completados somente enquanto o agendamento estiver em voo ou em solo.' }, 409)
-  if (perna.lancamento_diario_id) return c.json({ error: 'perna_ja_lancada_no_diario' }, 409)
+  if (perna.lancamento_diario_id) {
+    const lancamento = await db.prepare('SELECT id, confirmado, assinado_pic FROM lancamentos_diario_bordo WHERE id = ?1')
+      .bind(perna.lancamento_diario_id).first<{ id: string; confirmado: number; assinado_pic: string | null }>()
+    if (!lancamento) return c.json({ error: 'diario_lancamento_inexistente' }, 409)
+    if (Number(lancamento.confirmado) || lancamento.assinado_pic) {
+      return c.json({ error: 'diario_ja_assinado', detail: 'Os horários desta perna já foram assinados pelo comandante.' }, 409)
+    }
+  }
   const jornada = await db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(perna.jornada_id).first<any>()
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   if (!body || typeof body !== 'object' || Array.isArray(body)) return c.json({ error: 'payload_invalido' }, 400)
@@ -636,5 +664,6 @@ jornadasRoutes.patch('/api/interno/jornadas/:jornadaId/pernas/:pernaId', async c
   const pernas = await sincronizarResumoJornada(db, perna.jornada_id)
   const atualizada = await db.prepare('SELECT * FROM pernas_jornada_voo WHERE id = ?1').bind(perna.id).first<any>()
   const statusAgendamento = jornada ? await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id) : undefined
-  return c.json({ ...normalizarPernaJornada(atualizada), status_agendamento: statusAgendamento, limites: jornada ? await avaliarLimitesJornada(c, { ...jornada, pernas }) : null })
+  const diarioBordo = await sincronizarRascunhoSemPerderHorarios(db, perna.id, await getAuthenticatedUserId(c))
+  return c.json({ diario_bordo: diarioBordo, ...normalizarPernaJornada(atualizada), status_agendamento: statusAgendamento, limites: jornada ? await avaliarLimitesJornada(c, { ...jornada, pernas }) : null })
 })
