@@ -807,7 +807,7 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
 diarioBordoRoutes.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const id = c.req.param('id')
-  const current = await c.env.SHARE_DB.prepare('SELECT l.diario_mes_id, l.confirmado, l.assinado_pic, dm.fechado FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1').bind(id).first<{ diario_mes_id: string; fechado: number }>()
+  const current = await c.env.SHARE_DB.prepare('SELECT l.diario_mes_id, l.confirmado, l.assinado_pic, dm.fechado FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1').bind(id).first<{ diario_mes_id: string; fechado: number; confirmado: number | null; assinado_pic: string | null }>()
   if (!current) return c.notFound()
   if ((Number(current.confirmado) || current.assinado_pic) && !(await checkInternalAuth(c))) return c.json({ error: 'diario_ja_assinado' }, 409)
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
