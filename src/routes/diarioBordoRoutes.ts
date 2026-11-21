@@ -1,6 +1,6 @@
 import { Context, Hono } from 'hono'
 import { cachedFetch } from '../lib/cache'
-import { requireShareInternal, extractSupabaseUserId } from '../lib/auth'
+import { requireShareInternal, checkInternalAuth, extractSupabaseUserId } from '../lib/auth'
 import { fetchAisweb } from '../lib/aiswebClient'
 import { validateWorkerSchema } from '../lib/schema'
 import { uuid } from '../lib/strings'
@@ -701,6 +701,14 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
       (SELECT p.id FROM pernas_jornada_voo p WHERE p.lancamento_diario_id = l.id LIMIT 1) AS perna_jornada_id
     FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1`).bind(id).first<any>()
   if (!current) return c.notFound()
+  // O lançamento assinado fica imutável para a tripulação; correções legais
+  // excepcionais requerem a integração administrativa autenticada.
+  if ((Number(current.confirmado) || current.assinado_pic) && !(await checkInternalAuth(c))) {
+    return c.json({ error: 'diario_ja_assinado' }, 409)
+  }
+  if (current.perna_jornada_id && ['confirmado', 'confirmado_em', 'assinado_pic', 'data_assinatura'].some(campo => body[campo] !== undefined) && !(await checkInternalAuth(c))) {
+    return c.json({ error: 'assinatura_exclusiva_comandante', detail: 'Utilize a confirmação eletrônica autenticada do PIC.' }, 403)
+  }
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
   const aeronave = await db.prepare('SELECT id, consumo_combustivel FROM aeronave WHERE id = ?1').bind(current.aeronave_id).first<any>()
   const merged = { ...current, ...body, aeronave_id: current.aeronave_id, diario_mes_id: current.diario_mes_id }
@@ -796,8 +804,9 @@ diarioBordoRoutes.patch('/api/interno/diario-bordo/lancamentos/:id', async c => 
 diarioBordoRoutes.delete('/api/interno/diario-bordo/lancamentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const id = c.req.param('id')
-  const current = await c.env.SHARE_DB.prepare('SELECT l.diario_mes_id, dm.fechado FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1').bind(id).first<{ diario_mes_id: string; fechado: number }>()
+  const current = await c.env.SHARE_DB.prepare('SELECT l.diario_mes_id, l.confirmado, l.assinado_pic, dm.fechado FROM lancamentos_diario_bordo l LEFT JOIN diario_mes dm ON dm.id = l.diario_mes_id WHERE l.id = ?1').bind(id).first<{ diario_mes_id: string; fechado: number }>()
   if (!current) return c.notFound()
+  if ((Number(current.confirmado) || current.assinado_pic) && !(await checkInternalAuth(c))) return c.json({ error: 'diario_ja_assinado' }, 409)
   if (Number(current.fechado)) return c.json({ error: 'diario_fechado' }, 409)
   const result = await c.env.SHARE_DB.batch([
     c.env.SHARE_DB.prepare('UPDATE pernas_jornada_voo SET lancamento_diario_id = NULL WHERE lancamento_diario_id = ?1').bind(id),
