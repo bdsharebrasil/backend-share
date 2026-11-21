@@ -34,7 +34,7 @@ function createDb() {
       data_registro TEXT, aerodromo_partida TEXT, aerodromo_chegada TEXT, trecho TEXT,
       pic_canac TEXT, pic_nome TEXT, sic_canac TEXT, sic_nome TEXT,
       tripulacao_checkin_hora TEXT, tempo_ac TEXT, tempo_dep TEXT, tempo_pou TEXT, tempo_cor TEXT,
-      tempo_voo REAL, tempo_total REAL, horas_diurnas REAL, horas_noturnas REAL,
+      tempo_voo REAL, tempo_total REAL, tempo_ifr REAL DEFAULT 0, horas_diurnas REAL, horas_noturnas REAL,
       pousos_total INTEGER, passageiros INTEGER, natureza_voo TEXT, consumo_combustivel_voo REAL,
       consumo_combustivel_total REAL, confirmado INTEGER DEFAULT 0, assinado_pic TEXT,
       data_assinatura TEXT, criado_por TEXT, celula REAL, celula_tvoo REAL);
