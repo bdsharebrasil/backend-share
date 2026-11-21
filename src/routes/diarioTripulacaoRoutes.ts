@@ -167,6 +167,14 @@ diarioTripulacaoRoutes.post('/api/colaborador/diario-bordo/pernas/:id/assinar', 
   if (!String(info.natureza_voo || '').trim() || !String(info.pic_canac || '').trim()) {
     return c.json({ error: 'natureza_voo_e_canac_pic_obrigatorios' }, 409)
   }
+  const tempoVoo = Number(info.tempo_voo || 0)
+  const totalDiurnoNoturno = Number(info.horas_diurnas || 0) + Number(info.horas_noturnas || 0)
+  if (tempoVoo <= 0 || Math.abs(totalDiurnoNoturno - tempoVoo) > 0.02) {
+    return c.json({ error: 'classificacao_horas_obrigatoria', detail: 'Confira as horas diurnas e noturnas antes de assinar.' }, 409)
+  }
+  if (Number(info.tempo_ifr || 0) > tempoVoo + 0.02) {
+    return c.json({ error: 'horas_ifr_superiores_ao_voo' }, 409)
+  }
   const body = await c.req.json<{ confirmar_assinatura?: boolean }>().catch(() => null)
   if (body?.confirmar_assinatura !== true) return c.json({ error: 'confirmacao_expressa_obrigatoria' }, 400)
   const momento = new Date().toISOString()
