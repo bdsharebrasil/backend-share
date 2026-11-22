@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { lerHistorico, registrarSinal, LIMITE_SINAL_S } from '../lib/rastreioHistorico'
-import { requireShareInternal } from '../lib/auth'
+import { validarPontosGps } from '../lib/gpsTripulante'
+import { authenticatedColaborador, requireFlightCrewOrOperationsWriteAccess, requireShareInternal } from '../lib/auth'
 import { checkRateLimit, clientIp } from '../lib/cache'
 import { buscarPosicoes, configurarProvedor, normalizarMatricula, provedorIndisponivel, type PosicaoAeronave } from '../lib/adsbProvider'
 import { jornadaOperacionalDisponivel, statusAgendamentoComJornadaSql } from '../lib/flightStatus'
@@ -277,7 +279,7 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
     const destino = pernaAtual?.destino || icao(item.destino) || null
 
     return {
-      id: item.id as string, numero_voo: item.numero_voo || null, status, aeronave_id: item.aeronave_id || null,
+      id: item.id as string, data_agendada: item.data_agendada, status_agendamento: item.status_bruto, numero_voo: item.numero_voo || null, status, aeronave_id: item.aeronave_id || null,
       matricula_registro: item.matricula_registro || null, modelo: item.modelo || null, icao_hex: item.icao_hex || null,
       // rota da PERNA ATUAL (a da solicitação só entra se ainda não há perna)
       origem, destino,
@@ -329,4 +331,48 @@ rastreioRoutes.get('/api/interno/solicitacoes/:id/rastreio', async (c) => {
   const voos = await carregarVoosRastreio(c.env, c.req.param('id'))
   if (!voos.length) return c.json({ error: 'agendamento_nao_encontrado' }, 404)
   return c.json(voos[0])
+})
+
+// Escopo por voo: identidade e escala sempre verificadas antes do provedor ou D1.
+rastreioRoutes.get('/api/colaborador/meus-voos/:id/acompanhamento', async c => {
+  const id = c.req.param('id')
+  if (!(await requireFlightCrewOrOperationsWriteAccess(c, id))) return c.json({ error: 'Acesso ao voo negado.' }, 403)
+  if (!(await checkRateLimit(c, `trip-live:${clientIp(c)}`, 120))) return c.json({ error: 'Aguarde para atualizar.' }, 429)
+  c.header('Cache-Control', 'private, no-store')
+  const voos = await carregarVoosRastreio(c.env, id)
+  const voo = voos[0]
+  if (!voo) return c.json({ error: 'Voo não encontrado.' }, 404)
+  const agora = Date.now(), dep = Date.parse(voo.perna_atual?.horario_dep || '')
+  const atual = !['encerrada','concluida','concluido','cancelada','cancelado','excluida'].includes(String(voo.status_agendamento || '').toLowerCase()) && !vooFinalizadoPorCorte(voo.pernas) && (
+    String(voo.data_agendada).slice(0, 10) === new Date(agora).toISOString().slice(0,10)
+    || (Number.isFinite(dep) && dep <= agora && agora - dep < 36 * 3600_000))
+  let posicao: PosicaoAeronave | null = null
+  let indisponivel = false
+  if (atual) {
+    try {
+      const rows = await buscarPosicoes({ hex: voo.icao_hex ? [voo.icao_hex] : [], matriculas: voo.matricula_registro ? [voo.matricula_registro] : [] })
+      posicao = rows.find(p => (voo.icao_hex && p.hex.toUpperCase() === voo.icao_hex.toUpperCase())
+        || (voo.matricula_registro && normalizarMatricula(p.matricula || p.callsign || '') === normalizarMatricula(voo.matricula_registro))) || null
+      indisponivel = provedorIndisponivel()
+    } catch { indisponivel = true }
+  }
+  const idade = posicao?.visto_ha_s
+  const observado = idade != null && idade >= 0 ? new Date(agora - idade * 1000).toISOString() : null
+  return c.json({ ...voo, rastreio: posicao, rastreio_status: atual ? statusRastreio(posicao, false, indisponivel) : 'historico', observado_em: observado, consultado_em: new Date(agora).toISOString() })
+})
+
+rastreioRoutes.post('/api/colaborador/meus-voos/:id/posicoes-gps', bodyLimit({ maxSize: 64000 }), async c => {
+  const id = c.req.param('id'), usuario = await authenticatedColaborador(c)
+  if (!usuario) return c.json({ error: 'Não autorizado.' }, 401)
+  if (!(await requireFlightCrewOrOperationsWriteAccess(c, id))) return c.json({ error: 'Acesso ao voo negado.' }, 403)
+  if (!(await checkRateLimit(c, `trip-gps:${usuario.id}`, 30))) return c.json({ error: 'Aguarde para sincronizar.' }, 429)
+  if (Number(c.req.header('Content-Length') || 0) > 100_000) return c.json({ error: 'Lote muito grande.' }, 413)
+  let pontos
+  try { pontos = validarPontosGps((await c.req.json()).pontos) }
+  catch (e) { return c.json({ error: e instanceof Error ? e.message : 'Lote inválido.' }, 400) }
+  await c.env.SHARE_DB.batch(pontos.map(p => c.env.SHARE_DB.prepare(`INSERT OR IGNORE INTO rastreio_gps_tripulante
+    (voo_id,user_id,ponto_id,lat,lon,registrado_em,precisao_m,alt_ft,gs_kt,rumo_graus)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id,usuario.id,p.id,p.lat,p.lon,p.registrado_em,p.precisao_m,p.alt_ft,p.gs_kt,p.rumo_graus)))
+  c.header('Cache-Control','private, no-store')
+  return c.json({ recebidos: pontos.map(p => p.id), fonte: 'GPS_APARELHO' })
 })
