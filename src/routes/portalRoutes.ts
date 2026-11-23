@@ -396,10 +396,11 @@ portalRoutes.get('/api/portal/financeiro', async c => {
   if (!user?.cliente_id && !user?.socio_id) return c.json({ error: 'cotista_nao_vinculado' }, 409)
   const participantId = user.cliente_id || user.socio_id
   const ownedAircraftFilter = user.cliente_id ? 'ca.cliente_id = ?1' : 'ca.socio_id = ?1'
+  const paymentTable = user.cliente_id ? 'rateio_pagamentos' : 'rateio_hold_pagamentos'
   const paymentTotals = `LEFT JOIN (
     SELECT rateio_id,
            SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CONFIRMADO' THEN valor_centavos ELSE 0 END) AS valor_pago_centavos
-      FROM rateio_pagamentos
+      FROM ${paymentTable}
      GROUP BY rateio_id
   ) pagamentos ON pagamentos.rateio_id = r.id`
   const query = user.cliente_id

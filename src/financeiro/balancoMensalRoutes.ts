@@ -13,7 +13,7 @@ export function limitesMes(mes: string) {
   return { inicio: `${mes}-01`, fim: new Date(Date.UTC(ano, m, 0)).toISOString().slice(0, 10) }
 }
 export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: string, fim: string) {
-  const [participantesDB, rows, eventos, ajustesDB, movimentos] = await Promise.all([
+  const [participantesDB, rows, eventos, ajustesDB, movimentos, eventosHolding] = await Promise.all([
     listarTodos(db, `SELECT ca.id, ca.socio_id, ca.cliente_id, COALESCE(hs.nome,cl.razao_social,ca.codigo_cliente,ca.id) AS nome,
       CASE WHEN ca.socio_id IS NULL THEN 'CLIENTES' ELSE 'HOLD:' || hs.holding_id END AS dominio
       FROM cotista_aeronave ca LEFT JOIN cliente cl ON cl.id=ca.cliente_id
@@ -29,6 +29,8 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
     listarTodos(db, 'SELECT * FROM balanco_ajustes WHERE aeronave_id=? ORDER BY rowid', aeronaveId),
     listarTodos(db, `SELECT * FROM movimentos_holding WHERE aeronave_id=? AND tipo_caixa='HOLD'
       AND COALESCE(escopo_financeiro,'FINANCEIRO')='FINANCEIRO' ORDER BY id`, aeronaveId),
+    listarTodos(db, `SELECT p.* FROM rateio_hold_pagamentos p JOIN rateio_hold r ON r.id=p.rateio_id
+      WHERE r.aeronave_id=? ORDER BY p.id`, aeronaveId),
   ])
   const participantes = participantesDB.map(p => ({ id: String(p.id), nome: String(p.nome), dominio: String(p.dominio) }))
   const aliases = new Map<string, string | null>(participantes.map(p => [p.id, p.id]))
@@ -45,9 +47,16 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
     pagadorId: aliases.get(String(r.pago_por || '')) || null, direto: Number(r.pago_diretamente) === 1,
     dataPagamento: r.data_pagamento ? String(r.data_pagamento).slice(0,10) : null, status: String(r.status || ''),
   }))
-  const pagamentos: PagamentoBalanco[] = eventos.map(p => ({ id: String(p.id), rateioId: `CLIENTE:${p.rateio_id}`,
+  const eventoPagamento = (p: Record<string, unknown>, origem: 'CLIENTE' | 'HOLD'): PagamentoBalanco => ({
+    id: `${origem}:${p.id}`, rateioId: `${origem}:${p.rateio_id}`,
     pagadorId: p.tipo_pagador === 'COTISTA' ? aliases.get(String(p.pagador_cotista_id)) || null : null,
-    valor: Number(p.valor_centavos), data: String(p.data_pagamento).slice(0,10), status: String(p.status), tipoPagador: String(p.tipo_pagador || '') }))
+    valor: Number(p.valor_centavos), data: String(p.data_pagamento).slice(0,10),
+    status: String(p.status), tipoPagador: String(p.tipo_pagador || ''),
+  })
+  const pagamentos = [
+    ...eventos.map(p => eventoPagamento(p, 'CLIENTE')),
+    ...eventosHolding.map(p => eventoPagamento(p, 'HOLD')),
+  ]
   const ajustes: AjusteBalanco[] = ajustesDB.map(a => ({ id: String(a.id), origemRateioId: String(a.origem_rateio_id),
     destinoRateioId: String(a.destino_rateio_id), valor: Number(a.valor_centavos), motivo: String(a.motivo) }))
   const acumulado = calcularBalancoMensal(participantes, rateios, pagamentos, ajustes, '2000-01-01', fim)
