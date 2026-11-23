@@ -1551,6 +1551,18 @@ export async function issueRevenue(
     db,
     command.categoria_id,
   )
+  // `lancamentos.fornecedores_favoritos_id` referencia exclusivamente
+  // `fornecedores_favoritos` no D1. O UUID legado do fornecedor Share pode
+  // não existir em todos os ambientes (ou existir apenas em outra tabela),
+  // o que faz o batch da NF de saída falhar com FOREIGN KEY constraint failed.
+  // Preserve o nome para exibição e só grave o ID quando ele existir na
+  // tabela referenciada; NULL é o valor correto para uma receita sem
+  // fornecedor cadastrado.
+  const fornecedorShare = documentoSaida
+    ? await db.prepare('SELECT id FROM fornecedores_favoritos WHERE id = ? LIMIT 1')
+      .bind(FORNECEDOR_SHARE_ID).first<{ id: string }>()
+    : null
+  const fornecedorShareId = fornecedorShare?.id ?? null
   // O cliente_id de cotista_aeronave referencia a tabela D1 `cliente`.
   // Valide contra essa tabela antes de gravar o vínculo direto em lancamentos;
   // cotista_aeronave_id continua preservando o vínculo de negócio.
@@ -1588,7 +1600,7 @@ export async function issueRevenue(
           context?.cotistaAeronaveId || command.cotista_aeronave_id,
         descricao: command.descricao,
         fornecedor_nome: documentoSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
-        fornecedores_favoritos_id: documentoSaida ? FORNECEDOR_SHARE_ID : nullableText(command.fornecedor_id),
+        fornecedores_favoritos_id: documentoSaida ? fornecedorShareId : nullableText(command.fornecedor_id),
         fluxo: documentoSaida ? 'RECEITA' : 'ENTRADA',
         tipo_caixa: 'SHARE',
         valor_centavos: amount,
@@ -1662,7 +1674,7 @@ export async function issueRevenue(
           subcategoria_3: categoriaCliente?.subcategoria_3,
           subcategoria_4: categoriaCliente?.subcategoria_4,
           fornecedor_nome: documentoSaida ? 'SHARE BRASIL' : nullableText(command.fornecedor_nome ?? context?.nome),
-          fornecedores_favoritos_id: documentoSaida ? FORNECEDOR_SHARE_ID : nullableText(command.fornecedor_id),
+          fornecedores_favoritos_id: documentoSaida ? fornecedorShareId : nullableText(command.fornecedor_id),
           grupo_categoria: 'CAIXA CLIENTE',
           data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
@@ -1699,7 +1711,7 @@ export async function issueRevenue(
           periodicidade: nullableText(command.periodicidade ?? 'MENSAL'),
           data_emissao: command.data,
           data_vencimento: command.data_vencimento || command.data,
-          fornecedor_id: documentoSaida ? FORNECEDOR_SHARE_ID : nullableText(command.fornecedor_id),
+          fornecedor_id: documentoSaida ? fornecedorShareId : nullableText(command.fornecedor_id),
           descricao_despesa: command.descricao,
           pago_por: reciboSaida ? null : (context?.cotistaAeronaveId || command.cotista_aeronave_id),
           pago_diretamente: reciboSaida ? 0 : 1,

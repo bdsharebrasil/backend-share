@@ -39,6 +39,13 @@ test("lancamento de receita valida cliente_id na tabela singular do D1", () => {
   assert.doesNotMatch(issueRevenue, /cliente_id: context\?\.clienteId/);
 });
 
+test("NF de saída não grava fornecedor Share inexistente na FK do D1", () => {
+  assert.match(issueRevenue, /SELECT id FROM fornecedores_favoritos WHERE id = \? LIMIT 1/);
+  assert.match(issueRevenue, /const fornecedorShareId = fornecedorShare\?\.id \?\? null/);
+  assert.match(issueRevenue, /fornecedores_favoritos_id: documentoSaida \? fornecedorShareId :/);
+  assert.match(issueRevenue, /fornecedor_id: documentoSaida \? fornecedorShareId :/);
+});
+
 test("recibo de saída valida cotista, aeronave e categoria do rateio antes de alocar número", () => {
   const rota = recibosSaidaRoutes.slice(
     recibosSaidaRoutes.indexOf("recibosSaidaRoutes.post('/recibos-saida'"),
