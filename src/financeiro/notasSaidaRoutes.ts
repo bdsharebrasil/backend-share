@@ -284,17 +284,25 @@ notasSaidaRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>))
     const dataPagamento = body.data_pagamento ?? body.data_recebimento
     const contaBancaria = body.conta_bancaria_id ?? body.conta_bancaria ?? body.banco_recebimento
+    const cotista = await c.env.SHARE_DB.prepare('SELECT ca.socio_id, hs.holding_id FROM cotista_aeronave ca LEFT JOIN hold_socios hs ON hs.id = ca.socio_id WHERE ca.id = ?').bind(nota.cotista_id).first<{ socio_id: string | null; holding_id: string | null }>()
+    const holdingSaida = Boolean(cotista?.socio_id)
+    const saidaPagamento = String(body.saida_pagamento ?? '').trim().toUpperCase()
+    if (holdingSaida && !['DGA_BRADESCO', 'CONTA_COTISTA'].includes(saidaPagamento)) {
+      return c.json({ error: 'saida_pagamento_obrigatoria' }, 400)
+    }
     const pagamentos = Array.isArray(body.pagamentos) && body.pagamentos.length
-      ? body.pagamentos
+      ? body.pagamentos.map((pagamento) => ({ ...pagamento, saida_pagamento: pagamento.saida_pagamento ?? (holdingSaida ? saidaPagamento : null) }))
       : [{
-          tipo_pagador: 'COTISTA',
-          pagador_cotista_id: nota.cotista_id,
+          tipo_pagador: holdingSaida && saidaPagamento === 'DGA_BRADESCO' ? 'HOLDING' : 'COTISTA',
+          pagador_cotista_id: holdingSaida && saidaPagamento === 'CONTA_COTISTA' ? nota.cotista_id : null,
+          pagador_holding_id: holdingSaida && saidaPagamento === 'DGA_BRADESCO' ? cotista?.holding_id ?? null : null,
+          saida_pagamento: holdingSaida ? saidaPagamento : null,
           valor_centavos: Math.round(Number(nota.valor_total ?? 0) * 100),
           data_pagamento: dataPagamento,
           conta_bancaria_id: contaBancaria,
           forma_pagamento: body.forma_pagamento,
           comprovante_url: body.comprovante_url,
-        }]
+        }] as Record<string, unknown>[]
     const conta = await settleReceivable(c.env.SHARE_DB, contaId, {
       data_recebimento: dataPagamento,
       conta_bancaria_id: contaBancaria,

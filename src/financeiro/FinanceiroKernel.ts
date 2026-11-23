@@ -2194,7 +2194,8 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   return { ...(await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()), idempotent: false }
 }
 
-type RealPayment = { idempotency_key?: string | null; data_pagamento?: string | null; conta_bancaria_id?: string | null; comprovante_url?: string | null; forma_pagamento?: string | null; observacoes?: string | null; tipo_pagador: 'COTISTA' | 'SHARE' | 'HOLDING'; pagador_cotista_id?: string | null; pagador_holding_id?: string | null; valor_centavos: number; rateios: Array<{ rateio_id: string; valor_centavos: number }> }
+type SaidaPagamento = 'DGA_BRADESCO' | 'CONTA_COTISTA'
+type RealPayment = { idempotency_key?: string | null; data_pagamento?: string | null; conta_bancaria_id?: string | null; comprovante_url?: string | null; forma_pagamento?: string | null; observacoes?: string | null; tipo_pagador: 'COTISTA' | 'SHARE' | 'HOLDING'; pagador_cotista_id?: string | null; pagador_holding_id?: string | null; saida_pagamento?: SaidaPagamento | null; valor_centavos: number; rateios: Array<{ rateio_id: string; valor_centavos: number }> }
 
 export async function settleReceivable(db: Database, receivableId: string, body: Row, userId: string | null): Promise<Row> {
   const schema = await loadSchema(db)
@@ -2214,6 +2215,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const total = asPositiveCents(row.valor_centavos)
   const movimentoHoldingId = nullableText(row.movimentos_id)
   const documentoSaida = ['NF_SAIDA', 'RECIBO_SAIDA'].includes(upper(row.origem_tipo))
+  const holdingSaida = documentoSaida && Boolean(movimentoHoldingId)
   const reimbursement = await db.prepare('SELECT * FROM reembolsos WHERE conta_receber_id = ? LIMIT 1').bind(receivableId).first<Row>()
   const resolved = await resolveReceivableAllocation(db, row)
   const rateioLancamentoId = reimbursement
@@ -2280,6 +2282,16 @@ export async function settleReceivable(db: Database, receivableId: string, body:
       continue
     }
     if (!['COTISTA', 'SHARE', 'HOLDING'].includes(payment.tipo_pagador)) throw new FinanceError('Tipo de pagador inválido', 'pagador_invalido')
+    const saidaPagamento = nullableText(payment.saida_pagamento) as SaidaPagamento | null
+    if (holdingSaida && !['DGA_BRADESCO', 'CONTA_COTISTA'].includes(String(saidaPagamento ?? ''))) {
+      throw new FinanceError('Saída do pagamento inválida para baixa de holding', 'saida_pagamento_invalida')
+    }
+    if (holdingSaida && saidaPagamento === 'CONTA_COTISTA' && payment.tipo_pagador !== 'COTISTA') {
+      throw new FinanceError('CONTA COTISTA exige um cotista como pagador', 'cotista_pagador_obrigatorio')
+    }
+    if (holdingSaida && saidaPagamento === 'DGA_BRADESCO' && payment.tipo_pagador !== 'HOLDING') {
+      throw new FinanceError('DGA - BRADESCO exige a holding como pagadora', 'holding_pagadora_obrigatoria')
+    }
     if (payment.tipo_pagador === 'COTISTA' && !payment.pagador_cotista_id) throw new FinanceError('Cotista pagador não informado', 'cotista_pagador_obrigatorio')
     if (payment.tipo_pagador === 'HOLDING' && !payment.pagador_holding_id) throw new FinanceError('Holding pagadora não informada', 'holding_pagadora_obrigatoria')
     if (payment.tipo_pagador === 'SHARE') throw new FinanceError('A Share não pode registrar recebimento de si própria. Use o fluxo de adiantamento ou pagamento ao fornecedor.', 'recebimento_da_propria_share')
@@ -2336,7 +2348,9 @@ export async function settleReceivable(db: Database, receivableId: string, body:
       valor_pago_real_centavos: paid,
       status,
       data_pagamento: paid >= expected ? paymentForRateio.data_pagamento : null,
-      ...(isShareRevenue && rateioColumns?.has('pago_diretamente') ? { pago_diretamente: 1 } : {}),
+      ...(rateioColumns?.has('pago_diretamente') && (holdingSaida || isShareRevenue)
+        ? { pago_diretamente: holdingSaida ? (paymentForRateio.saida_pagamento === 'CONTA_COTISTA' ? 1 : 0) : 1 }
+        : {}),
       ...(documentoSaida ? {
         ...(rateioColumns?.has('pago_por') ? { pago_por: paymentForRateio.pagador_cotista_id ?? paymentForRateio.pagador_holding_id ?? null } : {}),
         ...(rateioColumns?.has('url_doc') ? { url_doc: nullableText(paymentForRateio.comprovante_url) } : {}),
@@ -2354,7 +2368,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
         comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl),
         forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento),
       } : {}),
-      ...(isShareRevenue ? { pago_diretamente: 1 } : {}),
+      ...(isShareRevenue ? { pago_diretamente: holdingSaida ? (lastPayment.saida_pagamento === 'CONTA_COTISTA' ? 1 : 0) : 1 } : {}),
       atualizado_em: new Date().toISOString(),
     }, 'id = ?', [shareId]))
     const client = rateioLancamentoId && rateioLancamentoId !== shareId ? { id: rateioLancamentoId } : null
@@ -2382,7 +2396,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
       comprovante_url: allPaid ? nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl) : null,
       forma_pagamento: allPaid ? nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento) : null,
       ...(movementColumns?.has('pago_por') ? { pago_por: allPaid ? lastPayment.pagador_cotista_id ?? lastPayment.pagador_holding_id ?? null : null } : {}),
-      ...(movementColumns?.has('pago_diretamente') ? { pago_diretamente: allPaid ? 1 : 0 } : {}),
+      ...(movementColumns?.has('pago_diretamente') ? { pago_diretamente: allPaid ? (holdingSaida ? (lastPayment.saida_pagamento === 'CONTA_COTISTA' ? 1 : 0) : 1) : 0 } : {}),
       atualizado_em: new Date().toISOString(),
     }, 'id = ?', [movimentoHoldingId]))
   }
@@ -3807,4 +3821,3 @@ function receiptReplayMatches(p: RealPayment, saved: Row[]): boolean {
   if (matches.some(r => r.tipo_pagador !== p.tipo_pagador || nullableText(r.pagador_cotista_id) !== nullableText(p.pagador_cotista_id) || nullableText(r.pagador_holding_id) !== nullableText(p.pagador_holding_id) || r.data_pagamento !== p.data_pagamento || nullableText(r.conta_bancaria_id) !== nullableText(p.conta_bancaria_id))) return false
   return !p.rateios?.length || (matches.length === p.rateios.length && p.rateios.every(a => matches.some(r => r.rateio_id === a.rateio_id && Number(r.valor_centavos) === Number(a.valor_centavos))))
 }
-

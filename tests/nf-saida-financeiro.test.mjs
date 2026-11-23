@@ -49,6 +49,14 @@ test("baixa da conta a receber atualiza rateio_hold e movimento Holding", () => 
   assert.match(settleReceivable, /origem_id = \?\) AND tipo_caixa = 'CLIENTE'/);
 });
 
+test("baixa de holding valida a saída e marca pagamento direto somente para CONTA_COTISTA", () => {
+  assert.match(kernel, /type SaidaPagamento = 'DGA_BRADESCO' \| 'CONTA_COTISTA'/);
+  assert.match(settleReceivable, /saida_pagamento_invalida/);
+  assert.match(settleReceivable, /paymentForRateio\.saida_pagamento === 'CONTA_COTISTA' \? 1 : 0/);
+  assert.match(notas, /saida_pagamento_obrigatoria/);
+  assert.match(notas, /pagador_holding_id: holdingSaida && saidaPagamento === 'DGA_BRADESCO'/);
+});
+
 test("baixa de NF/recibo encontra rateio CLIENTE e grava pagamento direto", () => {
   assert.match(settleReceivable, /const documentoSaida = \['NF_SAIDA', 'RECIBO_SAIDA'\]/);
   assert.match(settleReceivable, /SELECT id FROM lancamentos WHERE origem_id = \? AND tipo_caixa = 'CLIENTE'/);
