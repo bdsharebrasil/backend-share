@@ -16,7 +16,7 @@ notasSaidaRoutes.get('/notas-saida/opcoes', async (c) => {
       listar(db, 'SELECT id, matricula_registro FROM aeronave ORDER BY matricula_registro'),
       listar(db, "SELECT id, nome, grupo_categoria, tipo_despesa FROM categoria_movimentacao_share WHERE upper(COALESCE(grupo_categoria, '')) LIKE '%RECEIT%' OR upper(COALESCE(nome, '')) LIKE '%N.F%' OR upper(COALESCE(nome, '')) LIKE '%RECIBO%' ORDER BY nome"),
       listar(db, 'SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4 FROM categoria_movimentacao_cliente ORDER BY nome'),
-      listar(db, 'SELECT id, banco, numero_conta FROM contas_bancarias ORDER BY banco'),
+      listar(db, 'SELECT id, banco, numero_conta FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
     ])
     return c.json({ cotistas, aeronaves, categoriasReceita, categoriasDespesa, contasBancarias })
   } catch (error) { return errorResponse(c, error) }
@@ -116,7 +116,7 @@ notasSaidaRoutes.post('/notas-saida', async (c) => {
       subcategoria: categoriaCliente.subcategoria,
       dataEmissao,
       dataVencimento,
-      status: ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? 'PAGO' : 'EM_ABERTO',
+      status: 'EM_ABERTO',
       arquivoPdfUrl: body.arquivo_pdf_url ? String(body.arquivo_pdf_url) : null,
     }
     const financeiro = await issueRevenue(db, {
@@ -139,7 +139,13 @@ notasSaidaRoutes.post('/notas-saida', async (c) => {
       origem_id: id,
       periodicidade: 'MENSAL',
     }, c.get('userId') || null, {}, ({ lancamentoId, contaReceberId }) =>
-      notaSaidaStatements(db, { ...dadosNota, id, lancamentoId, contaReceberId }))
+      notaSaidaStatements(db, { ...dadosNota, id, lancamentoId, contaReceberId }),
+      ['PAGO', 'RECEBIDO', 'PAID'].includes(String(body.status ?? '').trim().toUpperCase()) ? {
+        data_pagamento: body.data_pagamento,
+        conta_bancaria_id: body.conta_bancaria_id ?? body.conta_bancaria,
+        forma_pagamento: body.forma_pagamento, comprovante_url: body.comprovante_url,
+        saida_pagamento: body.saida_pagamento,
+      } : undefined)
 
     if (financeiro.idempotent) {
       const conta = await db.prepare(`SELECT id, nf_saida_id, lancamentos_id
@@ -182,7 +188,10 @@ notasSaidaRoutes.patch('/notas-saida/:id', async (c) => {
     const add = (column: string, value: unknown) => { if (value !== undefined) fields.push([column, value === '' ? null : value]) }
     add('numero', body.numero); add('cotista_id', body.cotista_id ?? body.cotista_aeronave_id); add('aeronave_id', body.aeronave_id)
     add('data_emissao', body.data_emissao); add('data_vencimento', body.data_vencimento); add('valor_total', body.valor_total ?? body.valor)
-    add('nome_categoria', body.nome_categoria); add('descricao_servico', body.descricao_servico ?? body.descricao); add('status', body.status)
+    if (body.status !== undefined && String(body.status).toUpperCase() !== String(nota.status).toUpperCase()) {
+      return c.json({ error: 'Use a baixa de pagamento para alterar a situação financeira da nota.', code: 'status_exige_baixa' }, 409)
+    }
+    add('nome_categoria', body.nome_categoria); add('descricao_servico', body.descricao_servico ?? body.descricao)
     add('arquivo_pdf_url', body.arquivo_pdf_url)
     if (!fields.length) return c.json({ error: 'nenhum_campo_atualizavel' }, 400)
     const assignments = fields.map(([column]) => `${column} = ?`).join(', ')
@@ -293,8 +302,9 @@ notasSaidaRoutes.post('/notas-saida/:id/dar-baixa', async (c) => {
     const pagamentos = Array.isArray(body.pagamentos) && body.pagamentos.length
       ? body.pagamentos.map((pagamento) => ({ ...pagamento, saida_pagamento: pagamento.saida_pagamento ?? (holdingSaida ? saidaPagamento : null) }))
       : [{
+          idempotency_key: body.idempotency_key,
           tipo_pagador: holdingSaida && saidaPagamento === 'DGA_BRADESCO' ? 'HOLDING' : 'COTISTA',
-          pagador_cotista_id: holdingSaida && saidaPagamento === 'CONTA_COTISTA' ? nota.cotista_id : null,
+          pagador_cotista_id: holdingSaida && saidaPagamento === 'DGA_BRADESCO' ? null : nota.cotista_id,
           pagador_holding_id: holdingSaida && saidaPagamento === 'DGA_BRADESCO' ? cotista?.holding_id ?? null : null,
           saida_pagamento: holdingSaida ? saidaPagamento : null,
           valor_centavos: Math.round(Number(nota.valor_total ?? 0) * 100),
