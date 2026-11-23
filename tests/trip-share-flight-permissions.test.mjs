@@ -63,7 +63,7 @@ test('equipe de operações acessa voos e usuário sem perfil é negado', async 
   } finally { globalThis.fetch = originalFetch }
 })
 
-test('alterações de jornada e briefing PDF passam pela permissão restrita', async () => {
+test('horários de jornada são compartilhados entre colaboradores autenticados e briefing PDF preserva sua regra', async () => {
   const routes = await readFile(new URL('../src/routes/jornadasRoutes.ts', import.meta.url), 'utf8')
   const pdf = await readFile(new URL('../src/preparacao/rotas.ts', import.meta.url), 'utf8')
   const sections = [
@@ -76,7 +76,8 @@ test('alterações de jornada e briefing PDF passam pela permissão restrita', a
     const first = routes.indexOf(start)
     const next = end ? routes.indexOf(end, first + 1) : routes.length
     assert.notEqual(first, -1)
-    assert.match(routes.slice(first, next), /requireFlightCrewOrOperationsWriteAccess\(c,/)
+    assert.match(routes.slice(first, next), /requireFlightOperationAccess\(c,/)
+    assert.doesNotMatch(routes.slice(first, next), /requireFlightCrewOrOperationsWriteAccess\(c,/)
   }
   const pdfRoute = pdf.slice(pdf.indexOf("preparacaoRoutes.get(root+'/pdf'"), pdf.indexOf("preparacaoRoutes.post(root+'/reservar-hotel'"))
   assert.match(pdfRoute, /requireFlightCrewOrOperationsWriteAccess\(c, idVoo\(c\)\)/)
