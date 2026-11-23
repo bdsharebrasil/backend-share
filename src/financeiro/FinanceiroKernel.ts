@@ -1079,10 +1079,11 @@ function holdingAllocationStatements(
   movimentoId: string | null,
   lines: AllocationLine[],
   userId: string | null,
+  rateioIds?: string[],
 ): D1PreparedStatement[] {
   const amount = asPositiveCents(command.valor_centavos)
   const totalDespesa = optionalCents(command.valor_total_despesa_centavos) ?? amount
-  return lines.map((line) => {
+  return lines.map((line, index) => {
     if (!line.socioId) {
       throw new FinanceError(
         'Rateio de holding precisa de socio_id',
@@ -1091,7 +1092,7 @@ function holdingAllocationStatements(
     }
     const documentFields = buildDocumentFields(command.anexos_json, line.cotistaId)
     const values: Row = {
-      id: id(),
+      id: rateioIds?.[index] ?? id(),
       [holdingMovementColumn(schema)]: movimentoId,
       aeronave_id: command.aeronave_id,
       socio_id: line.socioId,
@@ -1518,6 +1519,67 @@ export async function createDirectExternalExpense(
   )
 }
 
+/** Valida o pagamento antes de persistir qualquer parte da nota. */
+async function prepareRevenuePayment(db: Database, input: Row, context: CotistaContext | null, command: Row): Promise<Row> {
+  const date = text(input.data_pagamento)
+  if (!validSettlementDate(date)) throw new FinanceError('Data do pagamento é obrigatória e deve ser válida', 'data_pagamento_obrigatoria')
+  const bank = await resolveContaBancariaId(db, input.conta_bancaria_id ?? input.conta_bancaria)
+  if (!bank) throw new FinanceError('Conta bancária do pagamento não encontrada', 'conta_bancaria_obrigatoria')
+  const holding = context?.kind === 'HOLDING'
+  const source = upper(input.saida_pagamento)
+  if (holding && !['DGA_BRADESCO', 'CONTA_COTISTA'].includes(source)) {
+    throw new FinanceError('Selecione a saída do pagamento', 'saida_pagamento_obrigatoria')
+  }
+  return {
+    data_pagamento: date, conta_bancaria_id: bank,
+    comprovante_url: nullableText(input.comprovante_url), forma_pagamento: nullableText(input.forma_pagamento),
+    tipo_pagador: holding && source === 'DGA_BRADESCO' ? 'HOLDING' : 'COTISTA',
+    pagador_cotista_id: holding && source === 'DGA_BRADESCO' ? null : context?.cotistaAeronaveId,
+    pagador_holding_id: holding && source === 'DGA_BRADESCO' ? context?.holdingId : null,
+    pago_diretamente: holding && source === 'DGA_BRADESCO' ? 0 : 1,
+    idempotency_key: `${command.idempotency_key}:pagamento`,
+  }
+}
+
+function initialRevenuePaymentStatements(db: Database, schema: SchemaCache, payment: Row,
+  refs: { shareId: string; clientId: string | null; movimentoId: string | null; contaId: string; rateioId: string; notaId: string | null },
+  amount: number, userId: string | null): D1PreparedStatement[] {
+  const update = (table: string, values: Row, rowId: string) => updateStatement(db, schema, table,
+    Object.fromEntries(Object.entries(values).filter(([key]) => schema.get(table)?.has(key))), 'id = ?', [rowId])
+  const details = {
+    data_pagamento: payment.data_pagamento, conta_bancaria_id: payment.conta_bancaria_id,
+    comprovante_url: payment.comprovante_url, forma_pagamento: payment.forma_pagamento,
+    pago_por: payment.pagador_cotista_id ?? payment.pagador_holding_id,
+    atualizado_em: new Date().toISOString(),
+  }
+  const statements = [
+    insertStatement(db, schema, 'rateio_pagamentos', {
+      id: id(), rateio_id: refs.rateioId, conta_receber_id: refs.contaId,
+      tipo_pagador: payment.tipo_pagador, pagador_cotista_id: payment.pagador_cotista_id,
+      pagador_holding_id: payment.pagador_holding_id, valor_centavos: amount,
+      data_pagamento: payment.data_pagamento, conta_bancaria_id: payment.conta_bancaria_id,
+      comprovante_url: payment.comprovante_url, forma_pagamento: payment.forma_pagamento,
+      status: 'CONFIRMADO', idempotency_key: `${payment.idempotency_key}:${refs.rateioId}`, criado_por: userId,
+    }, ['id', 'rateio_id', 'conta_receber_id', 'valor_centavos', 'idempotency_key']),
+    update('contas_areceber', {
+      status: 'RECEBIDO', data_recebimento: payment.data_pagamento, data_pagamento: payment.data_pagamento,
+      banco_recebimento: payment.conta_bancaria_id, comprovante_recebimento_url: payment.comprovante_url,
+      atualizado_em: details.atualizado_em,
+    }, refs.contaId),
+    update('lancamentos', { ...details, status: 'RECEBIDO', pago_diretamente: payment.pago_diretamente }, refs.shareId),
+    update(refs.movimentoId ? 'rateio_hold' : 'rateio_despesas', {
+      status: 'PAGO', data_pagamento: payment.data_pagamento, valor_pago_real_centavos: amount,
+      pago_diretamente: payment.pago_diretamente, pago_por: details.pago_por, url_doc: payment.comprovante_url,
+      atualizado_em: details.atualizado_em,
+    }, refs.rateioId),
+    auditStatement(db, schema, 'contas_areceber', refs.contaId, 'BAIXA', userId, amount, amount, null, text(payment.idempotency_key)),
+  ]
+  if (refs.clientId) statements.push(update('lancamentos', { ...details, status: 'PAGO', pago_diretamente: 0 }, refs.clientId))
+  if (refs.movimentoId) statements.push(update('movimentos_holding', { ...details, status: 'PAGO', pago_diretamente: payment.pago_diretamente }, refs.movimentoId))
+  if (refs.notaId) statements.push(update('notas_fiscais_saida', { status: 'RECEBIDO' }, refs.notaId))
+  return statements
+}
+
 export async function issueRevenue(
   db: Database,
   body: Row,
@@ -1529,6 +1591,7 @@ export async function issueRevenue(
     lancamentoClienteId: string | null
     movimentoHoldingId: string | null
   }) => D1PreparedStatement[],
+  initialPayment?: Row,
 ): Promise<Row> {
   const schema = await loadSchema(db)
   const command = normalizeCommand({ ...body, fluxo: 'ENTRADA' }, userId, options)
@@ -1583,6 +1646,8 @@ export async function issueRevenue(
     throw new FinanceError('Cotista Holding sem sócio ou holding vinculado', 'holding_cotista_incompleto')
   }
   const movimentoHoldingId = notaFiscalSaida && context?.kind === 'HOLDING' ? id() : null
+  const revenueRateioId = id()
+  const payment = initialPayment ? await prepareRevenuePayment(db, initialPayment, context, command) : null
   if (upper(command.origem_tipo) === 'RECIBO_SAIDA' && !clientLancamentoId) {
     throw new FinanceError('Recibo ADM exige vínculo de cotista cliente. Para holding, utilize o fluxo de documento da holding.', 'recibo_sem_destino_economico', 409)
   }
@@ -1638,7 +1703,6 @@ export async function issueRevenue(
         aeronave_id: context?.aeronaveId || command.aeronave_id,
         cotista_id: context?.cotistaAeronaveId || command.cotista_aeronave_id,
         lancamentos_id: lancamentoId,
-        ...(movimentoHoldingId ? { movimentos_id: movimentoHoldingId } : {}),
         origem_tipo: nullableText(command.origem_tipo) || 'RECEITA',
         idempotency_key: command.idempotency_key,
         criado_por: userId,
@@ -1649,7 +1713,7 @@ export async function issueRevenue(
   ]
 
   if (clientLancamentoId) {
-    const clientRateioId = id()
+    const clientRateioId = revenueRateioId
     const reciboSaida = documentoSaida
     statements.push(
       insertStatement(
@@ -1797,6 +1861,7 @@ export async function issueRevenue(
       Object.entries(movementValues).filter(([column]) => movementColumns?.has(column)),
     )
     statements.push(insertStatement(db, schema, 'movimentos_holding', compatibleMovementValues, ['id', 'holding_id', 'socio_id', 'aeronave_id']))
+    statements.push(updateStatement(db, schema, 'contas_areceber', { movimentos_id: movimentoHoldingId }, 'id = ?', [contaReceberId]))
     const holdingRateio: AllocationLine[] = [{
       cotistaId: context.cotistaAeronaveId,
       socioId: context.socioId,
@@ -1819,7 +1884,7 @@ export async function issueRevenue(
       numero_nf: command.numero_nf,
       url_nf: command.url_nf,
       origem_tipo: 'NF_SAIDA',
-    }, movimentoHoldingId, holdingRateio, userId))
+    }, movimentoHoldingId, holdingRateio, userId, [revenueRateioId]))
     statements.push(linkStatement(db, schema, 'NF_SAIDA', text(command.origem_id), 'MOVIMENTO_HOLDING', movimentoHoldingId, 'NF_SAIDA_MOVIMENTO', userId))
   }
 
@@ -1847,6 +1912,16 @@ export async function issueRevenue(
     }))
   }
 
+  if (payment) {
+    if (!documentoSaida || (!clientLancamentoId && !movimentoHoldingId)) {
+      throw new FinanceError('Pagamento inicial exige documento com rateio', 'pagamento_sem_rateio')
+    }
+    statements.push(...initialRevenuePaymentStatements(db, schema, payment, {
+      shareId: lancamentoId, clientId: clientLancamentoId, movimentoId: movimentoHoldingId,
+      contaId: contaReceberId, rateioId: revenueRateioId,
+      notaId: notaFiscalSaida ? nullableText(command.origem_id) : null,
+    }, amount, userId))
+  }
   await db.batch(statements)
   return {
     id: lancamentoId,
@@ -1856,7 +1931,7 @@ export async function issueRevenue(
     movimentoHoldingId,
     lancamento_cliente_id: clientLancamentoId,
     valor_centavos: amount,
-    status: 'EM_ABERTO',
+    status: payment ? 'RECEBIDO' : 'EM_ABERTO',
     idempotent: false,
   }
 }
