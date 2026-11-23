@@ -294,7 +294,7 @@ enviosPagamentoRoutes.patch('/envios-pagamento/cotistas/:id', async (c) => {
     const duplicado = await db.prepare("SELECT id FROM cotista_aeronave WHERE aeronave_id = ? AND id <> ? AND lower(COALESCE(status, 'ativo')) = 'ativo' AND ((? IS NOT NULL AND cliente_id = ?) OR (? IS NOT NULL AND socio_id = ?)) LIMIT 1")
       .bind(aeronaveId, id, current.cliente_id, current.cliente_id, current.socio_id, current.socio_id).first()
     if (duplicado) return c.json({ error: 'cotista_ja_vinculado_a_aeronave' }, 409)
-    const historico = await db.prepare('SELECT 1 AS existe FROM rateio_despesas WHERE cotista_id = ? UNION ALL SELECT 1 FROM rateio_pagamentos WHERE pagador_cotista_id = ? UNION ALL SELECT 1 FROM recibos_saida WHERE cotista_id = ? LIMIT 1').bind(id, id, id).first()
+    const historico = await db.prepare('SELECT 1 AS existe FROM rateio_despesas WHERE cotista_id = ? UNION ALL SELECT 1 FROM rateio_pagamentos WHERE pagador_cotista_id = ? UNION ALL SELECT 1 FROM rateio_hold_pagamentos WHERE pagador_cotista_id = ? UNION ALL SELECT 1 FROM recibos_saida WHERE cotista_id = ? LIMIT 1').bind(id, id, id, id).first()
     if (historico) return c.json({ error: 'aeronave_nao_pode_ser_alterada_com_historico_financeiro' }, 409)
   }
   await db.prepare("UPDATE cotista_aeronave SET aeronave_id = ?, percentual_sociedade = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, 'ativo')) = 'ativo'").bind(aeronaveId, percentual, id).run()

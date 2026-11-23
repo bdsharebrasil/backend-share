@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { contextoBaixaCotista, pagamentosContextoBaixa } from '../src/financeiro/FinanceiroKernel.ts';
+import { carregarDadosBalancoMensal } from '../src/financeiro/balancoMensalRoutes.ts';
 import { Hono } from 'hono';
 import { notasSaidaRoutes } from '../src/financeiro/notasSaidaRoutes.ts';
 
-// Contrato D1 enviado para NF, recebível e rateio da holding, com FKs imediatas.
-function banco() {
+const migration = readFileSync(new URL('../migrations/20261123_rateio_hold_pagamentos.sql', import.meta.url), 'utf8');
+
+// Inclui a FK histórica real de rateio_pagamentos.rateio_id para rateio_despesas.
+function banco(comMigracao = true) {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(`
     PRAGMA foreign_keys = ON;
@@ -76,7 +81,7 @@ function banco() {
       numero_recibo TEXT, url_recibo TEXT, numero_nf TEXT, url_nf TEXT, email_enviado_em TEXT, origem_tipo TEXT, url_doc TEXT, atualizado_em TEXT
     );
     CREATE TABLE rateio_pagamentos (
-      id TEXT PRIMARY KEY, rateio_id TEXT, conta_receber_id TEXT REFERENCES contas_areceber(id), tipo_pagador TEXT,
+      id TEXT PRIMARY KEY, rateio_id TEXT NOT NULL REFERENCES rateio_despesas(id), conta_receber_id TEXT REFERENCES contas_areceber(id), tipo_pagador TEXT,
       pagador_cotista_id TEXT REFERENCES cotista_aeronave(id), pagador_holding_id TEXT REFERENCES holdings(id),
       valor_centavos INTEGER, data_pagamento TEXT, conta_bancaria_id TEXT REFERENCES contas_bancarias(id), comprovante_url TEXT,
       forma_pagamento TEXT, status TEXT, observacoes TEXT, idempotency_key TEXT UNIQUE, criado_por TEXT
@@ -95,16 +100,23 @@ function banco() {
     INSERT INTO categoria_movimentacao_cliente VALUES ('despesa','Administração','Gestão',NULL,NULL,NULL);
     INSERT INTO contas_bancarias VALUES ('banco-share','SICRED','123',1,'SHARE',NULL);
   `);
+  if (comMigracao) sqlite.exec(migration);
   const prepare = (sql, values = []) => ({
     bind(...v) { return prepare(sql, v); },
     async first() { return sqlite.prepare(sql).get(...values) ?? null; },
     async all() { return { results: sqlite.prepare(sql).all(...values) }; },
     async run() { return sqlite.prepare(sql).run(...values); },
   });
-  const db = { prepare, async batch(statements) {
-    sqlite.exec('BEGIN');
-    try { const results = []; for (const statement of statements) results.push(await statement.run()); sqlite.exec('COMMIT'); return results; }
-    catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+  // D1 serializa batches atômicos; a fila evita transações SQLite sobrepostas no teste concorrente.
+  let queue = Promise.resolve();
+  const db = { prepare, batch(statements) {
+    const operation = queue.then(async () => {
+      sqlite.exec('BEGIN');
+      try { const results = []; for (const statement of statements) results.push(await statement.run()); sqlite.exec('COMMIT'); return results; }
+      catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+    });
+    queue = operation.catch(() => {});
+    return operation;
   } };
   const app = new Hono();
   app.use('*', async (c, next) => { c.set('userId', 'admin'); await next(); });
@@ -113,7 +125,7 @@ function banco() {
     const response = await app.request(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { SHARE_DB: db });
     return { status: response.status, body: await response.json() };
   };
-  return { sqlite, request };
+  return { sqlite, request, db };
 }
 const payload = (overrides = {}) => ({
   numero: '123', cotista_id: 'ca-hold', aeronave_id: 'av', valor_total: 1500,
@@ -145,7 +157,7 @@ for (const source of ['DGA_BRADESCO', 'CONTA_COTISTA']) {
     const result = await request(pago(source));
     assert.equal(result.status, 201, JSON.stringify(result.body));
     const rateio = sqlite.prepare('SELECT * FROM rateio_hold').get();
-    const payment = sqlite.prepare('SELECT * FROM rateio_pagamentos').get();
+    const payment = sqlite.prepare('SELECT * FROM rateio_hold_pagamentos').get();
     assert.equal(rateio.pago_diretamente, source === 'CONTA_COTISTA' ? 1 : 0);
     assert.equal(rateio.valor_pago_real_centavos, 150000);
     assert.equal(rateio.data_pagamento, '2026-11-23');
@@ -158,10 +170,11 @@ for (const source of ['DGA_BRADESCO', 'CONTA_COTISTA']) {
     assert.equal(sqlite.prepare('SELECT status FROM contas_areceber').get().status, 'RECEBIDO');
     assert.equal(sqlite.prepare('SELECT status FROM movimentos_holding').get().status, 'PAGO');
     assert.equal(result.body.nota.status, 'RECEBIDO');
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rateio_pagamentos').get().n, 0);
     const replay = await request(pago(source));
     assert.equal(replay.status, 200, JSON.stringify(replay.body));
     assert.equal(replay.body.nota.id, result.body.nota.id);
-    for (const table of ['notas_fiscais_saida','contas_areceber','rateio_hold','movimentos_holding','rateio_pagamentos']) {
+    for (const table of ['notas_fiscais_saida','contas_areceber','rateio_hold','movimentos_holding','rateio_hold_pagamentos']) {
       assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 1, table);
     }
   });
@@ -188,7 +201,7 @@ for (const overrides of [{ data_pagamento: '' }, { data_pagamento: '2026-02-30' 
 
 test('falha no histórico desfaz a nota, movimento, rateio e recebível juntos', async () => {
   const { sqlite, request } = banco();
-  sqlite.exec("CREATE TRIGGER simular_falha BEFORE INSERT ON rateio_pagamentos BEGIN SELECT RAISE(ABORT, 'falha simulada'); END");
+  sqlite.exec("CREATE TRIGGER simular_falha BEFORE INSERT ON rateio_hold_pagamentos BEGIN SELECT RAISE(ABORT, 'falha simulada'); END");
   const result = await request(pago('DGA_BRADESCO'));
   assert.equal(result.status, 500);
   for (const table of ['notas_fiscais_saida','contas_areceber','rateio_hold','movimentos_holding','lancamentos']) {
@@ -205,7 +218,10 @@ for (const source of ['DGA_BRADESCO', 'CONTA_COTISTA']) {
     const result = await request({ saida_pagamento: source, pagamentos: [payment] }, `/notas-saida/${created.body.nota.id}/dar-baixa`);
     assert.equal(result.status, 200, JSON.stringify(result.body));
     assert.equal(sqlite.prepare('SELECT pago_diretamente FROM rateio_hold').get().pago_diretamente, source === 'CONTA_COTISTA' ? 1 : 0);
-    assert.equal(sqlite.prepare('SELECT comprovante_url FROM rateio_pagamentos').get().comprovante_url, payment.comprovante_url);
+    const replay = await request({ saida_pagamento: source, pagamentos: [payment] }, `/notas-saida/${created.body.nota.id}/dar-baixa`);
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rateio_hold_pagamentos').get().n, 1);
+    assert.equal(sqlite.prepare('SELECT comprovante_url FROM rateio_hold_pagamentos').get().comprovante_url, payment.comprovante_url);
   });
 }
 
@@ -234,4 +250,121 @@ test('baixa simples com chave na raiz também resolve o cotista e o banco pelo I
   const payment = sqlite.prepare('SELECT * FROM rateio_pagamentos').get();
   assert.equal(payment.pagador_cotista_id, 'ca-cliente');
   assert.equal(payment.conta_bancaria_id, 'outro-sicred');
+});
+
+for (const source of ['DGA_BRADESCO', 'CONTA_COTISTA']) {
+  test(`histórico e balanço da holding usam os eventos corretos: ${source}`, async () => {
+    const { sqlite, request, db } = banco();
+    const result = await request(pago(source));
+    assert.equal(result.status, 201, JSON.stringify(result.body));
+    const share = sqlite.prepare("SELECT id FROM lancamentos WHERE tipo_caixa = 'SHARE'").get();
+    const context = await contextoBaixaCotista(db, share.id);
+    const history = await pagamentosContextoBaixa(db, context);
+    assert.equal(history.length, 1);
+    assert.equal(history[0].comprovante_url, 'https://documentos.test/pagamento.pdf');
+    assert.equal(history[0].tipo_pagador, source === 'CONTA_COTISTA' ? 'COTISTA' : 'HOLDING');
+    sqlite.exec(`
+      CREATE TABLE balanco_ajustes (id TEXT, origem_rateio_id TEXT, destino_rateio_id TEXT, valor_centavos INTEGER, motivo TEXT, aeronave_id TEXT);
+      CREATE VIEW vw_balanco_rateios AS SELECT 'HOLD:' || r.id AS id, ca.id AS participante_id,
+        'HOLD:' || hs.holding_id AS dominio, 'MOVIMENTO:' || r.movimento_id AS origem_chave,
+        r.aeronave_id, r.categoria_nome, r.descricao_despesa, r.tipo_rateio, r.valor_rateado_centavos,
+        r.valor_pago_real_centavos, r.pago_por, r.pago_diretamente, r.data_pagamento, r.status
+        FROM rateio_hold r JOIN hold_socios hs ON hs.id = r.socio_id
+        JOIN cotista_aeronave ca ON ca.socio_id = r.socio_id AND ca.aeronave_id = r.aeronave_id;
+    `);
+    const balance = await carregarDadosBalancoMensal(db, 'av', '2026-11-30');
+    assert.equal(balance.pagamentos.length, 1);
+    assert.equal(balance.pagamentos[0].rateioId, `HOLD:${sqlite.prepare('SELECT id FROM rateio_hold').get().id}`);
+    const socio = balance.holdings[0].socios.find(s => s.id === 'ca-hold');
+    assert.equal(socio.pagoCentavos, source === 'CONTA_COTISTA' ? 150000 : 0);
+    assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length, 0);
+  });
+}
+
+test('migração é idempotente, mantém pagamentos de cliente e preserva as duas FKs de rateio', async () => {
+  const { sqlite, request } = banco();
+  const client = await request(pago(undefined, { cotista_id: 'ca-cliente', idempotency_key: 'cliente' }));
+  assert.equal(client.status, 201, JSON.stringify(client.body));
+  const originalSchema = sqlite.prepare("SELECT sql FROM sqlite_master WHERE name='rateio_pagamentos'").get().sql;
+  const originalHistory = sqlite.prepare('SELECT * FROM rateio_pagamentos').all();
+  sqlite.exec(migration);
+  sqlite.exec(migration);
+  assert.equal(sqlite.prepare("SELECT sql FROM sqlite_master WHERE name='rateio_pagamentos'").get().sql, originalSchema);
+  assert.deepEqual(sqlite.prepare('SELECT * FROM rateio_pagamentos').all(), originalHistory);
+  assert.equal(sqlite.prepare("PRAGMA foreign_key_list('rateio_pagamentos')").all().find(f => f.from === 'rateio_id').table, 'rateio_despesas');
+  assert.equal(sqlite.prepare("PRAGMA foreign_key_list('rateio_hold_pagamentos')").all().find(f => f.from === 'rateio_id').table, 'rateio_hold');
+  const hold = await request(pago('DGA_BRADESCO', { idempotency_key: 'holding' }));
+  assert.equal(hold.status, 201, JSON.stringify(hold.body));
+  const holdId = sqlite.prepare('SELECT id FROM rateio_hold').get().id;
+  assert.throws(() => sqlite.prepare('UPDATE rateio_pagamentos SET rateio_id = ?').run(holdId), /FOREIGN KEY constraint failed/);
+  const clientRateioId = sqlite.prepare('SELECT id FROM rateio_despesas').get().id;
+  assert.throws(() => sqlite.prepare('UPDATE rateio_hold_pagamentos SET rateio_id = ?').run(clientRateioId), /FOREIGN KEY constraint failed/);
+  assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length, 0);
+});
+
+test('sem migração, responde 503 claro na criação paga e na baixa, sem gravações parciais', async () => {
+  const { sqlite, request } = banco(false);
+  const initial = await request(pago('CONTA_COTISTA'));
+  assert.equal(initial.status, 503, JSON.stringify(initial.body));
+  assert.equal(initial.body.code, 'migracao_pagamentos_holding_pendente');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM notas_fiscais_saida').get().n, 0);
+  const created = await request(payload());
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const baixa = await request({ idempotency_key: 'baixa', data_pagamento: '2026-11-23', conta_bancaria_id: 'banco-share', saida_pagamento: 'DGA_BRADESCO' }, `/notas-saida/${created.body.nota.id}/dar-baixa`);
+  assert.equal(baixa.status, 503, JSON.stringify(baixa.body));
+  assert.equal(baixa.body.code, 'migracao_pagamentos_holding_pendente');
+  assert.equal(sqlite.prepare('SELECT status FROM contas_areceber').get().status, 'EM_ABERTO');
+  assert.equal(sqlite.prepare('SELECT valor_pago_real_centavos FROM rateio_hold').get().valor_pago_real_centavos, 0);
+});
+
+test('exclusão da NF paga remove primeiro o histórico da holding e respeita todas as FKs', async () => {
+  const { sqlite, request } = banco();
+  const created = await request(pago('DGA_BRADESCO'));
+  const response = await request(undefined, `/notas-saida/${created.body.nota.id}`, 'DELETE');
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  for (const table of ['notas_fiscais_saida', 'contas_areceber', 'lancamentos', 'rateio_hold', 'rateio_hold_pagamentos', 'movimentos_holding']) {
+    assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, table);
+  }
+  assert.equal(sqlite.prepare('PRAGMA foreign_key_check').all().length, 0);
+});
+
+test('pagamentos parciais da holding mantêm saldo e aceitam repetição sem duplicar eventos', async () => {
+  const { sqlite, request } = banco();
+  const created = await request(payload());
+  const url = `/notas-saida/${created.body.nota.id}/dar-baixa`;
+  const payment = cents => ({ idempotency_key: `parcela-${cents}`, tipo_pagador: 'COTISTA', pagador_cotista_id: 'ca-hold', saida_pagamento: 'CONTA_COTISTA', valor_centavos: cents, data_pagamento: '2026-11-23', conta_bancaria_id: 'banco-share', comprovante_url: 'https://documentos.test/parcial.pdf' });
+  const first = { saida_pagamento: 'CONTA_COTISTA', pagamentos: [payment(50000)] };
+  assert.equal((await request(first, url)).status, 200);
+  assert.equal((await request(first, url)).status, 200);
+  assert.equal(sqlite.prepare('SELECT status FROM contas_areceber').get().status, 'EM_ABERTO');
+  assert.equal(sqlite.prepare('SELECT valor_pago_real_centavos FROM rateio_hold').get().valor_pago_real_centavos, 50000);
+  const final = await request({ saida_pagamento: 'CONTA_COTISTA', pagamentos: [payment(100000)] }, url);
+  assert.equal(final.status, 200, JSON.stringify(final.body));
+  assert.equal(sqlite.prepare('SELECT status FROM contas_areceber').get().status, 'RECEBIDO');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rateio_hold_pagamentos').get().n, 2);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rateio_pagamentos').get().n, 0);
+});
+
+test('falha no histórico durante baixa posterior mantém nota e rateio em aberto', async () => {
+  const { sqlite, request } = banco();
+  const created = await request(payload());
+  sqlite.exec("CREATE TRIGGER falha_baixa BEFORE INSERT ON rateio_hold_pagamentos BEGIN SELECT RAISE(ABORT, 'falha simulada'); END");
+  const response = await request({ idempotency_key: 'falha-baixa', data_pagamento: '2026-11-23', conta_bancaria_id: 'banco-share', saida_pagamento: 'DGA_BRADESCO' }, `/notas-saida/${created.body.nota.id}/dar-baixa`);
+  assert.equal(response.status, 500);
+  assert.equal(sqlite.prepare('SELECT status FROM contas_areceber').get().status, 'EM_ABERTO');
+  assert.equal(sqlite.prepare('SELECT status FROM notas_fiscais_saida').get().status, 'EM_ABERTO');
+  assert.equal(sqlite.prepare('SELECT valor_pago_real_centavos FROM rateio_hold').get().valor_pago_real_centavos, 0);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rateio_hold_pagamentos').get().n, 0);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM financeiro_baixa_revisoes').get().n, 0);
+});
+
+test('duas baixas concorrentes da holding não geram pagamento duplicado', async () => {
+  const { sqlite, request } = banco();
+  const created = await request(payload());
+  const url = `/notas-saida/${created.body.nota.id}/dar-baixa`;
+  const baixa = key => ({ idempotency_key: key, data_pagamento: '2026-11-23', conta_bancaria_id: 'banco-share', saida_pagamento: 'DGA_BRADESCO' });
+  const results = await Promise.all([request(baixa('primeira-baixa'), url), request(baixa('segunda-baixa'), url)]);
+  assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM rateio_hold_pagamentos').get().n, 1);
+  assert.equal(sqlite.prepare('SELECT SUM(valor_centavos) AS valor FROM rateio_hold_pagamentos').get().valor, 150000);
 });
