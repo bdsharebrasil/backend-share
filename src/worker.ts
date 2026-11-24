@@ -1,3 +1,4 @@
+import { resumoHorasPerfil } from './lib/horasTripulante'
 import { parseNomesPassageiros, validarNomesPassageiros } from './lib/pesoBalanceamento'
 import { importarAvatarLegado } from './lib/avatarLegado'
 import { tripAuthRoutes } from './routes/tripAuthRoutes'
@@ -1221,9 +1222,11 @@ app.get('/api/colaborador/perfil', async c => {
       ORDER BY r.atualizado_em DESC`).bind(colaborador.id).all().catch(error => { log.error('[colaborador/perfil] aprovações de relatório indisponíveis', error); return { results: [] } }),
   ])
 
-  const [metricas, credenciais] = await Promise.all([
+  const [metricas, credenciais, horasVoo] = await Promise.all([
     carregarMetricasColaborador(db, colaborador, tripulante),
     carregarCredenciaisTripulante(db, tripulante?.id),
+    resumoHorasPerfil(db, colaborador, new Date().toISOString().slice(0, 7))
+      .catch(error => { log.error('[colaborador/perfil] resumo de horas indisponível', error); return null }),
   ])
   const diasUtilizados = (ferias.results as Array<{ quantidade_dias: number; status: string }>)
     .filter(item => item.status === 'aprovada')
@@ -1232,6 +1235,7 @@ app.get('/api/colaborador/perfil', async c => {
     perfil: { ...colaborador, foto_url: colaborador.url_avatar ? '/api/colaborador/foto' : null, dias_ferias_direito: 30 },
     tripulante,
     ...credenciais,
+    horas_voo_minutos: horasVoo,
     metricas,
     pagamentos: pagamentos.results,
     documentos: documentos.results.map(row => documentoColaborador(row as Record<string, unknown>)),

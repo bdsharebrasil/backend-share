@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { PDFDocument } from 'pdf-lib'
-import { consultarHoras, filtrosHoras, pdfHoras } from '../src/lib/horasTripulante.ts'
+import { consultarHoras, filtrosHoras, pdfHoras, resumoHorasPerfil } from '../src/lib/horasTripulante.ts'
 import { diarioTripulacaoRoutes } from '../src/routes/diarioTripulacaoRoutes.ts'
 
 function setup() {
@@ -86,4 +86,15 @@ test('rotas de horas e PDF exigem sessão e ignoram usuário arbitrário no filt
     const pdf=await diarioTripulacaoRoutes.request('/api/colaborador/minhas-horas/pdf?inicio=2026-11-01',{headers},env)
     assert.equal(pdf.status,200);assert.equal(pdf.headers.get('content-type'),'application/pdf');assert.equal(pdf.headers.get('cache-control'),'private, no-store')
   } finally {sql.close();globalThis.fetch=original}
+})
+
+test('perfil soma minutos de voo PIC/SIC por mês, ano e histórico', async () => {
+  const { sql, db } = setup()
+  try {
+    sql.exec("UPDATE lancamentos_diario_bordo SET data_registro = '2025-11-30' WHERE id = 'r2'")
+    const resumo = await resumoHorasPerfil(db, { id: 'u1', canac: '123' }, '2026-11')
+    assert.deepEqual({ ...resumo }, { total: 240, mes: 90, ano: 210 })
+    const vazio = await resumoHorasPerfil(db, { id: 'u0' }, '2026-11')
+    assert.deepEqual({ ...vazio }, { total: 0, mes: 0, ano: 0 })
+  } finally { sql.close() }
 })
