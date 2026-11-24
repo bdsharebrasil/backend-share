@@ -2,7 +2,7 @@ const TERMINAL_SERVICE_ORDER_STATUSES = new Set([
   'concluido',
   'concluida',
   'cancelado',
-  'cancelada',
+  'cancelada', 'completed', 'closed', 'cancelled', 'canceled', 'encerrada', 'encerrado', 'finalizada', 'finalizado',
 ])
 
 export function isActiveCTMServiceOrder(status: unknown): boolean {
@@ -15,12 +15,12 @@ export function isActiveCTMServiceOrder(status: unknown): boolean {
 }
 
 export function getAircraftIdsInMaintenance(
-  orders: Array<{ aeronave_id?: unknown; status?: unknown }>,
+  orders: Array<{ aeronave_id?: unknown; status?: unknown; data_saida?: unknown }>,
 ): Set<string> {
   const aircraftIds = new Set<string>()
   for (const order of orders) {
     const aircraftId = String(order.aeronave_id ?? '').trim()
-    if (aircraftId && isActiveCTMServiceOrder(order.status)) aircraftIds.add(aircraftId)
+    if (aircraftId && !order.data_saida && isActiveCTMServiceOrder(order.status)) aircraftIds.add(aircraftId)
   }
   return aircraftIds
 }
