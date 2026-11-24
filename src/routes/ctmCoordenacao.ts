@@ -81,6 +81,10 @@ coordenacao.on(['POST','PATCH','DELETE'],[caminho,caminho+'/:id'],async c=>{
           campoData(k) && (!/^\d{4}-\d{2}-\d{2}$/.test(valor) || !Number.isFinite(Date.parse(valor)) || new Date(valor).toISOString().slice(0,10)!==valor)) return c.json({error:'Valor inválido: '+k},400)
       valores[k]=campoNumerico(k)?Number(valor):valor
     }
+    if (modulo==='oas' && (valores.total_pecas!=null || valores.total_mao_obra!=null)) {
+      const colunas=await db.prepare('PRAGMA table_info(ctm_ordem_acompanhamento_servico)').all<{name:string}>()
+      if(colunas.results.some(c=>c.name==='total_geral')) valores.total_geral=Number(valores.total_pecas||0)+Number(valores.total_mao_obra||0)
+    }
     if (modulo==='pecas' && (!Number.isInteger(valores.quantidade) || Number(valores.quantidade)<1)) return c.json({error:'Informe uma quantidade positiva.'},400)
     if (modulo==='pecas' && !await db.prepare(`SELECT id FROM ctm_ras WHERE id=? AND aeronave_id=? AND data_saida IS NULL AND ${ativo('ras','ctm_ras')}`).bind(valores.ordem_servico_id,aeronave).first()) return c.json({error:'Selecione um RAS aberto desta matrícula.'},400)
     if (valores.data_saida && (String(valores.data_saida)<String(valores.data_entrada) || modulo==='oas' && (!valores.os_oficina || !valores.oficina_nome || !valores.observacoes))) return c.json({error:'Confira as datas, a oficina, a OS e a descrição do serviço.'},400)

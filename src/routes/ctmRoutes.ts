@@ -91,17 +91,18 @@ ctmRoutes.get('/api/ctm/dashboard', async c => {
   const selecionada = (aeronave.results || []).find((item: any) => String(item.id) === aeronaveId) || (aeronave.results || [])[0] || null
   const id = selecionada?.id
   const filtro = id ? ' WHERE aeronave_id = ?' : ' WHERE 1 = 0'
-  const [programa, diretrizes, componentes, oas, orcamentos, ras, carregamentos] = await Promise.all([
-    ctmRead(c, 'ctm_programa_manutencao', `${filtro} AND ${ativo('programa','ctm_programa_manutencao')} ORDER BY categoria, item`, id ? [id] : []),
-    ctmRead(c, 'ctm_diretrizes', `${filtro} AND ${ativo('diretrizes','ctm_diretrizes')} ORDER BY data_vencimento`, id ? [id] : []),
-    ctmRead(c, 'ctm_mapa_componente', `${filtro} AND ${ativo('componentes','ctm_mapa_componente')} ORDER BY nome`, id ? [id] : []),
-    ctmRead(c, 'ctm_ordem_acompanhamento_servico', `${filtro} AND ${ativo('oas','ctm_ordem_acompanhamento_servico')} ORDER BY data_entrada DESC`, id ? [id] : []),
-    ctmRead(c, 'ctm_orcamentos', `${filtro} AND ${ativo('orcamentos','ctm_orcamentos')} ORDER BY id`, id ? [id] : []),
-    ctmRead(c, 'ctm_ras', `${filtro} AND ${ativo('ras','ctm_ras')} ORDER BY data_entrada DESC`, id ? [id] : []),
-    ctmRead(c, 'ctm_carregamentos', `${filtro} ORDER BY data_voo DESC`, id ? [id] : []),
-  ])
+  const falhas:string[]=[]
+  const [programa,diretrizes,componentes,oas,orcamentos,ras,carregamentos]=await Promise.all(['programa','diretrizes','componentes','oas','orcamentos','ras','carregamentos'].map(async modulo=>{
+    const tabela=CTM_READ_TABLES[modulo].table
+    try {
+      return await ctmRead(c,tabela,`${filtro} AND ${ativo(modulo,tabela)} ORDER BY id`,id?[id]:[])
+    } catch {
+      falhas.push(modulo)
+      return {results:[]}
+    }
+  }))
   const totalOrcamento = (orcamentos.results || []).reduce((total: number, item: any) => total + Number(item.total || item.valor_total || 0), 0)
-  return c.json({ data: { aeronaves: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => isActiveCTMServiceOrder(item.status)).length, orcamento_total: totalOrcamento } } })
+  return c.json({ data: { falhas, aeronaves: aeronave.results, aeronave: selecionada, programa: programa.results, diretrizes: diretrizes.results, componentes: componentes.results, oas: oas.results, orcamentos: orcamentos.results, ras: ras.results, carregamentos: carregamentos.results, resumo: { itens_manutencao: programa.results.length, proximos_vencimentos: programa.results.filter((item: any) => String(item.status || '').toLowerCase() !== 'concluido').length, diretrizes_pendentes: diretrizes.results.filter((item: any) => !['complied','not_applicable', 'concluido', 'conforme'].includes(String(item.status || '').toLowerCase())).length, componentes_atencao: componentes.results.filter((item: any) => !['ok', 'regular'].includes(String(item.status || '').toLowerCase())).length, ordens_abertas: oas.results.filter((item: any) => isActiveCTMServiceOrder(item.status)).length, orcamento_total: totalOrcamento } } })
 })
 
 ctmRoutes.get('/api/ctm/relatorios-manutencao', async c => {
@@ -451,6 +452,8 @@ ctmRoutes.get('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
 
 ctmRoutes.post('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const usuario=await shareBrasilUser(c)
+  if (!usuario || !podeEditar(usuario)) return c.json({error:'Edição restrita à coordenação.'},403)
   const aeronaveId = c.req.param('aeronaveId')
   const existe = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
   if (!existe) return c.notFound()
@@ -492,6 +495,8 @@ ctmRoutes.post('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
 
 ctmRoutes.patch('/api/ctm/aeronaves/:aeronaveId/documentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
+  const usuario=await shareBrasilUser(c)
+  if (!usuario || !podeEditar(usuario)) return c.json({error:'Edição restrita à coordenação.'},403)
   const aeronaveId = c.req.param('aeronaveId')
   const id = c.req.param('id')
   const db = c.env.SHARE_DB

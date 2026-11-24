@@ -47,11 +47,11 @@ jobs:
       - name: Type-check
         run: pnpm type-check
 
-      - name: Testes NF de saída e pagamentos da holding com FKs reais
-        run: node --import tsx --test tests/nf-saida-holding-pagamento.test.mjs tests/baixa-individual-cotista.test.mjs tests/migrar-baixas-rateio.test.mjs
-
       - name: Verificar CTM e peso e balanceamento
         run: node --import tsx --test tests/ctm*.test.mjs tests/pesoBalanceamento.test.mjs
+
+      - name: Testes NF de saída e pagamentos da holding com FKs reais
+        run: node --import tsx --test tests/nf-saida-holding-pagamento.test.mjs tests/baixa-individual-cotista.test.mjs tests/migrar-baixas-rateio.test.mjs
 
       - name: Testes do balanço e custos do portal
         run: node --import tsx --test tests/portal-horas-espelho.test.mjs tests/portal-custos-reais.test.mjs tests/portal-balanco-pagador.test.mjs tests/portal-aeronave-dashboard.test.mjs
