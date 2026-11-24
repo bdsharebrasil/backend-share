@@ -367,6 +367,11 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const ano = Number(c.req.query('ano') || new Date().getFullYear())
   if (!Number.isInteger(ano) || ano < 2000 || ano > 2100) return c.json({ error: 'ano_invalido' }, 400)
+  // No cartão da frota, use a última leitura conhecida até o mês atual.
+  const ultimaLeitura = c.req.query('referencia') === 'atual'
+  const periodo = ultimaLeitura
+    ? "printf('%04d-%02d', dm2.ano, dm2.mes) <= strftime('%Y-%m', 'now')"
+    : 'dm2.ano = ?1'
   const rows = await c.env.SHARE_DB.prepare(`SELECT a.id, a.matricula_registro, a.fabricante, a.modelo, a.url_imagem AS image_url, a.status, a.consumo_combustivel,
       COALESCE((SELECT SUM(l.tempo_total) FROM lancamentos_diario_bordo l WHERE l.aeronave_id = a.id AND strftime('%Y', l.data_registro) = ?1), 0) AS horas_ano,
       COALESCE(dm.celula_atual_ttotal, 0) AS celula_atual_ttotal,
@@ -375,10 +380,10 @@ diarioBordoRoutes.get('/api/interno/diario-bordo/resumo', async c => {
       COALESCE(dm.celula_atual_tvoo, 0) AS celula_atual_tvoo,
       COALESCE(dm.celula_prox_revisao_tvoo, 0) AS celula_prox_revisao_tvoo,
       COALESCE(dm.celula_disponivel_tvoo, 0) AS celula_disponivel_tvoo,
-      COALESCE(dm.mes, 0) AS mes_referencia,
+      dm.modo_celula, COALESCE(dm.mes, 0) AS mes_referencia,
       COALESCE(dm.fechado, 0) AS fechado
     FROM aeronave a
-    LEFT JOIN diario_mes dm ON dm.id = (SELECT dm2.id FROM diario_mes dm2 WHERE dm2.aeronave_id = a.id AND dm2.ano = ?1 ORDER BY dm2.mes DESC LIMIT 1)
+    LEFT JOIN diario_mes dm ON dm.id = (SELECT dm2.id FROM diario_mes dm2 WHERE dm2.aeronave_id = a.id AND ${periodo} ORDER BY dm2.ano DESC, dm2.mes DESC LIMIT 1)
     WHERE lower(COALESCE(a.status, 'ativa')) LIKE 'ativ%'
     ORDER BY a.matricula_registro`).bind(String(ano)).all<any>()
   return c.json({ ano, aeronaves: rows.results.map((row: any) => ({ ...row, horas_ano: Number(row.horas_ano || 0), celula_atual_ttotal: Number(row.celula_atual_ttotal || 0), celula_prox_revisao_ttotal: Number(row.celula_prox_revisao_ttotal || 0), celula_disponivel_ttotal: Number(row.celula_disponivel_ttotal || 0), celula_atual_tvoo: Number(row.celula_atual_tvoo || 0), celula_prox_revisao_tvoo: Number(row.celula_prox_revisao_tvoo || 0), celula_disponivel_tvoo: Number(row.celula_disponivel_tvoo || 0), fechado: Number(row.fechado || 0) })) })

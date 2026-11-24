@@ -16,10 +16,9 @@ type Registro = { id: string; aeronave_id: string; matricula: string; data: stri
 const minutos = (v: unknown) => Math.round(Math.max(0, Number(v) || 0) * 60)
 export const horasMinutos = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`
 
-export async function consultarHoras(db: D1Database, usuario: Usuario, filtros: Filtros) {
-  // A identidade é sempre extraída da sessão. Não há seleção de outro usuário.
-  // CANAC legado só é aceito se não estiver vinculado a outra conta.
-  const base = `FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id
+// A identidade é sempre extraída da sessão. Não há seleção de outro usuário.
+// CANAC legado só é aceito se não estiver vinculado a outra conta.
+const base = `FROM lancamentos_diario_bordo l LEFT JOIN aeronave a ON a.id = l.aeronave_id
     WHERE (EXISTS (SELECT 1 FROM tripulacao t WHERE
       (t.user_id = ?1 OR (t.user_id IS NULL AND NULLIF(TRIM(?2), '') IS NOT NULL AND lower(trim(t.canac)) = lower(trim(?2))
         AND NOT EXISTS (SELECT 1 FROM tripulacao outra WHERE outra.user_id IS NOT NULL AND outra.user_id <> ?1 AND lower(trim(outra.canac)) = lower(trim(?2)))))
@@ -28,6 +27,18 @@ export async function consultarHoras(db: D1Database, usuario: Usuario, filtros: 
       OR (NULLIF(TRIM(?2), '') IS NOT NULL
         AND (lower(trim(l.pic_canac)) = lower(trim(?2)) OR lower(trim(l.sic_canac)) = lower(trim(?2)))
         AND NOT EXISTS (SELECT 1 FROM tripulacao outra WHERE outra.user_id IS NOT NULL AND outra.user_id <> ?1 AND lower(trim(outra.canac)) = lower(trim(?2)))))`
+
+export function resumoHorasPerfil(db: D1Database, usuario: Usuario, competencia: string) {
+  return db.prepare(`WITH voos AS (
+    SELECT substr(l.data_registro, 1, 7) AS mes,
+      ROUND(MAX(COALESCE(l.tempo_voo, 0), 0) * 60) AS minutos ${base}
+  ) SELECT COALESCE(SUM(minutos), 0) AS total,
+      COALESCE(SUM(CASE WHEN mes = ?3 THEN minutos END), 0) AS mes,
+      COALESCE(SUM(CASE WHEN substr(mes, 1, 4) = substr(?3, 1, 4) THEN minutos END), 0) AS ano
+    FROM voos`).bind(usuario.id, usuario.canac || '', competencia).first<{ total: number; mes: number; ano: number }>()
+}
+
+export async function consultarHoras(db: D1Database, usuario: Usuario, filtros: Filtros) {
   const aeronaves = await db.prepare(`SELECT DISTINCT l.aeronave_id AS id, COALESCE(a.matricula_registro, 'Sem matrícula') AS matricula ${base} ORDER BY matricula`)
     .bind(usuario.id, usuario.canac || '').all<{ id: string; matricula: string }>()
   const rows = await db.prepare(`SELECT l.id, l.aeronave_id, COALESCE(a.matricula_registro, 'Sem matrícula') AS matricula,
