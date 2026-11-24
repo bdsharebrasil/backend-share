@@ -2261,6 +2261,38 @@ export async function createReimbursement(
   }
 }
 
+/** Liquida a saída da Share. O reembolso a receber e os rateios não são quitados aqui. */
+export async function settleShareExpense(db: Database, lancamentoId: string, body: Row, userId: string | null): Promise<Row> {
+  const row = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
+  if (!row) throw new FinanceError('Lançamento não encontrado', 'lancamento_nao_encontrado', 404)
+  if (upper(row.tipo_caixa) !== 'SHARE' || !['SAIDA', 'DESPESA'].includes(upper(row.fluxo)) || asFlag(row.pago_diretamente)) {
+    throw new FinanceError('A baixa exige uma despesa paga pela Share', 'pagamento_share_origem_invalida', 409)
+  }
+  if (upper(row.status) === 'CANCELADO') throw new FinanceError('Lançamento cancelado não pode ser pago', 'lancamento_cancelado', 409)
+  if (!isIsoDate(body.data_pagamento ?? body.dataPagamento)) throw new FinanceError('Data de pagamento inválida', 'data_pagamento_invalida')
+  const bank = await resolveContaBancariaId(db, body.conta_bancaria_id ?? body.banco_pagamento ?? body.bancoPagamento)
+  const shareBank = bank ? await db.prepare("SELECT id FROM contas_bancarias WHERE id = ? AND UPPER(tipo_caixa) = 'SHARE' AND ativo = 1").bind(bank).first<Row>() : null
+  if (!shareBank) throw new FinanceError('Selecione uma conta bancária ativa da Share', 'conta_bancaria_share_invalida')
+  const contas = await db.prepare('SELECT id, status FROM contas_apagar WHERE lancamentos_id = ?').bind(lancamentoId).all<Row>()
+  const ativas = (contas.results ?? []).filter(conta => upper(conta.status) !== 'CANCELADO')
+  if (ativas.length > 1) throw new FinanceError('Mais de uma conta a pagar vinculada. Selecione a obrigação correta.', 'vinculo_ambiguo', 409)
+  if (ativas.length === 1) return settlePayable(db, String(ativas[0].id), body, userId)
+  if (contas.results?.length) throw new FinanceError('Conta a pagar cancelada', 'conta_cancelada', 409)
+  if (upper(row.status) === 'PAGO' || row.data_pagamento) return { ...row, idempotent: true }
+  const paymentDate = dateValue(body.data_pagamento ?? body.dataPagamento)
+  const amount = asPositiveCents(row.valor_centavos)
+  const schema = await loadSchema(db)
+  await db.batch([
+    updateStatement(db, schema, 'lancamentos', {
+      status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank,
+      comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl),
+      forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString(),
+    }, 'id = ?', [lancamentoId]),
+    auditStatement(db, schema, 'lancamentos', lancamentoId, 'BAIXA_PAGAMENTO_SHARE', userId, amount, amount, nullableText(body.motivo), idempotencyKey(body)),
+  ])
+  return { ...(await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()), idempotent: false }
+}
+
 export async function settlePayable(db: Database, payableId: string, body: Row, userId: string | null): Promise<Row> {
   const schema = await loadSchema(db)
   const row = await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()
@@ -2306,8 +2338,8 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
     : null
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
-    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
-    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
+    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
+    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
       db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('APROVADO', 'CONVERTIDO')").bind(purchase.id),

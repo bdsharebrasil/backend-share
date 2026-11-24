@@ -29,6 +29,7 @@ export function mapConta(row: Record<string, unknown>): Record<string, unknown> 
     comprovantePagamentoUrl: row.comprovante_pagamento_url ?? row.comprovante_recebimento_url ?? null,
     documento,
     documentoUrl,
+    anexos_json: row.anexos_json ?? null,
     url_demonstrativo: row.url_demonstrativo ?? null,
     url_nf: row.url_nf ?? null,
     url_recibo: row.url_recibo ?? null,
