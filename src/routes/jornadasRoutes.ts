@@ -175,6 +175,12 @@ export function checklistPreVooConcluido(status: unknown) {
   return String(status || '').trim().toLowerCase() === 'concluido'
 }
 
+async function checklistDoAgendamentoConcluido(db: D1Database, agendamentoId: string) {
+  const checklist = await db.prepare('SELECT status FROM checklists_pre_voo WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1')
+    .bind(agendamentoId).first<{ status: string | null }>()
+  return checklistPreVooConcluido(checklist?.status)
+}
+
 export function agendamentoPermiteIniciarJornada(status: unknown) {
   const normalizado = String(status || '').trim().toLowerCase().replace(/\s+/g, '_')
   return ['aprovada', 'acionado', 'decolado', 'em_rota', 'em_voo', 'em_solo'].includes(normalizado)
@@ -246,7 +252,7 @@ jornadasRoutes.get('/api/interno/agendamento/:id/pernas-plano', async c => {
         p.horario_ac_user_id, p.horario_dep_user_id, p.horario_pouso_user_id, p.horario_corte_user_id, p.status
       FROM pernas_jornada_voo p
       JOIN jornadas_voo j ON j.id = p.jornada_id
-      WHERE j.solicitacao_id = ?1
+      WHERE j.solicitacao_id = ?1 OR p.id = ?1
       ORDER BY date(j.data), j.numero_jornada, p.numero, p.id`)
       .bind(c.req.param('id')).all()
     return c.json({ pernas: resultado.results || [] })
@@ -329,7 +335,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const db = c.env.SHARE_DB
   const idSolicitacao = c.req.param('id')
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
-  if (body.aguardar_horarios === true) return c.json({ error: 'planejamento_nao_cria_jornada', detail: 'Agende a próxima perna da solicitação. A jornada só começa ao registrar o acionamento.' }, 400)
+  if (body.aguardar_horarios === true) return c.json({ error: 'planejamento_nao_cria_jornada', detail: 'Use Novo agendamento. A jornada só começa ao registrar o acionamento.' }, 400)
   const planejada = body.perna_planejada_id ? await buscarPernaPlanejada(db, String(body.perna_planejada_id), idSolicitacao) : null
   if (body.perna_planejada_id && (!planejada || planejada.status !== 'PLANEJADA')) return c.json({ error: 'perna_planejada_indisponivel' }, 409)
   if (planejada) Object.assign(body, { origem: planejada.origem, destino: planejada.destino, numero_passageiros: planejada.numero_passageiros })
@@ -339,8 +345,12 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const statusVoo = String(voo.status || '').trim().toLowerCase()
   if (statusVoo === 'encerrada' || statusVoo === 'concluida') return c.json({ error: 'agendamento_encerrado', detail: 'Operações encerradas são somente leitura e não podem receber nova jornada.' }, 409)
   if (!agendamentoPermiteIniciarJornada(statusVoo)) return c.json({ error: 'agendamento_nao_aprovado', detail: 'A jornada só pode ser iniciada para um agendamento aprovado, em voo ou em solo.' }, 409)
-  const checklist = await db.prepare('SELECT status FROM checklists_pre_voo WHERE solicitacao_id = ?1 ORDER BY criado_em DESC LIMIT 1').bind(idSolicitacao).first<{ status: string | null }>()
-  if (!checklistPreVooConcluido(checklist?.status)) return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo antes de iniciar a jornada.' }, 409)
+  if (!await checklistDoAgendamentoConcluido(db, planejada?.id || idSolicitacao)) {
+    return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo deste agendamento para registrar o acionamento.' }, 409)
+  }
+  if (planejada && await db.prepare("SELECT id FROM jornadas_voo WHERE solicitacao_id = ?1 AND status <> 'encerrada' LIMIT 1").bind(idSolicitacao).first()) {
+    return c.json({ error: 'jornada_ja_iniciada', detail: 'Já existe uma jornada aberta. Atualize a operação para registrar este voo como a próxima perna.' }, 409)
+  }
   const tripulantes = (Array.isArray(body.tripulantes) && body.tripulantes.length
     ? body.tripulantes
     : [{ tripulante_id: voo.piloto_id, funcao: 'PIC' }, { tripulante_id: voo.copiloto_id, funcao: 'SIC' }]
@@ -396,14 +406,21 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   let primeiraPernaId: string | null = null
   for (const item of tripulantes.sort((a: any) => (a.funcao === 'PIC' ? -1 : 1))) {
     const jornadaId = uuid()
+    // A primeira inserção decide se a jornada ainda pode ser aberta. As outras
+    // só entram se a jornada principal deste lote tiver sido criada.
+    const condicaoPlanejada = principalId
+      ? 'WHERE EXISTS (SELECT 1 FROM jornadas_voo WHERE id = ?)'
+      : `WHERE EXISTS (SELECT 1 FROM solicitacoes_reserva_voo WHERE id = ? AND lower(status) = 'aprovada' AND excluida_em IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM jornadas_voo WHERE solicitacao_id = ? AND status <> 'encerrada')`
+    const parametrosPlanejados = principalId ? [principalId] : [planejada?.id || null, idSolicitacao]
     comandos.push(db.prepare(`INSERT INTO jornadas_voo
         (id, solicitacao_id, aeronave_id, tripulante_id, funcao_tripulante, jornada_principal_id, numero_jornada, data,
          horario_apresentacao, horario_acionamento, horario_decolagem, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       ${planejada ? "WHERE EXISTS (SELECT 1 FROM solicitacoes_reserva_voo WHERE id = ? AND lower(status) = 'aprovada' AND excluida_em IS NULL)" : ''}`)
+       ${planejada ? condicaoPlanejada : ''}`)
       .bind(jornadaId, idSolicitacao, voo.aeronave_id, item.tripulante_id, item.funcao, principalId, numeroJornada, data,
          apresentacao, acionamento, horarioDep, corteInicio, posCorte, corteInicio ? 'em_solo' : horarioDep ? 'em_rota' : 'em_solo',
-        body.observacoes || null, extractSupabaseUserId(c), ...(planejada ? [planejada.id] : [])))
+        body.observacoes || null, extractSupabaseUserId(c), ...(planejada ? parametrosPlanejados : [])))
     if (!principalId) {
       principalId = jornadaId
       primeiraPernaId = planejada?.id || uuid()
@@ -418,7 +435,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   }
   if (planejada && primeiraPernaId) comandos.push(vincularPernaPlanejada(db, planejada.id, idSolicitacao, horarioDep ? 'decolado' : 'acionado'))
   const resultados = await db.batch(comandos)
-  if (!resultados[0]?.meta?.changes) return c.json({ error: 'perna_planejada_ja_iniciada' }, 409)
+  if (!resultados[0]?.meta?.changes) return c.json({ error: 'agendamento_ou_jornada_alterados', detail: 'Atualize a operação e tente novamente.' }, 409)
   const criadas = await Promise.all(idsCriadas.map(id => db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(id).first<any>()))
   await db.prepare(`UPDATE solicitacoes_reserva_voo
       SET horario_previsto_agendamento = ?1,
@@ -576,7 +593,17 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
   const b = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const planejada = b.perna_planejada_id ? await buscarPernaPlanejada(db, String(b.perna_planejada_id), jornada.solicitacao_id) : null
   if (b.perna_planejada_id && (!planejada || planejada.status !== 'PLANEJADA')) return c.json({ error: 'perna_planejada_indisponivel' }, 409)
-  if (planejada) Object.assign(b, { origem: planejada.origem, destino: planejada.destino, numero_passageiros: planejada.numero_passageiros })
+  if (planejada) {
+    if (!await checklistDoAgendamentoConcluido(db, planejada.id)) {
+      return c.json({ error: 'checklist_pre_voo_obrigatorio', detail: 'Conclua o checklist pré-voo deste agendamento para registrar o acionamento.' }, 409)
+    }
+    const anterior = await db.prepare('SELECT horario_pouso, horario_corte FROM pernas_jornada_voo WHERE jornada_id = ?1 ORDER BY numero DESC LIMIT 1')
+      .bind(jornada.id).first<{ horario_pouso: string | null; horario_corte: string | null }>()
+    if (anterior && (!anterior.horario_pouso || !anterior.horario_corte)) {
+      return c.json({ error: 'perna_anterior_em_andamento', detail: 'Registre o pouso e o corte do voo anterior para iniciar o próximo.' }, 409)
+    }
+    Object.assign(b, { origem: planejada.origem, destino: planejada.destino, numero_passageiros: planejada.numero_passageiros })
+  }
   const ultima = await db.prepare('SELECT COALESCE(MAX(numero), 0) AS n, MAX(COALESCE(horario_corte, horario_pouso, horario_dep, horario_ac)) AS ultimo FROM pernas_jornada_voo WHERE jornada_id = ?1').bind(jornada.id).first<any>()
   const referencia = ultima?.ultimo || jornada.horario_apresentacao
   const origem = String(b.origem || '').trim().toUpperCase()
@@ -615,11 +642,11 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
     (id, jornada_id, numero, origem, destino, passageiros, horario_programado, horario_ac, horario_dep, horario_pouso, horario_corte,
      horario_ac_user_id, horario_dep_user_id, horario_pouso_user_id, horario_corte_user_id, status)
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    ${planejada ? "WHERE EXISTS (SELECT 1 FROM solicitacoes_reserva_voo WHERE id = ? AND lower(status) = 'aprovada' AND excluida_em IS NULL)" : ""}`)
+    ${planejada ? "WHERE EXISTS (SELECT 1 FROM solicitacoes_reserva_voo WHERE id = ? AND lower(status) = 'aprovada' AND excluida_em IS NULL) AND EXISTS (SELECT 1 FROM jornadas_voo WHERE id = ? AND status <> 'encerrada')" : ""}`)
     .bind(pernaId, jornada.id, numero, origem, destino, numeroPassageiros, horarioProgramado, horarioAc, horarioDep, horarioPouso, horarioCorte,
-      horarioAc ? userId : null, horarioDep ? userId : null, horarioPouso ? userId : null, horarioCorte ? userId : null, status, ...(planejada ? [planejada.id] : []))
+      horarioAc ? userId : null, horarioDep ? userId : null, horarioPouso ? userId : null, horarioCorte ? userId : null, status, ...(planejada ? [planejada.id, jornada.id] : []))
   const resultados = await db.batch(planejada ? [inserir, vincularPernaPlanejada(db, planejada.id, jornada.solicitacao_id, horarioCorte ? 'concluida' : horarioPouso ? 'em_solo' : horarioDep ? 'decolado' : 'acionado')] : [inserir])
-  if (!resultados[0]?.meta?.changes) return c.json({ error: 'perna_planejada_ja_iniciada' }, 409)
+  if (!resultados[0]?.meta?.changes) return c.json({ error: 'agendamento_ou_jornada_alterados', detail: 'Atualize a operação e tente novamente.' }, 409)
   const pernas = await sincronizarResumoJornada(db, jornada.id)
   const statusAgendamento = await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id)
   const diarioBordo = await sincronizarRascunhoSemPerderHorarios(db, pernaId, await getAuthenticatedUserId(c))
