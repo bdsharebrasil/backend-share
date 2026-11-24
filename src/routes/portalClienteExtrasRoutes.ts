@@ -312,7 +312,7 @@ portalClienteExtrasRoutes.get('/api/portal/manutencao', async c => {
              CAST(strftime('%Y', COALESCE(NULLIF(r.data_saida, ''), r.data_entrada)) AS INTEGER) AS ano
         FROM ctm_ras r
         JOIN aeronave a ON a.id = r.aeronave_id
-       WHERE lower(COALESCE(r.status, '')) IN ('in_progress', 'completed')
+       WHERE lower(COALESCE(r.status, '')) IN ('in_progress', 'completed','em_andamento','concluida','concluido') AND NOT EXISTS (SELECT 1 FROM ctm_historico h WHERE h.modulo='ras' AND h.registro_id=r.id AND h.acao='ARQUIVAR')
          AND EXISTS (
            SELECT 1 FROM cotista_aeronave ca
             WHERE ca.aeronave_id = r.aeronave_id
