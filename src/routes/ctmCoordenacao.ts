@@ -32,7 +32,7 @@ coordenacao.get(inicio+'/historico/:modulo',async c=>{
 })
 const caminho=inicio+'/registros/:modulo'
 coordenacao.get(caminho,async c=>{
-  const {modulo,aeronave}=c.req.param()
+  const modulo=c.req.param('modulo')||'', aeronave=c.req.param('aeronave')||''
   if (!Object.prototype.hasOwnProperty.call(modulos,modulo)) return c.notFound()
   const {tabela,campos,obrigatorios}=modulos[modulo]
   const db=c.env.SHARE_DB
