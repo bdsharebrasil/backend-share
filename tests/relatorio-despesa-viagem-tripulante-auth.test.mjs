@@ -13,19 +13,20 @@ function contextoAtivo() {
   }
 }
 
-test('colaborador ativo acessa somente os novos caminhos próprios do lançamento de despesas', async (t) => {
+test('usuário autenticado acessa as consultas do relatório, inclusive sem ser tripulante', async (t) => {
   const fetchOriginal = globalThis.fetch
   t.after(() => { globalThis.fetch = fetchOriginal })
   globalThis.fetch = async () => Response.json({ id: 'tripulante-teste' })
   const caminhosPermitidos = [
-    ['GET', '/api/financeiro/relatorios-despesa-viagem/meus-voos'],
-    ['POST', '/api/financeiro/relatorios-despesa-viagem/iniciar-do-voo'],
-    ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/finalizar'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/opcoes'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1'],
     ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/pdf'],
-    ['PUT', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/despesas-tripulante'],
-    ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos-tripulante'],
-    ['DELETE', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos-tripulante/anexo-1'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos/anexo-1/arquivo'],
     ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos-tripulante/anexo-1/arquivo'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos-rejeicao/anexo-1/arquivo'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/meus-voos'],
+    ['GET', '/api/financeiro/relatorios-despesa-viagem/minhas'],
   ]
   for (const [metodo, caminho] of caminhosPermitidos) {
     const acesso = await autorizarRequisicaoFinanceira(contextoAtivo(), caminho, metodo)
@@ -33,12 +34,11 @@ test('colaborador ativo acessa somente os novos caminhos próprios do lançament
   }
 })
 
-test('a nova permissão não libera rotas financeiras anteriores para colaborador sem papel', async (t) => {
+test('usuário autenticado não recebe permissões de alteração por causa da leitura', async (t) => {
   const fetchOriginal = globalThis.fetch
   t.after(() => { globalThis.fetch = fetchOriginal })
   globalThis.fetch = async () => Response.json({ id: 'tripulante-teste' })
   for (const [metodo, caminho] of [
-    ['GET', '/api/financeiro/relatorios-despesa-viagem/relatorio-1'],
     ['PATCH', '/api/financeiro/relatorios-despesa-viagem/relatorio-1'],
     ['POST', '/api/financeiro/relatorios-despesa-viagem/relatorio-1/anexos'],
   ]) {

@@ -135,6 +135,28 @@ test('usuário autenticado pode consultar o histórico de envios pessoais', asyn
   assert.deepEqual(acesso, { autorizado: true, userId: 'user-historico' })
 })
 
+test('qualquer usuário autenticado pode consultar o balanço financeiro cotista', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async () => Response.json({ id: 'user-cotista-comum' })
+  for (const path of [
+    '/api/financeiro/cotista',
+    '/api/financeiro/cotista/dashboard',
+    '/api/financeiro/cotista/relatorio-geral',
+    '/api/financeiro/cotista/voos-emprestimos',
+    '/api/financeiro/cotista/balanco-mensal',
+  ]) {
+    const acesso = await autorizarRequisicaoFinanceira(contexto(), path, 'GET')
+    assert.deepEqual(acesso, { autorizado: true, userId: 'user-cotista-comum' }, path)
+  }
+  const contextoEscrita = contexto('POST')
+  contextoEscrita.env.SHARE_DB = {
+    prepare() { return { bind() { return this }, async first() { return null } } },
+  }
+  const escrita = await autorizarRequisicaoFinanceira(contextoEscrita, '/api/financeiro/cotista/balanco-ajustes', 'POST')
+  assert.deepEqual(escrita, { autorizado: false, status: 403 })
+})
+
 test('usuário autenticado pode emitir recibos próprios, mas não executar operações financeiras de gestão', async (t) => {
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })

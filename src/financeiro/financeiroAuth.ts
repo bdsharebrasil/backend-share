@@ -80,6 +80,18 @@ async function usuarioAtivo(db: FinanceiroAuthDb, userId: string): Promise<boole
 async function validarUsuarioSupabase(c: FinanceiroAuthContext): Promise<string | null> {
   return getAuthenticatedUserId(c as Parameters<typeof getAuthenticatedUserId>[0])
 }
+function usuarioPodeConsultarRelatorio(path: string, method: string): boolean {
+  if (method !== 'GET') return false
+  return path === '/relatorios-despesa-viagem/opcoes'
+    || path === '/relatorios-despesa-viagem/minhas'
+    || path === '/relatorios-despesa-viagem/meus-voos'
+    || path === '/relatorios-despesa-viagem'
+    || /^\/relatorios-despesa-viagem\/[^/]+$/.test(path)
+    || /^\/relatorios-despesa-viagem\/[^/]+\/pdf$/.test(path)
+    || /^\/relatorios-despesa-viagem\/[^/]+\/anexos\/[^/]+\/arquivo$/.test(path)
+    || /^\/relatorios-despesa-viagem\/[^/]+\/anexos-tripulante\/[^/]+\/arquivo$/.test(path)
+    || /^\/relatorios-despesa-viagem\/[^/]+\/anexos-rejeicao\/[^/]+\/arquivo$/.test(path)
+}
 function colaboradorPodeSolicitar(path: string, method: string): boolean {
   if (method === 'GET' && path === '/relatorios-despesa-viagem/minhas') return true
   if (method === 'GET' && path === '/relatorios-despesa-viagem/meus-voos') return true
@@ -122,6 +134,15 @@ function usuarioPodeConsultarDashboard(path: string, method: string): boolean {
     || path === '/dashboard/financeiro/movimentacoes'
   )
 }
+function usuarioPodeConsultarBalancoCotista(path: string, method: string): boolean {
+  return method === 'GET' && [
+    '/cotista',
+    '/cotista/dashboard',
+    '/cotista/relatorio-geral',
+    '/cotista/voos-emprestimos',
+    '/cotista/balanco-mensal',
+  ].includes(path)
+}
 
 export async function autorizarRequisicaoFinanceira(
   c: FinanceiroAuthContext,
@@ -135,7 +156,16 @@ export async function autorizarRequisicaoFinanceira(
   if (path === '/pagamentos-folha' || path.startsWith('/pagamentos-folha/')) {
     return { autorizado: true, userId }
   }
+  // Consultas de relatórios são permitidas a qualquer usuário autenticado.
+  // As rotas de escrita continuam passando pelas regras de colaborador ativo
+  // ou pelo papel financeiro abaixo.
+  if (usuarioPodeConsultarRelatorio(path, method)) {
+    return { autorizado: true, userId }
+  }
   if (usuarioPodeConsultarDashboard(path, method)) {
+    return { autorizado: true, userId }
+  }
+  if (usuarioPodeConsultarBalancoCotista(path, method)) {
     return { autorizado: true, userId }
   }
   if (usuarioPodeAcessarEnvioPagamento(path, method)) {

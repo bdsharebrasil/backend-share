@@ -35,18 +35,17 @@ test("finalização da tripulação é autorizada no middleware e protegida por 
   assert.match(finalize, /statusFinalizado/);
 });
 
-test("PDF privado exige tripulante proprietário ou financeiro autorizado", () => {
+test("PDF privado exige autenticação, mas a leitura é comum aos perfis autenticados", () => {
   const pdf = route(worker,
     "app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf'",
     "function parseRejectionAttachments(");
   assert.match(pdf, /authenticatedColaborador\(c\)/);
-  assert.match(pdf, /buscarPosicaoTripulanteRelatorio\(c\.env\.SHARE_DB, id, user\.id\)/);
-  assert.match(pdf, /relatorio_nao_pertence_ao_tripulante/);
+  assert.doesNotMatch(pdf, /relatorio_nao_pertence_ao_tripulante/);
   assert.match(pdf, /Cache-Control': 'private, no-store'/);
   assert.match(pdf, /Content-Type': 'application\/pdf'/);
 });
 
-test("comprovantes de minhas usam rota específica que verifica posse do tripulante", () => {
+test("comprovantes do relatório usam rota autenticada comum aos perfis", () => {
   const minhas = route(worker,
     "app.get('/api/financeiro/relatorios-despesa-viagem/minhas'",
     "app.get('/api/financeiro/relatorios-despesa-viagem',");
@@ -54,5 +53,6 @@ test("comprovantes de minhas usam rota específica que verifica posse do tripula
   const proof = route(worker,
     "app.get('/api/financeiro/relatorios-despesa-viagem/:id/anexos-tripulante/:anexoId/arquivo'",
     "app.post('/api/financeiro/relatorios-despesa-viagem/:id/finalizar'");
-  assert.match(proof, /buscarPosicaoTripulanteRelatorio\(c\.env\.SHARE_DB, idRelatorio, user\.id\)/);
+  assert.match(proof, /authenticatedColaborador\(c\)/);
+  assert.doesNotMatch(proof, /relatorio_nao_pertence_ao_tripulante/);
 });

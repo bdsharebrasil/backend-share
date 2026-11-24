@@ -162,6 +162,15 @@ app.use('/api/financeiro/*', async (c, next) => {
 app.use('/api/financeiro/cotista/*', async (c, next) => {
   const userId = (c as any).get('userId') as string | null
   if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
+  const path = new URL(c.req.url).pathname.replace(/^\/api\/financeiro/, '')
+  const consultaCotista = c.req.method === 'GET' && [
+    '/cotista',
+    '/cotista/dashboard',
+    '/cotista/relatorio-geral',
+    '/cotista/voos-emprestimos',
+    '/cotista/balanco-mensal',
+  ].includes(path)
+  if (consultaCotista) return next()
   const permitido = await usuarioTemPapel(c.env.SHARE_DB, userId, ['admin', 'administrador', 'gestor_master', 'gestormaster', 'financeiro_master', 'financeiromaster'])
   if (!permitido) return c.json({ error: 'financeiro_cotista_nao_autorizado' }, 403)
   return next()
@@ -4538,7 +4547,6 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/anexos-tripulante/:anexoI
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     const idRelatorio = c.req.param('id')
-    if (!await buscarPosicaoTripulanteRelatorio(c.env.SHARE_DB, idRelatorio, user.id)) return c.json({ error: 'relatorio_nao_pertence_ao_tripulante' }, 403)
     const anexo = await c.env.SHARE_DB.prepare(`SELECT caminho_arquivo, nome_arquivo, tipo_arquivo
       FROM relatorio_despesa_viagem_anexos WHERE id = ?1 AND relatorio_despesa_viagem_id = ?2`)
       .bind(c.req.param('anexoId'), idRelatorio).first<{ caminho_arquivo: string; nome_arquivo: string; tipo_arquivo: string | null }>()
@@ -5190,11 +5198,6 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/pdf', async c => {
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   try {
-    const id = c.req.param('id')
-    const posicao = await buscarPosicaoTripulanteRelatorio(c.env.SHARE_DB, id, user.id)
-    if (!posicao && !(await usuarioPodeGerenciarFinanceiro(c.env.SHARE_DB, user.id))) {
-      return c.json({ error: 'relatorio_nao_pertence_ao_tripulante' }, 403)
-    }
     await garantirTabelaRelatorioDespesaViagem(c)
     const row = await c.env.SHARE_DB.prepare('SELECT pdf_path, numero_relatorio FROM relatorio_despesa_viagem WHERE id = ?1').bind(c.req.param('id')).first<{ pdf_path: string | null; numero_relatorio: string }>()
     if (!row?.pdf_path) return c.notFound()
@@ -5412,4 +5415,3 @@ export default {
     }
   },
 }
-
