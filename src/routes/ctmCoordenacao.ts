@@ -89,6 +89,9 @@ coordenacao.on(['POST','PATCH','DELETE'],[caminho,caminho+'/:id'],async c=>{
     if (modulo==='pecas' && !await db.prepare(`SELECT id FROM ctm_ras WHERE id=? AND aeronave_id=? AND data_saida IS NULL AND ${ativo('ras','ctm_ras')}`).bind(valores.ordem_servico_id,aeronave).first()) return c.json({error:'Selecione um RAS aberto desta matrícula.'},400)
     if (valores.data_saida && (String(valores.data_saida)<String(valores.data_entrada) || modulo==='oas' && (!valores.os_oficina || !valores.oficina_nome || !valores.observacoes))) return c.json({error:'Confira as datas, a oficina, a OS e a descrição do serviço.'},400)
     if (valores.tipo_rateio==='horas' && (!valores.relatorio_voo_de || !valores.relatorio_voo_ate || valores.relatorio_voo_de>valores.relatorio_voo_ate)) return c.json({error:'Informe o período do rateio por uso.'},400)
+    if (modulo==='ras' && valores.oas_numero && !await db.prepare(`SELECT id FROM ctm_ordem_acompanhamento_servico WHERE numero=? AND aeronave_id=? AND ${ativo('oas','ctm_ordem_acompanhamento_servico')}`).bind(valores.oas_numero,aeronave).first()) return c.json({error:'OAS não localizada nesta matrícula.'},400)
+    if (valores.data_saida && modulo==='ras' && !valores.descricao) return c.json({error:'Descreva os serviços registrados pela oficina.'},400)
+    if (valores.status==='not_applicable' && !valores.aplicabilidade) return c.json({error:'Documente o motivo da não aplicabilidade.'},400)
     if (valores.status==='complied' && (!valores.metodo_de_conformidade||!valores.data_de_conformidade)) return c.json({error:'Informe a referência e a data do cumprimento.'},400)
   }
   if (modulo==='pecas' && antes) {
