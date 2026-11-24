@@ -1,31 +1,32 @@
 export type PernaPlanejada = {
   id: string; solicitacao_id: string; data_prevista: string; origem: string; destino: string;
   horario_previsto: string | null; numero_passageiros: number; status: 'PLANEJADA' | 'INICIADA' | 'CANCELADA';
-  perna_jornada_id: string | null; criado_em: string; atualizado_em: string;
+  criado_em: string; atualizado_em: string;
 }
 
-export async function listarPernasPlanejadas(db: D1Database, inicio: string, fim: string, tabelaOpcional = false) {
-  try {
-    const rows = await db.prepare(`SELECT p.* FROM pernas_planejadas_voo p
-      JOIN solicitacoes_reserva_voo s ON s.id = p.solicitacao_id
-      WHERE p.status = 'PLANEJADA' AND p.data_prevista BETWEEN ?1 AND ?2
-        AND s.excluida_em IS NULL AND lower(s.status) NOT IN ('encerrada', 'concluida', 'cancelada', 'reprovada')
-      ORDER BY p.data_prevista, p.horario_previsto, p.criado_em, p.id`).bind(inicio, fim).all<PernaPlanejada>()
-    return rows.results || []
-  } catch (error) {
-    if (tabelaOpcional && String(error).includes('no such table: pernas_planejadas_voo')) return []
-    throw error
-  }
-}
+export const colunasPlanejamento = `id, solicitacao_origem_id AS solicitacao_id, data_agendada AS data_prevista,
+  origem, destino, horario_previsto_agendamento AS horario_previsto, numero_passageiros, numero_voo,
+  CASE lower(status) WHEN 'aprovada' THEN 'PLANEJADA' WHEN 'cancelada' THEN 'CANCELADA' ELSE 'INICIADA' END AS status,
+  criado_em, atualizado_em`
 
 export function buscarPernaPlanejada(db: D1Database, id: string, solicitacaoId: string) {
-  return db.prepare('SELECT * FROM pernas_planejadas_voo WHERE id = ?1 AND solicitacao_id = ?2')
-    .bind(id, solicitacaoId).first<PernaPlanejada>()
+  return db.prepare(`SELECT ${colunasPlanejamento} FROM solicitacoes_reserva_voo
+    WHERE id = ?1 AND solicitacao_origem_id = ?2 AND excluida_em IS NULL`)
+    .bind(id, solicitacaoId).first<PernaPlanejada & { numero_voo: string }>()
 }
 
-export function vincularPernaPlanejada(db: D1Database, id: string, solicitacaoId: string, pernaId: string) {
-  return db.prepare(`UPDATE pernas_planejadas_voo SET status = 'INICIADA', perna_jornada_id = ?1, atualizado_em = CURRENT_TIMESTAMP
-    WHERE id = ?2 AND solicitacao_id = ?3 AND status = 'PLANEJADA'
-      AND EXISTS (SELECT 1 FROM pernas_jornada_voo WHERE id = ?1)`)
-    .bind(pernaId, id, solicitacaoId)
+export function vincularPernaPlanejada(db: D1Database, id: string, solicitacaoId: string, fase: string) {
+  return db.prepare(`UPDATE solicitacoes_reserva_voo SET status = ?1, atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ?2 AND solicitacao_origem_id = ?3 AND lower(status) = 'aprovada' AND excluida_em IS NULL
+      AND EXISTS (SELECT 1 FROM pernas_jornada_voo WHERE id = ?2)`)
+    .bind(fase, id, solicitacaoId)
+}
+
+/** O mesmo pedido de gravação recebe o mesmo ID, com escopo na solicitação original. */
+export async function idAgendamentoPlanejado(solicitacaoId: string, chave: string) {
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([solicitacaoId, chave]))))
+  hash[6] = (hash[6] & 0x0f) | 0x80
+  hash[8] = (hash[8] & 0x3f) | 0x80
+  const hex = Array.from(hash.slice(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
 }

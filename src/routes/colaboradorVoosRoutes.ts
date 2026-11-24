@@ -25,6 +25,7 @@ const VOOS_COLABORADOR_SQL = `
   FROM solicitacoes_reserva_voo s
   LEFT JOIN aeronave a ON a.id = s.aeronave_id
   WHERE (s.piloto_id = ?1 OR s.copiloto_id = ?1)
+    AND s.solicitacao_origem_id IS NULL
     AND lower(trim(COALESCE(s.status, ''))) IN ('aprovada', 'acionado', 'decolado', 'em_voo', 'em voo', 'em_rota', 'em rota', 'em_solo', 'pousado', 'encerrada', 'concluida')
   ORDER BY date(s.data_agendada) DESC, s.horario_previsto_agendamento DESC, s.criado_em DESC
 `

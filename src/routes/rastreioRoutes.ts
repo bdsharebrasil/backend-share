@@ -223,6 +223,7 @@ export async function carregarVoosRastreio(env: RastreioBindings, solicitacaoId?
     LEFT JOIN tripulacao_freelancer fc ON fc.id = s.copiloto_id
     WHERE ${solicitacaoId ? 's.id = ?' : `
       s.excluida_em IS NULL
+      AND s.solicitacao_origem_id IS NULL
       AND s.status_calc IN ('aprovada', 'decolado', 'acionado', 'em_solo', 'em solo', 'pousado')
       AND date(s.data_agendada) <= date('now')
       AND date(s.data_agendada, '+' || max(COALESCE(s.dias_duracao, 1), 1) || ' days') >= date('now')`}

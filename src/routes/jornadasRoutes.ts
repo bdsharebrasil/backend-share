@@ -333,8 +333,9 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
   const planejada = body.perna_planejada_id ? await buscarPernaPlanejada(db, String(body.perna_planejada_id), idSolicitacao) : null
   if (body.perna_planejada_id && (!planejada || planejada.status !== 'PLANEJADA')) return c.json({ error: 'perna_planejada_indisponivel' }, 409)
   if (planejada) Object.assign(body, { origem: planejada.origem, destino: planejada.destino, numero_passageiros: planejada.numero_passageiros })
-  const voo = await db.prepare('SELECT aeronave_id, piloto_id, copiloto_id, data_agendada, numero_voo, status FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
-  if (!voo) return c.notFound()
+  const voo = await db.prepare('SELECT * FROM solicitacoes_reserva_voo WHERE id = ?1').bind(idSolicitacao).first<any>()
+  if (!voo || voo.excluida_em) return c.notFound()
+  if (voo.solicitacao_origem_id) return c.json({ error: 'use_solicitacao_original', solicitacao_id: voo.solicitacao_origem_id }, 409)
   const statusVoo = String(voo.status || '').trim().toLowerCase()
   if (statusVoo === 'encerrada' || statusVoo === 'concluida') return c.json({ error: 'agendamento_encerrado', detail: 'Operações encerradas são somente leitura e não podem receber nova jornada.' }, 409)
   if (!agendamentoPermiteIniciarJornada(statusVoo)) return c.json({ error: 'agendamento_nao_aprovado', detail: 'A jornada só pode ser iniciada para um agendamento aprovado, em voo ou em solo.' }, 409)
@@ -399,7 +400,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
         (id, solicitacao_id, aeronave_id, tripulante_id, funcao_tripulante, jornada_principal_id, numero_jornada, data,
          horario_apresentacao, horario_acionamento, horario_decolagem, horario_pouso, minutos_pos_corte, status, observacoes, criado_por)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       ${planejada ? "WHERE EXISTS (SELECT 1 FROM pernas_planejadas_voo WHERE id = ? AND status = 'PLANEJADA')" : ''}`)
+       ${planejada ? "WHERE EXISTS (SELECT 1 FROM solicitacoes_reserva_voo WHERE id = ? AND lower(status) = 'aprovada' AND excluida_em IS NULL)" : ''}`)
       .bind(jornadaId, idSolicitacao, voo.aeronave_id, item.tripulante_id, item.funcao, principalId, numeroJornada, data,
          apresentacao, acionamento, horarioDep, corteInicio, posCorte, corteInicio ? 'em_solo' : horarioDep ? 'em_rota' : 'em_solo',
         body.observacoes || null, extractSupabaseUserId(c), ...(planejada ? [planejada.id] : [])))
@@ -415,7 +416,7 @@ jornadasRoutes.post('/api/interno/agendamento/:id/jornada', async c => {
     }
     idsCriadas.push(jornadaId)
   }
-  if (planejada && primeiraPernaId) comandos.push(vincularPernaPlanejada(db, planejada.id, idSolicitacao, primeiraPernaId))
+  if (planejada && primeiraPernaId) comandos.push(vincularPernaPlanejada(db, planejada.id, idSolicitacao, horarioDep ? 'decolado' : 'acionado'))
   const resultados = await db.batch(comandos)
   if (!resultados[0]?.meta?.changes) return c.json({ error: 'perna_planejada_ja_iniciada' }, 409)
   const criadas = await Promise.all(idsCriadas.map(id => db.prepare('SELECT * FROM jornadas_voo WHERE id = ?1').bind(id).first<any>()))
@@ -614,10 +615,10 @@ jornadasRoutes.post('/api/interno/jornadas/:id/pernas', async c => {
     (id, jornada_id, numero, origem, destino, passageiros, horario_programado, horario_ac, horario_dep, horario_pouso, horario_corte,
      horario_ac_user_id, horario_dep_user_id, horario_pouso_user_id, horario_corte_user_id, status)
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    ${planejada ? "WHERE EXISTS (SELECT 1 FROM pernas_planejadas_voo WHERE id = ? AND status = 'PLANEJADA')" : ""}`)
+    ${planejada ? "WHERE EXISTS (SELECT 1 FROM solicitacoes_reserva_voo WHERE id = ? AND lower(status) = 'aprovada' AND excluida_em IS NULL)" : ""}`)
     .bind(pernaId, jornada.id, numero, origem, destino, numeroPassageiros, horarioProgramado, horarioAc, horarioDep, horarioPouso, horarioCorte,
       horarioAc ? userId : null, horarioDep ? userId : null, horarioPouso ? userId : null, horarioCorte ? userId : null, status, ...(planejada ? [planejada.id] : []))
-  const resultados = await db.batch(planejada ? [inserir, vincularPernaPlanejada(db, planejada.id, jornada.solicitacao_id, pernaId)] : [inserir])
+  const resultados = await db.batch(planejada ? [inserir, vincularPernaPlanejada(db, planejada.id, jornada.solicitacao_id, horarioCorte ? 'concluida' : horarioPouso ? 'em_solo' : horarioDep ? 'decolado' : 'acionado')] : [inserir])
   if (!resultados[0]?.meta?.changes) return c.json({ error: 'perna_planejada_ja_iniciada' }, 409)
   const pernas = await sincronizarResumoJornada(db, jornada.id)
   const statusAgendamento = await sincronizarStatusAgendamentoVoo(db, jornada.solicitacao_id)

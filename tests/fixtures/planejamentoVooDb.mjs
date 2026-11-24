@@ -13,7 +13,7 @@ export async function planejamentoFixture() {
     CREATE TABLE tripulacao (id TEXT, user_id TEXT, canac TEXT, nome_completo TEXT);
     CREATE TABLE tripulacao_freelancer (id TEXT, canac TEXT, nome_completo TEXT);
     CREATE TABLE aeronave (id TEXT, consumo_combustivel REAL);
-    CREATE TABLE solicitacoes_reserva_voo (id TEXT PRIMARY KEY, status TEXT, piloto_id TEXT, copiloto_id TEXT, atualizado_em TEXT, aeronave_id TEXT, cliente_id TEXT, socio_id TEXT, numero_voo TEXT);
+    CREATE TABLE solicitacoes_reserva_voo (id TEXT PRIMARY KEY, status TEXT, piloto_id TEXT, copiloto_id TEXT, atualizado_em TEXT, aeronave_id TEXT, cliente_id TEXT, socio_id TEXT, numero_voo TEXT, origem TEXT, destino TEXT, numero_passageiros INTEGER, dias_duracao INTEGER, voo_emprestado TEXT DEFAULT 'nao', cliente_emprestimo_id TEXT, socio_emprestimo_id TEXT, aprovado_por TEXT, aprovado_em TEXT, criado_em TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE jornadas_voo (id TEXT PRIMARY KEY, solicitacao_id TEXT, aeronave_id TEXT, data TEXT, horario_acionamento TEXT, horario_apresentacao TEXT NOT NULL, horario_decolagem TEXT, horario_pouso TEXT, horario_corte TEXT, tripulante_id TEXT, funcao_tripulante TEXT, jornada_principal_id TEXT, status TEXT, minutos_jornada INTEGER, minutos_pos_corte INTEGER, numero_jornada INTEGER, criado_em TEXT, atualizado_em TEXT);
     CREATE TABLE pernas_jornada_voo (id TEXT PRIMARY KEY, jornada_id TEXT, numero INTEGER, origem TEXT, destino TEXT, horario_programado TEXT, horario_ac TEXT, horario_dep TEXT, horario_pouso TEXT, horario_corte TEXT, horario_ac_user_id TEXT, horario_dep_user_id TEXT, horario_pouso_user_id TEXT, horario_corte_user_id TEXT, passageiros INTEGER, status TEXT, lancamento_diario_id TEXT);
     CREATE TABLE lancamentos_diario_bordo (id TEXT PRIMARY KEY, confirmado INTEGER, assinado_pic TEXT);
@@ -60,7 +60,7 @@ export async function planejamentoFixture() {
     UPDATE pernas_jornada_voo SET horario_pouso = '2026-11-19T18:37:00Z', horario_corte = '2026-11-19T18:40:00Z', status = 'cortado';
     CREATE TRIGGER validar_estado_jornada BEFORE INSERT ON jornadas_voo WHEN NEW.status NOT IN ('em_solo', 'em_rota', 'pousado', 'encerrada') BEGIN SELECT RAISE(ABORT, 'status_jornada_invalido'); END;
   `)
-  sqlite.exec(await readFile(new URL('../../migrations/20261124_pernas_planejadas_voo.sql', import.meta.url), 'utf8'))
+  sqlite.exec(await readFile(new URL('../../migrations/20261124_agendamento_solicitacao_origem.sql', import.meta.url), 'utf8'))
   const app = new Hono()
   app.route('/', pernasPlanejadasRoutes)
   app.route('/', jornadasRoutes)

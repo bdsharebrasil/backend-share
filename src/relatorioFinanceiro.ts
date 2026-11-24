@@ -523,7 +523,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
   userId: string | null,
 ): Promise<{ idempotent: boolean; destinos: Array<{ tipo: string; id: string }> }> {
   const numeroVooId = text(report.numero_voo)
-    ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 LIMIT 1').bind(text(report.numero_voo)).first<{ id: string }>())?.id || null
+    ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 AND solicitacao_origem_id IS NULL LIMIT 1').bind(text(report.numero_voo)).first<{ id: string }>())?.id || null
     : null
   const reportId = text(report.id)
   if (!reportId) throw new Error('relatorio_id_obrigatorio')

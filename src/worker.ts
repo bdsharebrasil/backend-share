@@ -19,7 +19,6 @@ import { diarioBordoRoutes } from './routes/diarioBordoRoutes'
 import { diarioTripulacaoRoutes } from './routes/diarioTripulacaoRoutes'
 import { jornadasRoutes } from './routes/jornadasRoutes'
 import { pernasPlanejadasRoutes } from './routes/pernasPlanejadasRoutes'
-import { listarPernasPlanejadas } from './lib/pernasPlanejadas'
 import { preparacaoRoutes } from './preparacao/rotas'
 import { aiswebRoutes } from './routes/aiswebRoutes'
 import { valuationRoutes } from './routes/valuationRoutes'
@@ -1646,10 +1645,10 @@ app.get('/api/interno/agendamento', async c => {
   const db = c.env.SHARE_DB
   const statusOperacionalSql = statusAgendamentoComJornadaSql(await jornadaOperacionalDisponivel(db))
   const [agendamentos, aeronave, tripulacao, freelancers, disponibilidades] = await Promise.all([
-    db.prepare(`SELECT s.id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, ${statusOperacionalSql} AS status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
+    db.prepare(`SELECT s.id, s.solicitacao_origem_id, s.cliente_id, s.socio_id, s.cliente_emprestimo_id, s.socio_emprestimo_id, s.aeronave_id, s.origem, s.destino, s.data_agendada, date(s.data_agendada, '+' || (COALESCE(s.dias_duracao, 1) - 1) || ' days') AS data_fim, s.horario_previsto_agendamento, s.dias_duracao, s.numero_passageiros, s.voo_emprestado, ${statusOperacionalSql} AS status, s.observacoes, s.motivo_rejeicao, s.numero_voo, s.criado_em, s.atualizado_em, s.piloto_id, s.copiloto_id,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status = 'encerrada') AS jornadas_encerradas,
         (SELECT COUNT(*) FROM jornadas_voo j WHERE j.solicitacao_id = s.id AND j.status <> 'encerrada') AS jornadas_abertas,
-        COALESCE(perna_agendada.horario_corte,
+        COALESCE(perna_vinculada.horario_corte, perna_agendada.horario_corte,
           (SELECT CASE WHEN COUNT(*) > 0 AND SUM(CASE WHEN j.status <> 'encerrada' THEN 1 ELSE 0 END) = 0 THEN MAX(j.horario_corte) END FROM jornadas_voo j WHERE j.solicitacao_id = s.id)
         ) AS horario_corte,
         perna_agendada.id AS perna_atual_id, perna_agendada.numero AS perna_atual_numero,
@@ -1668,6 +1667,7 @@ app.get('/api/interno/agendamento', async c => {
       LEFT JOIN aeronave a ON a.id = s.aeronave_id
       -- Última perna efetivamente cadastrada, inclusive quando já existe COR.
       -- A rota da solicitação permanece como alternativa quando não há jornadas/pernas.
+      LEFT JOIN pernas_jornada_voo perna_vinculada ON s.solicitacao_origem_id IS NOT NULL AND perna_vinculada.id = s.id
       LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada.id = (
         SELECT p.id
         FROM jornadas_voo j
@@ -1711,7 +1711,6 @@ app.get('/api/interno/agendamento', async c => {
     }
     return { ...agendamento, checklist_itens_respondidos: itensRespondidos, preparacao_pendencias: preparacaoPendencias }
   })
-  const pernasPlanejadas = await listarPernasPlanejadas(db, inicio, fim, true)
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
   const escala = agendamentosFormatados
     .filter((item: any) => ['aprovada', 'em_voo', 'em_rota', 'em_solo', 'acionado', 'decolado'].includes(String(item.status || '').toLowerCase()) && (item.piloto_id || item.copiloto_id))
@@ -1733,7 +1732,7 @@ app.get('/api/interno/agendamento', async c => {
         status: item.status,
       }
     })
-  return c.json({ inicio, fim, pernas_planejadas: pernasPlanejadas, agendamentos: agendamentosFormatados, aeronaves: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
+  return c.json({ inicio, fim, agendamentos: agendamentosFormatados, aeronaves: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
 })
 
 app.post('/api/interno/agendamento/disponibilidade', async c => {
@@ -3649,7 +3648,7 @@ function normalizarMatriculaRelatorio(value: unknown): string {
 
 async function buscarVooRelatorio(db: D1Database, numeroVoo: string, clienteId: string, socioId: string | null, aeronaveId: string) {
   const voo = await db.prepare(`SELECT id, numero_voo, cliente_id, socio_id, aeronave_id, origem, destino
-    FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 LIMIT 1`).bind(numeroVoo).first<any>()
+    FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 AND solicitacao_origem_id IS NULL LIMIT 1`).bind(numeroVoo).first<any>()
   if (!voo) return { error: 'voo_nao_encontrado', numero_voo: numeroVoo }
   const cotistaCompativel = socioId
     ? voo.socio_id === socioId && voo.cliente_id === clienteId
@@ -3859,7 +3858,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
         LEFT JOIN tripulacao_freelancer f1 ON f1.id = s.piloto_id
         LEFT JOIN tripulacao t2 ON t2.id = s.copiloto_id
         LEFT JOIN tripulacao_freelancer f2 ON f2.id = s.copiloto_id
-        WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
+        WHERE s.solicitacao_origem_id IS NULL AND s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
           AND (?1 IS NULL OR s.aeronave_id = ?1)
           AND (?2 IS NULL OR (s.cliente_id = ?2 AND (?3 IS NULL AND (s.socio_id IS NULL OR trim(s.socio_id) = '') OR s.socio_id = ?3)))
         ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC, s.id LIMIT 200`).bind(
@@ -3876,7 +3875,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/opcoes', async c => {
           JOIN jornadas_voo j ON j.id = p.jornada_id
           WHERE j.solicitacao_id IN (
             SELECT s.id FROM solicitacoes_reserva_voo s
-            WHERE s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
+            WHERE s.solicitacao_origem_id IS NULL AND s.numero_voo IS NOT NULL AND trim(s.numero_voo) <> ''
               AND (?1 IS NULL OR s.aeronave_id = ?1)
               AND (?2 IS NULL OR (s.cliente_id = ?2 AND (?3 IS NULL AND (s.socio_id IS NULL OR trim(s.socio_id) = '') OR s.socio_id = ?3)))
             ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC, s.id LIMIT 200
@@ -4087,7 +4086,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/meus-voos', async c => {
         WHERE ca_relacao.aeronave_id = s.aeronave_id
           AND (ca_relacao.socio_id = s.socio_id OR hs_relacao.holding_id = s.cliente_id) LIMIT 1
       )
-      WHERE trim(COALESCE(s.numero_voo, '')) <> ''
+      WHERE s.solicitacao_origem_id IS NULL AND trim(COALESCE(s.numero_voo, '')) <> ''
         AND (t1.user_id = ?1 OR t2.user_id = ?1)
       ORDER BY date(s.data_agendada) DESC, s.numero_voo DESC`).bind(user.id).all<Record<string, any>>()
     const voosComRota = await Promise.all((voos.results || []).map(async (voo) => {
@@ -4865,7 +4864,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     if (valorCentavos <= 0) return c.json({ error: 'relatorio_sem_valor_a_reembolsar' }, 400)
     const hoje = new Date().toISOString().slice(0, 10)
     const numeroVooId = report.numero_voo
-      ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 LIMIT 1').bind(report.numero_voo).first<{ id: string }>())?.id || null
+      ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 AND solicitacao_origem_id IS NULL LIMIT 1').bind(report.numero_voo).first<{ id: string }>())?.id || null
       : null
     const descricao = `Relatório Despesa de Viagem - ${report.numero_relatorio}`
     const shareLancamentoId = crypto.randomUUID(); const clienteLancamentoId = crypto.randomUUID(); const contaId = crypto.randomUUID()
