@@ -30,7 +30,7 @@ function ambiente(t) {
   const env={SHARE_DB:{prepare,async batch(stmts){sqlite.exec('BEGIN');try{for(const stmt of stmts)await stmt.run();sqlite.exec('COMMIT')}catch(e){sqlite.exec('ROLLBACK');throw e}}},SUPABASE_URL:'https://auth.example',SUPABASE_ANON_KEY:'teste'}
   t.mock.method(globalThis,'fetch',async()=>Response.json({id:'u'}))
   const req=(path,method='GET',body)=>ctmRoutes.request('/api/ctm/coordenacao'+path,{method,headers:{Authorization:'Bearer teste','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)},env)
-  return {sqlite,req}
+  return {sqlite,req,env}
 }
 test('aviso do Trip Share mantém autoria, histórico e versão por matrícula',async t=>{
   const {req,sqlite}=ambiente(t)
@@ -63,4 +63,48 @@ test('cadastros criam, atualizam e arquivam com controle de versão',async t=>{
     assert.equal((await req(path+'/'+id,'DELETE',{versao:2,motivo:'Duplicado'})).status,200)
     assert.equal((await (await req(path)).json()).registros.some(r=>r.id===id),false)
   }
+})
+
+test('edição do CTM considera funções atribuídas e mantém perfil comum em consulta', async t => {
+  const { req, sqlite } = ambiente(t)
+  sqlite.exec(`
+    CREATE TABLE usuarios_funcoes (user_id TEXT, funcao TEXT);
+    UPDATE user_profiles SET departamento = 'Administrativo';
+    INSERT INTO usuarios_funcoes VALUES ('u', 'Operações');
+    CREATE TABLE ctm_analise_oleo (id TEXT PRIMARY KEY, aeronave_id TEXT, data_analise TEXT);
+  `)
+  const permissoes = '/permissoes'
+  const analise = '/aeronaves/a/registros/oleo'
+  const dados = { dados: { data_analise: '2026-11-24' } }
+  assert.equal((await (await req(permissoes)).json()).podeEditar, true)
+  assert.equal((await req(analise, 'POST', dados)).status, 201)
+  sqlite.exec("UPDATE usuarios_funcoes SET funcao = 'Piloto'")
+  assert.equal((await (await req(permissoes)).json()).podeEditar, false)
+  assert.equal((await req(analise, 'POST', dados)).status, 403)
+  sqlite.exec("UPDATE usuarios_funcoes SET funcao = 'Gestor Master'; UPDATE user_profiles SET status = 'Bloqueada'")
+  assert.equal((await req(permissoes)).status, 403)
+})
+
+test('reportes são consultados somente para a matrícula solicitada', async t => {
+  const { req, sqlite } = ambiente(t)
+  sqlite.exec(`INSERT INTO ctm_reports_mobile(id,aeronave_id,data_relatorio,descricao,criado_por,criado_por_nome)
+    VALUES ('r1','a','2026-11-24','Primeiro','u','Piloto'), ('r2','b','2026-11-24','Segundo','u','Piloto')`)
+  const resposta = await (await req('/reportes?aeronave_id=b')).json()
+  assert.deepEqual(resposta.registros.map(registro => registro.id), ['r2'])
+})
+
+test('dashboard preserva as seções quando não existe tabela de carregamentos legada', async t => {
+  const { sqlite, env } = ambiente(t)
+  sqlite.exec("ALTER TABLE aeronave ADD COLUMN status TEXT DEFAULT 'ativa'")
+  for (const modulo of ['programa', 'diretrizes', 'componentes', 'oas', 'orcamentos', 'ras']) {
+    sqlite.exec('CREATE TABLE ' + modulos[modulo].tabela + '(id TEXT PRIMARY KEY, aeronave_id TEXT)')
+  }
+  const resposta = await ctmRoutes.request('/api/ctm/dashboard?aeronave_id=a', {
+    headers: { Authorization: 'Bearer teste' },
+  }, env)
+  assert.equal(resposta.status, 200)
+  const { data } = await resposta.json()
+  assert.deepEqual(data.falhas, [])
+  assert.equal(data.aeronave.id, 'a')
+  assert.deepEqual(data.carregamentos, [])
 })
