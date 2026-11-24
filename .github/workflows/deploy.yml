@@ -50,6 +50,9 @@ jobs:
       - name: Testes NF de saída e pagamentos da holding com FKs reais
         run: node --import tsx --test tests/nf-saida-holding-pagamento.test.mjs tests/baixa-individual-cotista.test.mjs tests/migrar-baixas-rateio.test.mjs
 
+      - name: Verificar CTM e peso e balanceamento
+        run: node --import tsx --test tests/ctm*.test.mjs tests/pesoBalanceamento.test.mjs
+
       - name: Testes do balanço e custos do portal
         run: node --import tsx --test tests/portal-horas-espelho.test.mjs tests/portal-custos-reais.test.mjs tests/portal-balanco-pagador.test.mjs tests/portal-aeronave-dashboard.test.mjs
 
@@ -103,6 +106,24 @@ jobs:
           if ! jq -e '.[0].results | any(.name == "solicitacao_origem_id")' <<< "$colunas" > /dev/null; then
             pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261124_agendamento_solicitacao_origem.sql
           fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Preparar coordenação de manutenção
+        run: |
+          pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261119_ctm_reports_mobile.sql
+          pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261124_ctm_coordenacao.sql
+          for spec in ctm_peso_balanceamento.envelope_pontos_json:TEXT solicitacoes_reserva_voo.passageiros_json:TEXT ctm_pecas_trocadas.valor_unitario:REAL ctm_pecas_trocadas.data_troca:TEXT ctm_mapa_componente.data_leitura:TEXT; do
+            tabela=${spec%%.*}
+            campo_tipo=${spec#*.}
+            coluna=${campo_tipo%:*}
+            tipo=${campo_tipo#*:}
+            estrutura=$(pnpm exec wrangler d1 execute bd_sharebrasil --remote --json --command="PRAGMA table_info($tabela)")
+            if ! jq -e --arg c "$coluna" '.[0].results | any(.name == $c)' <<< "$estrutura" >/dev/null; then
+              pnpm exec wrangler d1 execute bd_sharebrasil --remote --command="ALTER TABLE $tabela ADD COLUMN $coluna $tipo"
+            fi
+          done
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
