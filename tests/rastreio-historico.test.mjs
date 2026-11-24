@@ -80,7 +80,7 @@ test('aeronave compartilhada não duplica o mesmo sinal entre dois agendamentos'
 test('agendamento aprovado sem jornada e sem hex entra ao vivo pela matrícula e mantém histórico depois de encerrado', async () => {
   const { db, sqlite } = banco()
   sqlite.exec(`
-    CREATE TABLE solicitacoes_reserva_voo (id TEXT, numero_voo TEXT, status TEXT, excluida_em TEXT, status_antes_exclusao TEXT, aeronave_id TEXT, origem TEXT, destino TEXT, data_agendada TEXT, horario_previsto_agendamento TEXT, dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT);
+    CREATE TABLE solicitacoes_reserva_voo (id TEXT, numero_voo TEXT, status TEXT, excluida_em TEXT, status_antes_exclusao TEXT, aeronave_id TEXT, origem TEXT, destino TEXT, data_agendada TEXT, horario_previsto_agendamento TEXT, dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT, solicitacao_origem_id TEXT);
     CREATE TABLE aeronave (id TEXT, matricula_registro TEXT, modelo TEXT);
     CREATE TABLE hold_socios (id TEXT, nome TEXT);
     CREATE TABLE cliente (id TEXT, razao_social TEXT);
@@ -89,6 +89,8 @@ test('agendamento aprovado sem jornada e sem hex entra ao vivo pela matrícula e
     CREATE TABLE aerodromo (designativo_icao TEXT, coordenadas TEXT);
     INSERT INTO aeronave VALUES ('a', 'PT-ZXY', 'Cheyenne II');
     INSERT INTO solicitacoes_reserva_voo (id, status, aeronave_id, data_agendada, dias_duracao) VALUES ('sem-horarios', 'aprovada', 'a', date('now'), 1);
+    INSERT INTO solicitacoes_reserva_voo (id, status, aeronave_id, data_agendada, dias_duracao, solicitacao_origem_id)
+      VALUES ('trecho-confirmado', 'aprovada', 'a', date('now'), 1, 'sem-horarios');
   `)
   const fetchAnterior = globalThis.fetch
   const igualdadeAnterior = crypto.subtle.timingSafeEqual
@@ -155,7 +157,7 @@ test('painel resolve nome dos autores e deixa de exibir voo cortado, mantendo o 
     CREATE TABLE solicitacoes_reserva_voo (
       id TEXT, numero_voo TEXT, status TEXT, excluida_em TEXT, aeronave_id TEXT,
       origem TEXT, destino TEXT, data_agendada TEXT, horario_previsto_agendamento TEXT,
-      dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT
+      dias_duracao INTEGER, socio_id TEXT, cliente_id TEXT, piloto_id TEXT, copiloto_id TEXT, criado_em TEXT, solicitacao_origem_id TEXT
     );
     CREATE TABLE aeronave (id TEXT, matricula_registro TEXT, modelo TEXT);
     CREATE TABLE hold_socios (id TEXT, nome TEXT);
