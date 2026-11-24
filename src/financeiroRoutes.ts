@@ -199,7 +199,7 @@ financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
-financeiroRoutes.get('/share/opcoes', async (c) => {
+  financeiroRoutes.get('/share/opcoes', async (c) => {
   try {
     const db = c.env.SHARE_DB
     const tipoCaixa = c.req.query('tipo_caixa')
@@ -212,9 +212,13 @@ financeiroRoutes.get('/share/opcoes', async (c) => {
         ? listar(db, `SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias ${filtroConta} ORDER BY banco`, ...parametrosConta)
         : listar(db, 'SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
       listar(db, 'SELECT id, razao_social, cnpj FROM empresa ORDER BY razao_social'),
+      listar(db, `SELECT id, COALESCE(NULLIF(TRIM(apelido), ''), NULLIF(TRIM(nome_completo), '')) AS nome, cidade, uf, 'fornecedores_favoritos' AS origem FROM fornecedores_favoritos
+        UNION ALL SELECT id, NULLIF(TRIM(nome_fornecedor), '') AS nome, nome_cidade AS cidade, NULL AS uf, 'fornecedores_combustivel' AS origem FROM fornecedores_combustivel
+        UNION ALL SELECT id, COALESCE(NULLIF(TRIM(razao_social), ''), NULLIF(TRIM(empresa), ''), NULLIF(TRIM(nome_contato_responsavel), '')) AS nome, cidade, uf, 'agenda_contatos_fornecedores' AS origem FROM agenda_contatos_fornecedores
+        ORDER BY nome COLLATE NOCASE`),
     ]
-    const [categorias, contas, empresas] = await Promise.all(consultas)
-    return c.json({ categorias, contas_bancarias: contas, empresas })
+    const [categorias, contas, empresas, fornecedores] = await Promise.all(consultas)
+    return c.json({ categorias, contas_bancarias: contas, empresas, fornecedores })
   } catch (error) { return errorResponse(c, error) }
 })
 
