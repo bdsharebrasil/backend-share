@@ -94,6 +94,12 @@ ctmRoutes.get('/api/ctm/dashboard', async c => {
   const falhas:string[]=[]
   const [programa,diretrizes,componentes,oas,orcamentos,ras,carregamentos]=await Promise.all(['programa','diretrizes','componentes','oas','orcamentos','ras','carregamentos'].map(async modulo=>{
     const tabela=CTM_READ_TABLES[modulo].table
+    // A tabela legada não é instalada em todas as bases. As fichas atuais têm rotas próprias.
+    if (modulo === 'carregamentos') {
+      const existe = await c.env.SHARE_DB.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?")
+        .bind(tabela).first()
+      if (!existe) return { results: [] }
+    }
     try {
       return await ctmRead(c,tabela,`${filtro} AND ${ativo(modulo,tabela)} ORDER BY id`,id?[id]:[])
     } catch {
@@ -215,7 +221,7 @@ ctmRoutes.get('/api/ctm/peso-balanceamento', async c => {
 
 ctmRoutes.post('/api/ctm/peso-balanceamento', async c => {
   const user = await shareBrasilUser(c)
-  if (user && !podeEditar(user)) return c.json({error:'Acesso restrito ao CTM.'},403)
+  if (user && !await podeEditar(c.env.SHARE_DB, user)) return c.json({error:'Acesso restrito ao CTM.'},403)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const body = await c.req.json<Record<string, any>>().catch(() => ({} as Record<string, any>))
   const aeronaveId = String(body.aeronave_id || '').trim()
@@ -453,7 +459,7 @@ ctmRoutes.get('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
 ctmRoutes.post('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const usuario=await shareBrasilUser(c)
-  if (!usuario || !podeEditar(usuario)) return c.json({error:'Edição restrita à coordenação.'},403)
+  if (!usuario || !await podeEditar(c.env.SHARE_DB, usuario)) return c.json({error:'Edição restrita à coordenação.'},403)
   const aeronaveId = c.req.param('aeronaveId')
   const existe = await c.env.SHARE_DB.prepare('SELECT id FROM aeronave WHERE id = ?1').bind(aeronaveId).first()
   if (!existe) return c.notFound()
@@ -496,7 +502,7 @@ ctmRoutes.post('/api/ctm/aeronaves/:aeronaveId/documentos', async c => {
 ctmRoutes.patch('/api/ctm/aeronaves/:aeronaveId/documentos/:id', async c => {
   if (!(await requireShareInternal(c))) return c.json({ error: 'internal_auth_required' }, 401)
   const usuario=await shareBrasilUser(c)
-  if (!usuario || !podeEditar(usuario)) return c.json({error:'Edição restrita à coordenação.'},403)
+  if (!usuario || !await podeEditar(c.env.SHARE_DB, usuario)) return c.json({error:'Edição restrita à coordenação.'},403)
   const aeronaveId = c.req.param('aeronaveId')
   const id = c.req.param('id')
   const db = c.env.SHARE_DB
@@ -525,7 +531,7 @@ ctmRoutes.delete('/api/ctm/aeronaves/:aeronaveId/documentos/:id', async c => {
   const id = c.req.param('id')
   const db = c.env.SHARE_DB
   const user=await shareBrasilUser(c)
-  if (!user || !podeEditar(user)) return c.json({error:'Arquivamento restrito à coordenação.'},403)
+  if (!user || !await podeEditar(c.env.SHARE_DB, user)) return c.json({error:'Arquivamento restrito à coordenação.'},403)
   const atual=await db.prepare('SELECT * FROM documentos_aeronave WHERE id=? AND aeronave_id=?').bind(id,aeronaveId).first()
   if(!atual) return c.notFound()
   await db.prepare("INSERT OR IGNORE INTO ctm_historico(modulo,registro_id,aeronave_id,versao,acao,autor,anterior) VALUES ('documentos',?,?,1,'ARQUIVAR',?,?)").bind(id,aeronaveId,user.id,JSON.stringify(atual)).run()

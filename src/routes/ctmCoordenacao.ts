@@ -4,26 +4,50 @@ import { temposVooPortal, type CotaVooPortal } from '../financeiro/portalHoras'
 import { campoData, campoNumerico, encerrado, modulos, opcoes, prever, ratear } from '../lib/ctmCoordenacao'
 
 export const coordenacao=new Hono<{Bindings:{SHARE_DB:D1Database};Variables:{usuario:Colaborador}}>()
-export function podeEditar(user:Colaborador) {
-  return !['INATIVO','BLOQUEADO','DESATIVADO'].includes(String(user.status).trim().toUpperCase()) && (String(user.departamento).trim().toUpperCase()==='CTM' || ['admin','administrador','gestor_master','gestormaster'].includes(String(user.tipo_user).trim().toLowerCase().replace(/[ -]/g,'_')))
+const contaInativa = (user: Colaborador) =>
+  ['INATIVO', 'INATIVA', 'BLOQUEADO', 'BLOQUEADA', 'DESATIVADO', 'DESATIVADA'].includes(String(user.status).trim().toUpperCase())
+
+const papeisCtm = new Set([
+  'ctm', 'controle_tecnico_de_manutencao', 'controle_tecnico_manutencao',
+  'operacoes', 'operacao', 'coordenacao_de_operacoes', 'coordenacao_operacional',
+  'admin', 'administrador', 'gestor_master', 'gestormaster',
+])
+const normalizarPapel = (valor: unknown) => String(valor ?? '').normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+
+export async function podeEditar(db: D1Database, user: Colaborador) {
+  if (contaInativa(user)) return false
+  if ([user.departamento, user.tipo_user].some(papel => papeisCtm.has(normalizarPapel(papel)))) return true
+  const { results } = await db.prepare('SELECT funcao FROM usuarios_funcoes WHERE user_id = ?')
+    .bind(user.id).all<{ funcao: string }>()
+  return results.some(({ funcao }) => papeisCtm.has(normalizarPapel(funcao)))
 }
-coordenacao.use('*',async(c,next)=>{
-  const user=await shareBrasilUser(c)
-  if (!user || ['INATIVO','BLOQUEADO','DESATIVADO'].includes(String(user.status).toUpperCase())) return c.json({error:'Acesso restrito.'},403)
-  if(c.req.method!=='GET' && !podeEditar(user)) return c.json({error:'Edição restrita à coordenação do CTM.'},403)
-  c.set('usuario',user)
+
+coordenacao.use('*', async (c, next) => {
+  const user = await shareBrasilUser(c)
+  if (!user || contaInativa(user)) return c.json({ error: 'Acesso restrito.' }, 403)
+  if (c.req.method !== 'GET' && !await podeEditar(c.env.SHARE_DB, user)) {
+    return c.json({ error: 'Edição restrita aos perfis de CTM, Operações e gestão autorizada.' }, 403)
+  }
+  c.set('usuario', user)
   await next()
 })
 export function ativo(modulo:string,tabela:string) {
   return `NOT EXISTS (SELECT 1 FROM ctm_historico h WHERE h.modulo='${modulo}' AND h.registro_id=${tabela}.id AND h.acao='ARQUIVAR')`
 }
 const inicio='/aeronaves/:aeronave'
+coordenacao.get('/permissoes', async c => {
+  return c.json({ podeEditar: await podeEditar(c.env.SHARE_DB, c.get('usuario')) })
+})
+
 coordenacao.get('/reportes',async c=>{
+  const aeronave = c.req.query('aeronave_id')?.trim() || null
   const dados=await c.env.SHARE_DB.prepare(`SELECT r.*,a.matricula_registro,
     (SELECT COUNT(*) FROM ctm_historico h WHERE h.modulo='reportes' AND h.registro_id=r.id) AS versao
     FROM ctm_reports_mobile r JOIN aeronave a ON a.id=r.aeronave_id
-    ORDER BY (r.status='resolved'),CASE r.severidade WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,r.criado_em DESC`).all()
-  return c.json({registros:dados.results,podeEditar:podeEditar(c.get('usuario'))})
+    WHERE (?1 IS NULL OR r.aeronave_id = ?1)
+    ORDER BY (r.status='resolved'),CASE r.severidade WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,r.criado_em DESC`).bind(aeronave).all()
+  return c.json({registros:dados.results,podeEditar:await podeEditar(c.env.SHARE_DB, c.get('usuario'))})
 })
 coordenacao.get(inicio+'/historico/:modulo',async c=>{
   const rows=await c.env.SHARE_DB.prepare(`SELECT h.*,COALESCE(u.nome_completo,h.autor) AS responsavel FROM ctm_historico h LEFT JOIN user_profiles u ON u.id=h.autor
@@ -39,7 +63,7 @@ coordenacao.get(caminho,async c=>{
   const schema=(await db.prepare(`PRAGMA table_info(${tabela})`).all<{name:string;notnull:number;dflt_value:unknown}>()).results
   const escopo=modulo==='pecas'?'ordem_servico_id IN (SELECT id FROM ctm_ras WHERE aeronave_id=?)':'aeronave_id=?'
   const registros=(await db.prepare(`SELECT t.*,(SELECT COUNT(*) FROM ctm_historico h WHERE h.modulo=? AND h.registro_id=t.id) AS versao FROM ${tabela} t WHERE ${escopo} AND ${ativo(modulo,'t')} ORDER BY id`).bind(modulo,aeronave).all()).results
-  return c.json({campos:campos.filter(k=>schema.some(col=>col.name===k)).map(k=>({nome:k,tipo:campoData(k)?'date':campoNumerico(k)?'number':'text',opcoes:opcoes[k],obrigatorio:obrigatorios.includes(k)||schema.some(col=>col.name===k && col.notnull && col.dflt_value==null)})),registros:registros.map(r=>({...r,bloqueado:encerrado(r,modulo)})),podeEditar:podeEditar(c.get('usuario'))})
+  return c.json({campos:campos.filter(k=>schema.some(col=>col.name===k)).map(k=>({nome:k,tipo:campoData(k)?'date':campoNumerico(k)?'number':'text',opcoes:opcoes[k],obrigatorio:obrigatorios.includes(k)||schema.some(col=>col.name===k && col.notnull && col.dflt_value==null)})),registros:registros.map(r=>({...r,bloqueado:encerrado(r,modulo)})),podeEditar:await podeEditar(c.env.SHARE_DB, c.get('usuario'))})
 })
 coordenacao.on(['POST','PATCH','DELETE'],[caminho,caminho+'/:id'],async c=>{
   const modulo=c.req.param('modulo')||'', aeronave=c.req.param('aeronave')||'', id=c.req.param('id')
