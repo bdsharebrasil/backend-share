@@ -2522,6 +2522,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
         forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento),
       } : {}),
       ...(isShareRevenue ? { pago_diretamente: holdingSaida ? (lastPayment.saida_pagamento === 'CONTA_COTISTA' ? 1 : 0) : 1 } : {}),
+      ...(documentoSaida ? { pago_por: lastPayment.pagador_cotista_id ?? lastPayment.pagador_holding_id ?? null } : {}),
       atualizado_em: new Date().toISOString(),
     }, 'id = ?', [shareId]))
     const client = rateioLancamentoId && rateioLancamentoId !== shareId ? { id: rateioLancamentoId } : null
@@ -2534,7 +2535,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
         ...(clientColumns?.has('comprovante_url') ? { comprovante_url: nullableText(lastPayment.comprovante_url ?? body.comprovante_url ?? body.comprovanteRecebimentoUrl) } : {}),
         ...(clientColumns?.has('forma_pagamento') ? { forma_pagamento: nullableText(lastPayment.forma_pagamento ?? body.forma_pagamento ?? body.formaPagamento) } : {}),
         ...(clientColumns?.has('pago_por') ? { pago_por: lastPayment.pagador_cotista_id ?? lastPayment.pagador_holding_id ?? null } : {}),
-        ...(clientColumns?.has('pago_diretamente') ? { pago_diretamente: 0 } : {}),
+        ...(clientColumns?.has('pago_diretamente') ? { pago_diretamente: documentoSaida ? 1 : 0 } : {}),
         atualizado_em: new Date().toISOString(),
       }, 'id = ?', [client.id]))
     }
