@@ -1,3 +1,4 @@
+import { parcelasDoRateio } from '../financeiro/baixasRateio'
 import { Hono, Context } from 'hono'
 import { portalCreatePasswordHash, portalFeatureForPath, portalHasFeature, portalSession, portalTelegram, type PortalFeature } from './portalRoutes'
 import { carregarDadosBalancoMensal, limitesMes } from '../financeiro/balancoMensalRoutes'
@@ -373,7 +374,7 @@ portalClienteExtrasRoutes.get('/api/portal/balanco', async c => {
   const eventosConfirmados = `LEFT JOIN (
     SELECT rateio_id,
            SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CONFIRMADO' THEN valor_centavos ELSE 0 END) AS pago_centavos
-      FROM rateio_pagamentos GROUP BY rateio_id
+      FROM ${parcelasDoRateio('rateio_despesas')} GROUP BY rateio_id
   ) pagamentos ON pagamentos.rateio_id = r.id`
   const pagoEfetivo = "COALESCE(pagamentos.pago_centavos, r.valor_pago_real_centavos, 0)"
   const ph = placeholders(3, meses.length)
@@ -516,7 +517,7 @@ portalClienteExtrasRoutes.get('/api/portal/baixas', async c => {
   const user = await usuario(c)
   if (!user) return c.json({ error: 'client_auth_required' }, 401)
   const result = user.cliente_id
-    ? await c.env.SHARE_DB.prepare(`SELECT DISTINCT p.rateio_id AS id FROM rateio_pagamentos p
+    ? await c.env.SHARE_DB.prepare(`SELECT DISTINCT p.rateio_id AS id FROM ${parcelasDoRateio('rateio_despesas')} p
         JOIN cotista_aeronave ca ON ca.id = p.pagador_cotista_id
        WHERE ca.cliente_id = ?1 AND p.status = 'PENDENTE'`).bind(user.cliente_id).all<{ id: string }>()
     : await c.env.SHARE_DB.prepare(`SELECT id FROM rateio_hold WHERE socio_id = ?1 AND COALESCE(observacoes, '') LIKE '%${MARCADOR_COMPROVANTE}%'`).bind(user.socio_id).all<{ id: string }>()
@@ -557,13 +558,22 @@ portalClienteExtrasRoutes.post('/api/portal/comprovantes', async c => {
         FROM rateio_despesas r JOIN cotista_aeronave ca ON ca.id = r.cotista_id
        WHERE r.id = ?1 AND ca.cliente_id = ?2`).bind(referenciaId, user.cliente_id).first<Record<string, unknown>>()
     if (!row) return c.json({ error: 'referencia_nao_encontrada' }, 404)
-    const pendente = await db.prepare("SELECT id FROM rateio_pagamentos WHERE rateio_id = ?1 AND status = 'PENDENTE' LIMIT 1").bind(referenciaId).first()
+    const pendente = await db.prepare(`SELECT id FROM ${parcelasDoRateio('rateio_despesas')} WHERE rateio_id = ?1 AND status = 'PENDENTE' LIMIT 1`).bind(referenciaId).first()
     if (pendente) return c.json({ error: 'baixa_ja_solicitada' }, 409)
-    const valor = Math.max(1, Number(row.valor_rateado_centavos || 0) - Number(row.valor_pago_real_centavos || 0))
+    const valor = Number(row.valor_rateado_centavos || 0) - Number(row.valor_pago_real_centavos || 0)
+    if (valor <= 0) return c.json({ error: 'rateio_sem_saldo' }, 409)
     await c.env.SHARE_FILES.put(chave, arquivo.stream(), { httpMetadata: { contentType: arquivo.type } })
-    await db.prepare(`INSERT INTO rateio_pagamentos (id, rateio_id, tipo_pagador, pagador_cotista_id, valor_centavos, data_pagamento, comprovante_url, forma_pagamento, status, observacoes, criado_por, criado_em)
-      VALUES (?1, ?2, 'COTISTA', ?3, ?4, ?5, ?6, 'COMPROVANTE_PORTAL', 'PENDENTE', ?7, ?8, CURRENT_TIMESTAMP)`)
-      .bind(crypto.randomUUID(), referenciaId, row.cotista_id, valor, new Date().toISOString().slice(0, 10), chave, observacao || 'Solicitação de baixa enviada pelo Portal Cliente', `portal:${user.id}`).run()
+    const pedido = { id: crypto.randomUUID(), tipo_pagador: 'COTISTA', pagador_cotista_id: row.cotista_id,
+      valor_centavos: valor, data_pagamento: new Date().toISOString().slice(0, 10), comprovante_url: chave,
+      forma_pagamento: 'COMPROVANTE_PORTAL', status: 'PENDENTE', observacoes: observacao || 'Solicitação de baixa enviada pelo Portal Cliente',
+      criado_por: `portal:${user.id}`, criado_em: new Date().toISOString() }
+    const gravado = await db.prepare(`UPDATE rateio_despesas SET baixas_json = json_insert(baixas_json, '$[#]', json(?))
+      WHERE id = ? AND NOT EXISTS (SELECT 1 FROM json_each(baixas_json) WHERE json_extract(value, '$.status') = 'PENDENTE' AND json_extract(value, '$.aprovada_em') IS NULL)
+        AND valor_rateado_centavos - COALESCE(valor_pago_real_centavos, 0) = ?`).bind(JSON.stringify(pedido), referenciaId, valor).run()
+    if (!gravado.meta.changes) {
+      await c.env.SHARE_FILES.delete(chave)
+      return c.json({ error: 'rateio_alterado_ou_baixa_pendente' }, 409)
+    }
     descricao = String(row.descricao_despesa || 'Despesa')
   } else {
     const row = await db.prepare('SELECT id, descricao_despesa FROM rateio_hold WHERE id = ?1 AND socio_id = ?2').bind(referenciaId, user.socio_id).first<Record<string, unknown>>()

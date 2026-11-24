@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { holdingMovementColumn, issueRevenue, loadSchema, rateioPaymentTable, settleReceivable } from "./FinanceiroKernel"
+import { holdingMovementColumn, issueRevenue, loadSchema, settleReceivable } from "./FinanceiroKernel"
 import { errorResponse } from "./errorResponse"
 import { requireCaixaShareAccess } from "./access"
 import { listar } from "./repositories/d1"
@@ -259,16 +259,10 @@ notasSaidaRoutes.delete('/notas-saida/:id', async (c) => {
     const removerLancamentos: D1PreparedStatement[] = []
     if (ids.length) {
       const placeholders = ids.map(() => '?').join(', ')
-      const rateios = await listar(db, `SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`, ...ids)
-      const rateioIds = rateios.map((row) => String(row.id)).filter(Boolean)
-      if (rateioIds.length) statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioIds.map(() => '?').join(', ')})`).bind(...rateioIds))
       statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
       removerLancamentos.push(db.prepare(`DELETE FROM lancamentos WHERE id IN (${placeholders})`).bind(...ids))
     }
     for (const movimentoId of movimentos) {
-      const rateiosHold = await listar(db, `SELECT id FROM rateio_hold WHERE ${holdingColumn} = ?`, movimentoId)
-      const rateioHoldIds = rateiosHold.map((row) => String(row.id)).filter(Boolean)
-      if (rateioHoldIds.length) statements.push(db.prepare(`DELETE FROM ${rateioPaymentTable(schema, true)} WHERE rateio_id IN (${rateioHoldIds.map(() => '?').join(', ')})`).bind(...rateioHoldIds))
       statements.push(db.prepare(`DELETE FROM rateio_hold WHERE ${holdingColumn} = ?`).bind(movimentoId))
     }
     const vinculoIds = [...new Set([...ids, ...movimentos, id])]

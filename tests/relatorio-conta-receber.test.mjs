@@ -30,8 +30,7 @@ function fakeDb(matches = [], hasConfirmedPayment = false) {
           return { results: [] };
         },
         async first() {
-          if (sql.includes("sqlite_master")) return hasConfirmedPayment ? { name: "rateio_pagamentos" } : null;
-          if (sql.includes("FROM rateio_pagamentos")) return hasConfirmedPayment ? { encontrado: 1 } : null;
+          if (sql.includes("json_each(rateio.baixas_json)")) return hasConfirmedPayment ? { encontrado: 1 } : null;
           return null;
         },
       };
