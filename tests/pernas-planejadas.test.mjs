@@ -16,6 +16,10 @@ async function setup(t) {
   return fixture
 }
 
+function concluirChecklist(sqlite, id) {
+  sqlite.prepare("INSERT INTO checklists_pre_voo VALUES (?, 'concluido', CURRENT_TIMESTAMP)").run(id)
+}
+
 test('grava a próxima perna como agendamento confirmado com o número original e sem iniciar jornada', async t => {
   const { sqlite, request } = await setup(t)
   const response = await request('POST', root + '/pernas-planejadas', plano)
@@ -57,6 +61,7 @@ test('reenvio não duplica planejamento e quantidade zero é preservada', async 
 test('acionamento inicia a jornada e vincula exatamente uma perna ao planejamento original', async t => {
   const { sqlite, request } = await setup(t)
   const planned = await (await request('POST', root + '/pernas-planejadas', plano)).json()
+  concluirChecklist(sqlite, planned.id)
   const response = await request('POST', root + '/jornada', { ...ac, perna_planejada_id: planned.id })
   const body = await response.json()
   assert.equal(response.status, 201, JSON.stringify(body))
@@ -88,6 +93,7 @@ test('cancelamento retira somente a perna planejada e não altera o histórico o
 test('falha na primeira perna desfaz a jornada inteira e mantém o planejamento pendente', async t => {
   const { sqlite, request } = await setup(t)
   const planned = await (await request('POST', root + '/pernas-planejadas', plano)).json()
+  concluirChecklist(sqlite, planned.id)
   sqlite.exec("CREATE TRIGGER falhar_perna BEFORE INSERT ON pernas_jornada_voo BEGIN SELECT RAISE(ABORT, 'falha simulada'); END")
   const response = await request('POST', root + '/jornada', { ...ac, perna_planejada_id: planned.id })
   assert.equal(response.status, 500)
@@ -99,6 +105,7 @@ test('perna planejada pode iniciar na jornada aberta e exige acionamento real', 
   const { sqlite, request } = await setup(t)
   sqlite.exec("UPDATE jornadas_voo SET status = 'em_solo', horario_corte = NULL, horario_pouso = NULL")
   const planned = await (await request('POST', root + '/pernas-planejadas', { ...plano, data_prevista: '2026-11-19' })).json()
+  concluirChecklist(sqlite, planned.id)
   const path = '/api/interno/jornadas/defa1cf1-6043-4aa9-8245-9f6cf7def701/pernas'
   assert.equal((await request('POST', path, { perna_planejada_id: planned.id, horario_programado: '2026-11-19T19:00:00Z' })).status, 400)
   assert.equal(sqlite.prepare('SELECT status FROM solicitacoes_reserva_voo WHERE id = ?').get(planned.id).status, 'aprovada')
@@ -126,6 +133,7 @@ test('planejamento de outra solicitação não pode ser iniciado nesta operaçã
 test('o agendamento vinculado não abre jornada independente e acompanha os horários da perna', async t => {
   const { sqlite, request } = await setup(t)
   const planned = await (await request('POST', root + '/pernas-planejadas', plano)).json()
+  concluirChecklist(sqlite, planned.id)
   const independent = await request('POST', '/api/interno/agendamento/' + planned.id + '/jornada', ac)
   assert.equal(independent.status, 409)
   assert.equal((await independent.json()).solicitacao_id, 'solicitacao-teste')
@@ -133,4 +141,22 @@ test('o agendamento vinculado não abre jornada independente e acompanha os hor�
   assert.equal(started.status, 201)
   sqlite.prepare("UPDATE pernas_jornada_voo SET horario_corte = '2026-11-24T12:00:00Z' WHERE id = ?").run(planned.id)
   assert.equal(sqlite.prepare('SELECT status FROM solicitacoes_reserva_voo WHERE id = ?').get(planned.id).status, 'concluida')
+})
+
+test('checklist anterior não libera o novo agendamento com jornada aberta nem encerrada', async t => {
+  const { sqlite, request } = await setup(t)
+  const planned = await (await request('POST', root + '/pernas-planejadas', plano)).json()
+  const body = { ...ac, perna_planejada_id: planned.id }
+  const iniciarJornada = await request('POST', root + '/jornada', body)
+  assert.equal(iniciarJornada.status, 409)
+  assert.equal((await iniciarJornada.json()).error, 'checklist_pre_voo_obrigatorio')
+
+  sqlite.exec("UPDATE jornadas_voo SET status = 'em_solo'")
+  const adicionarPerna = await request('POST', '/api/interno/jornadas/defa1cf1-6043-4aa9-8245-9f6cf7def701/pernas', {
+    perna_planejada_id: planned.id, horario_ac: ac.horario_acionamento,
+  })
+  assert.equal(adicionarPerna.status, 409)
+  assert.equal((await adicionarPerna.json()).error, 'checklist_pre_voo_obrigatorio')
+  assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM pernas_jornada_voo').get().n, 1)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM jornadas_voo').get().n, 1)
 })
