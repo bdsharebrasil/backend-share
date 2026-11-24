@@ -1,3 +1,5 @@
+import { portalBaixasRoutes } from '../src/financeiro/portalBaixasRoutes.ts';
+import { parcelasDoRateio } from '../src/financeiro/baixasRateio.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,7 +12,7 @@ function banco(comLancamento = true) {
     CREATE TABLE lancamentos (id TEXT PRIMARY KEY, tipo_caixa TEXT, fluxo TEXT, status TEXT, data_pagamento TEXT, pago_diretamente INTEGER, atualizado_em TEXT, aeronave_id TEXT, origem_id TEXT, origem_tipo TEXT, reembolsavel INTEGER);
     CREATE TABLE cotista_aeronave (id TEXT PRIMARY KEY, aeronave_id TEXT);
     CREATE TABLE rateio_despesas (id TEXT PRIMARY KEY, lancamento_id TEXT, cotista_id TEXT, aeronave_id TEXT, valor_rateado_centavos INTEGER, valor_pago_real_centavos INTEGER, status TEXT, data_pagamento TEXT, pago_por TEXT, pago_diretamente INTEGER, atualizado_em TEXT);
-    CREATE TABLE rateio_pagamentos (id TEXT PRIMARY KEY, rateio_id TEXT, conta_receber_id TEXT, tipo_pagador TEXT, pagador_cotista_id TEXT, pagador_holding_id TEXT, valor_centavos INTEGER, data_pagamento TEXT, conta_bancaria_id TEXT, comprovante_url TEXT, forma_pagamento TEXT, observacoes TEXT, status TEXT, idempotency_key TEXT UNIQUE, criado_por TEXT);
+    ALTER TABLE rateio_despesas ADD COLUMN baixas_json TEXT NOT NULL DEFAULT '[]';
     CREATE TABLE financeiro_baixa_revisoes (chave TEXT PRIMARY KEY, revisao INTEGER NOT NULL);
     CREATE TABLE contas_areceber (id TEXT, lancamentos_id TEXT, recibos_saida_id TEXT, nf_saida_id TEXT, status TEXT);
     CREATE TABLE reembolsos (conta_receber_id TEXT, lancamento_cliente_id TEXT);
@@ -39,13 +41,13 @@ test('duas baixas diretas têm datas e comprovantes individuais; nulo mantém pa
   assert.equal(db.sqlite.prepare("SELECT valor_pago_real_centavos FROM rateio_despesas WHERE id='rb'").get().valor_pago_real_centavos,null);
   await settleCotista(db,'l',baixa('b'),'usuario');
   assert.equal(db.sqlite.prepare("SELECT status FROM lancamentos WHERE id='l'").get().status,'PAGO');
-  const historico=db.sqlite.prepare('SELECT rateio_id,data_pagamento,comprovante_url FROM rateio_pagamentos ORDER BY rateio_id').all();
+  const historico=db.sqlite.prepare(`SELECT rateio_id,data_pagamento,comprovante_url FROM ${parcelasDoRateio('rateio_despesas')} ORDER BY rateio_id`).all();
   assert.deepEqual(historico.map(r=>({...r})),[{rateio_id:'ra',data_pagamento:'2026-11-01',comprovante_url:'https://documentos.test/a.pdf'},{rateio_id:'rb',data_pagamento:'2026-11-08',comprovante_url:'https://documentos.test/b.pdf'}]);
   const registros = await pagamentosContextoBaixa(db, await contextoBaixaCotista(db,'ra'));
   assert.equal(registros.length,1); assert.equal(registros[0].rateio_id,'ra'); assert.equal(registros[0].comprovante_url,'https://documentos.test/a.pdf');
   assert.equal((await pagamentosContextoBaixa(db, await contextoBaixaCotista(db,'l'))).length,2);
   assert.equal((await settleCotista(db,'l',baixa('b'),'usuario')).idempotent,true);
-  assert.equal(db.sqlite.prepare('SELECT COUNT(*) n FROM rateio_pagamentos').get().n,2);
+  assert.equal(db.sqlite.prepare(`SELECT COUNT(*) n FROM ${parcelasDoRateio('rateio_despesas')}`).get().n,2);
 });
 
 test('pagamento parcial preserva saldo, rejeita excesso e respeita seleção de rateio', async () => {
@@ -74,6 +76,42 @@ test('duas confirmações concorrentes não baixam a mesma parcela duas vezes', 
   const resultados=await Promise.allSettled([settleCotista(db,'l',baixa('a'),'usuario'),settleCotista(db,'l',baixa('a',500000,{idempotency_key:'outra-tentativa'}),'usuario')]);
   assert.equal(resultados.filter(r=>r.status==='fulfilled').length,1);
   assert.equal(resultados.filter(r=>r.status==='rejected').length,1);
-  assert.equal(db.sqlite.prepare('SELECT COUNT(*) n FROM rateio_pagamentos').get().n,1);
+  assert.equal(db.sqlite.prepare(`SELECT COUNT(*) n FROM ${parcelasDoRateio('rateio_despesas')}`).get().n,1);
   assert.equal(db.sqlite.prepare("SELECT status FROM lancamentos WHERE id='l'").get().status,'EM_ABERTO');
+});
+
+test('complementar um rateio anterior conserva o valor, a data e o pagador originais', async () => {
+  const db = banco();
+  db.sqlite.exec("UPDATE rateio_despesas SET valor_pago_real_centavos=200000, data_pagamento='2026-10-20', pago_diretamente=1, pago_por='b' WHERE id='ra'");
+  await settleCotista(db, 'ra', baixa('a', 300000), 'usuario');
+  const parcelas = await pagamentosContextoBaixa(db, await contextoBaixaCotista(db, 'ra'));
+  assert.deepEqual(parcelas.map(p => [p.pagador_cotista_id, p.valor_centavos, p.data_pagamento]), [
+    ['b', 200000, '2026-10-20'], ['a', 300000, '2026-11-01'],
+  ]);
+});
+
+test('conferência de comprovante do portal quita só o rateio enviado e aceita repetição', async () => {
+  const db = banco();
+  db.sqlite.exec(`ALTER TABLE rateio_despesas ADD COLUMN descricao_despesa TEXT;
+    ALTER TABLE rateio_despesas ADD COLUMN data_vencimento TEXT;
+    ALTER TABLE cotista_aeronave ADD COLUMN cliente_id TEXT;
+    ALTER TABLE cotista_aeronave ADD COLUMN socio_id TEXT;
+    ALTER TABLE cotista_aeronave ADD COLUMN codigo_cliente TEXT;
+    CREATE TABLE cliente(id TEXT, razao_social TEXT);
+    CREATE TABLE hold_socios(id TEXT, nome TEXT);
+    CREATE TABLE aeronave(id TEXT, matricula_registro TEXT);`);
+  const prova = { id: 'prova', status: 'PENDENTE', forma_pagamento: 'COMPROVANTE_PORTAL', valor_centavos: 500000,
+    pagador_cotista_id: 'a', comprovante_url: 'portal-cliente/comprovantes/rateio/ra/prova.pdf' };
+  db.sqlite.prepare("UPDATE rateio_despesas SET baixas_json=? WHERE id='ra'").run(JSON.stringify([prova]));
+  const aprovar = () => portalBaixasRoutes.request('/solicitacoes-baixa-portal/prova/aprovar', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_pagamento: '2026-11-24' }),
+  }, { SHARE_DB: db });
+  assert.equal((await aprovar()).status, 200);
+  assert.equal((await (await aprovar()).json()).idempotent, true);
+  const pendentes = await portalBaixasRoutes.request('/solicitacoes-baixa-portal', {}, { SHARE_DB: db });
+  assert.deepEqual((await pendentes.json()).solicitacoes, []);
+  assert.equal(db.sqlite.prepare("SELECT status FROM rateio_despesas WHERE id='rb'").get().status, 'EM_ABERTO');
+  const pagamentos = await pagamentosContextoBaixa(db, await contextoBaixaCotista(db, 'ra'));
+  assert.equal(pagamentos.length, 1);
+  assert.equal(pagamentos[0].comprovante_url, prova.comprovante_url);
 });

@@ -171,17 +171,9 @@ recibosSaidaRoutes.delete('/recibos-saida/:id', async (c) => {
     const movimentos = [...new Set(movimentoIds)]
     const placeholders = ids.map(() => '?').join(', ')
     const movimentoPlaceholders = movimentos.map(() => '?').join(', ')
-    const rateioIds = ids.length
-      ? (await listar(db, `SELECT id FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`, ...ids)).map((row) => String(row.id)).filter(Boolean)
-      : []
-
     const statements: D1PreparedStatement[] = []
     if (ids.length) statements.push(db.prepare(`DELETE FROM financeiro_vinculos WHERE (origem_id IN (${placeholders}) OR destino_id IN (${placeholders}) OR origem_id = ? OR destino_id = ?)`).bind(...ids, ...ids, reciboId, reciboId))
     else statements.push(db.prepare('DELETE FROM financeiro_vinculos WHERE origem_id = ? OR destino_id = ?').bind(reciboId, reciboId))
-    if (rateioIds.length) {
-      const rateioPlaceholders = rateioIds.map(() => '?').join(', ')
-      statements.push(db.prepare(`DELETE FROM rateio_pagamentos WHERE rateio_id IN (${rateioPlaceholders})`).bind(...rateioIds))
-    }
     if (ids.length) statements.push(db.prepare(`DELETE FROM rateio_despesas WHERE lancamento_id IN (${placeholders})`).bind(...ids))
     if (movimentos.length) statements.push(db.prepare(`DELETE FROM rateio_hold WHERE movimento_id IN (${movimentoPlaceholders})`).bind(...movimentos))
     if (contaId) statements.push(db.prepare('UPDATE contas_areceber SET recibos_saida_id = NULL WHERE id = ?').bind(contaId))

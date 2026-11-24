@@ -1,3 +1,5 @@
+import { holdingMovementColumn, loadSchema } from './FinanceiroKernel'
+import { parcelasDoRateio } from './baixasRateio'
 import { Hono } from 'hono'
 import { listarTodos } from './repositories/d1'
 import { errorResponse } from './errorResponse'
@@ -13,6 +15,7 @@ export function limitesMes(mes: string) {
   return { inicio: `${mes}-01`, fim: new Date(Date.UTC(ano, m, 0)).toISOString().slice(0, 10) }
 }
 export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: string, fim: string) {
+  const colunaMovimento = holdingMovementColumn(await loadSchema(db))
   const [participantesDB, rows, eventos, ajustesDB, movimentos, eventosHolding] = await Promise.all([
     listarTodos(db, `SELECT ca.id, ca.socio_id, ca.cliente_id, COALESCE(hs.nome,cl.razao_social,ca.codigo_cliente,ca.id) AS nome,
       CASE WHEN ca.socio_id IS NULL THEN 'CLIENTES' ELSE 'HOLD:' || hs.holding_id END AS dominio
@@ -24,12 +27,12 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
       (SELECT r.data_emissao FROM rateio_despesas r WHERE v.id = 'CLIENTE:' || r.id),
       (SELECT h.data_emissao FROM rateio_hold h WHERE v.id = 'HOLD:' || h.id)
     ) AS emissao FROM vw_balanco_rateios v WHERE v.aeronave_id=? ORDER BY v.id`, aeronaveId),
-    listarTodos(db, `SELECT p.* FROM rateio_pagamentos p JOIN rateio_despesas r ON r.id=p.rateio_id
+    listarTodos(db, `SELECT p.* FROM ${parcelasDoRateio('rateio_despesas')} p JOIN rateio_despesas r ON r.id=p.rateio_id
       WHERE r.aeronave_id=? ORDER BY p.id`, aeronaveId),
     listarTodos(db, 'SELECT * FROM balanco_ajustes WHERE aeronave_id=? ORDER BY rowid', aeronaveId),
     listarTodos(db, `SELECT * FROM movimentos_holding WHERE aeronave_id=? AND tipo_caixa='HOLD'
       AND COALESCE(escopo_financeiro,'FINANCEIRO')='FINANCEIRO' ORDER BY id`, aeronaveId),
-    listarTodos(db, `SELECT p.* FROM rateio_hold_pagamentos p JOIN rateio_hold r ON r.id=p.rateio_id
+    listarTodos(db, `SELECT p.*, r.${colunaMovimento} AS movimento_id FROM ${parcelasDoRateio('rateio_hold')} p JOIN rateio_hold r ON r.id=p.rateio_id
       WHERE r.aeronave_id=? ORDER BY p.id`, aeronaveId),
   ])
   const participantes = participantesDB.map(p => ({ id: String(p.id), nome: String(p.nome), dominio: String(p.dominio) }))
@@ -60,11 +63,27 @@ export async function carregarDadosBalancoMensal(db: D1Database, aeronaveId: str
   const ajustes: AjusteBalanco[] = ajustesDB.map(a => ({ id: String(a.id), origemRateioId: String(a.origem_rateio_id),
     destinoRateioId: String(a.destino_rateio_id), valor: Number(a.valor_centavos), motivo: String(a.motivo) }))
   const acumulado = calcularBalancoMensal(participantes, rateios, pagamentos, ajustes, '2000-01-01', fim)
+  // Uma NF pode ter parcelas pagas pelo banco da holding e outras pelo sócio.
+  // Considere a origem e a data de cada parcela, inclusive antes da quitação total.
+  const saidasPorMovimento = new Map<string, number>()
+  for (const p of eventosHolding) {
+    if (!p.movimento_id || !p.conta_receber_id || p.status !== 'CONFIRMADO') continue
+    const id = String(p.movimento_id)
+    const valor = p.tipo_pagador === 'HOLDING' && p.data_pagamento && String(p.data_pagamento).slice(0, 10) <= fim
+      ? Number(p.valor_centavos) : 0
+    saidasPorMovimento.set(id, (saidasPorMovimento.get(id) || 0) + valor)
+  }
   const holdings = [...new Set(participantes.filter(p => p.dominio.startsWith('HOLD:')).map(p => p.dominio))].map(dominio => {
     let saldoMovimentosAeronaveCentavos = 0, aportesSemSocioCentavos = 0
     const aportes = new Map<string, number>()
     for (const m of movimentos) {
-      if (`HOLD:${m.holding_id}` !== dominio || Number(m.pago_diretamente) === 1) continue
+      if (`HOLD:${m.holding_id}` !== dominio || m.status === 'CANCELADO') continue
+      const saidas = saidasPorMovimento.get(String(m.id))
+      if (m.fluxo === 'SAIDA' && saidas !== undefined) {
+        saldoMovimentosAeronaveCentavos -= saidas
+        continue
+      }
+      if (Number(m.pago_diretamente) === 1) continue
       if (!['PAGO','RECEBIDO','REEMBOLSADO','ENTRADA','APORTE_MENSAL','RENDIMENTO_BANCARIO'].includes(String(m.status).toUpperCase())) continue
       const data = String(m.data_pagamento || '').slice(0,10)
       if (!data || data > fim) continue

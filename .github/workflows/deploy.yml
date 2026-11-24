@@ -9,6 +9,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      remover_tabelas_pagamentos:
+        description: Remover as duas tabelas antigas após conferir todos os pagamentos no rateio
+        type: boolean
+        default: false
+
+concurrency:
+  group: financeiro-deploy-${{ github.event_name == 'pull_request' && github.ref || 'worker' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -39,7 +48,7 @@ jobs:
         run: pnpm type-check
 
       - name: Testes NF de saída e pagamentos da holding com FKs reais
-        run: node --import tsx --test tests/nf-saida-holding-pagamento.test.mjs
+        run: node --import tsx --test tests/nf-saida-holding-pagamento.test.mjs tests/baixa-individual-cotista.test.mjs tests/migrar-baixas-rateio.test.mjs
 
       - name: Testes do balanço e custos do portal
         run: node --import tsx --test tests/portal-horas-espelho.test.mjs tests/portal-custos-reais.test.mjs tests/portal-balanco-pagador.test.mjs tests/portal-aeronave-dashboard.test.mjs
@@ -82,8 +91,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: Criar histórico de pagamentos dos rateios da holding
-        run: pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261123_rateio_hold_pagamentos.sql
+      - name: Preparar as baixas nos próprios rateios
+        run: node scripts/migrar-baixas-rateio.mjs preparar --remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -100,6 +109,13 @@ jobs:
 
       - name: Deploy to Cloudflare Workers
         run: pnpm run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Conferir e remover tabelas antigas de pagamentos
+        if: github.event_name == 'workflow_dispatch' && inputs.remover_tabelas_pagamentos
+        run: node scripts/migrar-baixas-rateio.mjs remover-legado --remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

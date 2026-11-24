@@ -1,6 +1,7 @@
 type Row = Record<string, unknown>
 type Database = D1Database
 
+import { parcelasDoRateio, registrarParcela } from './baixasRateio'
 import { dateValue, isIsoDate, nullableText, text, uuid } from '../lib/strings'
 import { mensagemFinanceiraStatements } from './financeiroNotifications'
 import {
@@ -355,8 +356,6 @@ export async function loadSchema(db: Database): Promise<SchemaCache> {
     'contas_apagar',
     'contas_areceber',
     'rateio_despesas',
-    'rateio_pagamentos',
-    'rateio_hold_pagamentos',
     'rateio_hold',
     'movimentos_holding',
     'reembolsos',
@@ -420,9 +419,8 @@ export async function validateFinanceSchema(db: Database): Promise<void> {
   requireTable(schema, 'lancamentos', ['id', 'descricao', 'fluxo', 'valor_centavos', 'status'])
   requireTable(schema, 'contas_apagar', ['id', 'lancamentos_id', 'valor_centavos', 'status'])
   requireTable(schema, 'contas_areceber', ['id', 'valor_centavos', 'status'])
-  requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id', 'status'])
-  requireTable(schema, 'rateio_pagamentos', ['id', 'rateio_id', 'conta_receber_id', 'valor_centavos', 'status'])
-  requireTable(schema, 'rateio_hold', ['id', 'socio_id'])
+  requireTable(schema, 'rateio_despesas', ['id', 'lancamento_id', 'status', 'baixas_json'])
+  requireTable(schema, 'rateio_hold', ['id', 'socio_id', 'baixas_json'])
   if (!schema.get('rateio_hold')?.has('movimento_id') && !schema.get('rateio_hold')?.has('movimento_holding_id')) {
     throw new FinanceError('Coluna de movimento ausente em rateio_hold', 'schema_coluna_ausente', 500)
   }
@@ -531,17 +529,6 @@ function addKnownColumns(
 export function holdingMovementColumn(schema: SchemaCache): 'movimento_id' | 'movimento_holding_id' {
   if (schema.get('rateio_hold')?.has('movimento_id')) return 'movimento_id'
   return 'movimento_holding_id'
-}
-
-/** Cada histórico referencia a sua tabela de rateios; IDs de holding não cabem na FK de cliente. */
-export function rateioPaymentTable(schema: SchemaCache, holding: boolean): 'rateio_pagamentos' | 'rateio_hold_pagamentos' {
-  if (!holding) return 'rateio_pagamentos'
-  const table = 'rateio_hold_pagamentos'
-  const columns = schema.get(table)
-  if (!columns?.has('rateio_id') || !columns.has('conta_receber_id') || !columns.has('idempotency_key')) {
-    throw new FinanceError('O histórico de pagamentos da holding precisa ser atualizado pelo administrador antes desta baixa.', 'migracao_pagamentos_holding_pendente', 503)
-  }
-  return table
 }
 
 function insertStatement(
@@ -712,8 +699,8 @@ async function findExistingByIdempotency(
       const rateios = await db.prepare(`SELECT id FROM rateio_despesas WHERE lancamento_id=?
         UNION ALL SELECT id FROM rateio_hold WHERE origem_tipo='ENVIO_DESPESA' AND origem_id=?`)
         .bind(envioLink.destino_id, envioLink.destino_id).all<Row>()
-      return { id: envioLink.destino_id, envio_id: envioLink.destino_id, lancamento_id: null,
-        movimento_holding_id: null, rateio_ids: (rateios.results || []).map(r => r.id),
+      return { id: envioLink.destino_id, envio_id: envioLink.destino_id, lancamento_id: envio.movimentacao_id ? envio.lancamento_id : null,
+        movimento_holding_id: envio.movimentos_holding_id ?? null, rateio_ids: (rateios.results || []).map(r => r.id),
         conta_pagar_id: null, status: 'PAGO', idempotent: true }
     }
   }
@@ -1066,7 +1053,39 @@ function clientAllocationStatements(
   })
 }
 
-/** Persiste apenas parcelas de cliente; o id do envio é a referência do rateio. */
+// Um envio convertido usa o mesmo identificador no caixa e nos rateios.
+// O comprovante de pagamento fica separado dos documentos originais da despesa.
+async function movimentoDoEnvio(db: Database, schema: SchemaCache, envioId: string, command: Row,
+  userId: string | null, pago: boolean, holding?: CotistaContext | null) {
+  const tabela = holding ? 'movimentos_holding' : 'lancamentos'
+  const fornecedor = command.fornecedor_id
+    ? await db.prepare('SELECT id FROM fornecedores_favoritos WHERE id = ?').bind(command.fornecedor_id).first<Row>()
+    : null
+  const categoria = nullableText(command.categoria_cliente_id ?? command.categoria_id)
+  const campos = {
+    ...buildDocumentFields(command.anexos_json),
+    id: envioId, aeronave_id: command.aeronave_id, descricao: command.descricao,
+    data_emissao: command.data, data_vencimento: command.data_vencimento,
+    valor_centavos: command.valor_centavos, fluxo: 'SAIDA', tipo_caixa: holding ? 'HOLD' : 'CLIENTE',
+    periodicidade: command.periodicidade, tipo_rateio: normalizeRateioType(command.tipo_rateio),
+    categoria_nome: command.categoria_nome, fornecedor_nome: command.fornecedor_nome,
+    subcategoria_1: command.subcategoria_1, subcategoria_2: command.subcategoria_2,
+    subcategoria_3: command.subcategoria_3, subcategoria_4: command.subcategoria_4,
+    status: pago ? 'PAGO' : 'EM_ABERTO', pago_diretamente: pago ? 1 : 0,
+    data_pagamento: pago ? dateValue(command.data_pagamento ?? command.data) : null,
+    comprovante_url: pago ? command.comprovante_url : null, forma_pagamento: pago ? command.forma_pagamento : null,
+    criado_por: userId, observacoes: command.observacoes, escopo_financeiro: escopoFinanceiro(command),
+    abastecimentos_id: command.abastecimentos_id, numero_voo: command.numero_voo,
+    ...(command.numero_recibo ? { numero_recibo: command.numero_recibo, url_recibo: command.url_recibo } : {}),
+    ...(holding ? { holding_id: holding.holdingId, socio_id: holding.socioId, categoria_id: categoria, fornecedor_id: fornecedor?.id }
+      : { cotista_aeronave_id: command.cotista_aeronave_id, origem_tipo: 'ENVIO_DESPESA', origem_id: envioId,
+          pago_por: pago ? command.cotista_pagador_id ?? command.pago_por : null, categoria_cliente_id: categoria,
+          fornecedores_favoritos_id: fornecedor?.id }),
+  }
+  return insertStatement(db, schema, tabela, Object.fromEntries(Object.entries(campos)
+    .filter(([campo]) => schema.get(tabela)?.has(campo))), ['id', 'valor_centavos', 'tipo_caixa', 'fluxo', 'status'])
+}
+
 export async function createClientExpenseRateios(
   db: Database,
   body: Row,
@@ -1080,7 +1099,12 @@ export async function createClientExpenseRateios(
   const lines = allocationLines(command)
   if (!lines.length) throw new FinanceError('Despesa de cliente precisa de rateio', 'rateio_obrigatorio')
   const rateioIds = lines.map(() => id())
-  await db.batch(clientAllocationStatements(db, schema, command, sourceId, lines, userId, rateioIds))
+  const pai = await db.prepare('SELECT id FROM lancamentos WHERE id = ?').bind(sourceId).first()
+  const existentes = await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id = ? ORDER BY id').bind(sourceId).all<Row>()
+  if (existentes.results.length) return { id: sourceId, lancamento_id: sourceId, rateio_ids: existentes.results.map(r => r.id), idempotent: true }
+  const statements = clientAllocationStatements(db, schema, command, sourceId, lines, userId, rateioIds)
+  if (!pai) statements.unshift(await movimentoDoEnvio(db, schema, sourceId, command, userId, false))
+  await db.batch(statements)
   return { id: sourceId, lancamento_id: sourceId, rateio_ids: rateioIds, movimentacao_id: null, status: 'EM_ABERTO', idempotent: false }
 }
 
@@ -1228,8 +1252,20 @@ export async function createExpense(
     const diretoCommand = { ...command, origem_tipo: 'ENVIO_DESPESA', origem_id: envioId }
     const rateioIds = lines.map(() => id())
     const allocationStatements = context?.kind === 'HOLDING'
-      ? holdingAllocationStatements(db, schema, diretoCommand, null, lines, userId)
+      ? holdingAllocationStatements(db, schema, diretoCommand, envioId, lines, userId, rateioIds)
       : clientAllocationStatements(db, schema, diretoCommand, envioId, lines, userId, rateioIds)
+    const tabelaRateio = context?.kind === 'HOLDING' ? 'rateio_hold' : 'rateio_despesas'
+    const parcelasPagas = lines.flatMap((linha, indice) => {
+      const valor = linha.valorPagoRealCentavos ?? (linha.pagoDiretamente ? linha.valorCentavos : 0)
+      if (valor === 0) return []
+      return [registrarParcela(db, tabelaRateio, {
+        id: id(), rateio_id: rateioIds[indice], tipo_pagador: 'COTISTA',
+        pagador_cotista_id: linha.pagoPor ?? command.cotista_pagador_id ?? linha.cotistaId,
+        valor_centavos: valor, data_pagamento: dateValue(command.data_pagamento ?? command.data),
+        comprovante_url: nullableText(command.comprovante_url), forma_pagamento: nullableText(command.forma_pagamento),
+        status: 'CONFIRMADO', criado_por: userId,
+      })]
+    })
     const key = nullableText(command.idempotency_key)
     const statements: D1PreparedStatement[] = [
       ...(source ? [] : [insertStatement(db, schema, 'envio_despesas', {
@@ -1245,7 +1281,11 @@ export async function createExpense(
         tipo_rateio: normalizeRateioType(command.tipo_rateio), periodicidade: nullableText(command.periodicidade),
         escopo_financeiro: escopo,
       }, ['id', 'aeronave_id', 'descricao', 'valor'])]),
+      await movimentoDoEnvio(db, schema, envioId, command, userId, true, context?.kind === 'HOLDING' ? context : null),
+      db.prepare('UPDATE envio_despesas SET lancamento_id = ?, movimentacao_id = ?, movimentos_holding_id = ? WHERE id = ?')
+        .bind(context?.kind === 'HOLDING' ? null : envioId, envioId, context?.kind === 'HOLDING' ? envioId : null, envioId),
       ...allocationStatements,
+      ...parcelasPagas,
       ...(key ? [db.prepare(`INSERT INTO financeiro_vinculos
         (id,origem_tipo,origem_id,destino_tipo,destino_id,tipo_vinculo)
         VALUES (?,'IDEMPOTENCY_KEY',?,'ENVIO_DESPESA',?,'IDEMPOTENCIA')`).bind(id(),key,envioId)] : []),
@@ -1257,7 +1297,7 @@ export async function createExpense(
     const result = context?.kind === 'HOLDING'
       ? await db.prepare("SELECT id FROM rateio_hold WHERE origem_tipo='ENVIO_DESPESA' AND origem_id=?").bind(envioId).all<Row>()
       : await db.prepare('SELECT id FROM rateio_despesas WHERE lancamento_id=?').bind(envioId).all<Row>()
-    return { id: envioId, envio_id: envioId, lancamento_id: null, movimento_holding_id: null,
+    return { id: envioId, envio_id: envioId, lancamento_id: context?.kind === 'HOLDING' ? null : envioId, movimento_holding_id: context?.kind === 'HOLDING' ? envioId : null,
       rateio_ids: (result.results || []).map(r => r.id), conta_pagar_id: null,
       valor_centavos: amount, status: 'PAGO', idempotent: false }
   }
@@ -1565,14 +1605,14 @@ function initialRevenuePaymentStatements(db: Database, schema: SchemaCache, paym
     atualizado_em: new Date().toISOString(),
   }
   const statements = [
-    insertStatement(db, schema, rateioPaymentTable(schema, Boolean(refs.movimentoId)), {
+    registrarParcela(db, refs.movimentoId ? 'rateio_hold' : 'rateio_despesas', {
       id: id(), rateio_id: refs.rateioId, conta_receber_id: refs.contaId,
       tipo_pagador: payment.tipo_pagador, pagador_cotista_id: payment.pagador_cotista_id,
       pagador_holding_id: payment.pagador_holding_id, valor_centavos: amount,
       data_pagamento: payment.data_pagamento, conta_bancaria_id: payment.conta_bancaria_id,
       comprovante_url: payment.comprovante_url, forma_pagamento: payment.forma_pagamento,
       status: 'CONFIRMADO', idempotency_key: `${payment.idempotency_key}:${refs.rateioId}`, criado_por: userId,
-    }, ['id', 'rateio_id', 'conta_receber_id', 'valor_centavos', 'idempotency_key']),
+    }),
     update('contas_areceber', {
       status: 'RECEBIDO', data_recebimento: payment.data_pagamento, data_pagamento: payment.data_pagamento,
       banco_recebimento: payment.conta_bancaria_id, comprovante_recebimento_url: payment.comprovante_url,
@@ -1810,10 +1850,9 @@ export async function issueRevenue(
 
     if (!reciboSaida) {
       statements.push(
-        insertStatement(
+        registrarParcela(
           db,
-          schema,
-          'rateio_pagamentos',
+          'rateio_despesas',
           {
             id: id(),
             rateio_id: clientRateioId,
@@ -1832,7 +1871,6 @@ export async function issueRevenue(
             idempotency_key: `DIRETO:${command.idempotency_key || clientLancamentoId}:${clientRateioId}`,
             criado_por: userId,
           },
-          ['id', 'rateio_id', 'valor_centavos'],
         ),
       )
     }
@@ -2164,7 +2202,7 @@ export async function createReimbursement(
       db,
       schema,
       'rateio_despesas',
-      {
+      Object.fromEntries(Object.entries({
         id: rateioIds[index],
         lancamento_id: clientLancamentoId,
         cotista_id: line.cotistaId,
@@ -2191,8 +2229,8 @@ export async function createReimbursement(
         origem_id: reimbursementId,
         origem_tipo: 'REEMBOLSO',
         criado_por: userId,
-      },
-      ['id', 'cotista_id', 'aeronave_id'],
+      }).filter(([campo]) => schema.get('rateio_despesas')?.has(campo))),
+      ['id', 'lancamento_id', 'cotista_id', 'aeronave_id', 'valor_rateado_centavos', 'valor_pago_real_centavos'],
     )),
     auditStatement(
       db,
@@ -2281,19 +2319,38 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   return { ...(await db.prepare('SELECT * FROM contas_apagar WHERE id = ?').bind(payableId).first<Row>()), idempotent: false }
 }
 
+// Antes de complementar uma baixa antiga, preserve o valor e a data que já
+// constam no rateio. Um recebimento sem vínculo ou sem data exige conciliação.
+function parcelaAnterior(rateio: Row, contaId: string | null, holding = false) {
+  const valor = Number(rateio.valor_pago_real_centavos || 0)
+  if (valor <= 0 || (contaId && !rateio.data_pagamento)) return null
+  const parcelas = JSON.parse(String(rateio.baixas_json || '[]')) as Row[]
+  if (parcelas.some(p => p.status === 'CONFIRMADO' || p.status === 'ESTORNADO')) return null
+  return {
+    id: `ANTERIOR:${rateio.id}`, rateio_id: rateio.id, conta_receber_id: contaId,
+    status: 'CONFIRMADO', valor_centavos: valor, data_pagamento: rateio.data_pagamento ?? null,
+    tipo_pagador: asFlag(rateio.pago_diretamente) ? 'COTISTA' : holding ? 'HOLDING' : 'NAO_INFORMADO',
+    pagador_holding_id: holding && !asFlag(rateio.pago_diretamente) ? rateio.pago_por : null,
+    pagador_cotista_id: asFlag(rateio.pago_diretamente) ? rateio.pago_por : null,
+    observacoes: 'Saldo pago registrado no rateio antes do detalhamento das parcelas.',
+  }
+}
+
 type SaidaPagamento = 'DGA_BRADESCO' | 'CONTA_COTISTA'
 type RealPayment = { idempotency_key?: string | null; data_pagamento?: string | null; conta_bancaria_id?: string | null; comprovante_url?: string | null; forma_pagamento?: string | null; observacoes?: string | null; tipo_pagador: 'COTISTA' | 'SHARE' | 'HOLDING'; pagador_cotista_id?: string | null; pagador_holding_id?: string | null; saida_pagamento?: SaidaPagamento | null; valor_centavos: number; rateios: Array<{ rateio_id: string; valor_centavos: number }> }
 
-export async function settleReceivable(db: Database, receivableId: string, body: Row, userId: string | null): Promise<Row> {
+export async function settleReceivable(db: Database, receivableId: string, body: Row, userId: string | null, aoConfirmar: D1PreparedStatement[] = []): Promise<Row> {
   const schema = await loadSchema(db)
   const revision = await readSettlementRevision(db, `receber:${receivableId}`)
   const row = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
   if (!row) throw new FinanceError('Conta a receber não encontrada', 'nao_encontrado', 404)
-  const paymentTable = rateioPaymentTable(schema, Boolean(row.movimentos_id))
+  const tabelaRateio = row.movimentos_id ? 'rateio_hold' : 'rateio_despesas'
+  const parcelas = parcelasDoRateio(tabelaRateio)
   if (['RECEBIDO', 'PAGO'].includes(upper(row.status))) {
     const requested = Array.isArray(body.pagamentos) ? body.pagamentos as RealPayment[] : []
-    const saved = (await db.prepare(`SELECT * FROM ${paymentTable} WHERE conta_receber_id = ? AND status = 'CONFIRMADO'`).bind(receivableId).all<Row>()).results || []
+    const saved = (await db.prepare(`SELECT * FROM ${parcelas} WHERE conta_receber_id = ? AND status = 'CONFIRMADO'`).bind(receivableId).all<Row>()).results || []
     if (!requested.length || !requested.every(p => receiptReplayMatches(p, saved))) throw new FinanceError('Conta já recebida. Recarregue os dados antes de registrar outro pagamento.', 'conta_ja_recebida', 409)
+    if (aoConfirmar.length) await db.batch(aoConfirmar)
     return { ...row, idempotent: true }
   }
   if (upper(row.status) === 'CANCELADO') throw new FinanceError('Conta a receber cancelada não pode ser baixada', 'conta_cancelada')
@@ -2338,7 +2395,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   const existingByRateio = new Map<string, number>()
   const paidByPayments = new Map<string, number>()
   const existingKeys = new Set<string>()
-  const existing = await db.prepare(`SELECT * FROM ${paymentTable} WHERE conta_receber_id = ? AND status = 'CONFIRMADO'`).bind(receivableId).all<Row>()
+  const existing = await db.prepare(`SELECT * FROM ${parcelas} WHERE conta_receber_id = ? AND status = 'CONFIRMADO'`).bind(receivableId).all<Row>()
   for (const rateio of rateios.results || []) {
     const paid = Number(rateio.valor_pago_real_centavos || 0)
     if (paid > 0) existingByRateio.set(String(rateio.id), paid)
@@ -2352,9 +2409,14 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   for (const [rid, paid] of paidByPayments) {
     existingByRateio.set(rid, Math.max(existingByRateio.get(rid) || 0, paid))
   }
-  const confirmadoAnterior = [...paidByPayments.values()].reduce((sum, value) => sum + value, 0)
+  let confirmadoAnterior = [...paidByPayments.values()].reduce((sum, value) => sum + value, 0)
   for (const [rid, paid] of existingByRateio) {
-    if (paid !== (paidByPayments.get(rid) || 0)) throw new FinanceError('Rateio com baixa sem histórico conciliado nesta conta. Regularize o histórico antes de receber.', 'historico_pagamento_divergente', 409)
+    if (paid === (paidByPayments.get(rid) || 0)) continue
+    const rateio = rateios.results.find(r => r.id === rid)
+    const anterior = documentoSaida && rateio ? parcelaAnterior(rateio, receivableId, holdingSaida) : null
+    if (!anterior) throw new FinanceError('Rateio com baixa sem histórico conciliado nesta conta. Regularize o histórico antes de receber.', 'historico_pagamento_divergente', 409)
+    statements.push(registrarParcela(db, tabelaRateio, anterior))
+    confirmadoAnterior += anterior.valor_centavos
   }
   const requestKeys = new Set<string>()
   const acceptedPayments: RealPayment[] = []
@@ -2405,13 +2467,16 @@ export async function settleReceivable(db: Database, receivableId: string, body:
       const next = (existingByRateio.get(rid) || 0) + (distributed.get(rid) || 0) + cents
       if (next > (allowed.get(rid) || 0)) throw new FinanceError('Pagamento excede o valor esperado do rateio', 'rateio_excedido')
       distributed.set(rid, (distributed.get(rid) || 0) + cents)
-      statements.push(insertStatement(db, schema, paymentTable, { id: id(), rateio_id: rid, conta_receber_id: receivableId, tipo_pagador: payment.tipo_pagador, pagador_cotista_id: payment.pagador_cotista_id || null, pagador_holding_id: payment.pagador_holding_id || null, valor_centavos: cents, data_pagamento: date, conta_bancaria_id: bank, comprovante_url: nullableText(payment.comprovante_url), forma_pagamento: nullableText(payment.forma_pagamento), observacoes: nullableText(payment.observacoes), status: 'CONFIRMADO', idempotency_key: `${paymentKey}:${rid}`, criado_por: userId }, ['id', 'rateio_id', 'conta_receber_id', 'valor_centavos', 'idempotency_key']))
+      statements.push(registrarParcela(db, tabelaRateio, { id: id(), rateio_id: rid, conta_receber_id: receivableId, tipo_pagador: payment.tipo_pagador, pagador_cotista_id: payment.pagador_cotista_id || null, pagador_holding_id: payment.pagador_holding_id || null, valor_centavos: cents, data_pagamento: date, conta_bancaria_id: bank, comprovante_url: nullableText(payment.comprovante_url), forma_pagamento: nullableText(payment.forma_pagamento), observacoes: nullableText(payment.observacoes), status: 'CONFIRMADO', idempotency_key: `${paymentKey}:${rid}`, criado_por: userId }))
     }
     newTotal += value
     acceptedPayments.push(payment)
   }
   if (confirmadoAnterior + newTotal > total) throw new FinanceError('O pagamento excede o saldo da conta a receber', 'conta_receber_excedida')
-  if (!acceptedPayments.length) return { ...row, idempotent: true }
+  if (!acceptedPayments.length) {
+    if (aoConfirmar.length) await db.batch(aoConfirmar)
+    return { ...row, idempotent: true }
+  }
 
   const finalTotal = confirmadoAnterior + newTotal
   const novoStatusConta = finalTotal >= total ? 'RECEBIDO' : 'EM_ABERTO'
@@ -2435,7 +2500,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
     statements.push(updateStatement(db, schema, rateioTable, {
       valor_pago_real_centavos: paid,
       status,
-      data_pagamento: paid >= expected ? paymentForRateio.data_pagamento : null,
+      data_pagamento: paymentForRateio.data_pagamento,
       ...(rateioColumns?.has('pago_diretamente') && (holdingSaida || isShareRevenue)
         ? { pago_diretamente: holdingSaida ? (paymentForRateio.saida_pagamento === 'CONTA_COTISTA' ? 1 : 0) : 1 }
         : {}),
@@ -2494,7 +2559,7 @@ export async function settleReceivable(db: Database, receivableId: string, body:
   }
   if (row.recibos_saida_id) statements.push(updateStatement(db, schema, 'recibos_saida', { status: novoStatusConta, atualizado_em: new Date().toISOString() }, 'id = ?', [row.recibos_saida_id]))
   if (row.nf_saida_id && schema.get('notas_fiscais_saida')?.has('status')) statements.push(updateStatement(db, schema, 'notas_fiscais_saida', { status: novoStatusConta }, 'id = ?', [row.nf_saida_id]))
-  await commitSettlement(db, statements)
+  await commitSettlement(db, [...statements, ...aoConfirmar])
   const updated = await db.prepare('SELECT * FROM contas_areceber WHERE id = ?').bind(receivableId).first<Row>()
   const updatedRateios = movimentoHoldingId
     ? await db.prepare(`SELECT id, socio_id AS cotista_id, valor_rateado_centavos, valor_pago_real_centavos, status FROM rateio_hold WHERE ${holdingMovementColumn(schema)} = ? ORDER BY rowid`).bind(movimentoHoldingId).all<Row>()
@@ -2994,7 +3059,7 @@ export async function enviarReciboPagamentoParaRateio(
 
   // Recibo pago por cliente representa uma despesa do caixa cliente. O envio
   // é a origem operacional desse fluxo; suas parcelas devem usar o próprio ID
-  // do envio como lancamento_id, sem criar um lançamento espelho.
+  // do envio para vincular as parcelas ao lançamento do cliente.
   if (!rateioExistente && receipt.pagador_tipo === 'cliente') {
     const rateioLinhas = Array.isArray(body.rateio_linhas) ? body.rateio_linhas as Row[] : []
     const aeronaveId = text(body.aeronave_id) || text(receipt.aeronave_id)
@@ -3812,20 +3877,22 @@ export async function contextoBaixaCotista(db: Database, entityId: string): Prom
   if (['RECIBO_SAIDA', 'NF_SAIDA', 'RECIBO_REEMBOLSO', 'REEMBOLSO'].includes(upper(lancamento.origem_tipo)) || asFlag(lancamento.reembolsavel)) throw new FinanceError('Cobrança da Share sem conta a receber válida. Regularize os vínculos.', 'conta_nao_vinculada', 409)
   const rows = allocation ? [allocation] : (await db.prepare("SELECT * FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO' ORDER BY id").bind(lancamento.id).all<Row>()).results || []
   if (!rows.length) throw new FinanceError('Despesa sem rateio. Defina a responsabilidade antes da baixa.', 'rateio_nao_vinculado', 409)
-  return { natureza: 'PAGAMENTO_DIRETO', conta_id: null, lancamento, rateios: rows, cotista_id: allocation?.cotista_id ?? lancamento.cotista_aeronave_id }
+  return { natureza: 'PAGAMENTO_DIRETO', conta_id: null,
+    envio_id: lancamento.origem_tipo === 'ENVIO_DESPESA' ? lancamento.origem_id : null,
+    lancamento, rateios: rows, cotista_id: allocation?.cotista_id ?? lancamento.cotista_aeronave_id }
 }
 
 export async function pagamentosContextoBaixa(db: Database, contexto: Row): Promise<Row[]> {
   const ids = (contexto.rateios as Row[]).map((rateio) => String(rateio.id))
   if (!ids.length) return []
-  const table = rateioPaymentTable(await loadSchema(db), contexto.rateio_tabela === 'rateio_hold')
+  const table = parcelasDoRateio(contexto.rateio_tabela === 'rateio_hold' ? 'rateio_hold' : 'rateio_despesas')
   return (await db.prepare(`SELECT id, rateio_id, tipo_pagador, pagador_cotista_id, pagador_holding_id,
     valor_centavos, data_pagamento, comprovante_url, forma_pagamento, observacoes FROM ${table}
     WHERE rateio_id IN (${ids.map(() => '?').join(',')}) AND status = 'CONFIRMADO'
     ORDER BY data_pagamento, id`).bind(...ids).all<Row>()).results || []
 }
 
-export async function settleCotista(db: Database, entityId: string, body: Row, userId: string | null): Promise<Row> {
+export async function settleCotista(db: Database, entityId: string, body: Row, userId: string | null, aoConfirmar: D1PreparedStatement[] = []): Promise<Row> {
   const initial = await contextoBaixaCotista(db, entityId)
   if (initial.natureza === 'RECEBIMENTO_SHARE') {
     const payments = Array.isArray(body.pagamentos) ? body.pagamentos as RealPayment[] : []
@@ -3835,7 +3902,7 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
     }
     // A selection containing one allocation must not silently settle another allocation.
     if (allowed.size === 1) for (const p of payments) if (!p.rateios?.length) p.rateios = [{ rateio_id: [...allowed][0], valor_centavos: p.valor_centavos }]
-    return settleReceivable(db, String(initial.conta_id), { ...body, pagamentos: payments }, userId)
+    return settleReceivable(db, String(initial.conta_id), { ...body, pagamentos: payments }, userId, aoConfirmar)
   }
   const lancamento = initial.lancamento as Row
   const lancamentoId = nullableText(lancamento.id)
@@ -3863,10 +3930,11 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
   if (!allocations.length || new Set(allocations.map(r => r.rateio_id)).size !== allocations.length) throw new FinanceError('Distribuição de pagamento inválida', 'rateios_invalidos')
   if (allocations.reduce((s, r) => s + asPositiveCents(r.valor_centavos), 0) !== amount) throw new FinanceError('Valor diferente da soma dos rateios', 'distribuicao_pagamento_invalida')
   const idempotencyPrefix = `DIRETO-COTISTA:${requestKey}:`
-  const existing = await db.prepare("SELECT * FROM rateio_pagamentos WHERE status = 'CONFIRMADO' AND substr(idempotency_key, 1, ?) = ?").bind(idempotencyPrefix.length, idempotencyPrefix).all<Row>()
+  const existing = await db.prepare(`SELECT * FROM ${parcelasDoRateio('rateio_despesas')} WHERE status = 'CONFIRMADO' AND substr(idempotency_key, 1, ?) = ?`).bind(idempotencyPrefix.length, idempotencyPrefix).all<Row>()
   if ((existing.results || []).length) {
     const old = existing.results || []
     if (old.some(o => o.pagador_cotista_id !== p.pagador_cotista_id || o.data_pagamento !== p.data_pagamento || o.tipo_pagador !== 'COTISTA') || old.length !== allocations.length || !allocations.every(a => old.some(o => o.idempotency_key === `DIRETO-COTISTA:${requestKey}:${a.rateio_id}` && o.valor_centavos === a.valor_centavos))) throw new FinanceError('Chave de pagamento reutilizada com outros dados', 'idempotencia_conflitante', 409)
+    if (aoConfirmar.length) await db.batch(aoConfirmar)
     return { ok: true, idempotent: true }
   }
   const statements: D1PreparedStatement[] = [settlementRevisionStatement(db, key, revision)]
@@ -3876,15 +3944,18 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
     if (['PAGO', 'PAGO_DIRETAMENTE', 'REEMBOLSADO', 'CANCELADO'].includes(upper(r.status))) throw new FinanceError('Rateio já liquidado ou cancelado', 'rateio_ja_liquidado', 409)
     const next = Number(r.valor_pago_real_centavos || 0) + a.valor_centavos
     if (next > Number(r.valor_rateado_centavos)) throw new FinanceError('Pagamento excede o saldo do rateio', 'rateio_excedido')
-    statements.push(insertStatement(db, schema, 'rateio_pagamentos', {
+    const anterior = parcelaAnterior(r, null)
+    if (anterior) statements.push(registrarParcela(db, 'rateio_despesas', anterior))
+    statements.push(registrarParcela(db, 'rateio_despesas', {
       id: id(), rateio_id: r.id, conta_receber_id: null, tipo_pagador: 'COTISTA', pagador_cotista_id: p.pagador_cotista_id,
       valor_centavos: a.valor_centavos, data_pagamento: p.data_pagamento, conta_bancaria_id: null,
       comprovante_url: nullableText(p.comprovante_url), forma_pagamento: nullableText(p.forma_pagamento), observacoes: nullableText(p.observacoes),
       status: 'CONFIRMADO', idempotency_key: `DIRETO-COTISTA:${requestKey}:${r.id}`, criado_por: userId,
-    }, ['id', 'rateio_id', 'valor_centavos', 'idempotency_key']))
+    }))
     statements.push(updateStatement(db, schema, 'rateio_despesas', {
       valor_pago_real_centavos: next, status: next === Number(r.valor_rateado_centavos) ? 'PAGO_DIRETAMENTE' : 'EM_ABERTO',
-      data_pagamento: next === Number(r.valor_rateado_centavos) ? p.data_pagamento : null,
+      data_pagamento: p.data_pagamento,
+      ...(schema.get('rateio_despesas')?.has('url_doc') && p.comprovante_url && !r.url_doc ? { url_doc: p.comprovante_url } : {}),
       pago_por: p.pagador_cotista_id, pago_diretamente: 1, atualizado_em: new Date().toISOString(),
     }, 'id = ?', [r.id]))
   }
@@ -3899,7 +3970,7 @@ export async function settleCotista(db: Database, entityId: string, body: Row, u
       AND EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO')
       AND NOT EXISTS (SELECT 1 FROM rateio_despesas WHERE lancamento_id = ? AND COALESCE(status, '') <> 'CANCELADO'
         AND COALESCE(valor_pago_real_centavos, 0) < COALESCE(valor_rateado_centavos, 0))`).bind(envioId, envioLancamentoId, envioLancamentoId))
-  await commitSettlement(db, statements)
+  await commitSettlement(db, [...statements, ...aoConfirmar])
   return { ok: true, idempotent: false, natureza: 'PAGAMENTO_DIRETO', lancamento_id: lancamentoId, envio_id: envioId }
 }
 

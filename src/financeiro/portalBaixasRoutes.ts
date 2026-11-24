@@ -1,3 +1,4 @@
+import { parcelasDoRateio } from './baixasRateio'
 import { Hono } from 'hono'
 import { contextoBaixaCotista, settleCotista } from './FinanceiroKernel'
 import { errorResponse } from './errorResponse'
@@ -34,7 +35,7 @@ async function solicitacaoPendente(db: D1Database, id: string): Promise<Solicita
       r.lancamento_id,
       COALESCE(cl.razao_social, hs.nome, ca.codigo_cliente, 'Cotista') AS nome_cotista,
       a.matricula_registro AS aeronave
-    FROM rateio_pagamentos p
+    FROM ${parcelasDoRateio('rateio_despesas')} p
     JOIN rateio_despesas r ON r.id = p.rateio_id
     LEFT JOIN cotista_aeronave ca ON ca.id = p.pagador_cotista_id
     LEFT JOIN cliente cl ON cl.id = ca.cliente_id
@@ -47,7 +48,7 @@ async function solicitacaoPendente(db: D1Database, id: string): Promise<Solicita
 
 portalBaixasRoutes.get('/solicitacoes-baixa-portal', async c => {
   const { results } = await c.env.SHARE_DB.prepare(`SELECT p.id
-    FROM rateio_pagamentos p
+    FROM ${parcelasDoRateio('rateio_despesas')} p
     WHERE p.forma_pagamento = 'COMPROVANTE_PORTAL' AND p.status = 'PENDENTE'
     ORDER BY p.criado_em ASC LIMIT 200`).all<{ id: string }>()
   const solicitacoes = await Promise.all((results ?? []).map(async ({ id }) => {
@@ -104,8 +105,6 @@ portalBaixasRoutes.post('/solicitacoes-baixa-portal/:id/aprovar', async c => {
         : c.json({ error: 'solicitacao_ja_processada' }, 409)
     }
     if (String(request.status_rateio).toUpperCase() === 'CANCELADO') return c.json({ error: 'solicitacao_nao_encontrada' }, 404)
-    const pending = await db.prepare("SELECT id FROM rateio_pagamentos WHERE id = ? AND status = 'PENDENTE' AND forma_pagamento = 'COMPROVANTE_PORTAL'").bind(id).first()
-    if (!pending) return c.json({ error: 'solicitacao_ja_processada' }, 409)
     const body = await c.req.json<{ data_pagamento?: unknown; conta_bancaria_id?: unknown }>().catch(() => null)
     const dataPagamento = String(body?.data_pagamento ?? '').trim()
     const dataValidada = /^\d{4}-\d{2}-\d{2}$/.test(dataPagamento) ? new Date(`${dataPagamento}T00:00:00Z`) : null
@@ -121,6 +120,12 @@ portalBaixasRoutes.post('/solicitacoes-baixa-portal/:id/aprovar', async c => {
       const contaShare = await db.prepare("SELECT id FROM contas_bancarias WHERE id = ? AND COALESCE(ativo, 1) = 1 AND upper(COALESCE(tipo_caixa, 'SHARE')) = 'SHARE'").bind(contaId).first()
       if (!contaShare) return c.json({ error: 'conta_bancaria_share_invalida' }, 400)
     }
+    const aprovarPedido = db.prepare(`UPDATE rateio_despesas SET baixas_json = json_set(rateio_despesas.baixas_json,
+        '$[' || p.key || '].aprovada_em', CURRENT_TIMESTAMP)
+      FROM rateio_despesas r, json_each(r.baixas_json) p
+      WHERE rateio_despesas.id = r.id AND r.id = ? AND json_extract(p.value, '$.id') = ?
+        AND json_extract(p.value, '$.status') = 'PENDENTE'`)
+      .bind(request.rateio_id, id)
     const settlement = await settleCotista(db, request.rateio_id, {
       pagamentos: [{
         idempotency_key: `PORTAL_BAIXA:${request.id}`,
@@ -134,9 +139,7 @@ portalBaixasRoutes.post('/solicitacoes-baixa-portal/:id/aprovar', async c => {
         observacoes: request.observacoes || 'Pagamento confirmado após solicitação no Portal Cliente',
         rateios: [{ rateio_id: request.rateio_id, valor_centavos: request.valor_centavos }],
       }],
-    }, c.get('userId') || null)
-    await db.prepare("UPDATE rateio_pagamentos SET status = 'CANCELADO', observacoes = COALESCE(observacoes, '') || ' [Solicitação aprovada; baixa conciliada pelo financeiro]' WHERE id = ? AND status = 'PENDENTE'")
-      .bind(id).run()
+    }, c.get('userId') || null, [aprovarPedido])
     return c.json({ success: true, settlement })
   } catch (error) {
     return errorResponse(c, error)

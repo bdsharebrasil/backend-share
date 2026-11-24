@@ -260,8 +260,7 @@ export async function convertPaymentRequest(
   }
 
   try {
-    // Cotista cliente já está representado pelo envio e suas parcelas. Não criar
-    // um segundo lançamento; o id do envio é a referência do rateio.
+    // A conversão mantém a referência do envio no lançamento do cliente e nas parcelas.
     if (request.tipo === 'cliente' && !ehHolding) {
       if (!handlers.createClientExpenseRateios) throw new Error('handler_de_rateio_cliente_nao_configurado')
       const rateio = await handlers.createClientExpenseRateios(db, { ...comando, lancamento_id: request.id }, userId, { internal: true })

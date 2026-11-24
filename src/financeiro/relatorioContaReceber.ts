@@ -1,8 +1,10 @@
+import { parcelasDoRateio } from './baixasRateio'
 import { uuid } from '../lib/strings'
 
 type ContaAReceberValues = Record<string, unknown>
 
 type ExistingContaAReceber = {
+  movimentos_id?: string | null
   id: string
   status: string | null
   valor_centavos: number | null
@@ -70,13 +72,11 @@ export async function ensureRelatorioContaAReceber(
     const hasPaymentStatus = ['RECEBIDO', 'PAGO'].includes(status)
     const hasPaymentMetadata = Boolean(row.data_recebimento || row.data_pagamento || row.comprovante_recebimento_url
       || Number(row.valor_pago_real_centavos || 0) > 0 || Number(row.valor_recebido_centavos || 0) > 0)
-    let hasPaymentRows = false
-    const paymentTable = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rateio_pagamentos' LIMIT 1").first<{ name: string }>()
-    if (paymentTable?.name) {
-      const payment = await db.prepare(`SELECT 1 AS encontrado FROM rateio_pagamentos
-        WHERE conta_receber_id = ?1 AND UPPER(COALESCE(status, '')) = 'CONFIRMADO' LIMIT 1`).bind(row.id).first<{ encontrado: number }>()
-      hasPaymentRows = Boolean(payment)
-    }
+    const tabelaRateio = row.movimentos_id ? 'rateio_hold' : 'rateio_despesas'
+    const payment = hasPaymentStatus || hasPaymentMetadata ? null : await db.prepare(`SELECT 1 AS encontrado
+      FROM ${parcelasDoRateio(tabelaRateio)} WHERE conta_receber_id = ?1 AND status = 'CONFIRMADO' LIMIT 1`)
+      .bind(row.id).first()
+    const hasPaymentRows = Boolean(payment)
     const hasPayments = hasPaymentStatus || hasPaymentMetadata || hasPaymentRows
     const updates: Record<string, unknown> = {
       origem_tipo: 'RELATORIO_DESPESA_VIAGEM',

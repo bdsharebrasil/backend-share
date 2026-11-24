@@ -13,7 +13,7 @@ test('financeiro do portal separa cliente e holding por sessão', () => {
 });
 
 test('financeiro do portal calcula pago apenas com pagamentos confirmados e não aceita IDs do navegador', () => {
-  assert.match(source, /const paymentTable = user\.cliente_id \? 'rateio_pagamentos' : 'rateio_hold_pagamentos'/);
+  assert.match(source, /const paymentTable = parcelasDoRateio\(user\.cliente_id \? 'rateio_despesas' : 'rateio_hold'\)/);
   assert.match(source, /FROM \$\{paymentTable\}/);
   assert.match(source, /UPPER\(COALESCE\(status, ''\)\) = 'CONFIRMADO'/);
   assert.match(source, /portalSession\(c\)/);
