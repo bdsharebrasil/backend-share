@@ -1403,7 +1403,7 @@ export async function createExpense(
         fornecedor_nome: nullableText(command.fornecedor_nome ?? command.fornecedor),
         fornecedores_favoritos_id: nullableText(command.fornecedor_id),
         categoria_share_id: ehDespesaCliente ? null : shareCategory!.categoria_share_id,
-        categoria_cliente_id: ehDespesaCliente ? nullableText(command.categoria_cliente_id ?? command.categoria_id) : null,
+        categoria_cliente_id: nullableText(command.categoria_cliente_id ?? (ehDespesaCliente ? command.categoria_id : null)),
         categoria_nome: ehDespesaCliente
           ? nullableText(command.categoria_nome ?? command.categoria ?? 'SEM CATEGORIA')
           : shareCategory!.categoria_nome,

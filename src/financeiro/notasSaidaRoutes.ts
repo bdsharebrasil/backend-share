@@ -329,8 +329,11 @@ notasSaidaRoutes.post('/notas-saida/anexos', async (c) => {
     const arquivo = form.arquivo
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const origem = String(form.origem ?? 'nota_fiscal_saida')
+    if (!['nota_fiscal_saida', 'recibo_saida', 'lancamento'].includes(origem)) return c.json({ error: 'origem_invalida' }, 400)
+    if (origem === 'lancamento' && !arquivo.type.toLowerCase().startsWith('image/')) return c.json({ error: 'apenas_imagens_permitidas' }, 400)
+    if (arquivo.size > 20 * 1024 * 1024) return c.json({ error: 'arquivo_maior_que_20_mb' }, 413)
     const documentoId = String(form.documento_id ?? '').trim() || crypto.randomUUID()
-    const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : 'nota_fiscal_saida'
+    const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : origem === 'lancamento' ? 'lancamento' : 'nota_fiscal_saida'
     const id = crypto.randomUUID()
     const key = `share/${prefixo}/${documentoId}/${id}-${arquivo.name}`
     await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })

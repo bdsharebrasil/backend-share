@@ -554,11 +554,13 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (body.periodicidade !== undefined && origem !== 'lancamentos') campos.push(['periodicidade', body.periodicidade || null])
     if (body.observacoes !== undefined) campos.push(['observacoes', body.observacoes || null])
     if (origem === 'lancamentos') {
-      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'periodicidade', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
       if (Object.prototype.hasOwnProperty.call(body, 'categoria_id') || Object.prototype.hasOwnProperty.call(body, 'categoria_share_id')) {
         campos.push(['categoria_share_id', body.categoria_share_id ?? body.categoria_id ?? null])
       }
+      if (Object.prototype.hasOwnProperty.call(body, 'categoria_cliente_id')) campos.push(['categoria_cliente_id', body.categoria_cliente_id || null])
+      if (Object.prototype.hasOwnProperty.call(body, 'fornecedor_id')) campos.push(['fornecedor_id', body.fornecedor_id || null])
       if (body.status != null && !STATUS_LANCAMENTO.includes(String(body.status).toUpperCase() as (typeof STATUS_LANCAMENTO)[number])) return c.json({ error: 'status_lancamento_invalido' }, 400)
     }
     if (body.valor_centavos != null || body.valorCentavos != null) {
