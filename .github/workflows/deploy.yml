@@ -47,6 +47,9 @@ jobs:
       - name: Testes Diário de Bordo automático e horas
         run: node --import tsx --test tests/diario-automatico-tripapp.test.mjs tests/horas-tripulante.test.mjs
 
+      - name: Testes planejamento de próximas pernas na mesma solicitação
+        run: node --import tsx --test tests/pernas-planejadas.test.mjs
+
       - name: Testes acompanhamento e GPS do tripulante
         run: node --import tsx --test tests/gps-tripulante.test.mjs tests/rastreio-historico.test.mjs tests/rastreio-d1-compat.test.mjs tests/trip-share-flight-permissions.test.mjs
 
@@ -81,6 +84,12 @@ jobs:
 
       - name: Criar histórico de pagamentos dos rateios da holding
         run: pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261123_rateio_hold_pagamentos.sql
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Criar planejamento de pernas da mesma solicitação
+        run: pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261124_pernas_planejadas_voo.sql
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -18,6 +18,8 @@ import { gestorContratosRoutes } from './routes/gestorContratosRoutes'
 import { diarioBordoRoutes } from './routes/diarioBordoRoutes'
 import { diarioTripulacaoRoutes } from './routes/diarioTripulacaoRoutes'
 import { jornadasRoutes } from './routes/jornadasRoutes'
+import { pernasPlanejadasRoutes } from './routes/pernasPlanejadasRoutes'
+import { listarPernasPlanejadas } from './lib/pernasPlanejadas'
 import { preparacaoRoutes } from './preparacao/rotas'
 import { aiswebRoutes } from './routes/aiswebRoutes'
 import { valuationRoutes } from './routes/valuationRoutes'
@@ -129,6 +131,7 @@ app.route('/', abastecimentosRoutes)
 app.route('/api/gestor/contratos', gestorContratosRoutes)
 app.route('/', diarioBordoRoutes)
 app.route('/', diarioTripulacaoRoutes)
+app.route('/', pernasPlanejadasRoutes)
 app.route('/', jornadasRoutes)
 app.route('/', preparacaoRoutes)
 app.route('/', aiswebRoutes)
@@ -1708,6 +1711,7 @@ app.get('/api/interno/agendamento', async c => {
     }
     return { ...agendamento, checklist_itens_respondidos: itensRespondidos, preparacao_pendencias: preparacaoPendencias }
   })
+  const pernasPlanejadas = await listarPernasPlanejadas(db, inicio, fim, true)
   const nomes = new Map(tripulantes.map((item: any) => [item.id, item.nome_completo]))
   const escala = agendamentosFormatados
     .filter((item: any) => ['aprovada', 'em_voo', 'em_rota', 'em_solo', 'acionado', 'decolado'].includes(String(item.status || '').toLowerCase()) && (item.piloto_id || item.copiloto_id))
@@ -1729,7 +1733,7 @@ app.get('/api/interno/agendamento', async c => {
         status: item.status,
       }
     })
-  return c.json({ inicio, fim, agendamentos: agendamentosFormatados, aeronaves: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
+  return c.json({ inicio, fim, pernas_planejadas: pernasPlanejadas, agendamentos: agendamentosFormatados, aeronaves: aeronave.results, tripulacao: tripulantes, escala, disponibilidades: disponibilidades.results })
 })
 
 app.post('/api/interno/agendamento/disponibilidade', async c => {
