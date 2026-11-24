@@ -7,6 +7,7 @@ import {
   issueRevenue,
   processFinanceQueue,
   settlePayable,
+  settleShareExpense,
   settleReceivable,
   contextoBaixaCotista,
   pagamentosContextoBaixa,
@@ -19,6 +20,7 @@ import { errorResponse } from './financeiro/errorResponse'
 import { listar } from './financeiro/repositories/d1'
 import { contasRoutes } from './financeiro/contasRoutes'
 import { mapConta } from './financeiro/contas'
+import { documentosRelatorio, colunaAnexosLancamento } from './financeiro/documentosRelatorio'
 import { enriquecerFornecedores } from './financeiro/repositories/contas'
 import { balancoMensalRoutes } from './financeiro/balancoMensalRoutes'
 import { dashboardCotistaRoutes } from './financeiro/dashboardCotistaRoutes'
@@ -98,6 +100,7 @@ financeiroRoutes.get('/solicitacoes-compra', async (c) => {
 financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
   try {
     const db = c.env.SHARE_DB
+    const anexosLancamento = await colunaAnexosLancamento(db)
     const [envios, reembolsos] = await Promise.all([
       listar(db, `SELECT l.*,
           'cliente' AS tipo,
@@ -145,7 +148,7 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
         ORDER BY date(l.data_emissao) DESC, l.criado_em DESC LIMIT 500`),
       listar(db, `SELECT cp.*, l.fornecedor_nome, l.numero_doc, l.numero_nf, l.numero_recibo, l.numero_demonstrativo,
           l.comprovante_url, a.matricula_registro,
-          l.data_emissao AS lancamento_data_emissao, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
+          l.data_emissao AS lancamento_data_emissao, ${anexosLancamento}, l.origem_tipo AS lancamento_origem_tipo, l.origem_id AS lancamento_origem_id, l.url_doc, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto,
           COALESCE(NULLIF(TRIM(voo.numero_voo), ''), NULLIF(TRIM(l.numero_voo), '')) AS numero_voo,
           l.aeronave_id, a.matricula_registro AS aeronave, l.cotista_aeronave_id, l.descricao AS lancamento_descricao,
           COALESCE(NULLIF(TRIM(cat.nome), ''), NULLIF(TRIM(l.categoria_nome), ''), NULLIF(TRIM(cp.categoria_nome), '')) AS lancamento_categoria_nome,
@@ -169,7 +172,7 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
           AND UPPER(cp.status) NOT IN ('PAGO', 'CANCELADO')
         ORDER BY date(cp.data_vencimento) ASC LIMIT 500`),
     ])
-    return c.json({ envios, reembolsos: reembolsos.map((row) => ({
+    return c.json({ envios: await documentosRelatorio(db, envios), reembolsos: (await documentosRelatorio(db, reembolsos)).map((row) => ({
       ...mapConta(row),
       lancamentoId: row.lancamentos_id ?? null,
       descricao: row.lancamento_descricao ?? null,
@@ -233,7 +236,7 @@ financeiroRoutes.get('/lancamentos', async (c) => {
     if (fim) { filtros.push('date(COALESCE(l.data_emissao, l.criado_em)) <= date(?)'); params.push(fim) }
     if (caixa) { filtros.push('l.tipo_caixa = ?'); params.push(caixa.toUpperCase()) }
     const rows = await listar(c.env.SHARE_DB, `SELECT l.*, cb.banco AS banco_pagamento_nome FROM lancamentos l LEFT JOIN contas_bancarias cb ON cb.id = l.conta_bancaria_id${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(l.data_emissao, l.criado_em)) DESC, l.criado_em DESC LIMIT 500`, ...params)
-    return c.json({ lancamentos: await enriquecerFornecedores(c.env.SHARE_DB, rows) })
+    return c.json({ lancamentos: await documentosRelatorio(c.env.SHARE_DB, await enriquecerFornecedores(c.env.SHARE_DB, rows)) })
   } catch (error) { return errorResponse(c, error) }
 })
 
@@ -617,6 +620,16 @@ financeiroRoutes.post('/lancamentos/:id/baixa-conciliada', async (c) => {
     return c.json(await settleCotista(c.env.SHARE_DB, c.req.param('id'), await c.req.json<Record<string, unknown>>(), c.get('userId') || null))
   }
   catch (error) { return errorResponse(c, error) }
+})
+
+// Pagamento da despesa Share, independente do recebimento do reembolso do cliente.
+financeiroRoutes.post('/lancamentos/:id/pagamento-share', async (c) => {
+  const denied = await requireCaixaShareAccess(c)
+  if (denied) return denied
+  try {
+    return c.json(await settleShareExpense(c.env.SHARE_DB, c.req.param('id'),
+      await c.req.json<Record<string, unknown>>(), c.get('userId') || null))
+  } catch (error) { return errorResponse(c, error) }
 })
 
 financeiroRoutes.post('/lancamentos/:id/baixa', async (c) => {

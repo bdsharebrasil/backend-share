@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { createExpense, resolveReceivableAllocations } from './FinanceiroKernel'
 import { mapConta } from './contas'
+import { documentosRelatorio, colunaAnexosLancamento } from './documentosRelatorio'
 import { errorResponse } from './errorResponse'
 import { enriquecerFornecedores } from './repositories/contas'
 import { listar } from './repositories/d1'
@@ -50,8 +51,9 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const urlRelatorio = table === 'contas_areceber'
     ? "COALESCE(NULLIF(rv.pdf_url, ''), CASE WHEN NULLIF(rv.pdf_path, '') IS NOT NULL THEN '/api/financeiro/relatorios-despesa-viagem/' || cr.origem_id || '/pdf' END) AS relatorio_pdf_url"
     : 'NULL AS relatorio_pdf_url'
-  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc, ${urlRelatorio}, ${nomeCotista}, ${matriculaAeronave}, ${nomeHolding} FROM ${table} ${alias}${origem}${joinRelatorio}${joinsCotista}${joinsAeronave}${joinsHolding}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
-  const mapped = (await enriquecerFornecedores(c.env.SHARE_DB, rows)).map(mapConta)
+  const anexosLancamento = await colunaAnexosLancamento(c.env.SHARE_DB)
+  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc, ${anexosLancamento}, l.origem_tipo AS lancamento_origem_tipo, l.origem_id AS lancamento_origem_id, ${urlRelatorio}, ${nomeCotista}, ${matriculaAeronave}, ${nomeHolding} FROM ${table} ${alias}${origem}${joinRelatorio}${joinsCotista}${joinsAeronave}${joinsHolding}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
+  const mapped = (await documentosRelatorio(c.env.SHARE_DB, await enriquecerFornecedores(c.env.SHARE_DB, rows))).map(mapConta)
   if (table !== 'contas_areceber') return mapped
 
   const resolved = await resolveReceivableAllocations(c.env.SHARE_DB, rows)
