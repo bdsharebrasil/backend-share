@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sincronizarRelatorioViagemFinanceiro } from "../src/relatorioFinanceiro.ts";
+import { registrarDespesaDiretaRelatorioViagem, sincronizarRelatorioViagemFinanceiro } from "../src/relatorioFinanceiro.ts";
 
 const columns = [
   "id", "aeronave_id", "holding_id", "socio_id", "colaborador_id", "data_emissao", "data_vencimento", "data_pagamento",
@@ -244,3 +244,30 @@ test("relatório de sócio de holding cria um movimento total e um rateio_hold p
   assert.deepEqual(rateios.map((rateio) => rateio.percentual_sociedade), [60, 40]);
   assert.ok(rateios.every((rateio) => rateio.movimento_holding_id === movimentos[0].id));
 });
+
+for (const kind of ["CLIENTE", "HOLDING"]) {
+  test(`relatório sem reembolso de ${kind} gera somente a despesa no envio ao cliente`, async () => {
+    const db = fakeDb(kind);
+    const relatorio = report({
+      reembolso_caixa_share: 0,
+      ...(kind === "HOLDING" ? { socio_id: "socio-1", cliente_id: "holding-1" } : {}),
+    });
+    await sincronizarRelatorioViagemFinanceiro(db, relatorio, "usuario-1");
+    assert.equal(db.batched.length, 0);
+
+    await registrarDespesaDiretaRelatorioViagem(db, relatorio, "usuario-1", {
+      vencimento: "2026-11-30", periodicidade: "EVENTUAL", tipoRateio: "VARIAVEL_POR_VOO", emailId: "email-1",
+    });
+    const despesas = insertedRows(db, kind === "CLIENTE" ? "lancamentos" : "movimentos_holding");
+    assert.equal(despesas.length, 1);
+    assert.equal(despesas[0].tipo_caixa, kind === "CLIENTE" ? "CLIENTE" : "HOLD");
+    assert.equal(despesas[0].valor_centavos, 8500);
+    assert.equal(despesas[0].data_vencimento, "2026-11-30");
+    assert.equal(insertedRows(db, "contas_apagar").length, 0);
+    assert.equal(insertedRows(db, "contas_areceber").length, 0);
+    assert.match(db.batched.at(-1).sql, /status = 'enviado_cliente'/);
+    if (kind === "CLIENTE") {
+      assert.equal(insertedRows(db, "rateio_despesas")[0].valor_pago_real_centavos, 1000);
+    }
+  });
+}
