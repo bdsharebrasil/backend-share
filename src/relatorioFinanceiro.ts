@@ -286,6 +286,13 @@ async function addTripulantePayableStatements(
   return payableId
 }
 
+type EnvioDireto = {
+  vencimento: string
+  periodicidade: string
+  tipoRateio: string
+  emailId: string | null
+}
+
 async function addRateiosCliente(
   db: D1Database,
   statements: D1PreparedStatement[],
@@ -296,6 +303,7 @@ async function addRateiosCliente(
   lancamentoCustoId: string,
   pagamentoDiretoCentavos: number,
   categoriaCliente: CategoriaClienteRelatorio,
+  envioDireto?: EnvioDireto,
 ) {
   const reportId = text(report.id)
   const existingResult = await db.prepare(`SELECT r.id, r.cotista_id, r.status, r.pago_diretamente,
@@ -329,7 +337,7 @@ async function addRateiosCliente(
       aeronave_id: text(report.aeronave_id),
       cotista_id: allocation.id,
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
-      data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
+      data_vencimento: envioDireto?.vencimento || dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
       data_pagamento: null,
       categoria_id: categoriaCliente.id,
       categoria_nome: categoriaCliente.nome,
@@ -337,8 +345,8 @@ async function addRateiosCliente(
       subcategoria_2: categoriaCliente.subcategoria_2,
       subcategoria_3: categoriaCliente.subcategoria_3,
       subcategoria_4: categoriaCliente.subcategoria_4,
-      tipo_rateio: 'VARIAVEL_POR_VOO',
-      periodicidade: 'EVENTUAL',
+      tipo_rateio: envioDireto?.tipoRateio || 'VARIAVEL_POR_VOO',
+      periodicidade: envioDireto?.periodicidade || 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
       percentual_uso: allocation.percentual_uso,
       valor_total_centavos: amountCentavos,
@@ -372,7 +380,7 @@ async function addRateiosCliente(
       ))
       await addLinkStatements(db, statements, reportId, 'RATEIO_DESPESAS', existing.id, 'RELATORIO_RATEIO_DESPESA')
     } else {
-      const rateioId = uuid()
+      const rateioId = envioDireto ? `relatorio-direto:${report.id}:${allocation.id}` : uuid()
       statements.push(await prepareInsert(db, 'rateio_despesas', { id: rateioId, lancamento_id: lancamentoCustoId, ...common }))
       await addLinkStatements(db, statements, reportId, 'RATEIO_DESPESAS', rateioId, 'RELATORIO_RATEIO_DESPESA')
     }
@@ -391,13 +399,14 @@ async function ensureLancamentoCustoIntegral(
   clienteId: string | null,
   userId: string | null,
   categoriaCliente: CategoriaClienteRelatorio,
+  envioDireto?: EnvioDireto,
 ): Promise<string> {
   const reportId = text(report.id)
   const idempotencyKey = `RELATORIO_DESPESA_VIAGEM:${reportId}:CUSTO_INTEGRAL`
   const existing = await db.prepare(`SELECT id FROM lancamentos
     WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1 AND idempotency_key = ?2 LIMIT 1`)
     .bind(reportId, idempotencyKey).first<{ id: string }>()
-  const id = text(existing?.id) || uuid()
+  const id = text(existing?.id) || (envioDireto ? `relatorio-direto:${reportId}` : uuid())
   const dataEmissao = text(report.data_inicio).slice(0, 10)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dataEmissao)) {
     throw new Error('data_inicio_obrigatoria_para_custo_integral')
@@ -417,7 +426,7 @@ async function ensureLancamentoCustoIntegral(
     subcategoria_2: categoriaCliente.subcategoria_2,
     subcategoria_3: categoriaCliente.subcategoria_3,
     subcategoria_4: categoriaCliente.subcategoria_4,
-    periodicidade: 'EVENTUAL',
+    periodicidade: envioDireto?.periodicidade || 'EVENTUAL',
     status: 'EM_ABERTO',
     fluxo: 'SAIDA',
     tipo_caixa: 'CLIENTE',
@@ -463,18 +472,25 @@ async function addRateiosHolding(
   amountCentavos: number,
   description: string,
   userId: string | null,
+  envioDireto?: EnvioDireto,
 ) {
   const movimentoStatus = 'EM_ABERTO'
   const rateioStatus = 'EM_ABERTO'
-  const movimentoId = uuid()
+  const movimentoId = envioDireto ? `relatorio-direto:${report.id}` : uuid()
   statements.push(await prepareInsert(db, 'movimentos_holding', {
     id: movimentoId,
     holding_id: allocations[0]?.holding_id,
     socio_id: allocations[0]?.socio_id,
     aeronave_id: text(report.aeronave_id),
     tipo_caixa: 'HOLD',
+    periodicidade: envioDireto?.periodicidade,
+    tipo_rateio: envioDireto?.tipoRateio,
+    numero_doc: envioDireto ? text(report.numero_relatorio) : undefined,
+    url_doc: envioDireto ? text(report.pdf_path) || null : undefined,
+    email_enviado_id: envioDireto?.emailId,
+    email_enviado_em: envioDireto?.emailId ? new Date().toISOString() : undefined,
     data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
-    data_vencimento: dateValue(report.data_vencimento_reembolso, dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))),
+    data_vencimento: envioDireto?.vencimento || dateValue(report.data_vencimento_reembolso, dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)))),
     data_pagamento: null,
     descricao: description,
     categoria_nome: 'DESPESAS DE VIAGEM',
@@ -490,18 +506,18 @@ async function addRateiosHolding(
   await addLinkStatements(db, statements, text(report.id), 'MOVIMENTO_HOLDING', movimentoId, 'RELATORIO_MOVIMENTO_HOLDING')
   for (const allocation of allocations) {
     if (!allocation.socio_id) continue
-    const rateioId = uuid()
+    const rateioId = envioDireto ? `relatorio-direto:${report.id}:${allocation.id}` : uuid()
     statements.push(await prepareInsert(db, 'rateio_hold', {
       id: rateioId,
       movimento_holding_id: movimentoId,
       aeronave_id: text(report.aeronave_id),
       socio_id: allocation.socio_id,
       data_emissao: dateValue(report.data_inicio, new Date().toISOString().slice(0, 10)),
-      data_vencimento: dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
+      data_vencimento: envioDireto?.vencimento || dateValue(report.data_fim, dateValue(report.data_inicio, new Date().toISOString().slice(0, 10))),
       data_pagamento: null,
       categoria_nome: 'DESPESAS DE VIAGEM',
-      tipo_rateio: 'VARIAVEL_POR_VOO',
-      periodicidade: 'EVENTUAL',
+      tipo_rateio: envioDireto?.tipoRateio || 'VARIAVEL_POR_VOO',
+      periodicidade: envioDireto?.periodicidade || 'EVENTUAL',
       percentual_sociedade: numberValue(allocation.percentual_sociedade) || allocation.percentual_uso,
       percentual_uso: allocation.percentual_uso,
       valor_total_centavos: amountCentavos,
@@ -517,11 +533,61 @@ async function addRateiosHolding(
   return movimentoId
 }
 
+export async function registrarDespesaDiretaRelatorioViagem(
+  db: D1Database,
+  report: ReportRow,
+  userId: string,
+  envio: EnvioDireto,
+): Promise<void> {
+  const reportId = text(report.id)
+  const expenses = expensesFromReport(report)
+  const total = Math.round(expenses.reduce((sum, expense) => sum + expense.valor, 0) * 100)
+  if (total <= 0) throw new Error('relatorio_sem_despesas')
+
+  const { kind, rows } = await selectCotistas(db, report)
+  if (!rows.length) throw new Error('cotista_aeronave_nao_encontrado_para_o_relatorio')
+  const allocations = allocate(total, rows, kind === 'HOLDING')
+  const description = payerDescription(report, 'cliente')
+  const statements: D1PreparedStatement[] = []
+  if (kind === 'HOLDING') {
+    await addRateiosHolding(db, statements, report, allocations, total, description, userId, envio)
+  } else {
+    const categoria = await resolveCategoriaClienteRelatorio(db, report)
+    const clienteId = await findLancamentoClientId(db, report.cliente_id)
+    const numeroVooId = text(report.numero_voo)
+      ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 AND solicitacao_origem_id IS NULL LIMIT 1')
+        .bind(text(report.numero_voo)).first<{ id: string }>())?.id || null
+      : null
+    const lancamentoId = await ensureLancamentoCustoIntegral(
+      db, statements, report, allocations, total, description, envio.vencimento, numeroVooId, clienteId, userId, categoria, envio,
+    )
+    const valorPagoPeloCliente = Math.round(expenses
+      .filter((expense) => normalizePayer(expense.pago_por ?? expense.paid_by) === 'cliente')
+      .reduce((sum, expense) => sum + expense.valor, 0) * 100)
+    await addRateiosCliente(db, statements, report, allocations, total, description, lancamentoId, valorPagoPeloCliente, categoria, envio)
+    statements.push(db.prepare(`UPDATE lancamentos SET tipo_rateio = ?, email_enviado_id = COALESCE(?, email_enviado_id),
+      email_enviado_em = CASE WHEN ? IS NOT NULL THEN COALESCE(email_enviado_em, CURRENT_TIMESTAMP) ELSE email_enviado_em END
+      WHERE id = ?`).bind(envio.tipoRateio, envio.emailId, envio.emailId, lancamentoId))
+  }
+  statements.push(db.prepare(`UPDATE relatorio_despesa_viagem SET status = 'enviado_cliente',
+      data_vencimento_reembolso = ?, enviado_para_cliente_em = COALESCE(enviado_para_cliente_em, CURRENT_TIMESTAMP),
+      programado_pagamento_em = COALESCE(programado_pagamento_em, CURRENT_TIMESTAMP), atualizado_em = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'aprovado' AND reembolso_caixa_share = 0`).bind(envio.vencimento, reportId))
+  try {
+    await db.batch(statements)
+  } catch (error) {
+    const atual = await db.prepare('SELECT status FROM relatorio_despesa_viagem WHERE id = ?')
+      .bind(reportId).first<{ status: string }>()
+    if (atual?.status !== 'enviado_cliente') throw error
+  }
+}
+
 export async function sincronizarRelatorioViagemFinanceiro(
   db: D1Database,
   report: ReportRow,
   userId: string | null,
 ): Promise<{ idempotent: boolean; destinos: Array<{ tipo: string; id: string }> }> {
+  if (report.reembolso_caixa_share === 0) return { idempotent: true, destinos: [] }
   const numeroVooId = text(report.numero_voo)
     ? (await db.prepare('SELECT id FROM solicitacoes_reserva_voo WHERE numero_voo = ?1 AND solicitacao_origem_id IS NULL LIMIT 1').bind(text(report.numero_voo)).first<{ id: string }>())?.id || null
     : null

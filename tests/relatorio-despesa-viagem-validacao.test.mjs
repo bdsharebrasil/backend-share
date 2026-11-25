@@ -182,7 +182,7 @@ test("holding compartilha reconciliação e vincula recebível ao movimento, nã
 });
 
 test("envio ao cliente só grava cliente_id se existir na tabela de cadastro", () => {
-  assert.match(worker, /import \{ calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro \}/);
+  assert.match(worker, /import \{[^}]*\bfindLancamentoClientId\b[^}]*\} from '\.\/relatorioFinanceiro'/);
   assert.match(worker, /import \{ ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements \} from '\.\/financeiro\/relatorioContaReceber'/);
   assert.match(rotaEnvioCliente, /const clienteIdLancamentoFk = await findLancamentoClientId\(db, report\.cliente_id\)/);
   assert.match(rotaEnvioCliente, /cotista\.id, clienteIdLancamentoFk, hoje, body\.data_vencimento/);

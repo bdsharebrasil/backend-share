@@ -35,7 +35,7 @@ import { rastreioRoutes, coletarRastreioAgendado } from './routes/rastreioRoutes
 import { criarV1Routes } from './routes/v1Routes'
 import { autorizarRequisicaoFinanceira, usuarioPodeGerenciarFinanceiro, usuarioTemPapel } from './financeiro/financeiroAuth'
 import { FinanceError, processFinanceQueue } from './financeiro/FinanceiroKernel'
-import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
+import { calcularVencimentoReembolsoTripulante, findLancamentoClientId, registrarDespesaDiretaRelatorioViagem, sincronizarRelatorioViagemFinanceiro } from './relatorioFinanceiro'
 import { ensureRelatorioContaAReceber, repairRelatorioContaReceberLinkStatements } from './financeiro/relatorioContaReceber'
 import { lotesIcaoRelatorio, nomearRotaRelatorio, sequenciaRotaRelatorio, type PernaRotaRelatorio } from './relatorioViagemRota'
 import { calcularTotaisDespesasTripulante, dataFimProvisoriaVoo, normalizarDespesasTripulante, type PosicaoTripulante } from './relatorioDespesaViagemTripulante'
@@ -3589,7 +3589,7 @@ app.notFound((c) => c.json({ error: 'Rota não encontrada', path: c.req.path }, 
 async function garantirTabelaRelatorioDespesaViagem(c: Context<{ Bindings: Bindings }>) {
   await validateWorkerSchema(c, [
     { table: 'relatorio_despesa_viagem_anexos', columns: ['id'] },
-    { table: 'relatorio_despesa_viagem', columns: ['id', 'anexos_rejeicao', 'origem_criacao'] },
+    { table: 'relatorio_despesa_viagem', columns: ['id', 'anexos_rejeicao', 'origem_criacao', 'reembolso_caixa_share'] },
     { table: 'relatorio_despesa_viagem_historico_ajustes', columns: ['id', 'relatorio_despesa_viagem_id', 'tripulante_pos', 'motivo', 'anexos', 'criado_em'] },
     { table: 'sequencia_relatorios_despesa_viagem', columns: ['codigo_cotista', 'aeronave_id', 'ano', 'ultimo_numero'] },
   ])
@@ -4275,8 +4275,8 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
         tripulante_id_2, nome_tripulante_2, observacoes, despesas, status,
         total_valor, total_combustivel, total_hospedagem, total_alimentacao, total_transporte,
         total_outros, total_tripulacao, total_tripulante_1, total_tripulante_2, total_cliente,
-        total_sharebrasil, criado_por, gerado_por_usuario_id
-      ) VALUES (${new Array(31).fill('?').join(', ')})
+        total_sharebrasil, criado_por, gerado_por_usuario_id, reembolso_caixa_share
+      ) VALUES (${new Array(32).fill('?').join(', ')})
     `).bind(
       id, numero, numeroVoo, clienteId, socioId, aeronaveId,
       aeronave?.matricula_registro || body.matricula_aeronave || null, rota, dataInicio, dataFim,
@@ -4287,6 +4287,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem', async c => {
       Number(body.total_alimentacao || 0), Number(body.total_transporte || 0), Number(body.total_outros || 0),
       Number(body.total_tripulacao || 0), Number(body.total_tripulante_1 || 0), Number(body.total_tripulante_2 || 0),
       Number(body.total_cliente || 0), Number(body.total_sharebrasil || 0), user.id, user.id,
+      ['finalizado', 'enviado_cliente'].includes(status) ? 1 : null,
     ).run()
     const relatorio = await buscarRelatorioViagemComNomes(c, id)
     if (!relatorio) return c.json({ error: 'falha_ao_carregar_relatorio_criado' }, 500)
@@ -4639,8 +4640,11 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     await garantirTabelaRelatorioDespesaViagem(c)
     await validateWorkerSchema(c, [{ table: 'relatorio_despesa_viagem', columns: ['token_aprovacao_tripulante_1', 'token_aprovacao_tripulante_2', 'aprovado_tripulante_1_em', 'motivo_reprovacao_tripulante_1', 'motivo_reprovacao_tripulante_2'] }])
     const id = c.req.param('id')
-    const body = await c.req.json<{ tripulante_pos?: 1 | 2 }>().catch(() => ({} as { tripulante_pos?: 1 | 2 }))
-    const pos = body.tripulante_pos === 2 ? 2 : 1
+    const body = await c.req.json<{ tripulante_pos?: 1 | 2; reembolso_caixa_share?: boolean }>().catch(() => null)
+    if (body?.reembolso_caixa_share !== undefined && typeof body.reembolso_caixa_share !== 'boolean') {
+      return c.json({ error: 'reembolso_caixa_share_invalido' }, 400)
+    }
+    const pos = body?.tripulante_pos === 2 ? 2 : 1
     const tokenColumn = pos === 1 ? 'token_aprovacao_tripulante_1' : 'token_aprovacao_tripulante_2'
     const sentColumn = pos === 1 ? 'enviado_para_tripulante_em' : 'enviado_para_tripulante_2_em'
     const relatorio = await buscarRelatorioViagemComNomes(c, id)
@@ -4648,9 +4652,14 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-aprovacao', async
     if (statusRelatorioViagem(relatorio.status) === 'rascunho') return c.json({ error: 'relatorio_precisa_ser_finalizado' }, 409)
     const tripulanteId = pos === 1 ? relatorio.tripulacao_id : relatorio.tripulante_id_2
     if (!tripulanteId) return c.json({ error: 'tripulante_nao_informado' }, 400)
+    const escolha = body?.reembolso_caixa_share
+    if (relatorio.reembolso_caixa_share == null && escolha === undefined) {
+      return c.json({ error: 'reembolso_caixa_share_obrigatorio' }, 400)
+    }
+    const classificacao = escolha === undefined ? relatorio.reembolso_caixa_share : Number(escolha)
     const tokenAtual = String(relatorio[tokenColumn] || '').trim()
     const novoToken = tokenAtual || crypto.randomUUID()
-    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET ${tokenColumn} = COALESCE(NULLIF(trim(${tokenColumn}), ''), ?), ${sentColumn} = COALESCE(NULLIF(trim(${sentColumn}), ''), CURRENT_TIMESTAMP), status = CASE WHEN status IN ('finalizado', 'ajuste_concluido') THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND lower(COALESCE(status, '')) IN ('finalizado', 'ajuste_concluido', 'aguardando_aprovacao')`).bind(novoToken, id).run()
+    const envio = await c.env.SHARE_DB.prepare(`UPDATE relatorio_despesa_viagem SET reembolso_caixa_share = COALESCE(reembolso_caixa_share, ?), ${tokenColumn} = COALESCE(NULLIF(trim(${tokenColumn}), ''), ?), ${sentColumn} = COALESCE(NULLIF(trim(${sentColumn}), ''), CURRENT_TIMESTAMP), status = CASE WHEN status IN ('finalizado', 'ajuste_concluido') THEN 'aguardando_aprovacao' ELSE status END, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND (reembolso_caixa_share IS NULL OR reembolso_caixa_share = ?) AND lower(COALESCE(status, '')) IN ('finalizado', 'ajuste_concluido', 'aguardando_aprovacao')`).bind(classificacao, novoToken, id, classificacao).run()
     if (!envio.meta.changes) return c.json({ error: 'relatorio_nao_pode_ser_enviado_para_aprovacao' }, 409)
     const dadosEnvio = await c.env.SHARE_DB.prepare(`SELECT numero_relatorio, ${tokenColumn} AS token FROM relatorio_despesa_viagem WHERE id = ?1`).bind(id).first<{ numero_relatorio: string; token: string }>()
     if (!dadosEnvio?.token) return c.json({ error: 'token_de_aprovacao_nao_persistido' }, 500)
@@ -4800,7 +4809,7 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/aprovacao', async c => {
     }
     const updated = await buscarRelatorioViagemComNomes(c, id)
     if (!updated) return c.notFound()
-    if (body.aprovado && updated.status === 'aprovado') {
+    if (body.aprovado && updated.status === 'aprovado' && updated.reembolso_caixa_share !== 0) {
       try {
         const dataVencimentoReembolso = calcularVencimentoReembolsoTripulante(updated)
         await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, id, userId, null, false, dataVencimentoReembolso)
@@ -4819,7 +4828,7 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', a
   const user = await authenticatedColaborador(c)
   if (!user) return c.json({ error: 'nao_autorizado' }, 401)
   const row = await c.env.SHARE_DB.prepare(`SELECT r.id, r.numero_relatorio, r.total_valor, r.total_cliente, r.despesas, r.aeronave_id,
-    a.matricula_registro AS aeronave_matricula, r.cliente_id, r.socio_id, r.data_vencimento_reembolso, r.pdf_url, r.pdf_path, r.status
+    a.matricula_registro AS aeronave_matricula, r.cliente_id, r.socio_id, r.data_vencimento_reembolso, r.pdf_url, r.pdf_path, r.status, r.status_aprovacao_tripulante, r.reembolso_caixa_share
     FROM relatorio_despesa_viagem r LEFT JOIN aeronave a ON a.id = r.aeronave_id WHERE r.id = ?`).bind(c.req.param('id')).first<any>()
   if (!row) return c.notFound()
   const statusAtual = statusRelatorioViagem(row.status)
@@ -4834,15 +4843,17 @@ app.get('/api/financeiro/relatorios-despesa-viagem/:id/programacao-reembolso', a
   const relatorioAprovado = await buscarRelatorioViagemComNomes(c, row.id)
   if (!relatorioAprovado) return c.notFound()
   try {
-    const dataVencimentoReembolso = calcularVencimentoReembolsoTripulante(relatorioAprovado)
-    await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id, null, false, dataVencimentoReembolso)
-    await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, { ...relatorioAprovado, data_vencimento_reembolso: dataVencimentoReembolso }, user.id)
-    await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id, null, false, dataVencimentoReembolso)
+    if (relatorioAprovado.reembolso_caixa_share !== 0) {
+      const dataVencimentoReembolso = calcularVencimentoReembolsoTripulante(relatorioAprovado)
+      await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id, null, false, dataVencimentoReembolso)
+      await sincronizarRelatorioViagemFinanceiro(c.env.SHARE_DB, { ...relatorioAprovado, data_vencimento_reembolso: dataVencimentoReembolso }, user.id)
+      await persistirMetadadosFinanceirosRelatorio(c.env.SHARE_DB, row.id, user.id, null, false, dataVencimentoReembolso)
+    }
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:programacao-financeira]', error?.message || error)
     return c.json({ error: 'aprovacao_registrada_falha_conta_a_pagar', message: 'O relatório está aprovado, mas a conta a pagar não pôde ser gerada. Tente novamente.' }, 500)
   }
-  return c.json({ descricao: `Relatório Despesa de Viagem - ${row.numero_relatorio}`, valor: Math.max(0, Number(row.total_valor || 0) - Number(row.total_cliente || 0)), fornecedor: 'Share Brasil', grupo_categoria_id: 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', subcategoria: 'RELATORIO DE VIAGEM', aeronave_id: row.aeronave_id, aeronave_matricula: row.aeronave_matricula, cliente_id: row.cliente_id, socio_id: row.socio_id, data_vencimento_reembolso: row.data_vencimento_reembolso || null, periodicidade: 'EVENTUAL', tipo_rateio: 'VARIAVEL POR VOO', pdf_url: row.pdf_url, pdf_path: row.pdf_path })
+  return c.json({ descricao: `Relatório Despesa de Viagem - ${row.numero_relatorio}`, valor: Math.max(0, Number(row.total_valor || 0) - Number(row.total_cliente || 0)), fornecedor: row.reembolso_caixa_share === 0 ? null : 'Share Brasil', grupo_categoria_id: 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300', subcategoria: 'RELATORIO DE VIAGEM', aeronave_id: row.aeronave_id, aeronave_matricula: row.aeronave_matricula, cliente_id: row.cliente_id, socio_id: row.socio_id, data_vencimento_reembolso: row.data_vencimento_reembolso || null, periodicidade: 'EVENTUAL', tipo_rateio: 'VARIAVEL POR VOO', pdf_url: row.pdf_url, pdf_path: row.pdf_path })
 })
 app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c => {
   const user = await authenticatedColaborador(c)
@@ -4859,6 +4870,17 @@ app.post('/api/financeiro/relatorios-despesa-viagem/:id/enviar-cliente', async c
     if (!['aprovado', 'enviado_cliente'].includes(statusRelatorioViagem(report.status))) return c.json({ error: 'aguarde_aprovacao_de_todos_os_tripulantes' }, 409)
     if (!report.pdf_path) return c.json({ error: 'pdf_obrigatorio_antes_do_envio' }, 409)
     const db = c.env.SHARE_DB
+    if (report.reembolso_caixa_share === 0) {
+      if (statusRelatorioViagem(report.status) === 'aprovado') {
+        await registrarDespesaDiretaRelatorioViagem(db, report, user.id, {
+          vencimento: body.data_vencimento,
+          periodicidade,
+          tipoRateio,
+          emailId: body.email_enviado_id || null,
+        })
+      }
+      return c.json({ success: true, status: 'enviado_cliente', relatorio: await buscarRelatorioViagemComNomes(c, id), message: 'Despesa enviada diretamente ao cliente.' })
+    }
     const cotista = await db.prepare(`SELECT id FROM cotista_aeronave WHERE aeronave_id = ?1
       AND ((?2 IS NOT NULL AND socio_id = ?2) OR (?3 IS NOT NULL AND cliente_id = ?3))
       ORDER BY CASE WHEN ?2 IS NOT NULL AND socio_id = ?2 THEN 0 ELSE 1 END LIMIT 1`)
@@ -5063,7 +5085,7 @@ app.post('/api/public/relatorios-despesa-viagem/aprovacao/:token', async c => {
         }
       }
     }
-    if (body.aprovado && updatedForNotification?.status === 'aprovado') {
+    if (body.aprovado && updatedForNotification?.status === 'aprovado' && row.reembolso_caixa_share !== 0) {
       const updated = await buscarRelatorioViagemComNomes(c, row.id)
       if (!updated) return c.notFound()
       try {
