@@ -42,7 +42,10 @@ export async function gravar(db:any, id:string, body:any, usuario:{id:string;nom
   const batch=[cmd,db.prepare('INSERT INTO preparacao_voo_versoes(id,solicitacao_id,versao,tipo,snapshot_json,criado_por,criado_em) SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM preparacoes_voo WHERE solicitacao_id=? AND comando_id=?)').bind(crypto.randomUUID(),id,versao,concluir?'CONCLUSAO':'ATUALIZACAO',snapshotJson,usuario.id,agora,id,comando)];
   // Compatibilidade com a lista de voos e o início de jornada existentes. Não cria gastos.
   const respostas:any={};
-  for(const [key,r] of Object.entries(dados.itens))respostas[key]={status:['CONCLUIDO','NAO_APLICAVEL'].includes(r.estado)?'feito':r.estado==='EM_ANDAMENTO'?'alerta':'nao_feito',observacao:r.observacao};
+  for(const [key,r] of Object.entries(dados.itens)) {
+    const valorAcordadoTipo=key==='comissaria'?String(r.valor_acordado_tipo||'').trim().slice(0,10):'';
+    respostas[key]={status:['CONCLUIDO','NAO_APLICAVEL'].includes(r.estado)?'feito':r.estado==='EM_ANDAMENTO'?'alerta':'nao_feito',observacao:r.observacao,...(key==='comissaria'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo)?{valor_acordado_tipo:valorAcordadoTipo}:{})};
+  }
   respostas._preparacao={pendencias:sum.pendencias,versao,finalizado:Boolean(finalizado)};
   const status=finalizado?'concluido':'rascunho', respostaJson=JSON.stringify(respostas);
   batch.push(db.prepare(`UPDATE checklists_pre_voo SET respostas=?,nivel_oleo=?,observacoes=?,executado_por=?,executado_por_nome=?,status=?,concluido_em=?,atualizado_em=? WHERE id=(SELECT id FROM checklists_pre_voo WHERE solicitacao_id=? ORDER BY criado_em DESC LIMIT 1) AND EXISTS(SELECT 1 FROM preparacoes_voo WHERE solicitacao_id=? AND comando_id=?)`).bind(respostaJson,dados.nivel_oleo,dados.observacoes,usuario.id,usuario.nome,status,finalizado,agora,id,id,comando));

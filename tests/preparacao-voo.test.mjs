@@ -13,7 +13,7 @@ await build({stdin:{contents:"export {preparacaoRoutes} from './rotas';export {h
  b.onResolve({filter:/^pdf-lib$/},()=>({path:require.resolve('pdf-lib/dist/pdf-lib.esm.js')}));
  b.onResolve({filter:/^hono$/},()=>({path:'hono',namespace:'teste'}));
  b.onLoad({filter:/.*/,namespace:'teste'},()=>({contents:`export class Hono{routes=[];error;get(p,f){this.routes.push({method:'GET',p,f});return this;}post(p,f){this.routes.push({method:'POST',p,f});return this;}onError(f){this.error=f;return this;}}`}));
- b.onResolve({filter:/\/lib\/auth$/},()=>({path:'auth',namespace:'auth'}));b.onLoad({filter:/.*/,namespace:'auth'},()=>({contents:`export const authenticatedColaborador=async c=>c.testUser;export const requireFlightOperationAccess=async c=>Boolean(c.testUser);`}));
+ b.onResolve({filter:/\/lib\/auth$/},()=>({path:'auth',namespace:'auth'}));b.onLoad({filter:/.*/,namespace:'auth'},()=>({contents:`export const authenticatedColaborador=async c=>c.testUser;export const requireFlightOperationAccess=async c=>Boolean(c.testUser);export const requireFlightCrewOrOperationsWriteAccess=async c=>Boolean(c.testUser);`}));
  b.onResolve({filter:/\/lib\/storage$/},()=>({path:'storage',namespace:'storage'}));b.onLoad({filter:/.*/,namespace:'storage'},()=>({contents:`export const salvarArquivoShareBrasil=async(c,u,f,p)=>{let key=p+'/'+crypto.randomUUID();c.env.bucket.set(key,{body:await f.arrayBuffer()});return key;};export const shareBrasilBucket=c=>({get:async k=>c.env.bucket.get(k),delete:async k=>c.env.bucket.delete(k)});`}));
 }}]});
 const {preparacaoRoutes:router,hospedagensDoVoo}=await import(out);
@@ -101,4 +101,44 @@ test('tripulante recebe hotel solicitado pela coordenação, sem reservas de out
 
 test('horário ISO do agendamento conserva o instante UTC inclusive ao trocar o dia',async()=>{
  const t=setup();try{t.db.exec("UPDATE solicitacoes_reserva_voo SET horario_previsto_agendamento='2026-11-18T23:30:00-03:00'");let r=(await t.call('GET')).body;assert.equal(r.dados.trechos[0].data,'2026-11-19');assert.equal(r.dados.trechos[0].horario,'02:30');assert.equal(r.dados.trechos[0].fuso,'UTC');assert.equal((await t.call('POST','/concluir',{versao:0,dados:r.dados})).status,200);}finally{t.close();}
+});
+
+test('persiste apenas PESSOA ou TOTAL para valores acordados de hotel e comissaria',async()=>{
+ const t=setup();try{
+  let r=(await t.call('GET')).body;
+  r.dados.itens.comissaria.valor_acordado_tipo='PESSOA';
+  r.dados.escalas[0].servicos.find(s=>s.tipo==='HOTEL').dados.valor_acordado_tipo='TOTAL';
+  r.dados.escalas[0].servicos.find(s=>s.tipo==='HANGAR').dados.balizamento='FEITO';
+  let saved=await t.call('POST','',{versao:r.versao,dados:r.dados});assert.equal(saved.status,200);
+  let stored=JSON.parse(t.db.prepare('SELECT respostas FROM checklists_pre_voo').get().respostas);
+  assert.equal(stored.comissaria.valor_acordado_tipo,'PESSOA');
+  assert.equal(saved.body.dados.escalas[0].servicos.find(s=>s.tipo==='HOTEL').dados.valor_acordado_tipo,'TOTAL');
+  assert.equal(saved.body.dados.escalas[0].servicos.find(s=>s.tipo==='HANGAR').dados.balizamento,'FEITO');
+  r=(await t.call('GET')).body;assert.equal(r.dados.itens.comissaria.valor_acordado_tipo,'PESSOA');assert.equal(r.dados.escalas[0].servicos.find(s=>s.tipo==='HANGAR').dados.balizamento,'FEITO');
+  r.dados.itens.comissaria.valor_acordado_tipo='QUALQUER';
+  r.dados.escalas[0].servicos.find(s=>s.tipo==='HOTEL').dados.valor_acordado_tipo='QUALQUER';
+  saved=await t.call('POST','',{versao:r.versao,dados:r.dados});assert.equal(saved.status,200);
+  stored=JSON.parse(t.db.prepare('SELECT respostas FROM checklists_pre_voo').get().respostas);
+  assert.equal(Object.hasOwn(stored.comissaria,'valor_acordado_tipo'),false);
+  assert.equal(Object.hasOwn(saved.body.dados.escalas[0].servicos.find(s=>s.tipo==='HOTEL').dados,'valor_acordado_tipo'),false);
+ }finally{t.close();}
+});
+test('registro legado sem valor de comissaria carrega e salva sem exigir o campo novo',async()=>{
+ const t=setup();try{
+  t.db.prepare('INSERT INTO checklists_pre_voo(id,solicitacao_id,respostas,status) VALUES(?,?,?,?)').run('legado','voo1',JSON.stringify({comissaria:{status:'feito',observacao:'Comissaria conferida'}}),'rascunho');
+  let r=(await t.call('GET')).body;assert.equal(r.dados.itens.comissaria.estado,'CONCLUIDO');assert.equal(r.dados.itens.comissaria.valor_acordado_tipo,undefined);
+  r.dados.itens.comissaria.observacao='Registro antigo atualizado';
+  const saved=await t.call('POST','',{versao:r.versao,dados:r.dados});assert.equal(saved.status,200);
+  const persisted=JSON.parse(t.db.prepare('SELECT respostas FROM checklists_pre_voo WHERE id=?').get('legado').respostas);
+  assert.equal(persisted.comissaria.status,'feito');assert.equal(persisted.comissaria.observacao,'Registro antigo atualizado');assert.equal(Object.hasOwn(persisted.comissaria,'valor_acordado_tipo'),false);
+  r=(await t.call('GET')).body;assert.equal(r.dados.itens.comissaria.estado,'CONCLUIDO');assert.equal(r.dados.itens.comissaria.observacao,'Registro antigo atualizado');
+ }finally{t.close();}
+});
+test('trechos incompletos continuam armazenados e não entram na contagem de pendências',async()=>{
+ const t=setup();try{
+  const r=(await t.call('GET')).body;r.dados.trechos[0].data='';r.dados.trechos[0].horario='';r.dados.trechos[0].fuso='';
+  const saved=await t.call('POST','',{versao:r.versao,dados:r.dados});assert.equal(saved.status,200);
+  assert.equal(saved.body.dados.trechos[0].data,'');assert.equal(saved.body.dados.trechos[0].horario,'');assert.equal(saved.body.dados.trechos[0].fuso,'');
+  assert.equal(saved.body.resumo.linhas.some(l=>l.secao==='Roteiro'),false);
+ }finally{t.close();}
 });

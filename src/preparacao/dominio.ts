@@ -2,10 +2,11 @@ import { SECOES_CHECKLIST } from './estrutura';
 export const ESTADOS = ['PENDENTE', 'EM_ANDAMENTO', 'CONCLUIDO', 'NAO_REALIZADO', 'NAO_APLICAVEL'] as const;
 export type Estado = typeof ESTADOS[number];
 export type Resposta = { estado: Estado; observacao: string; atualizado_em?: string; responsavel?: string };
+export type ItemResposta = Resposta & { valor_acordado_tipo?: 'PESSOA' | 'TOTAL' };
 export type Servico = Resposta & { id: string; tipo: string; cadastro_id?: string; origem?: string; dados: Record<string, string> };
 export type Escala = { id: string; icao: string; cidade: string; servicos: Servico[] };
 export type Trecho = { id: string; origem: string; destino: string; data: string; horario: string; fuso: string; pernoite: boolean; origem_escala_id: string; destino_escala_id: string };
-export type Preparacao = { modelo: 1; itens: Record<string, Resposta>; nivel_oleo: string; observacoes: string; trechos: Trecho[]; escalas: Escala[] };
+export type Preparacao = { modelo: 1; itens: Record<string, ItemResposta>; nivel_oleo: string; observacoes: string; trechos: Trecho[]; escalas: Escala[] };
 export const TIPOS_SERVICO = [
   { id: 'COMBUSTIVEL', nome: 'Combustível previsto / acionamento' },
   { id: 'HOTEL', nome: 'Hospedagem da tripulação' },
@@ -27,7 +28,8 @@ export function inicial(voo: any, legado: any): Preparacao {
   const itens: Preparacao['itens'] = {};
   for(const secao of SECOES) for(const i of secao.itens) {
     const r = respostas[i.id];
-    itens[i.id] = { estado:r?.status === 'feito' ? 'CONCLUIDO' : r?.status === 'alerta' ? 'EM_ANDAMENTO' : r?.status === 'nao_feito' ? 'NAO_REALIZADO' : 'PENDENTE', observacao:r?.observacao || '' };
+    const valorAcordadoTipo=i.id==='comissaria'?texto(r?.valor_acordado_tipo,10):'';
+    itens[i.id] = { estado:r?.status === 'feito' ? 'CONCLUIDO' : r?.status === 'alerta' ? 'EM_ANDAMENTO' : r?.status === 'nao_feito' ? 'NAO_REALIZADO' : 'PENDENTE', observacao:r?.observacao || '', ...(i.id==='comissaria'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo)?{valor_acordado_tipo:valorAcordadoTipo as 'PESSOA'|'TOTAL'}:{}) };
   }
   const previsto=String(voo.horario_previsto_agendamento||'');
   const comFuso=/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(previsto)&&Number.isFinite(Date.parse(previsto));
@@ -46,7 +48,11 @@ export function validarDados(v: any): Preparacao {
   if(!v || v.modelo !== 1 || !Array.isArray(v.trechos) || !v.trechos.length || v.trechos.length>30 || !Array.isArray(v.escalas) || v.escalas.length>40) throw new Error('preparacao_invalida');
   const ids = new Set<string>();
   const itens: Preparacao['itens'] = {};
-  for(const sec of SECOES) for(const item of sec.itens) itens[item.id] = resposta(v.itens?.[item.id] || {estado:'PENDENTE'});
+  for(const sec of SECOES) for(const item of sec.itens) {
+    const r=v.itens?.[item.id],normalizada=resposta(r||{estado:'PENDENTE'});
+    const valorAcordadoTipo=item.id==='comissaria'?texto(r?.valor_acordado_tipo,10):'';
+    itens[item.id]={...normalizada,...(item.id==='comissaria'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo)?{valor_acordado_tipo:valorAcordadoTipo as 'PESSOA'|'TOTAL'}:{})};
+  }
   const trechos = v.trechos.map((t:any) => {
     const id=texto(t.id,80); if(!id || ids.has('t:'+id))throw new Error('trecho_invalido'); ids.add('t:'+id);
     const origem=texto(t.origem,100).toUpperCase(),destino=texto(t.destino,100).toUpperCase();
@@ -63,6 +69,9 @@ export function validarDados(v: any): Preparacao {
       const s=(e.servicos||[]).find((s:any)=>s.tipo===tipo.id)||novoServico(id,tipo.id);
       const dados: Record<string,string>={};
       for(const [k,value] of Object.entries(s.dados||{})) { if(/^[a-z0-9_]{1,60}$/.test(k))dados[k]=texto(value); }
+      const valorAcordadoTipo=texto(dados.valor_acordado_tipo,10);
+      if(tipo.id==='HOTEL'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo))dados.valor_acordado_tipo=valorAcordadoTipo;
+      else delete dados.valor_acordado_tipo;
       return {...resposta(s),id:`${id}:${tipo.id}`,tipo:tipo.id,cadastro_id:texto(s.cadastro_id,100),origem:texto(s.origem,50),dados};
     })};
   });
@@ -84,7 +93,6 @@ export function resumo(dados: Preparacao) {
   for(const e of dados.escalas)for(const s of e.servicos)if(s.tipo==='HOTEL'&&s.estado==='CONCLUIDO'&&!['INCLUIDO','A_PARTE','NAO_OFERECE'].includes(s.dados.cafe_estado))linhas.push({grupo:'tripulacao',secao:e.icao,item:'Café da manhã: condição a confirmar',estado:'PENDENTE',observacao:'Confirmar se o café está incluído, é cobrado à parte ou não é oferecido.'});
   // Óleo omitido é uma pendência visível, nunca um impedimento à conclusão.
   if(!dados.nivel_oleo.trim())linhas.push({grupo:'aeronave',secao:'Check externo',item:'Nível de óleo',estado:'PENDENTE',observacao:''});
-  for(const [i,t] of dados.trechos.entries())if(!t.origem||!t.destino||!t.data||!t.horario||!t.fuso)linhas.push({grupo:'tripulacao',secao:'Roteiro',item:`Trecho ${i+1}: dados ou fuso a confirmar`,estado:'PENDENTE',observacao:'Dados do roteiro não informados por completo.'});
   const pendencias=linhas.filter(l=>!['CONCLUIDO','NAO_APLICAVEL'].includes(l.estado));
   return {total:linhas.length,resolvidos:linhas.length-pendencias.length,pendencias:pendencias.length,linhas};
 }
