@@ -554,8 +554,14 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (body.periodicidade !== undefined && origem !== 'lancamentos') campos.push(['periodicidade', body.periodicidade || null])
     if (body.observacoes !== undefined) campos.push(['observacoes', body.observacoes || null])
     if (origem === 'lancamentos') {
-      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'periodicidade', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'aeronave_id', 'cotista_aeronave_id']
+      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'periodicidade', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'conta_bancaria_id', 'pago_por', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
+      if (body.data_pagamento != null && body.data_pagamento !== '') {
+        const dataPagamento = String(body.data_pagamento)
+        const dataConvertida = /^\d{4}-\d{2}-\d{2}$/.test(dataPagamento) ? new Date(`${dataPagamento}T00:00:00Z`) : null
+        const dataValida = Boolean(dataConvertida && Number.isFinite(dataConvertida.getTime()) && dataConvertida.toISOString().slice(0, 10) === dataPagamento)
+        if (!dataValida) return c.json({ error: 'data_pagamento_invalida' }, 400)
+      }
       if (Object.prototype.hasOwnProperty.call(body, 'categoria_id') || Object.prototype.hasOwnProperty.call(body, 'categoria_share_id')) {
         campos.push(['categoria_share_id', body.categoria_share_id ?? body.categoria_id ?? null])
       }
@@ -572,9 +578,29 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     const colunaId = atualizarGrupoRateio ? 'lancamento_id' : 'id'
     const idAtualizacao = atualizarGrupoRateio ? lancamentoPaiId : id
     const atualizacaoPrincipal = db.prepare(`UPDATE ${origem} SET ${campos.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE ${colunaId} = ?`).bind(...campos.map(([, valor]) => valor), idAtualizacao)
+    const atualizacoesBaixa: D1PreparedStatement[] = []
+    if (origem === 'lancamentos') {
+      const baixaEditada = ['data_pagamento', 'conta_bancaria_id', 'comprovante_url'].some((campo) => Object.prototype.hasOwnProperty.call(body, campo))
+      if (baixaEditada) {
+        const data = Object.prototype.hasOwnProperty.call(body, 'data_pagamento') ? body.data_pagamento ?? null : undefined
+        const conta = Object.prototype.hasOwnProperty.call(body, 'conta_bancaria_id') ? body.conta_bancaria_id ?? null : undefined
+        const comprovante = Object.prototype.hasOwnProperty.call(body, 'comprovante_url') ? body.comprovante_url ?? null : undefined
+        const camposPagar: Array<[string, unknown]> = []
+        const camposReceber: Array<[string, unknown]> = []
+        if (data !== undefined) { camposPagar.push(['data_pagamento', data]); camposReceber.push(['data_recebimento', data], ['data_pagamento', data]) }
+        if (conta !== undefined) { camposPagar.push(['banco_pagamento', conta]); camposReceber.push(['banco_recebimento', conta]) }
+        if (comprovante !== undefined) { camposPagar.push(['comprovante_pagamento_url', comprovante]); camposReceber.push(['comprovante_recebimento_url', comprovante]) }
+        atualizacoesBaixa.push(
+          db.prepare(`UPDATE contas_apagar SET ${camposPagar.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE lancamentos_id = ?`).bind(...camposPagar.map(([, valor]) => valor), id),
+          db.prepare(`UPDATE contas_areceber SET ${camposReceber.map(([campo]) => `${campo} = ?`).join(', ')}, atualizado_em = CURRENT_TIMESTAMP WHERE lancamentos_id = ?`).bind(...camposReceber.map(([, valor]) => valor), id),
+        )
+      }
+    }
     if (body.descricao != null) {
       const relacionadas = await atualizacoesDescricaoVinculada(db, origem, id, String(body.descricao).trim(), lancamentoPaiId)
-      await db.batch([atualizacaoPrincipal, ...relacionadas])
+      await db.batch([atualizacaoPrincipal, ...relacionadas, ...atualizacoesBaixa])
+    } else if (atualizacoesBaixa.length) {
+      await db.batch([atualizacaoPrincipal, ...atualizacoesBaixa])
     } else {
       await atualizacaoPrincipal.run()
     }

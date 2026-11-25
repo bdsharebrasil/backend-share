@@ -11,20 +11,24 @@ class FakeStatement {
 }
 
 class FakeD1 {
-  constructor({ parentId, sourceLaunch = null, envio = null }) {
+  constructor({ parentId, sourceLaunch = null, envio = null, directLaunch = false }) {
     this.parentId = parentId
     this.sourceLaunch = sourceLaunch
     this.envio = envio
+    this.directLaunch = directLaunch
     this.updates = []
   }
   prepare(sql) { return new FakeStatement(this, sql) }
   async first(sql, values) {
     if (sql.includes('SELECT id, "rateio_despesas" AS origem FROM rateio_despesas WHERE id = ?')) return null
     if (sql.includes('SELECT lancamento_id AS id, "rateio_despesas_pai" AS origem FROM rateio_despesas')) {
-      return values[0] === this.parentId ? { id: this.parentId, origem: 'rateio_despesas_pai' } : null
+      return !this.directLaunch && values[0] === this.parentId ? { id: this.parentId, origem: 'rateio_despesas_pai' } : null
     }
     if (sql.includes('SELECT id, "rateio_hold" AS origem FROM rateio_hold')) return null
-    if (sql.includes('SELECT id, "lancamentos" AS origem FROM lancamentos WHERE id = ?')) return null
+    if (sql.includes('SELECT id, "lancamentos" AS origem FROM lancamentos WHERE id = ?')) {
+      return this.directLaunch && values[0] === this.parentId ? { id: this.parentId, origem: 'lancamentos' } : null
+    }
+    if (sql.includes('SELECT * FROM lancamentos WHERE id = ?')) return { id: values[0] }
     if (sql.includes('SELECT id, "movimentos_holding" AS origem FROM movimentos_holding')) return null
     if (sql.includes('SELECT lancamento_id FROM rateio_despesas WHERE id = ?')) return null
     if (sql.includes('SELECT id, tipo_caixa, origem_tipo, origem_id FROM lancamentos WHERE id = ?')) {
@@ -84,4 +88,29 @@ test('edita descrição da despesa originada em envio_despesas sem criar lançam
   assert.ok(updates.some(({ sql, values }) => sql.includes('UPDATE rateio_despesas') && values.at(-1) === 'envio-1'))
   assert.ok(updates.some(({ sql, values }) => sql.includes('UPDATE envio_despesas') && values.at(-1) === 'envio-1'))
   assert.ok(!updates.some(({ sql }) => sql.includes('UPDATE lancamentos')))
+})
+
+test('edita data e demais dados da baixa de um lançamento Share já pago', async () => {
+  const db = new FakeD1({ parentId: 'share-pago-1', directLaunch: true })
+  const dados = {
+    data_pagamento: '2026-11-21',
+    conta_bancaria_id: 'conta-2',
+    forma_pagamento: 'PIX',
+    comprovante_url: 'https://docs.test/comprovante.pdf',
+    pago_por: 'Share Brasil',
+  }
+  const response = await financeiroRoutes.request('/lancamentos/share-pago-1', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(dados),
+  }, { SHARE_DB: db })
+
+  assert.equal(response.status, 200, await response.clone().text())
+  const update = db.updates.find(({ sql }) => sql.includes('UPDATE lancamentos SET'))
+  assert.ok(update)
+  for (const campo of Object.keys(dados)) assert.match(update.sql, new RegExp(`${campo} = \\?`))
+  assert.ok(Object.values(dados).every((valor) => update.values.includes(valor)))
+  assert.equal(update.values.at(-1), 'share-pago-1')
+  assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_apagar SET') && sql.includes('data_pagamento = ?') && values.includes('2026-11-21')))
+  assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_areceber SET') && sql.includes('data_recebimento = ?') && values.includes('2026-11-21')))
 })
