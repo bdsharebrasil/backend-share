@@ -39,13 +39,15 @@ test('painel de agendamento apresenta última perna e corte mesmo sem encerrar a
   assert.ok(inicio >= 0, 'rota do painel existe');
   const painel = workerSource.slice(inicio, fim > inicio ? fim : undefined);
   assert.match(painel, /perna_agendada\.horario_corte AS perna_atual_horario_corte/);
-  assert.match(painel, /perna_agendada\.horario_pouso AS perna_atual_horario_pouso/);
+  assert.match(painel, /COALESCE\(perna_vinculada\.horario_pouso, perna_agendada\.horario_pouso,[\s\S]*?AS perna_atual_horario_pouso/);
+  assert.match(painel, /j\.id = COALESCE\(perna_vinculada\.jornada_id, perna_agendada\.jornada_id\)/);
+  assert.match(painel, /j\.solicitacao_id = s\.id ORDER BY j\.numero_jornada DESC, j\.criado_em DESC/);
   assert.match(painel, /perna_agendada\.origem AS perna_atual_origem/);
   assert.match(painel, /perna_agendada\.destino AS perna_atual_destino/);
   assert.match(painel, /LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada\.id =/);
   assert.match(painel, /CASE WHEN p\.horario_corte IS NULL/);
   assert.match(painel, /j\.numero_jornada DESC, p\.numero DESC/);
-  assert.match(painel, /COALESCE\(perna_agendada\.horario_corte/);
+  assert.match(painel, /COALESCE\(perna_vinculada\.horario_corte, perna_agendada\.horario_corte/);
 });
 
 test('painel escolhe a primeira perna aberta; após todos os cortes preserva a última', () => {
@@ -71,6 +73,42 @@ test('painel escolhe a primeira perna aberta; após todos os cortes preserva a �
     assert.equal(atual(), 'p3', 'avança para a próxima perna ainda aberta');
     db.exec("UPDATE pernas_jornada_voo SET horario_corte='2026-11-19T12:00:00Z', status='cortado' WHERE id='p3'");
     assert.equal(atual(), 'p3', 'mantém última perna registrada após o corte final');
+  } finally {
+    db.close();
+  }
+});
+
+test('painel recupera pouso registrado na jornada quando falta na perna selecionada', () => {
+  const inicio = workerSource.indexOf("app.get('/api/interno/agendamento',");
+  const fim = workerSource.indexOf("\napp.", inicio + 1);
+  const painel = workerSource.slice(inicio, fim > inicio ? fim : undefined);
+  const inicioExpressao = painel.indexOf('COALESCE(perna_vinculada.horario_pouso, perna_agendada.horario_pouso');
+  const fimExpressao = painel.indexOf(' AS perna_atual_horario_pouso', inicioExpressao);
+  assert.ok(inicioExpressao >= 0 && fimExpressao > inicioExpressao, 'expressão de pouso deve existir');
+  const expressao = painel.slice(inicioExpressao, fimExpressao);
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`
+      CREATE TABLE solicitacoes (id TEXT);
+      CREATE TABLE jornadas_voo (id TEXT, solicitacao_id TEXT, jornada_principal_id TEXT, numero_jornada INTEGER, criado_em TEXT, horario_pouso TEXT);
+      CREATE TABLE pernas_jornada_voo (id TEXT, jornada_id TEXT, horario_pouso TEXT);
+      INSERT INTO solicitacoes VALUES ('voo1');
+      INSERT INTO jornadas_voo VALUES
+        ('j1','voo1',NULL,1,'2026-11-26T11:00:00Z','2026-11-26T12:40:00Z'),
+        ('j2','voo1',NULL,2,'2026-11-26T13:00:00Z',NULL);
+      INSERT INTO pernas_jornada_voo VALUES ('p1','j1',NULL);
+    `);
+    const query = db.prepare(`SELECT ${expressao} AS pouso
+      FROM solicitacoes s
+      LEFT JOIN pernas_jornada_voo perna_vinculada ON perna_vinculada.id = s.id
+      LEFT JOIN pernas_jornada_voo perna_agendada ON perna_agendada.id = ?1
+      WHERE s.id = ?2`);
+    assert.equal(query.get('p1', 'voo1').pouso, '2026-11-26T12:40:00Z', 'usa o pouso da jornada pai da perna atual');
+    db.exec("UPDATE pernas_jornada_voo SET horario_pouso='2026-11-26T12:45:00Z' WHERE id='p1'");
+    assert.equal(query.get('p1', 'voo1').pouso, '2026-11-26T12:45:00Z', 'prioriza o pouso registrado diretamente na perna');
+    assert.equal(query.get(null, 'voo1').pouso, null, 'não reutiliza pouso antigo quando a jornada mais recente ainda não pousou');
+    db.exec("UPDATE jornadas_voo SET horario_pouso='2026-11-26T13:50:00Z' WHERE id='j2'");
+    assert.equal(query.get(null, 'voo1').pouso, '2026-11-26T13:50:00Z', 'usa o horário da jornada mais recente sem perna selecionada');
   } finally {
     db.close();
   }

@@ -1668,7 +1668,10 @@ app.get('/api/interno/agendamento', async c => {
         perna_agendada.id AS perna_atual_id, perna_agendada.numero AS perna_atual_numero,
         perna_agendada.origem AS perna_atual_origem, perna_agendada.destino AS perna_atual_destino,
         perna_agendada.horario_ac AS perna_atual_horario_ac, perna_agendada.horario_dep AS perna_atual_horario_dep,
-        perna_agendada.horario_pouso AS perna_atual_horario_pouso, perna_agendada.horario_corte AS perna_atual_horario_corte,
+        COALESCE(perna_vinculada.horario_pouso, perna_agendada.horario_pouso,
+          (SELECT j.horario_pouso FROM jornadas_voo j WHERE j.id = COALESCE(perna_vinculada.jornada_id, perna_agendada.jornada_id) LIMIT 1),
+          (SELECT j.horario_pouso FROM jornadas_voo j WHERE j.solicitacao_id = s.id ORDER BY j.numero_jornada DESC, j.criado_em DESC, j.id DESC LIMIT 1)
+        ) AS perna_atual_horario_pouso, perna_agendada.horario_corte AS perna_atual_horario_corte,
         perna_agendada.status AS perna_atual_status,
         c.razao_social AS cliente_razao_social, so.nome AS socio_nome, ce.razao_social AS cliente_emprestimo_nome, se.nome AS socio_emprestimo_nome, COALESCE(ce.codigo_cliente, (SELECT cae.codigo_cliente FROM cotista_aeronave cae WHERE (cae.cliente_id = s.cliente_emprestimo_id OR cae.socio_id = s.socio_emprestimo_id) AND cae.aeronave_id = s.aeronave_id ORDER BY cae.codigo_cliente LIMIT 1), (SELECT ca.codigo_cliente FROM cotista_aeronave ca WHERE (ca.cliente_id = s.cliente_id OR ca.socio_id = s.socio_id) AND ca.aeronave_id = s.aeronave_id ORDER BY ca.codigo_cliente LIMIT 1), c.codigo_cliente) AS codigo_cliente, a.matricula_registro, a.modelo, a.status AS status_aeronave,
         (SELECT cp.status FROM checklists_pre_voo cp WHERE cp.solicitacao_id = s.id ORDER BY cp.criado_em DESC LIMIT 1) AS checklist_status,
