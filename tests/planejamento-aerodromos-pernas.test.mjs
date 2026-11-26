@@ -67,6 +67,27 @@ test('cálculo de voo usa as coordenadas normalizadas para SN9T e não exige lat
   assert.ok(resposta.body.flightplan.distance_nm > 0);
   assert.equal((await calcular(contexto({ query: { adep: 'SN!T', ades: 'SBCY' } }))).status, 400);
 });
+
+test('plano de voo preserva os dados ICAO e de identificação cadastrados para a aeronave', async () => {
+  const calcular = handler(ais, 'get', '/api/flightplan', depsAis);
+  const aircraft = {
+    id: 'aeronave-1', fabricante: 'FAB', modelo: 'MODELO', tipo_aeronave: 'TURBOELICE',
+    consumo_combustivel: 80, velocidade_cruzeiro: '150', performance_velocidade_cruzeiro_kt: 175,
+    designador_icao: 'AT72', esteira_turbulencia: 'M', equipamentos_icao: 'SDFGIRW',
+    vigilancia_icao: 'LB1', pbn_icao: 'B2C2D2', autonomia_padrao_minutos: 240, cor_marcas: 'BRANCO/AZUL',
+  };
+  const db = { prepare: () => ({ bind: () => ({ first: async () => aircraft }) }) };
+  const resposta = await calcular(contexto({ db, query: { adep: 'SBGR', ades: 'SBCY', aeronave_id: aircraft.id } }));
+  assert.equal(resposta.status, 200);
+  assert.deepEqual(resposta.body.performance, {
+    source: 'performance_aeronave', fabricante: 'FAB', modelo: 'MODELO', tipo_aeronave: 'TURBOELICE',
+    velocidade_cruzeiro_kt: 175, consumo_combustivel_lh: 80, categoria: null,
+    teto_servico_ft: null, taxa_subida_fpm: null, taxa_descida_fpm: null,
+    designador_icao: 'AT72', esteira_turbulencia: 'M', equipamentos_icao: 'SDFGIRW',
+    vigilancia_icao: 'LB1', pbn_icao: 'B2C2D2', autonomia_padrao_minutos: 240, cor_marcas: 'BRANCO/AZUL',
+  });
+});
+
 test('salvamento aceita SN9T e mantém a perna selecionada no payload', async () => {
   let vinculos, gravacoes = 0;
   const salvar = handler(worker, 'post', '/api/interno/planos-voo', {

@@ -478,13 +478,13 @@ aiswebRoutes.get('/api/flightplan', async (c) => {
     let aircraftData: any = null
     if (aircraftId) {
       try {
-        aircraftData = await c.env.SHARE_DB.prepare(`SELECT a.id, a.fabricante, a.modelo, a.tipo_aeronave, a.consumo_combustivel, a.velocidade_cruzeiro, a.performance_aeronave_id, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
+        aircraftData = await c.env.SHARE_DB.prepare(`SELECT a.*, p.categoria AS performance_categoria, p.velocidade_cruzeiro_kt AS performance_velocidade_cruzeiro_kt, p.teto_servico_ft AS performance_teto_servico_ft, p.taxa_subida_fpm AS performance_taxa_subida_fpm, p.taxa_descida_fpm AS performance_taxa_descida_fpm
           FROM aeronave a
           LEFT JOIN performance_aeronave p ON p.id = COALESCE(a.performance_aeronave_id, (SELECT p2.id FROM performance_aeronave p2 WHERE lower(p2.modelo) = lower(a.modelo) ORDER BY p2.atualizado_em DESC LIMIT 1))
           WHERE a.id = ?1`).bind(aircraftId).first()
       } catch (error: any) {
         log.warn(`[flightplan] performance_aeronave indisponível: ${error.message}`)
-        aircraftData = await c.env.SHARE_DB.prepare('SELECT id, fabricante, modelo, tipo_aeronave, consumo_combustivel, velocidade_cruzeiro FROM aeronave WHERE id = ?1').bind(aircraftId).first()
+        aircraftData = await c.env.SHARE_DB.prepare('SELECT * FROM aeronave WHERE id = ?1').bind(aircraftId).first()
       }
     }
     const speed = requestedSpeed || numericValue(aircraftData?.performance_velocidade_cruzeiro_kt) || numericValue(aircraftData?.velocidade_cruzeiro) || 120
@@ -564,6 +564,13 @@ aiswebRoutes.get('/api/flightplan', async (c) => {
         teto_servico_ft: aircraftData.performance_teto_servico_ft ?? null,
         taxa_subida_fpm: aircraftData.performance_taxa_subida_fpm ?? null,
         taxa_descida_fpm: aircraftData.performance_taxa_descida_fpm ?? null,
+        designador_icao: aircraftData.designador_icao ?? null,
+        esteira_turbulencia: aircraftData.esteira_turbulencia ?? null,
+        equipamentos_icao: aircraftData.equipamentos_icao ?? null,
+        vigilancia_icao: aircraftData.vigilancia_icao ?? null,
+        pbn_icao: aircraftData.pbn_icao ?? null,
+        autonomia_padrao_minutos: aircraftData.autonomia_padrao_minutos ?? null,
+        cor_marcas: aircraftData.cor_marcas ?? null,
       } : null,
       fuel: {
         burn_lh: burn,
