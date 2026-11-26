@@ -47,6 +47,9 @@ jobs:
       - name: Type-check
         run: pnpm type-check
 
+      - name: Verificar categorias e reembolsos dos relatórios de viagem
+        run: node --import tsx --test tests/relatorio-despesa-viagem-financeiro.test.mjs tests/relatorio-viagem-categorias.test.mjs tests/relatorio-baixa-recebimento.test.mjs
+
       - name: Verificar CTM e peso e balanceamento
         run: node --import tsx --test tests/ctm*.test.mjs tests/pesoBalanceamento.test.mjs
 
@@ -134,6 +137,12 @@ jobs:
           if ! jq -e '.[0].results | any(.name == "reembolso_caixa_share")' <<< "$colunas" > /dev/null; then
             pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261125_relatorio_viagem_reembolso_caixa_share.sql
           fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Corrigir categorias dos relatórios de viagem existentes
+        run: pnpm exec wrangler d1 execute bd_sharebrasil --remote --file=migrations/20261126_relatorio_viagem_categorias.sql
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

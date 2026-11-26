@@ -5,7 +5,7 @@ import { registrarDespesaDiretaRelatorioViagem, sincronizarRelatorioViagemFinanc
 const columns = [
   "id", "aeronave_id", "holding_id", "socio_id", "colaborador_id", "data_emissao", "data_vencimento", "data_pagamento",
   "descricao", "descricao_despesa", "fornecedor_nome", "numero_doc", "numero_voo", "url_doc", "cotista_aeronave_id",
-  "cliente_id", "categoria_cliente_id", "categoria_nome", "grupo_categoria", "subcategoria_1", "subcategoria_2", "subcategoria_3", "subcategoria_4", "status", "fluxo", "tipo_caixa", "valor_centavos", "pago_por",
+  "cliente_id", "categoria_share_id", "categoria_cliente_id", "categoria_nome", "grupo_categoria", "subcategoria_1", "subcategoria_2", "subcategoria_3", "subcategoria_4", "status", "fluxo", "tipo_caixa", "valor_centavos", "pago_por",
   "pago_diretamente", "reembolsavel", "reembolso_quitado", "forma_pagamento", "observacoes", "criado_por", "origem_tipo",
   "origem_id", "idempotency_key", "lancamento_id", "lancamentos_id", "cotista_id", "movimentos_id", "movimento_id",
   "movimento_holding_id", "tripulante_id", "categoria_id", "percentual_sociedade", "percentual_uso", "valor_total_centavos",
@@ -15,6 +15,7 @@ const columns = [
 function fakeDb(kind = "CLIENTE", existingData = null) {
   const db = {
     batched: [],
+    executed: [],
     prepare(sql) {
       const statement = {
         sql,
@@ -25,7 +26,7 @@ function fakeDb(kind = "CLIENTE", existingData = null) {
         },
         async first() {
           if (sql.includes("SELECT holding_id FROM hold_socios")) return { holding_id: "holding-1" };
-          if (sql.includes("SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4")) return { id: "categoria-cliente-1", nome: "Despesas de Viagem", subcategoria_1: null, subcategoria_2: "RELATORIO DE VIAGEM", subcategoria_3: null, subcategoria_4: null };
+          if (sql.includes("SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4")) return { id: "b4016b98-7b4c-4f18-9f8d-d7b03cd4d300", nome: "DESPESAS DE VIAGEM", subcategoria_1: null, subcategoria_2: "RELATORIO DE VIAGEM", subcategoria_3: null, subcategoria_4: null };
           if (sql.includes("SELECT id FROM cliente WHERE")) return { id: "cliente-1" };
           if (sql.includes("SELECT user_id FROM tripulacao")) return { user_id: "colaborador-1" };
           if (existingData && sql.includes("SELECT id, status FROM contas_apagar")) return existingData.payable || null;
@@ -49,6 +50,7 @@ function fakeDb(kind = "CLIENTE", existingData = null) {
           return { results: [] };
         },
         async run() {
+          db.executed.push(this);
           return { success: true, meta: { changes: 0 } };
         },
       };
@@ -101,11 +103,14 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   const lancamentoReembolso = lancamentos.find((row) => row.idempotency_key === "RELATORIO_DESPESA_VIAGEM:relatorio-1:tripulante_1");
   const lancamentoCusto = lancamentos.find((row) => row.idempotency_key === "RELATORIO_DESPESA_VIAGEM:relatorio-1:CUSTO_INTEGRAL");
   assert.equal(lancamentos.length, 2);
-  assert.equal(lancamentoReembolso?.categoria_nome, "DESPESAS REEMBOLSÁVEIS");
+  assert.equal(lancamentoReembolso?.categoria_nome, "RELATORIO DE VIAGEM");
+  assert.equal(lancamentoReembolso?.categoria_share_id, "64fb90ae-dc29-4468-a2b3-1578f5c9bd06");
+  assert.equal(lancamentoReembolso?.grupo_categoria, "DESPESAS REEMBOLSÁVEIS");
+  assert.equal(lancamentoCusto?.grupo_categoria, "DESPESAS DE VIAGEM");
   assert.equal(lancamentoReembolso?.valor_centavos, 2500);
   assert.equal(lancamentoReembolso?.escopo_financeiro, "CAIXA_SHARE");
-  assert.equal(lancamentoCusto?.categoria_nome, "Despesas de Viagem");
-  assert.equal(lancamentoCusto?.categoria_cliente_id, "categoria-cliente-1");
+  assert.equal(lancamentoCusto?.categoria_nome, "DESPESAS DE VIAGEM");
+  assert.equal(lancamentoCusto?.categoria_cliente_id, "b4016b98-7b4c-4f18-9f8d-d7b03cd4d300");
   assert.equal(lancamentoCusto?.subcategoria_1, null);
   assert.equal(lancamentoCusto?.subcategoria_2, "RELATORIO DE VIAGEM");
   assert.equal(lancamentoCusto?.valor_centavos, 8500);
@@ -116,6 +121,8 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
 
   const recebiveis = insertedRows(db, "contas_areceber");
   assert.equal(recebiveis.length, 1);
+  assert.equal(recebiveis[0].categoria_id, "a7555994-103d-4739-96a5-001c3bec1424");
+  assert.equal(recebiveis[0].categoria_nome, "REEMBOLSO RELATORIO DE DESPESA DE VIAGENS recebido");
   assert.equal(recebiveis[0].valor_centavos, 7500);
   assert.equal(recebiveis[0].lancamentos_id, null);
   assert.equal(recebiveis[0].origem_id, "relatorio-1");
@@ -130,8 +137,8 @@ test("relatório de cotista direto cria um rateio único pelo total sem perder o
   assert.equal(rateios[0].valor_rateado_centavos, 8500);
   assert.equal(rateios[0].percentual_uso, 100);
   assert.equal(rateios[0].lancamento_id, lancamentoCusto?.id);
-  assert.equal(rateios[0].categoria_nome, "Despesas de Viagem");
-  assert.equal(rateios[0].categoria_id, "categoria-cliente-1");
+  assert.equal(rateios[0].categoria_nome, "DESPESAS DE VIAGEM");
+  assert.equal(rateios[0].categoria_id, "b4016b98-7b4c-4f18-9f8d-d7b03cd4d300");
   assert.equal(rateios[0].subcategoria_1, null);
   assert.equal(rateios[0].subcategoria_2, "RELATORIO DE VIAGEM");
   assert.equal(rateios[0].valor_pago_real_centavos, 1000);
@@ -209,6 +216,11 @@ test("repetir a sincronização atualiza custo e rateios sem trocar suas identid
     despesas: [{ valor: 147.5, pago_por: "tripulante_1" }],
   }), "usuario-1");
 
+  const reparoCategoria = db.executed.find((stmt) => stmt.sql.includes("UPDATE lancamentos SET valor_centavos"));
+  assert.ok(reparoCategoria);
+  assert.match(reparoCategoria.sql, /categoria_share_id = \?, categoria_nome = \?, grupo_categoria = \?/);
+  assert.deepEqual(reparoCategoria.values.slice(-4, -1), ["64fb90ae-dc29-4468-a2b3-1578f5c9bd06", "RELATORIO DE VIAGEM", "DESPESAS REEMBOLSÁVEIS"]);
+  assert.doesNotMatch(reparoCategoria.sql, /(?:status|data_pagamento|comprovante_url) =/);
   const updates = db.batched.filter((statement) => statement.sql.startsWith("UPDATE rateio_despesas SET"));
   assert.equal(updates.length, 1);
   assert.equal(updates[0].values.at(-1), "rateio-existente");
