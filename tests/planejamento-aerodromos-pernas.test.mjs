@@ -68,6 +68,19 @@ test('cálculo de voo usa as coordenadas normalizadas para SN9T e não exige lat
   assert.equal((await calcular(contexto({ query: { adep: 'SN!T', ades: 'SBCY' } }))).status, 400);
 });
 
+test('rota principal continua disponível quando alternados e NOTAMs falham', async () => {
+  const calcular = handler(ais, 'get', '/api/flightplan', {
+    ...depsAis,
+    fetchNearby: async () => { throw new Error('geilóc indisponível'); },
+    cachedFetch: async (_c, key, _ttl, fn) => key.startsWith('routes-') ? fn() : Promise.reject(new Error('NOTAM indisponível')),
+  });
+  const resposta = await calcular(contexto({ query: { adep: 'SN9T', ades: 'SBCY' } }));
+  assert.equal(resposta.status, 200);
+  assert.equal(resposta.body.flightplan.route, 'SN9T DCT SBCY');
+  assert.deepEqual(resposta.body.alternates, []);
+  assert.deepEqual(resposta.body.notam_alerts, []);
+});
+
 test('plano de voo preserva os dados ICAO e de identificação cadastrados para a aeronave', async () => {
   const calcular = handler(ais, 'get', '/api/flightplan', depsAis);
   const aircraft = {

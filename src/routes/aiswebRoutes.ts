@@ -528,10 +528,21 @@ aiswebRoutes.get('/api/flightplan', async (c) => {
       log.warn(`[flightplan] rota preferencial indisponível: ${error.message}`)
     }
 
+    // A rota, distância e combustível continuam úteis mesmo se serviços
+    // acessórios (geilócus/NOTAM) estiverem indisponíveis.
     const [alternates, notamDep, notamDes] = await Promise.all([
-      fetchNearby(c, lat2, lon2),
-      cachedFetch(c, `notam-${adep}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: adep })),
-      cachedFetch(c, `notam-${ades}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: ades })),
+      fetchNearby(c, lat2, lon2).catch((error: any) => {
+        log.warn(`[flightplan] alternados indisponíveis: ${error.message}`)
+        return [] as Airport[]
+      }),
+      cachedFetch(c, `notam-${adep}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: adep })).catch((error: any) => {
+        log.warn(`[flightplan] NOTAM ${adep} indisponível: ${error.message}`)
+        return []
+      }),
+      cachedFetch(c, `notam-${ades}`, 600, () => fetchAisweb(c, 'notam', { icaoCode: ades })).catch((error: any) => {
+        log.warn(`[flightplan] NOTAM ${ades} indisponível: ${error.message}`)
+        return []
+      }),
     ])
 
     const nearbyAlts = alternates
