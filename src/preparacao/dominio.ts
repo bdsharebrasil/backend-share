@@ -2,13 +2,13 @@ import { SECOES_CHECKLIST } from './estrutura';
 export const ESTADOS = ['PENDENTE', 'EM_ANDAMENTO', 'CONCLUIDO', 'NAO_REALIZADO', 'NAO_APLICAVEL'] as const;
 export type Estado = typeof ESTADOS[number];
 export type Resposta = { estado: Estado; observacao: string; atualizado_em?: string; responsavel?: string };
-export type ItemResposta = Resposta & { valor_acordado_tipo?: 'PESSOA' | 'TOTAL' };
+export type ItemResposta = Resposta;
 export type Servico = Resposta & { id: string; tipo: string; cadastro_id?: string; origem?: string; dados: Record<string, string> };
 export type Escala = { id: string; icao: string; cidade: string; servicos: Servico[] };
 export type Trecho = { id: string; origem: string; destino: string; data: string; horario: string; fuso: string; pernoite: boolean; origem_escala_id: string; destino_escala_id: string };
 export type Preparacao = { modelo: 1; itens: Record<string, ItemResposta>; nivel_oleo: string; observacoes: string; trechos: Trecho[]; escalas: Escala[] };
 export const TIPOS_SERVICO = [
-  { id: 'COMBUSTIVEL', nome: 'Combustível previsto / acionamento' },
+  { id: 'COMBUSTIVEL', nome: 'ABASTECIMENTO DESTINO' },
   { id: 'HOTEL', nome: 'Hospedagem da tripulação' },
   { id: 'HANGAR', nome: 'Pátio / pernoite da aeronave' },
   { id: 'GPU', nome: 'GPU' }, { id: 'AR_CONDICIONADO', nome: 'Ar-condicionado' },
@@ -28,8 +28,7 @@ export function inicial(voo: any, legado: any): Preparacao {
   const itens: Preparacao['itens'] = {};
   for(const secao of SECOES) for(const i of secao.itens) {
     const r = respostas[i.id];
-    const valorAcordadoTipo=i.id==='comissaria'?texto(r?.valor_acordado_tipo,10):'';
-    itens[i.id] = { estado:r?.status === 'feito' ? 'CONCLUIDO' : r?.status === 'alerta' ? 'EM_ANDAMENTO' : r?.status === 'nao_feito' ? 'NAO_REALIZADO' : 'PENDENTE', observacao:r?.observacao || '', ...(i.id==='comissaria'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo)?{valor_acordado_tipo:valorAcordadoTipo as 'PESSOA'|'TOTAL'}:{}) };
+    itens[i.id] = { estado:r?.status === 'feito' ? 'CONCLUIDO' : r?.status === 'alerta' ? 'EM_ANDAMENTO' : r?.status === 'nao_feito' ? 'NAO_REALIZADO' : 'PENDENTE', observacao:r?.observacao || '' };
   }
   const previsto=String(voo.horario_previsto_agendamento||'');
   const comFuso=/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(previsto)&&Number.isFinite(Date.parse(previsto));
@@ -50,8 +49,7 @@ export function validarDados(v: any): Preparacao {
   const itens: Preparacao['itens'] = {};
   for(const sec of SECOES) for(const item of sec.itens) {
     const r=v.itens?.[item.id],normalizada=resposta(r||{estado:'PENDENTE'});
-    const valorAcordadoTipo=item.id==='comissaria'?texto(r?.valor_acordado_tipo,10):'';
-    itens[item.id]={...normalizada,...(item.id==='comissaria'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo)?{valor_acordado_tipo:valorAcordadoTipo as 'PESSOA'|'TOTAL'}:{})};
+    itens[item.id]={...normalizada};
   }
   const trechos = v.trechos.map((t:any) => {
     const id=texto(t.id,80); if(!id || ids.has('t:'+id))throw new Error('trecho_invalido'); ids.add('t:'+id);
@@ -69,9 +67,8 @@ export function validarDados(v: any): Preparacao {
       const s=(e.servicos||[]).find((s:any)=>s.tipo===tipo.id)||novoServico(id,tipo.id);
       const dados: Record<string,string>={};
       for(const [k,value] of Object.entries(s.dados||{})) { if(/^[a-z0-9_]{1,60}$/.test(k))dados[k]=texto(value); }
-      const valorAcordadoTipo=texto(dados.valor_acordado_tipo,10);
-      if(tipo.id==='HOTEL'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo))dados.valor_acordado_tipo=valorAcordadoTipo;
-      else delete dados.valor_acordado_tipo;
+      if(tipo.id!=='HOTEL')delete dados.valor_acordado_tipo;
+      if(tipo.id==='COMBUSTIVEL'){for(const k of Object.keys(dados))if(!['codigo_icao','nome_fornecedor','pessoa_contato','telefone','preco_avgas','preco_jet'].includes(k))delete dados[k];}
       return {...resposta(s),id:`${id}:${tipo.id}`,tipo:tipo.id,cadastro_id:texto(s.cadastro_id,100),origem:texto(s.origem,50),dados};
     })};
   });

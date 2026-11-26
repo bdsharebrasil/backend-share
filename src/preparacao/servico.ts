@@ -43,8 +43,7 @@ export async function gravar(db:any, id:string, body:any, usuario:{id:string;nom
   // Compatibilidade com a lista de voos e o início de jornada existentes. Não cria gastos.
   const respostas:any={};
   for(const [key,r] of Object.entries(dados.itens)) {
-    const valorAcordadoTipo=key==='comissaria'?String(r.valor_acordado_tipo||'').trim().slice(0,10):'';
-    respostas[key]={status:['CONCLUIDO','NAO_APLICAVEL'].includes(r.estado)?'feito':r.estado==='EM_ANDAMENTO'?'alerta':'nao_feito',observacao:r.observacao,...(key==='comissaria'&&['PESSOA','TOTAL'].includes(valorAcordadoTipo)?{valor_acordado_tipo:valorAcordadoTipo}:{})};
+    respostas[key]={status:['CONCLUIDO','NAO_APLICAVEL'].includes(r.estado)?'feito':r.estado==='EM_ANDAMENTO'?'alerta':'nao_feito',observacao:r.observacao};
   }
   respostas._preparacao={pendencias:sum.pendencias,versao,finalizado:Boolean(finalizado)};
   const status=finalizado?'concluido':'rascunho', respostaJson=JSON.stringify(respostas);
