@@ -143,7 +143,7 @@ test("envio ao cliente usa uma categoria compatível com cada FK e tipo de caixa
   assert.match(rotaEnvioCliente, /categoriaClienteId, categoriaCliente\.nome/);
   assert.match(rotaEnvioCliente, /categoriaClienteId, categoriaCliente\.nome, valorCentavos/);
   assert.match(rotaEnvioCliente, /categoria_id: categoriaReceitaShare\.id/);
-  assert.match(rotaEnvioCliente, /descricao, categoriaClienteId, categoriaCliente\.nome, 'CAIXA CLIENTE'/);
+  assert.match(rotaEnvioCliente, /descricao, categoriaClienteId, categoriaCliente\.nome, categoriaCliente\.nome/);
   assert.match(rotaEnvioCliente, /categoriaReceitaShare\.id, categoriaReceitaShare\.nome, 'REEMBOLSOS ENTRADAS'/);
   assert.match(rotaEnvioCliente, /categoria_cliente_relatorio_viagem_nao_encontrada/);
   assert.match(rotaEnvioCliente, /categoria_share_entrada_reembolso_nao_encontrada/);

@@ -28,11 +28,14 @@ type CategoriaClienteRelatorio = {
   subcategoria_4: string | null
 }
 
-const CATEGORIA_SHARE_REEMBOLSO_RELATORIO = {
-  categoria_share_id: 'a7555994-103d-4739-96a5-001c3bec1424',
-  categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
+export const CATEGORIA_SHARE_DESPESA_RELATORIO = {
+  categoria_share_id: '64fb90ae-dc29-4468-a2b3-1578f5c9bd06',
+  categoria_nome: 'RELATORIO DE VIAGEM',
   grupo_categoria: 'DESPESAS REEMBOLSÁVEIS',
 }
+
+export const CATEGORIA_CLIENTE_RELATORIO_ID = 'b4016b98-7b4c-4f18-9f8d-d7b03cd4d300'
+export const CATEGORIA_SHARE_ENTRADA_RELATORIO_ID = 'a7555994-103d-4739-96a5-001c3bec1424'
 
 const FORNECEDOR_RELATORIO_VIAGEM = 'SHARE BRASIL'
 
@@ -174,9 +177,9 @@ async function resolveCategoriaClienteRelatorio(db: D1Database, report: ReportRo
   const categoria = await db.prepare(`
     SELECT id, nome, subcategoria_1, subcategoria_2, subcategoria_3, subcategoria_4
       FROM categoria_movimentacao_cliente
-     WHERE upper(trim(nome)) = upper(trim(?1))
+     WHERE id = ?1
      LIMIT 1
-  `).bind('DESPESAS DE VIAGEM').first<CategoriaClienteRelatorio>()
+  `).bind(CATEGORIA_CLIENTE_RELATORIO_ID).first<CategoriaClienteRelatorio>()
   if (!categoria?.id || !text(categoria.nome)) throw new Error('categoria_cliente_despesas_viagem_nao_encontrada')
 
   const subcategoriaSelecionada = text(
@@ -204,7 +207,7 @@ async function dataEmissaoRelatorio(db: D1Database, report: ReportRow, lancament
   const sibling = await db.prepare(`SELECT data_emissao FROM lancamentos
     WHERE origem_tipo = 'RELATORIO_DESPESA_VIAGEM' AND origem_id = ?1
       AND (?2 IS NULL OR id <> ?2) AND COALESCE(trim(data_emissao), '') <> ''
-    ORDER BY CASE WHEN categoria_nome = 'DESPESAS REEMBOLSÁVEIS' THEN 1 ELSE 0 END, criado_em
+    ORDER BY CASE WHEN tipo_caixa = 'SHARE' THEN 1 ELSE 0 END, criado_em
     LIMIT 1`).bind(text(report.id), lancamentoId).first<{ data_emissao: string | null }>()
   const approvalDates = [report.aprovado_tripulante_1_em, report.aprovado_tripulante_2_em, report.aprovado_tripulante_em]
     .map((value) => text(value))
@@ -255,7 +258,7 @@ async function addTripulantePayableStatements(
   if (existing?.id) {
     if (!['PAGO', 'CANCELADO'].includes(text(existing.status).toUpperCase())) {
       statements.push(db.prepare(`UPDATE contas_apagar SET
-        data_vencimento = ?, valor_centavos = ?, categoria_nome = 'DESPESAS REEMBOLSÁVEIS',
+        data_vencimento = ?, valor_centavos = ?, categoria_nome = 'RELATORIO DE VIAGEM',
         descricao = ?, aeronave_id = ?, lancamentos_id = COALESCE(?, lancamentos_id), movimentos_id = COALESCE(?, movimentos_id),
         colaborador_id = ?, tripulante_id = ?, escopo_financeiro = 'CAIXA_SHARE', atualizado_em = CURRENT_TIMESTAMP
         WHERE id = ?`).bind(
@@ -268,7 +271,7 @@ async function addTripulantePayableStatements(
       id: payableId,
       data_vencimento: dueDate,
       valor_centavos: amountCentavos,
-      categoria_nome: 'DESPESAS REEMBOLSÁVEIS',
+      categoria_nome: 'RELATORIO DE VIAGEM',
       descricao: description,
       aeronave_id: text(report.aeronave_id),
       lancamentos_id: lancamentoId,
@@ -421,7 +424,7 @@ async function ensureLancamentoCustoIntegral(
     descricao: description,
     categoria_cliente_id: categoriaCliente.id,
     categoria_nome: categoriaCliente.nome,
-    grupo_categoria: 'CAIXA CLIENTE',
+    grupo_categoria: categoriaCliente.nome,
     subcategoria_1: categoriaCliente.subcategoria_1,
     subcategoria_2: categoriaCliente.subcategoria_2,
     subcategoria_3: categoriaCliente.subcategoria_3,
@@ -593,18 +596,7 @@ export async function sincronizarRelatorioViagemFinanceiro(
     : null
   const reportId = text(report.id)
   if (!reportId) throw new Error('relatorio_id_obrigatorio')
-  const categoriaSharePersistida = await db.prepare(`
-    SELECT id, nome, grupo_categoria FROM categoria_movimentacao_share
-    WHERE upper(COALESCE(grupo_categoria, '')) = 'DESPESAS REEMBOLSÁVEIS'
-    ORDER BY nome LIMIT 1
-  `).first<{ id: string; nome: string | null; grupo_categoria: string | null }>()
-  const shareCategory = categoriaSharePersistida?.id
-    ? {
-      categoria_share_id: categoriaSharePersistida.id,
-      categoria_nome: categoriaSharePersistida.nome || CATEGORIA_SHARE_REEMBOLSO_RELATORIO.categoria_nome,
-      grupo_categoria: categoriaSharePersistida.grupo_categoria || CATEGORIA_SHARE_REEMBOLSO_RELATORIO.grupo_categoria,
-    }
-    : CATEGORIA_SHARE_REEMBOLSO_RELATORIO
+  const shareCategory = CATEGORIA_SHARE_DESPESA_RELATORIO
   const expenses = expensesFromReport(report)
   if (!expenses.length) throw new Error('relatorio_sem_despesas')
   const reportTotalCentavos = Math.round(expenses.reduce((sum, expense) => sum + numberValue(expense.valor), 0) * 100)
@@ -664,7 +656,8 @@ export async function sincronizarRelatorioViagemFinanceiro(
           id: uuid(),
           data_vencimento: existingDueDate,
           valor_centavos: existingReceivableAmount,
-          categoria_nome: 'DESPESAS DE VIAGEM',
+          categoria_id: CATEGORIA_SHARE_ENTRADA_RELATORIO_ID,
+          categoria_nome: 'REEMBOLSO RELATORIO DE DESPESA DE VIAGENS recebido',
           descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
           aeronave_id: text(report.aeronave_id),
           lancamentos_id: null,
@@ -702,8 +695,8 @@ export async function sincronizarRelatorioViagemFinanceiro(
         lancamentoId = text(lancamentoExistente?.id) || null
         const dataEmissao = await dataEmissaoRelatorio(db, report, lancamentoId)
         if (lancamentoId) {
-          await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, periodicidade = 'EVENTUAL', url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_emissao = ?, data_vencimento = ?, escopo_financeiro = 'CAIXA_SHARE'
-            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, clienteLancamentoId, dataEmissao, existingDueDate, lancamentoId).run()
+          await db.prepare(`UPDATE lancamentos SET valor_centavos = ?, descricao = ?, fornecedor_nome = ?, numero_doc = ?, numero_voo = ?, periodicidade = 'EVENTUAL', url_doc = ?, cotista_aeronave_id = ?, cliente_id = ?, data_emissao = ?, data_vencimento = ?, categoria_share_id = ?, categoria_nome = ?, grupo_categoria = ?, escopo_financeiro = 'CAIXA_SHARE'
+            WHERE id = ?`).bind(amountCentavos, description, FORNECEDOR_RELATORIO_VIAGEM, text(report.numero_relatorio), numeroVooId, text(report.pdf_path) || null, rows[0]?.id || null, clienteLancamentoId, dataEmissao, existingDueDate, shareCategory.categoria_share_id, shareCategory.categoria_nome, shareCategory.grupo_categoria, lancamentoId).run()
         } else if (payer === 'tripulante_1' || payer === 'tripulante_2') {
           const tripulanteId = payer === 'tripulante_1' ? report.tripulacao_id : report.tripulante_id_2
           const tripulanteUserId = await findTripulanteUserId(db, tripulanteId)
@@ -857,7 +850,8 @@ export async function sincronizarRelatorioViagemFinanceiro(
         id: uuid(),
         data_vencimento: fallbackDate,
         valor_centavos: valorAReceberCentavos,
-        categoria_nome: 'DESPESAS DE VIAGEM',
+        categoria_id: CATEGORIA_SHARE_ENTRADA_RELATORIO_ID,
+        categoria_nome: 'REEMBOLSO RELATORIO DE DESPESA DE VIAGENS recebido',
         descricao: `Relatório de despesa de viagem ${text(report.numero_relatorio) || reportId}`,
         aeronave_id: text(report.aeronave_id),
         // O lançamento do tripulante é o reembolso a pagar, não a cobrança do cliente.
