@@ -7,6 +7,11 @@ import { listar } from "./repositories/d1"
 type Bindings = { SHARE_DB: D1Database; SHARE_FILES?: R2Bucket; FILES?: R2Bucket; R2_PUBLIC_URL?: string }
 type Variables = { userId: string | null }
 
+const tiposImagemLancamentoPermitidos = new Set([
+  'image/jpeg', 'image/png', 'image/apng', 'image/gif', 'image/webp',
+  'image/avif', 'image/bmp', 'image/svg+xml', 'image/x-icon',
+])
+
 export const notasSaidaRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 notasSaidaRoutes.get('/notas-saida/opcoes', async (c) => {
   try {
@@ -330,8 +335,8 @@ notasSaidaRoutes.post('/notas-saida/anexos', async (c) => {
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const origem = String(form.origem ?? 'nota_fiscal_saida')
     if (!['nota_fiscal_saida', 'recibo_saida', 'lancamento'].includes(origem)) return c.json({ error: 'origem_invalida' }, 400)
-    const tipoArquivo = arquivo.type.toLowerCase()
-    if (origem === 'lancamento' && tipoArquivo !== 'application/pdf' && !tipoArquivo.startsWith('image/')) return c.json({ error: 'formato_de_anexo_nao_permitido' }, 415)
+    const tipoArquivo = arquivo.type.toLowerCase().split(';')[0].trim()
+    if (origem === 'lancamento' && tipoArquivo !== 'application/pdf' && !tiposImagemLancamentoPermitidos.has(tipoArquivo)) return c.json({ error: 'formato_de_anexo_nao_permitido' }, 415)
     if (arquivo.size > 20 * 1024 * 1024) return c.json({ error: 'arquivo_maior_que_20_mb' }, 413)
     let conteudoPdf: ArrayBuffer | null = null
     if (origem === 'lancamento' && tipoArquivo === 'application/pdf') {
@@ -345,7 +350,7 @@ notasSaidaRoutes.post('/notas-saida/anexos', async (c) => {
     const key = `share/${prefixo}/${documentoId}/${id}-${arquivo.name}`
     await bucket.put(key, conteudoPdf ?? await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
     const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
-    const url = publicBase
+    const url = origem !== 'lancamento' && publicBase
       ? `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
       : `/api/financeiro/notas-saida/anexos/${id}/arquivo?key=${encodeURIComponent(key)}`
     return c.json({ id, url }, 201)
