@@ -113,6 +113,8 @@ test('edita data e demais dados da baixa de um lançamento Share já pago', asyn
   assert.equal(update.values.at(-1), 'share-pago-1')
   assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_apagar SET') && sql.includes('data_pagamento = ?') && values.includes('2026-11-21')))
   assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_areceber SET') && sql.includes('data_recebimento = ?') && values.includes('2026-11-21')))
+  assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_apagar SET') && sql.includes('comprovante_pagamento_url = ?') && values.includes('https://docs.test/comprovante.pdf')))
+  assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_areceber SET') && sql.includes('comprovante_recebimento_url = ?') && values.includes('https://docs.test/comprovante.pdf')))
 })
 
 test('edição de saída persiste fornecedor_id na coluna fornecedores_favoritos_id do D1', async () => {
