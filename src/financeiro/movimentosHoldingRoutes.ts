@@ -27,6 +27,27 @@ movimentosHoldingRoutes.get('/movimentos-holding/pendentes', async (c) => {
   } catch (error) { return errorResponse(c, error) }
 })
 
+movimentosHoldingRoutes.get('/movimentos-holding', async (c) => {
+  try {
+    const movimentos = await listar(c.env.SHARE_DB, `SELECT mh.id, mh.holding_id, h.nome AS holding_nome,
+        mh.socio_id, hs.nome AS socio_nome, mh.aeronave_id, a.matricula_registro AS aeronave,
+        mh.data_emissao, mh.data_vencimento, mh.data_pagamento, mh.descricao, mh.categoria_nome,
+        mh.valor_centavos, mh.fluxo, mh.status, mh.fornecedor_nome, mh.fornecedor_id,
+        mh.conta_bancaria_id, cb.tipo_caixa AS conta_tipo_caixa, cb.banco AS conta_bancaria_nome,
+        mh.comprovante_url, mh.pago_diretamente, mh.criado_em, mh.atualizado_em,
+        COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
+        COALESCE((SELECT SUM(rh.valor_pago_real_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS pago_centavos
+      FROM movimentos_holding mh
+      LEFT JOIN holdings h ON h.id = mh.holding_id
+      LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
+      LEFT JOIN aeronave a ON a.id = mh.aeronave_id
+      LEFT JOIN contas_bancarias cb ON cb.id = mh.conta_bancaria_id
+      WHERE mh.tipo_caixa = 'HOLD'
+      ORDER BY date(mh.data_emissao) DESC, mh.criado_em DESC LIMIT 1000`)
+    return c.json({ movimentos })
+  } catch (error) { return errorResponse(c, error) }
+})
+
 movimentosHoldingRoutes.post('/movimentos-holding/:id/baixa', async (c) => {
   try {
     const db = c.env.SHARE_DB
@@ -39,8 +60,10 @@ movimentosHoldingRoutes.post('/movimentos-holding/:id/baixa', async (c) => {
     if (!movimento) return c.json({ error: 'movimento_holding_nao_encontrado' }, 404)
     if (String(movimento.status).toUpperCase() === 'PAGO') return c.json({ ...movimento, idempotent: true })
     if (String(movimento.status).toUpperCase() === 'CANCELADO') return c.json({ error: 'movimento_holding_cancelado' }, 409)
-    const conta = await db.prepare("SELECT id FROM contas_bancarias WHERE id = ? AND tipo_caixa = 'HOLDING' AND holding_id = ? AND ativo = 1").bind(bancoId, movimento.holding_id).first()
-    if (!conta) return c.json({ error: 'conta_bancaria_holding_invalida' }, 400)
+    const conta = await db.prepare("SELECT id, tipo_caixa, holding_id FROM contas_bancarias WHERE id = ? AND UPPER(tipo_caixa) IN ('HOLDING', 'SHARE') AND ativo = 1").bind(bancoId).first<{ id: string; tipo_caixa: string; holding_id: string | null }>()
+    if (!conta || (String(conta.tipo_caixa).toUpperCase() === 'HOLDING' && conta.holding_id !== movimento.holding_id)) {
+      return c.json({ error: 'conta_bancaria_pagadora_invalida' }, 400)
+    }
     const envio = await db.prepare(`SELECT id, criado_por, descricao FROM envio_despesas
       WHERE movimentos_holding_id = ? OR movimentacao_id = ? LIMIT 1`).bind(movimentoId, movimentoId).first<Record<string, unknown>>()
     const statements = [
@@ -48,6 +71,8 @@ movimentosHoldingRoutes.post('/movimentos-holding/:id/baixa', async (c) => {
         .bind(dataPagamento, bancoId, body.forma_pagamento ?? null, body.comprovante_url ?? null, movimentoId),
       db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'")
         .bind(dataPagamento, movimentoId),
+      db.prepare("UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE movimentos_id = ? AND UPPER(status) NOT IN ('PAGO', 'CANCELADO')")
+        .bind(dataPagamento, bancoId, body.comprovante_url ?? null, movimentoId),
       ...(envio ? [
         db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('CONVERTIDO', 'APROVADO')").bind(envio.id),
         ...mensagemFinanceiraStatements(db, String(envio.criado_por ?? '') || null, c.get('userId') || null, 'Solicitação Holding concluída', `O pagamento da solicitação “${String(envio.descricao ?? 'Despesa Holding')}” foi concluído em ${dataPagamento}.`),

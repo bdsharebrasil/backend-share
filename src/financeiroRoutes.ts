@@ -101,7 +101,7 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
   try {
     const db = c.env.SHARE_DB
     const anexosLancamento = await colunaAnexosLancamento(db)
-    const [envios, reembolsos] = await Promise.all([
+    const [envios, reembolsos, holdings] = await Promise.all([
       listar(db, `SELECT l.*,
           'cliente' AS tipo,
           CAST(l.valor_centavos AS REAL) / 100 AS valor,
@@ -171,8 +171,24 @@ financeiroRoutes.get('/solicitacoes-pagamento', async (c) => {
           AND NULLIF(TRIM(cp.colaborador_id), '') IS NOT NULL
           AND UPPER(cp.status) NOT IN ('PAGO', 'CANCELADO')
         ORDER BY date(cp.data_vencimento) ASC LIMIT 500`),
+      listar(db, `SELECT mh.id, mh.id AS movimento_holding_id, mh.holding_id, h.nome AS holding_nome,
+          mh.socio_id, hs.nome AS socio_nome, mh.aeronave_id, a.matricula_registro AS aeronave_matricula,
+          mh.data_emissao, mh.data_vencimento, mh.data_vencimento AS vencimento,
+          mh.descricao, mh.categoria_nome, mh.valor_centavos,
+          CAST(mh.valor_centavos AS REAL) / 100 AS valor, mh.status, mh.fornecedor_nome,
+          mh.fornecedor_id, mh.conta_bancaria_id, mh.pago_diretamente, mh.comprovante_url,
+          'HOLDING' AS tipo_caixa, NULL AS lancamento_id, NULL AS conta_a_pagar_id,
+          NULL AS conta_a_pagar_status, mh.criado_por, mh.criado_em
+        FROM movimentos_holding mh
+        LEFT JOIN holdings h ON h.id = mh.holding_id
+        LEFT JOIN hold_socios hs ON hs.id = mh.socio_id
+        LEFT JOIN aeronave a ON a.id = mh.aeronave_id
+        WHERE mh.tipo_caixa = 'HOLD' AND UPPER(mh.fluxo) = 'SAIDA'
+          AND UPPER(mh.status) IN ('EM_ABERTO', 'EM_ATRASO', 'AGUARDANDO_REEMBOLSO')
+          AND COALESCE(mh.pago_diretamente, 0) = 0
+        ORDER BY date(mh.data_vencimento) ASC, mh.criado_em DESC LIMIT 500`),
     ])
-    return c.json({ envios: await documentosRelatorio(db, envios), reembolsos: (await documentosRelatorio(db, reembolsos)).map((row) => ({
+    return c.json({ envios: await documentosRelatorio(db, envios), holdings, reembolsos: (await documentosRelatorio(db, reembolsos)).map((row) => ({
       ...mapConta(row),
       lancamentoId: row.lancamentos_id ?? null,
       descricao: row.lancamento_descricao ?? null,
@@ -212,8 +228,8 @@ financeiroRoutes.get('/lancamentos/opcoes', async (c) => {
     const consultas = [
       listar(db, 'SELECT id, nome, tipo, grupo_categoria AS grupo, tipo_despesa AS classificacao, NULL AS empresa_id, COALESCE(reembolsavel, 0) AS reembolsavel FROM categoria_movimentacao_share ORDER BY nome'),
       filtroConta
-        ? listar(db, `SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias ${filtroConta} ORDER BY banco`, ...parametrosConta)
-        : listar(db, 'SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
+        ? listar(db, `SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id, tipo_caixa, ativo FROM contas_bancarias ${filtroConta} ORDER BY banco`, ...parametrosConta)
+        : listar(db, 'SELECT id, banco, numero_conta, NULL AS tipo_conta, holding_id, tipo_caixa, ativo FROM contas_bancarias WHERE ativo = 1 ORDER BY banco'),
       listar(db, 'SELECT id, razao_social, cnpj FROM empresa ORDER BY razao_social'),
       listar(db, `SELECT id, COALESCE(NULLIF(TRIM(apelido), ''), NULLIF(TRIM(nome_completo), '')) AS nome, cidade, uf, 'fornecedores_favoritos' AS origem FROM fornecedores_favoritos
         UNION ALL SELECT id, NULLIF(TRIM(nome_fornecedor), '') AS nome, nome_cidade AS cidade, NULL AS uf, 'fornecedores_combustivel' AS origem FROM fornecedores_combustivel
