@@ -13,7 +13,7 @@ QUIZ_ALLOWED_ORIGINS = "https://conheca.share-brasil.com,https://conheca-share.p
 EMAIL_FROM = "Financeiro Share Brasil <financeiro@share-brasil.com>"
 SUPABASE_URL = "https://jilmlmdgeyzubylncpjy.supabase.co"
 R2_PUBLIC_URL = "https://share-brasil.com"
-ALLOWED_ORIGINS = "https://gestao.share-brasil.com,https://tripulacao.share-brasil.com,https://portalcliente-2.pages.dev,https://conheca.share-brasil.com,https://fd2466a7518f4a91a46c-powered-citadel-8132i0bb.builderio.dev,https://deskboard.share-brasil.com,https://psychic-space-halibut-97wrvv7775xvh79j9-8082.app.github.dev"
+ALLOWED_ORIGINS = "https://share-brasil.com,https://*.share-brasil.com,https://gestao.share-brasil.com,https://tripulacao.share-brasil.com,https://portalcliente-2.pages.dev,https://conheca.share-brasil.com,https://fd2466a7518f4a91a46c-powered-citadel-8132i0bb.builderio.dev,https://deskboard.share-brasil.com,https://psychic-space-halibut-97wrvv7775xvh79j9-8082.app.github.dev"
 
 # ============= KV NAMESPACE =============
 [[kv_namespaces]]
