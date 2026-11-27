@@ -3937,7 +3937,12 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
   if (!userId) return c.json({ error: 'nao_autorizado' }, 401)
   try {
     await garantirTabelaRelatorioDespesaViagem(c)
-    const rows = await c.env.SHARE_DB.prepare(`SELECT r.*,
+    const requestedMonth = String(c.req.query('mes') || '').trim()
+    const paymentMonth = /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedMonth)
+      ? requestedMonth
+      : new Date().toISOString().slice(0, 7)
+    const [rows, paymentsThisMonth] = await Promise.all([
+      c.env.SHARE_DB.prepare(`SELECT r.*,
         a.matricula_registro AS aeronave_matricula,
         COALESCE(NULLIF(r.nome_tripulante, ''), t1.nome_completo) AS nome_tripulante,
         COALESCE(NULLIF(r.nome_tripulante_2, ''), t2.nome_completo) AS nome_tripulante_2,
@@ -3948,6 +3953,10 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
         COALESCE((SELECT SUM(CASE WHEN upper(COALESCE(cp.status, '')) = 'PAGO' THEN cp.valor_centavos ELSE 0 END) FROM contas_apagar cp
           WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
             AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'), 0) AS pagamento_pago_centavos,
+        (SELECT MAX(cp.data_pagamento) FROM contas_apagar cp
+          WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+            AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'
+            AND upper(COALESCE(cp.status, '')) = 'PAGO') AS pagamento_data,
         COALESCE((SELECT COUNT(*) FROM contas_apagar cp
           WHERE cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
             AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':' || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'), 0) AS pagamentos_total,
@@ -3960,7 +3969,22 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
       LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
       LEFT JOIN aeronave a ON a.id = r.aeronave_id
       WHERE t1.user_id = ?1 OR t2.user_id = ?1
-      ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(userId).all<Record<string, any>>()
+      ORDER BY date(r.data_inicio) DESC, r.criado_em DESC LIMIT 200`).bind(userId).all<Record<string, any>>(),
+      c.env.SHARE_DB.prepare(`SELECT COALESCE(SUM(cp.valor_centavos), 0) AS pago_mes_centavos
+        FROM contas_apagar cp
+        INNER JOIN relatorio_despesa_viagem r
+          ON cp.origem_tipo = 'RELATORIO_DESPESA_VIAGEM'
+          AND (cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':tripulante_1:CONTA_PAGAR'
+            OR cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':tripulante_2:CONTA_PAGAR')
+        LEFT JOIN tripulacao t1 ON t1.id = r.tripulacao_id
+        LEFT JOIN tripulacao t2 ON t2.id = r.tripulante_id_2
+        WHERE (t1.user_id = ?1 OR t2.user_id = ?1)
+          AND cp.idempotency_key = 'RELATORIO_DESPESA_VIAGEM:' || r.id || ':'
+            || CASE WHEN t1.user_id = ?1 THEN 'tripulante_1' ELSE 'tripulante_2' END || ':CONTA_PAGAR'
+          AND upper(COALESCE(cp.status, '')) = 'PAGO'
+          AND cp.data_pagamento IS NOT NULL
+          AND substr(cp.data_pagamento, 1, 7) = ?2`).bind(userId, paymentMonth).first<{ pago_mes_centavos: number }>(),
+    ])
     const reportRows = rows.results || []
     const anexosPorRelatorio = new Map<string, Record<string, any>[]>()
     const ajustesPorRelatorio = new Map<string, Record<string, any>[]>()
@@ -4012,7 +4036,13 @@ app.get('/api/financeiro/relatorios-despesa-viagem/minhas', async c => {
         : 'NAO_PROGRAMADO',
       pagamento_valor: Number(row.pagamento_pago_centavos || 0) / 100,
       pagamento_total: Number(row.pagamento_total_centavos || 0) / 100,
-    })) })
+      pagamento_data: row.pagamento_data || null,
+    })),
+      resumo_pagamentos: {
+        mes: paymentMonth,
+        pago_mes_centavos: Number(paymentsThisMonth?.pago_mes_centavos || 0),
+      },
+    })
   } catch (error: any) {
     log.error('[relatorio-despesa-viagem:minhas]', error?.message || error)
     return c.json({ error: error?.message || 'falha_ao_listar_relatorios_do_tripulante' }, 500)
