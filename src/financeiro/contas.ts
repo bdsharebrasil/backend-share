@@ -5,6 +5,7 @@ export function mapConta(row: Record<string, unknown>): Record<string, unknown> 
     id: row.id,
     dataEmissao: row.lancamento_data_emissao ?? row.data_emissao ?? row.data ?? null,
     dataVencimento: row.data_vencimento,
+    periodicidade: row.lancamento_periodicidade ?? row.periodicidade ?? null,
     valor: Number(row.valor ?? Number(row.valor_centavos ?? 0) / 100),
     categoriaId: row.categoria_id ?? null,
     categoriaNome: row.lancamento_categoria_nome ?? row.categoria_nome ?? null,

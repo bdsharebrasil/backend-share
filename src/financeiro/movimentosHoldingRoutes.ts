@@ -32,7 +32,7 @@ movimentosHoldingRoutes.get('/movimentos-holding', async (c) => {
     const movimentos = await listar(c.env.SHARE_DB, `SELECT mh.id, mh.holding_id, h.nome AS holding_nome,
         mh.socio_id, hs.nome AS socio_nome, mh.aeronave_id, a.matricula_registro AS aeronave,
         mh.data_emissao, mh.data_vencimento, mh.data_pagamento, mh.descricao, mh.categoria_nome,
-        mh.valor_centavos, mh.fluxo, mh.status, mh.fornecedor_nome, mh.fornecedor_id,
+        mh.valor_centavos, mh.fluxo, mh.status, mh.fornecedor_nome, mh.fornecedor_id, mh.periodicidade,
         mh.conta_bancaria_id, cb.tipo_caixa AS conta_tipo_caixa, cb.banco AS conta_bancaria_nome,
         mh.comprovante_url, mh.pago_diretamente, mh.criado_em, mh.atualizado_em,
         COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
