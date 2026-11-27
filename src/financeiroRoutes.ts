@@ -588,6 +588,11 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
       }
       if (body.status != null && !STATUS_LANCAMENTO.includes(String(body.status).toUpperCase() as (typeof STATUS_LANCAMENTO)[number])) return c.json({ error: 'status_lancamento_invalido' }, 400)
     }
+    if (origem === 'movimentos_holding') {
+      for (const campo of ['numero_doc', 'url_doc', 'comprovante_url']) {
+        if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
+      }
+    }
     if (body.valor_centavos != null || body.valorCentavos != null) {
       const valor = Number(body.valor_centavos ?? body.valorCentavos)
       if (!Number.isInteger(valor) || valor <= 0) return c.json({ error: 'valor_centavos_invalido' }, 400)
