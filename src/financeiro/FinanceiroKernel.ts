@@ -2281,11 +2281,13 @@ export async function settleShareExpense(db: Database, lancamentoId: string, bod
   if (upper(row.status) === 'PAGO' || row.data_pagamento) return { ...row, idempotent: true }
   const paymentDate = dateValue(body.data_pagamento ?? body.dataPagamento)
   const amount = asPositiveCents(row.valor_centavos)
+  const comprovante = nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl)
+    ?? nullableText(row.comprovante_url)
   const schema = await loadSchema(db)
   await db.batch([
     updateStatement(db, schema, 'lancamentos', {
       status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank,
-      comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl),
+      comprovante_url: comprovante,
       forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento),
       ...(schema.get('lancamentos')?.has('pago_por') ? { pago_por: nullableText(body.pago_por ?? body.pagoPor) } : {}),
       atualizado_em: new Date().toISOString(),
@@ -2318,6 +2320,7 @@ export async function settleShareRevenue(db: Database, lancamentoId: string, bod
   if ((contas.results ?? []).length !== 1) throw new FinanceError('A entrada precisa ter uma única conta a receber vinculada', 'conta_receber_vinculo_invalido', 409)
   const contaId = String(contas.results![0].id)
   const comprovante = nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl)
+    ?? nullableText(row.comprovante_url)
   const forma = nullableText(body.forma_pagamento ?? body.formaPagamento)
   const pagoPor = nullableText(body.pago_por ?? body.pagoPor)
   const now = new Date().toISOString()
@@ -2355,10 +2358,10 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
   const movimentoHoldingId = nullableText(row.movimentos_id)
   if (!lancamentoId && !movimentoHoldingId) throw new FinanceError('Conta a pagar sem lançamento ou movimento vinculado', 'origem_obrigatoria')
   const lancamento = lancamentoId
-    ? await db.prepare('SELECT id, tipo_caixa, fluxo, status FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
+    ? await db.prepare('SELECT id, tipo_caixa, fluxo, status, comprovante_url FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
     : null
   const movimentoHolding = movimentoHoldingId
-    ? await db.prepare('SELECT id, holding_id, fluxo, status FROM movimentos_holding WHERE id = ?').bind(movimentoHoldingId).first<Row>()
+    ? await db.prepare('SELECT id, holding_id, fluxo, status, comprovante_url FROM movimentos_holding WHERE id = ?').bind(movimentoHoldingId).first<Row>()
     : null
   if (lancamentoId && !lancamento) throw new FinanceError('Lançamento da conta a pagar não encontrado', 'lancamento_nao_encontrado')
   if (movimentoHoldingId && !movimentoHolding) throw new FinanceError('Movimento Holding da conta a pagar não encontrado', 'movimento_holding_nao_encontrado')
@@ -2377,15 +2380,19 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
     if (!bankRow) throw new FinanceError('A conta bancária não pertence à holding do movimento', 'conta_bancaria_holding_invalida')
   }
   const now = new Date().toISOString()
+  const comprovante = nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl)
+    ?? nullableText(row.comprovante_pagamento_url)
+    ?? nullableText(movimentoHolding?.comprovante_url)
+    ?? nullableText(lancamento?.comprovante_url)
   // A solicitação de compra fica APROVADO até a conversão e CONVERTIDO depois;
   // nos dois casos a baixa deve concluí-la e avisar o solicitante.
   const purchase = lancamentoId
     ? await db.prepare("SELECT id, descricao, criado_por, solicitacao_compra_id FROM envio_despesas WHERE lancamento_id = ? AND tipo = 'share' AND status IN ('APROVADO', 'CONVERTIDO') LIMIT 1").bind(lancamentoId).first<Row>()
     : null
   const statements: D1PreparedStatement[] = [
-    updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
-    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), ...(schema.get('lancamentos')?.has('pago_por') ? { pago_por: nullableText(body.pago_por ?? body.pagoPor) } : {}), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
-    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
+    updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: comprovante, atualizado_em: now }, 'id = ?', [payableId]),
+    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: comprovante, forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), ...(schema.get('lancamentos')?.has('pago_por') ? { pago_por: nullableText(body.pago_por ?? body.pagoPor) } : {}), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
+    ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: comprovante, forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [
       db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('APROVADO', 'CONVERTIDO')").bind(purchase.id),

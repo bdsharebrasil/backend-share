@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Hono } from 'hono';
 import { notasSaidaRoutes } from '../src/financeiro/notasSaidaRoutes.ts';
 
-function criarAplicacao() {
+function criarAplicacao(ambienteExtra = {}) {
   const uploads = [];
   const db = {
     prepare() {
@@ -35,7 +35,7 @@ function criarAplicacao() {
       const response = await app.request('/notas-saida/anexos', {
         method: 'POST',
         body: form,
-      }, { SHARE_DB: db, SHARE_FILES: bucket });
+      }, { SHARE_DB: db, SHARE_FILES: bucket, ...ambienteExtra });
       return { response, body: await response.json() };
     },
   };
@@ -82,4 +82,20 @@ test('continua aceitando imagens em lançamentos e rejeita outros MIME types', a
   assert.equal(resultadoOutro.response.status, 415);
   assert.equal(resultadoOutro.body.error, 'formato_de_anexo_nao_permitido');
   assert.equal(outroFormato.uploads.length, 0);
+
+  const imagemSemSuporte = criarAplicacao();
+  const resultadoSemSuporte = await imagemSemSuporte.enviarArquivo({
+    conteudo: new TextEncoder().encode('tiff'),
+    nome: 'comprovante.tiff',
+    tipo: 'image/tiff',
+  });
+  assert.equal(resultadoSemSuporte.response.status, 415);
+  assert.equal(imagemSemSuporte.uploads.length, 0);
+});
+
+test('retorna rota autenticada da API para anexos de lançamentos mesmo com URL pública R2 configurada', async () => {
+  const { enviarArquivo } = criarAplicacao({ R2_PUBLIC_URL: 'https://arquivos.exemplo.test' });
+  const { response, body } = await enviarArquivo({ conteudo: new TextEncoder().encode('%PDF-1.7 teste') });
+  assert.equal(response.status, 201, JSON.stringify(body));
+  assert.match(body.url, /^\/api\/financeiro\/notas-saida\/anexos\/.+\/arquivo\?key=/);
 });

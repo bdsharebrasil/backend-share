@@ -24,7 +24,7 @@ movimentosHoldingRoutes.get('/movimentos-holding/pendentes', async (c) => {
   try {
     const movimentos = await listar(c.env.SHARE_DB, `SELECT mh.id, mh.holding_id, h.nome AS holding_nome,
         mh.socio_id, hs.nome AS socio_nome, mh.aeronave_id, a.matricula_registro AS aeronave,
-        mh.data_emissao, mh.data_vencimento, mh.descricao, mh.categoria_nome, mh.valor_centavos,
+        mh.data_emissao, mh.data_vencimento, mh.descricao, mh.numero_doc, mh.url_doc, mh.comprovante_url, mh.categoria_nome, mh.valor_centavos,
         mh.status, mh.fluxo, COALESCE(NULLIF(TRIM(mh.fornecedor_nome), ''), NULLIF(TRIM(ff.apelido), ''), ff.nome_completo) AS fornecedor_nome, mh.fornecedor_id,
         COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
         COALESCE((SELECT SUM(rh.valor_pago_real_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS pago_centavos
@@ -50,7 +50,7 @@ movimentosHoldingRoutes.get('/movimentos-holding', async (c) => {
         mh.valor_centavos, mh.fluxo, mh.status, COALESCE(NULLIF(TRIM(mh.fornecedor_nome), ''), NULLIF(TRIM(ff.apelido), ''), ff.nome_completo) AS fornecedor_nome, mh.fornecedor_id, mh.periodicidade,
         mh.conta_bancaria_id, cb.tipo_caixa AS conta_tipo_caixa,
         COALESCE(NULLIF(cb.nome, ''), NULLIF(cb.banco, ''), mh.conta_bancaria_id) AS conta_bancaria_nome,
-        mh.comprovante_url, mh.pago_diretamente, mh.criado_em, mh.atualizado_em,
+        mh.numero_doc, mh.url_doc, mh.comprovante_url, mh.pago_diretamente, mh.criado_em, mh.atualizado_em,
         COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
         COALESCE((SELECT SUM(rh.valor_pago_real_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS pago_centavos
       FROM movimentos_holding mh
@@ -130,11 +130,11 @@ movimentosHoldingRoutes.post('/movimentos-holding', async (c) => {
       if (sum !== valor || Math.abs(preparedRateios.reduce((total, line) => total + line.percentage, 0) - 100) > 0.01) return c.json({ error: 'rateio_nao_confere_com_movimento' }, 400)
     }
     const statements: D1PreparedStatement[] = [db.prepare(`INSERT INTO movimentos_holding
-      (id, holding_id, socio_id, aeronave_id, tipo_caixa, data_emissao, data_vencimento, periodicidade, descricao,
+      (id, holding_id, socio_id, aeronave_id, tipo_caixa, data_emissao, data_vencimento, periodicidade, descricao, numero_doc,
        fornecedor_id, fornecedor_nome, categoria_id, categoria_nome, grupo_categoria, fluxo,
        valor_centavos, status, pago_diretamente, observacoes, criado_por, idempotency_key)
-      VALUES (?, ?, ?, ?, 'HOLD', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 0, ?, ?, ?)`)
-      .bind(movementId, holdingId, socioId, aircraftId, data, dueDate, periodicidade, descricao, supplierId, supplierName, categoryId, categoryName, nullable(body.grupo_categoria), fluxo, valor, nullable(body.observacoes), c.get('userId') || null, key)]
+      VALUES (?, ?, ?, ?, 'HOLD', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EM_ABERTO', 0, ?, ?, ?)`)
+      .bind(movementId, holdingId, socioId, aircraftId, data, dueDate, periodicidade, descricao, nullable(body.numero_doc), supplierId, supplierName, categoryId, categoryName, nullable(body.grupo_categoria), fluxo, valor, nullable(body.observacoes), c.get('userId') || null, key)]
     for (const line of preparedRateios) {
       statements.push(db.prepare(`INSERT INTO rateio_hold
         (id, movimento_id, aeronave_id, socio_id, data_emissao, data_vencimento, categoria_id, categoria_nome,
@@ -168,11 +168,11 @@ movimentosHoldingRoutes.post('/movimentos-holding/:id/baixa', async (c) => {
     const envio = await db.prepare(`SELECT id, criado_por, descricao FROM envio_despesas
       WHERE movimentos_holding_id = ? OR movimentacao_id = ? LIMIT 1`).bind(movimentoId, movimentoId).first<Record<string, unknown>>()
     const statements = [
-      db.prepare('UPDATE movimentos_holding SET status = ?, data_pagamento = ?, conta_bancaria_id = ?, forma_pagamento = ?, comprovante_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE id = ?')
+      db.prepare('UPDATE movimentos_holding SET status = ?, data_pagamento = ?, conta_bancaria_id = ?, forma_pagamento = ?, comprovante_url = COALESCE(?, comprovante_url), atualizado_em = CURRENT_TIMESTAMP WHERE id = ?')
         .bind(statusFinal, dataPagamento, bancoId, body.forma_pagamento ?? null, body.comprovante_url ?? null, movimentoId),
       db.prepare('UPDATE rateio_hold SET status = ?, data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> \'CANCELADO\'')
         .bind(statusFinal, dataPagamento, movimentoId),
-      ...(!entrada ? [db.prepare("UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = ?, atualizado_em = CURRENT_TIMESTAMP WHERE movimentos_id = ? AND UPPER(status) NOT IN ('PAGO', 'CANCELADO')")
+      ...(!entrada ? [db.prepare("UPDATE contas_apagar SET status = 'PAGO', data_pagamento = ?, banco_pagamento = ?, comprovante_pagamento_url = COALESCE(?, comprovante_pagamento_url), atualizado_em = CURRENT_TIMESTAMP WHERE movimentos_id = ? AND UPPER(status) NOT IN ('PAGO', 'CANCELADO')")
         .bind(dataPagamento, bancoId, body.comprovante_url ?? null, movimentoId)] : []),
       ...(envio ? [
         db.prepare("UPDATE envio_despesas SET status = 'CONCLUIDO', atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('CONVERTIDO', 'APROVADO')").bind(envio.id),
