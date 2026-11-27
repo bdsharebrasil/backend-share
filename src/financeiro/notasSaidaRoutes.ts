@@ -330,13 +330,20 @@ notasSaidaRoutes.post('/notas-saida/anexos', async (c) => {
     if (!(arquivo instanceof File)) return c.json({ error: 'arquivo_obrigatorio' }, 400)
     const origem = String(form.origem ?? 'nota_fiscal_saida')
     if (!['nota_fiscal_saida', 'recibo_saida', 'lancamento'].includes(origem)) return c.json({ error: 'origem_invalida' }, 400)
-    if (origem === 'lancamento' && !arquivo.type.toLowerCase().startsWith('image/')) return c.json({ error: 'apenas_imagens_permitidas' }, 400)
+    const tipoArquivo = arquivo.type.toLowerCase()
+    if (origem === 'lancamento' && tipoArquivo !== 'application/pdf' && !tipoArquivo.startsWith('image/')) return c.json({ error: 'formato_de_anexo_nao_permitido' }, 415)
     if (arquivo.size > 20 * 1024 * 1024) return c.json({ error: 'arquivo_maior_que_20_mb' }, 413)
+    let conteudoPdf: ArrayBuffer | null = null
+    if (origem === 'lancamento' && tipoArquivo === 'application/pdf') {
+      conteudoPdf = await arquivo.arrayBuffer()
+      const assinatura = new TextDecoder().decode(new Uint8Array(conteudoPdf, 0, Math.min(5, conteudoPdf.byteLength)))
+      if (!assinatura.startsWith('%PDF-')) return c.json({ error: 'conteudo_pdf_invalido' }, 415)
+    }
     const documentoId = String(form.documento_id ?? '').trim() || crypto.randomUUID()
     const prefixo = origem === 'recibo_saida' ? 'recibo_saida' : origem === 'lancamento' ? 'lancamento' : 'nota_fiscal_saida'
     const id = crypto.randomUUID()
     const key = `share/${prefixo}/${documentoId}/${id}-${arquivo.name}`
-    await bucket.put(key, await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
+    await bucket.put(key, conteudoPdf ?? await arquivo.arrayBuffer(), { httpMetadata: { contentType: arquivo.type || 'application/octet-stream' } })
     const publicBase = String(c.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
     const url = publicBase
       ? `${publicBase}/${key.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`
