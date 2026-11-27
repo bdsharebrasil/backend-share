@@ -35,3 +35,17 @@ test("contas preservam cada URL de anexo para a tabela do Financeiro Share", () 
   assert.equal(conta.url_doc, "https://example.test/outro.jpg");
   assert.equal(conta.documentoUrl, "https://example.test/demonstrativo.pdf");
 });
+
+test("conta a pagar preserva o colaborador como favorecido mesmo com fornecedor associado", () => {
+  const conta = mapConta({
+    id: "conta-colaborador",
+    colaborador_id: "colaborador-1",
+    colaborador_nome: "Ana Souza",
+    fornecedor_id: "fornecedor-1",
+    fornecedor_nome: "Fornecedor Exemplo",
+  });
+
+  assert.equal(conta.colaboradorId, "colaborador-1");
+  assert.equal(conta.colaboradorNome, "Ana Souza");
+  assert.equal(conta.fornecedor, "Fornecedor Exemplo");
+});

@@ -34,6 +34,10 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
   const matriculaAeronave = table === 'contas_areceber' ? 'a.matricula_registro AS aeronave_matricula' : 'NULL AS aeronave_matricula'
   const joinsHolding = table === 'contas_areceber' ? ' LEFT JOIN movimentos_holding mh ON mh.id = cr.movimentos_id LEFT JOIN holdings hl ON hl.id = mh.holding_id' : ''
   const nomeHolding = table === 'contas_areceber' ? 'mh.holding_id AS holding_id, hl.nome AS holding_nome' : 'NULL AS holding_id, NULL AS holding_nome'
+  const joinsColaborador = table === 'contas_apagar' ? ' LEFT JOIN user_profiles up_colaborador ON up_colaborador.id = cp.colaborador_id' : ''
+  const nomeColaborador = table === 'contas_apagar'
+    ? "COALESCE(NULLIF(TRIM(up_colaborador.nome_exibicao), ''), NULLIF(TRIM(up_colaborador.nome_completo), ''), NULLIF(TRIM(up_colaborador.email), '')) AS colaborador_nome"
+    : 'NULL AS colaborador_nome'
   if (table === 'contas_apagar') {
     filtros.push("COALESCE(UPPER(l.tipo_caixa), 'SHARE') = 'SHARE'")
     filtros.push("UPPER(COALESCE(cp.origem_tipo, '')) <> 'RELATORIO_DESPESA_VIAGEM'")
@@ -52,7 +56,7 @@ async function consultarContas(c: any, table: 'contas_apagar' | 'contas_areceber
     ? "COALESCE(NULLIF(rv.pdf_url, ''), CASE WHEN NULLIF(rv.pdf_path, '') IS NOT NULL THEN '/api/financeiro/relatorios-despesa-viagem/' || cr.origem_id || '/pdf' END) AS relatorio_pdf_url"
     : 'NULL AS relatorio_pdf_url'
   const anexosLancamento = await colunaAnexosLancamento(c.env.SHARE_DB)
-  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.periodicidade AS lancamento_periodicidade, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc, ${anexosLancamento}, l.origem_tipo AS lancamento_origem_tipo, l.origem_id AS lancamento_origem_id, ${urlRelatorio}, ${nomeCotista}, ${matriculaAeronave}, ${nomeHolding} FROM ${table} ${alias}${origem}${joinRelatorio}${joinsCotista}${joinsAeronave}${joinsHolding}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
+  const rows = await listar(c.env.SHARE_DB, `SELECT ${alias}.*, l.periodicidade AS lancamento_periodicidade, l.data_emissao AS lancamento_data_emissao, l.numero_nf, l.numero_recibo, l.numero_doc, l.numero_demonstrativo, l.url_demonstrativo, l.url_nf, l.url_recibo, l.url_boleto, l.url_doc, ${anexosLancamento}, l.origem_tipo AS lancamento_origem_tipo, l.origem_id AS lancamento_origem_id, ${urlRelatorio}, ${nomeCotista}, ${matriculaAeronave}, ${nomeHolding}, ${nomeColaborador} FROM ${table} ${alias}${origem}${joinRelatorio}${joinsCotista}${joinsAeronave}${joinsHolding}${joinsColaborador}${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(${alias}.data_vencimento) ASC, ${alias}.criado_em DESC LIMIT 500`, ...params)
   const mapped = (await documentosRelatorio(c.env.SHARE_DB, await enriquecerFornecedores(c.env.SHARE_DB, rows))).map(mapConta)
   if (table !== 'contas_areceber') return mapped
 

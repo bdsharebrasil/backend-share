@@ -252,7 +252,7 @@ financeiroRoutes.get('/lancamentos', async (c) => {
     if (inicio) { filtros.push('date(COALESCE(l.data_emissao, l.criado_em)) >= date(?)'); params.push(inicio) }
     if (fim) { filtros.push('date(COALESCE(l.data_emissao, l.criado_em)) <= date(?)'); params.push(fim) }
     if (caixa) { filtros.push('l.tipo_caixa = ?'); params.push(caixa.toUpperCase()) }
-    const rows = await listar(c.env.SHARE_DB, `SELECT l.*, cb.banco AS banco_pagamento_nome FROM lancamentos l LEFT JOIN contas_bancarias cb ON cb.id = l.conta_bancaria_id${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(l.data_emissao, l.criado_em)) DESC, l.criado_em DESC LIMIT 500`, ...params)
+    const rows = await listar(c.env.SHARE_DB, `SELECT l.*, cb.banco AS banco_pagamento_nome, COALESCE(NULLIF(TRIM(up_colaborador.nome_exibicao), ''), NULLIF(TRIM(up_colaborador.nome_completo), ''), NULLIF(TRIM(up_colaborador.email), '')) AS colaborador_nome FROM lancamentos l LEFT JOIN contas_bancarias cb ON cb.id = l.conta_bancaria_id LEFT JOIN user_profiles up_colaborador ON up_colaborador.id = l.colaborador_id${filtros.length ? ` WHERE ${filtros.join(' AND ')}` : ''} ORDER BY date(COALESCE(l.data_emissao, l.criado_em)) DESC, l.criado_em DESC LIMIT 500`, ...params)
     return c.json({ lancamentos: await documentosRelatorio(c.env.SHARE_DB, await enriquecerFornecedores(c.env.SHARE_DB, rows)) })
   } catch (error) { return errorResponse(c, error) }
 })

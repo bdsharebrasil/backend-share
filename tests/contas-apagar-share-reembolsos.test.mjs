@@ -12,3 +12,8 @@ test("contas a pagar preserva filtro padrão e permite recuperar obrigação Sha
   assert.match(consulta, /if \(incluirReembolsos\)\s*\{\s*filtros\.push\("NULLIF\(TRIM\(cp\.colaborador_id\), ''\) IS NULL"\)\s*\} else \{[\s\S]*?COALESCE\(l\.reembolsavel, 0\) = 0[\s\S]*?NOT LIKE '%REEMBOLS%'/);
   assert.match(consulta, /UPPER\(COALESCE\(cp\.origem_tipo, ''\)\) <> 'RELATORIO_DESPESA_VIAGEM'/);
 });
+
+test("listagem de contas a pagar resolve o nome do colaborador associado", () => {
+  assert.match(consulta, /LEFT JOIN user_profiles up_colaborador ON up_colaborador\.id = cp\.colaborador_id/);
+  assert.match(consulta, /up_colaborador\.nome_exibicao[\s\S]*up_colaborador\.nome_completo[\s\S]*up_colaborador\.email[\s\S]*AS colaborador_nome/);
+});

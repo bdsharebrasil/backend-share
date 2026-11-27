@@ -18,6 +18,8 @@ export function mapConta(row: Record<string, unknown>): Record<string, unknown> 
     numeroVoo: row.numero_voo ?? null,
     cotistaId: row.cotista_id ?? null,
     cotistaNome: row.cotista_nome ?? null,
+    colaboradorId: row.colaborador_id ?? null,
+    colaboradorNome: row.colaborador_nome ?? null,
     holdingNome: row.holding_nome ?? null,
     tipoCaixa: row.tipo_caixa ?? (row.movimentos_id ? 'HOLDING' : 'SHARE'),
     holdingId: row.holding_id ?? null,
