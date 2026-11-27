@@ -2286,9 +2286,55 @@ export async function settleShareExpense(db: Database, lancamentoId: string, bod
     updateStatement(db, schema, 'lancamentos', {
       status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank,
       comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl),
-      forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: new Date().toISOString(),
+      forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento),
+      ...(schema.get('lancamentos')?.has('pago_por') ? { pago_por: nullableText(body.pago_por ?? body.pagoPor) } : {}),
+      atualizado_em: new Date().toISOString(),
     }, 'id = ?', [lancamentoId]),
     auditStatement(db, schema, 'lancamentos', lancamentoId, 'BAIXA_PAGAMENTO_SHARE', userId, amount, amount, nullableText(body.motivo), idempotencyKey(body)),
+  ])
+  return { ...(await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()), idempotent: false }
+}
+
+/** Liquida uma entrada própria da Share e a conta a receber vinculada, sem rateio de cotistas. */
+export async function settleShareRevenue(db: Database, lancamentoId: string, body: Row, userId: string | null): Promise<Row> {
+  const schema = await loadSchema(db)
+  const row = await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()
+  if (!row) throw new FinanceError('Lançamento não encontrado', 'lancamento_nao_encontrado', 404)
+  if (upper(row.tipo_caixa) !== 'SHARE' || !['ENTRADA', 'RECEITA'].includes(upper(row.fluxo))) {
+    throw new FinanceError('A baixa exige uma entrada da Share', 'recebimento_share_origem_invalida', 409)
+  }
+  if (upper(row.status) === 'CANCELADO') throw new FinanceError('Lançamento cancelado não pode ser recebido', 'lancamento_cancelado', 409)
+  if (['RECEBIDO', 'PAGO'].includes(upper(row.status)) || row.data_pagamento) return { ...row, idempotent: true }
+
+  const paymentDate = text(body.data_pagamento ?? body.dataPagamento)
+  if (!validSettlementDate(paymentDate)) throw new FinanceError('Data de recebimento inválida', 'data_pagamento_invalida')
+  const bank = await resolveContaBancariaId(db, body.conta_bancaria_id ?? body.contaBancariaId ?? body.banco_recebimento ?? body.bancoPagamento)
+  const shareBank = bank
+    ? await db.prepare("SELECT id FROM contas_bancarias WHERE id = ? AND UPPER(tipo_caixa) = 'SHARE' AND ativo = 1").bind(bank).first<Row>()
+    : null
+  if (!shareBank) throw new FinanceError('Selecione uma conta bancária ativa da Share', 'conta_bancaria_share_invalida')
+
+  const contas = await db.prepare('SELECT id FROM contas_areceber WHERE lancamentos_id = ? AND UPPER(COALESCE(status, \'\')) <> \'CANCELADO\'').bind(lancamentoId).all<Row>()
+  if ((contas.results ?? []).length !== 1) throw new FinanceError('A entrada precisa ter uma única conta a receber vinculada', 'conta_receber_vinculo_invalido', 409)
+  const contaId = String(contas.results![0].id)
+  const comprovante = nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl)
+  const forma = nullableText(body.forma_pagamento ?? body.formaPagamento)
+  const pagoPor = nullableText(body.pago_por ?? body.pagoPor)
+  const now = new Date().toISOString()
+  const detalhesLancamento: Row = {
+    status: 'RECEBIDO', data_pagamento: paymentDate, conta_bancaria_id: bank,
+    comprovante_url: comprovante, forma_pagamento: forma, atualizado_em: now,
+  }
+  if (schema.get('lancamentos')?.has('pago_por')) detalhesLancamento.pago_por = pagoPor
+  const valoresConta: Row = {
+    status: 'RECEBIDO', data_recebimento: paymentDate, data_pagamento: paymentDate,
+    banco_recebimento: bank, comprovante_recebimento_url: comprovante, atualizado_em: now,
+  }
+  const camposConta = Object.fromEntries(Object.entries(valoresConta).filter(([campo]) => schema.get('contas_areceber')?.has(campo)))
+  await db.batch([
+    updateStatement(db, schema, 'lancamentos', detalhesLancamento, 'id = ?', [lancamentoId]),
+    updateStatement(db, schema, 'contas_areceber', camposConta, 'id = ?', [contaId]),
+    auditStatement(db, schema, 'lancamentos', lancamentoId, 'BAIXA_RECEBIMENTO_SHARE', userId, asPositiveCents(row.valor_centavos), asPositiveCents(row.valor_centavos), null, idempotencyKey(body)),
   ])
   return { ...(await db.prepare('SELECT * FROM lancamentos WHERE id = ?').bind(lancamentoId).first<Row>()), idempotent: false }
 }
@@ -2338,7 +2384,7 @@ export async function settlePayable(db: Database, payableId: string, body: Row, 
     : null
   const statements: D1PreparedStatement[] = [
     updateStatement(db, schema, 'contas_apagar', { status: 'PAGO', data_pagamento: paymentDate, banco_pagamento: bank, comprovante_pagamento_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), atualizado_em: now }, 'id = ?', [payableId]),
-    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
+    ...(lancamentoId ? [updateStatement(db, schema, 'lancamentos', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), ...(schema.get('lancamentos')?.has('pago_por') ? { pago_por: nullableText(body.pago_por ?? body.pagoPor) } : {}), atualizado_em: now }, 'id = ?', [lancamentoId])] : []),
     ...(movimentoHoldingId ? [updateStatement(db, schema, 'movimentos_holding', { status: 'PAGO', data_pagamento: paymentDate, conta_bancaria_id: bank, comprovante_url: nullableText(body.comprovante_url ?? body.comprovante_pagamento_url ?? body.comprovantePagamentoUrl), forma_pagamento: nullableText(body.forma_pagamento ?? body.formaPagamento), atualizado_em: now }, 'id = ?', [movimentoHoldingId]), db.prepare("UPDATE rateio_hold SET status = 'PAGO', data_pagamento = ?, valor_pago_real_centavos = valor_rateado_centavos, atualizado_em = CURRENT_TIMESTAMP WHERE movimento_id = ? AND status <> 'CANCELADO'").bind(paymentDate, movimentoHoldingId)] : []),
     auditStatement(db, schema, 'contas_apagar', payableId, 'BAIXA', userId, amount, amount, nullableText(body.motivo), requestKey),
     ...(purchase ? [

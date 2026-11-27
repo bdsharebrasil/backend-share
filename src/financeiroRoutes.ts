@@ -8,6 +8,7 @@ import {
   processFinanceQueue,
   settlePayable,
   settleShareExpense,
+  settleShareRevenue,
   settleReceivable,
   contextoBaixaCotista,
   pagamentosContextoBaixa,
@@ -674,6 +675,15 @@ financeiroRoutes.post('/lancamentos/:id/pagamento-share', async (c) => {
   if (denied) return denied
   try {
     return c.json(await settleShareExpense(c.env.SHARE_DB, c.req.param('id'),
+      await c.req.json<Record<string, unknown>>(), c.get('userId') || null))
+  } catch (error) { return errorResponse(c, error) }
+})
+
+financeiroRoutes.post('/lancamentos/:id/recebimento-share', async (c) => {
+  const denied = await requireCaixaShareAccess(c)
+  if (denied) return denied
+  try {
+    return c.json(await settleShareRevenue(c.env.SHARE_DB, c.req.param('id'),
       await c.req.json<Record<string, unknown>>(), c.get('userId') || null))
   } catch (error) { return errorResponse(c, error) }
 })
