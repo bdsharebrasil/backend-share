@@ -81,3 +81,18 @@ test('allowlist não aceita origem com caminho ou barra final', async () => {
   const response = await preflight('https://psychic-space-halibut-97wrvv7775xvh79j9-8082.app.github.dev/path')
   assert.equal(response.headers.get('Access-Control-Allow-Origin'), null)
 })
+
+test('domínio raiz share-brasil.com e todos os seus subdomínios recebem CORS', async () => {
+  for (const origin of ['https://share-brasil.com', 'https://www.share-brasil.com', 'https://app.interno.share-brasil.com']) {
+    const response = await preflight(origin)
+    assert.equal(response.status, 204)
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), origin)
+  }
+})
+
+test('subdomínio falso não corresponde ao wildcard Share Brasil', async () => {
+  for (const origin of ['https://share-brasil.com.evil.example', 'https://evilshare-brasil.com', 'http://app.share-brasil.com']) {
+    const response = await preflight(origin)
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), null)
+  }
+})
