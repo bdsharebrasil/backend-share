@@ -566,7 +566,9 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
         campos.push(['categoria_share_id', body.categoria_share_id ?? body.categoria_id ?? null])
       }
       if (Object.prototype.hasOwnProperty.call(body, 'categoria_cliente_id')) campos.push(['categoria_cliente_id', body.categoria_cliente_id || null])
-      if (Object.prototype.hasOwnProperty.call(body, 'fornecedor_id')) campos.push(['fornecedor_id', body.fornecedor_id || null])
+      if (Object.prototype.hasOwnProperty.call(body, 'fornecedor_id') || Object.prototype.hasOwnProperty.call(body, 'fornecedores_favoritos_id')) {
+        campos.push(['fornecedores_favoritos_id', body.fornecedores_favoritos_id ?? body.fornecedor_id ?? null])
+      }
       if (body.status != null && !STATUS_LANCAMENTO.includes(String(body.status).toUpperCase() as (typeof STATUS_LANCAMENTO)[number])) return c.json({ error: 'status_lancamento_invalido' }, 400)
     }
     if (body.valor_centavos != null || body.valorCentavos != null) {

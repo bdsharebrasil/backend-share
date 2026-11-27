@@ -114,3 +114,20 @@ test('edita data e demais dados da baixa de um lançamento Share já pago', asyn
   assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_apagar SET') && sql.includes('data_pagamento = ?') && values.includes('2026-11-21')))
   assert.ok(db.updates.some(({ sql, values }) => sql.includes('UPDATE contas_areceber SET') && sql.includes('data_recebimento = ?') && values.includes('2026-11-21')))
 })
+
+test('edição de saída persiste fornecedor_id na coluna fornecedores_favoritos_id do D1', async () => {
+  const db = new FakeD1({ parentId: 'share-saida-1', directLaunch: true })
+  const response = await financeiroRoutes.request('/lancamentos/share-saida-1', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ fornecedor_id: 'fornecedor-1' }),
+  }, { SHARE_DB: db })
+
+  assert.equal(response.status, 200, await response.clone().text())
+  const update = db.updates.find(({ sql }) => sql.includes('UPDATE lancamentos SET'))
+  assert.ok(update)
+  assert.match(update.sql, /fornecedores_favoritos_id = \?/)
+  assert.doesNotMatch(update.sql, /(?:^|[, ])fornecedor_id = \?/)
+  assert.equal(update.values[0], 'fornecedor-1')
+  assert.equal(update.values.at(-1), 'share-saida-1')
+})
