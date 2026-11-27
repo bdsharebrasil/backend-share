@@ -571,7 +571,7 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
     if (body.periodicidade !== undefined && origem !== 'lancamentos') campos.push(['periodicidade', body.periodicidade || null])
     if (body.observacoes !== undefined) campos.push(['observacoes', body.observacoes || null])
     if (origem === 'lancamentos') {
-      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'periodicidade', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'conta_bancaria_id', 'pago_por', 'aeronave_id', 'cotista_aeronave_id']
+      const camposLegados = ['data_pagamento', 'status', 'categoria_nome', 'grupo_categoria', 'fornecedor_nome', 'periodicidade', 'numero_doc', 'numero_nf', 'numero_recibo', 'numero_boleto', 'numero_demonstrativo', 'url_doc', 'url_nf', 'url_recibo', 'url_boleto', 'url_demonstrativo', 'comprovante_url', 'forma_pagamento', 'conta_bancaria_id', 'pago_por', 'aeronave_id', 'cotista_aeronave_id']
       for (const campo of camposLegados) if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
       if (body.data_pagamento != null && body.data_pagamento !== '') {
         const dataPagamento = String(body.data_pagamento)
@@ -589,7 +589,7 @@ financeiroRoutes.patch('/lancamentos/:id', async (c) => {
       if (body.status != null && !STATUS_LANCAMENTO.includes(String(body.status).toUpperCase() as (typeof STATUS_LANCAMENTO)[number])) return c.json({ error: 'status_lancamento_invalido' }, 400)
     }
     if (origem === 'movimentos_holding') {
-      for (const campo of ['numero_doc', 'url_doc', 'comprovante_url']) {
+      for (const campo of ['numero_doc', 'url_doc', 'numero_nf', 'url_nf', 'numero_recibo', 'url_recibo', 'numero_boleto', 'url_boleto', 'numero_demonstrativo', 'url_demonstrativo', 'comprovante_url']) {
         if (Object.prototype.hasOwnProperty.call(body, campo)) campos.push([campo, body[campo] ?? null])
       }
     }

@@ -35,9 +35,9 @@ test('baixa converte entradas em RECEBIDO e saídas em PAGO e aceita somente con
 });
 
 test('documento e comprovante Holding são atualizáveis separadamente e o comprovante anterior não é apagado na baixa', () => {
-  assert.match(financeiro, /if \(origem === 'movimentos_holding'\)[\s\S]*\['numero_doc', 'url_doc', 'comprovante_url'\]/);
+  assert.match(financeiro, /if \(origem === 'movimentos_holding'\)[\s\S]*\['numero_doc', 'url_doc', 'numero_nf', 'url_nf', 'numero_recibo', 'url_recibo', 'numero_boleto', 'url_boleto', 'numero_demonstrativo', 'url_demonstrativo', 'comprovante_url'\]/);
   assert.match(routes, /comprovante_url = COALESCE\(\?, comprovante_url\)/);
-  assert.match(routes, /mh\.numero_doc, mh\.url_doc, mh\.comprovante_url/);
+  assert.match(routes, /mh\.numero_doc, mh\.url_doc, mh\.numero_nf, mh\.url_nf, mh\.numero_recibo, mh\.url_recibo, mh\.numero_boleto, mh\.url_boleto, mh\.numero_demonstrativo, mh\.url_demonstrativo, mh\.comprovante_url/);
   assert.match(kernel, /export async function settlePayable[\s\S]*?nullableText\(row\.comprovante_pagamento_url\)[\s\S]*?nullableText\(movimentoHolding\?\.comprovante_url\)[\s\S]*?nullableText\(lancamento\?\.comprovante_url\)/);
 });
 

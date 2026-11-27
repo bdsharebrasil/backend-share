@@ -24,7 +24,7 @@ movimentosHoldingRoutes.get('/movimentos-holding/pendentes', async (c) => {
   try {
     const movimentos = await listar(c.env.SHARE_DB, `SELECT mh.id, mh.holding_id, h.nome AS holding_nome,
         mh.socio_id, hs.nome AS socio_nome, mh.aeronave_id, a.matricula_registro AS aeronave,
-        mh.data_emissao, mh.data_vencimento, mh.descricao, mh.numero_doc, mh.url_doc, mh.comprovante_url, mh.categoria_nome, mh.valor_centavos,
+        mh.data_emissao, mh.data_vencimento, mh.descricao, mh.numero_doc, mh.url_doc, mh.numero_nf, mh.url_nf, mh.numero_recibo, mh.url_recibo, mh.numero_boleto, mh.url_boleto, mh.numero_demonstrativo, mh.url_demonstrativo, mh.comprovante_url, mh.categoria_nome, mh.valor_centavos,
         mh.status, mh.fluxo, COALESCE(NULLIF(TRIM(mh.fornecedor_nome), ''), NULLIF(TRIM(ff.apelido), ''), ff.nome_completo) AS fornecedor_nome, mh.fornecedor_id,
         COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
         COALESCE((SELECT SUM(rh.valor_pago_real_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS pago_centavos
@@ -50,7 +50,7 @@ movimentosHoldingRoutes.get('/movimentos-holding', async (c) => {
         mh.valor_centavos, mh.fluxo, mh.status, COALESCE(NULLIF(TRIM(mh.fornecedor_nome), ''), NULLIF(TRIM(ff.apelido), ''), ff.nome_completo) AS fornecedor_nome, mh.fornecedor_id, mh.periodicidade,
         mh.conta_bancaria_id, cb.tipo_caixa AS conta_tipo_caixa,
         COALESCE(NULLIF(cb.nome, ''), NULLIF(cb.banco, ''), mh.conta_bancaria_id) AS conta_bancaria_nome,
-        mh.numero_doc, mh.url_doc, mh.comprovante_url, mh.pago_diretamente, mh.criado_em, mh.atualizado_em,
+        mh.numero_doc, mh.url_doc, mh.numero_nf, mh.url_nf, mh.numero_recibo, mh.url_recibo, mh.numero_boleto, mh.url_boleto, mh.numero_demonstrativo, mh.url_demonstrativo, mh.comprovante_url, mh.pago_diretamente, mh.criado_em, mh.atualizado_em,
         COALESCE((SELECT SUM(rh.valor_rateado_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS rateado_centavos,
         COALESCE((SELECT SUM(rh.valor_pago_real_centavos) FROM rateio_hold rh WHERE rh.movimento_id = mh.id AND rh.status <> 'CANCELADO'), 0) AS pago_centavos
       FROM movimentos_holding mh
