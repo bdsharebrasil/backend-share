@@ -23,6 +23,7 @@ import { jornadasRoutes } from './routes/jornadasRoutes'
 import { pernasPlanejadasRoutes } from './routes/pernasPlanejadasRoutes'
 import { preparacaoRoutes } from './preparacao/rotas'
 import { aiswebRoutes } from './routes/aiswebRoutes'
+import { geoaiswebRoutes } from './routes/geoaiswebRoutes'
 import { valuationRoutes } from './routes/valuationRoutes'
 import { portalRoutes } from './routes/portalRoutes'
 import { portalClienteExtrasRoutes } from './routes/portalClienteExtrasRoutes'
@@ -136,6 +137,7 @@ app.route('/', pernasPlanejadasRoutes)
 app.route('/', jornadasRoutes)
 app.route('/', preparacaoRoutes)
 app.route('/', aiswebRoutes)
+app.route('/', geoaiswebRoutes)
 app.route('/', valuationRoutes)
 app.route('/', portalClienteExtrasRoutes)
 app.route('/', portalRoutes)
